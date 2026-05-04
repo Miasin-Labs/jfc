@@ -1403,10 +1403,15 @@ mod cwd_filter_tests {
 
     #[test]
     fn display_title_empty_prompt_falls_to_id_robust() {
-        // Both title + first_prompt empty/None → fall back to id slice
-        // (v126's last-resort token; mirrors cli.js:47183-47184).
+        // Both title + first_prompt empty/None → fall back to
+        // format_session_id_timestamp(id) which pretty-prints
+        // `ses_YYYYMMDD_HHMMSS`. Non-matching ids pass through verbatim.
+        let m = meta("ses_20260504_194649", None, None, None);
+        assert_eq!(m.display_title(), "2026-05-04 19:46");
+
+        // Verbatim passthrough for ids that don't match the ses_ pattern.
         let m = meta("abcdef1234567890", None, None, None);
-        assert_eq!(m.display_title(), "abcdef12");
+        assert_eq!(m.display_title(), "abcdef1234567890");
     }
 
     #[test]
