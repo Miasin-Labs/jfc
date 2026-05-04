@@ -1,75 +1,72 @@
-use gpui::{Hsla, Rgba};
+use ratatui::style::{Color, Modifier, Style};
 
+#[derive(Clone, Copy)]
 pub struct Theme {
-    pub background: Hsla,
-    pub surface: Hsla,
-    pub surface_raised: Hsla,
-    pub surface_code: Hsla,
-    pub border: Hsla,
-    pub border_focus: Hsla,
-    pub text_primary: Hsla,
-    pub text_secondary: Hsla,
-    pub text_muted: Hsla,
-    pub accent: Hsla,
-    pub accent_muted: Hsla,
-    pub user_bubble: Hsla,
-    pub assistant_bubble: Hsla,
-    pub success: Hsla,
-    pub warning: Hsla,
-    pub error: Hsla,
-    pub diff_added_bg: Hsla,
-    pub diff_added_text: Hsla,
-    pub diff_removed_bg: Hsla,
-    pub diff_removed_text: Hsla,
-    pub code_keyword: Hsla,
-    pub code_string: Hsla,
-    pub code_comment: Hsla,
-    pub code_function: Hsla,
-    pub overlay_bg: Hsla,
+    pub bg:              Color,
+    pub surface:         Color,
+    pub surface_raised:  Color,
+    pub border:          Color,
+    pub text_primary:    Color,
+    pub text_secondary:  Color,
+    pub text_muted:      Color,
+    pub accent:          Color,
+    pub success:         Color,
+    pub warning:         Color,
+    pub error:           Color,
+    pub user_bubble_bg:  Color,
+    pub asst_bubble_bg:  Color,
+    pub code_bg:         Color,
+    pub code_fg:         Color,
+    pub code_string:     Color,
+    pub code_keyword:    Color,
+    pub code_comment:    Color,
+    pub code_number:     Color,
+    pub reasoning_bg:    Color,
+    pub reasoning_fg:    Color,
 }
 
 impl Theme {
     pub fn dark() -> Self {
         Self {
-            background: hex_to_hsla(0x1a1a2e),
-            surface: hex_to_hsla(0x16213e),
-            surface_raised: hex_to_hsla(0x1e293b),
-            surface_code: hex_to_hsla(0x0f172a),
-            border: hex_to_hsla(0x334155),
-            border_focus: hex_to_hsla(0xf97316),
-            text_primary: hex_to_hsla(0xf1f5f9),
-            text_secondary: hex_to_hsla(0x94a3b8),
-            text_muted: hex_to_hsla(0x64748b),
-            accent: hex_to_hsla(0xf97316),
-            accent_muted: hex_to_hsla(0x431407),
-            user_bubble: hex_to_hsla(0x1e3a5f),
-            assistant_bubble: hex_to_hsla(0x1e293b),
-            success: hex_to_hsla(0x22c55e),
-            warning: hex_to_hsla(0xeab308),
-            error: hex_to_hsla(0xef4444),
-            diff_added_bg: hex_to_hsla(0x052e16),
-            diff_added_text: hex_to_hsla(0x86efac),
-            diff_removed_bg: hex_to_hsla(0x450a0a),
-            diff_removed_text: hex_to_hsla(0xfca5a5),
-            code_keyword: hex_to_hsla(0xc084fc),
-            code_string: hex_to_hsla(0x86efac),
-            code_comment: hex_to_hsla(0x6b7280),
-            code_function: hex_to_hsla(0x60a5fa),
-            overlay_bg: hex_to_hsla_alpha(0x000000, 0.6),
+            bg:             Color::Rgb(15, 15, 20),
+            surface:        Color::Rgb(25, 25, 35),
+            surface_raised: Color::Rgb(35, 35, 50),
+            border:         Color::Rgb(55, 55, 75),
+            text_primary:   Color::Rgb(220, 220, 230),
+            text_secondary: Color::Rgb(160, 160, 180),
+            text_muted:     Color::Rgb(90, 90, 110),
+            accent:         Color::Rgb(100, 160, 255),
+            success:        Color::Rgb(100, 210, 130),
+            warning:        Color::Rgb(255, 190, 80),
+            error:          Color::Rgb(255, 100, 100),
+            user_bubble_bg: Color::Rgb(30, 45, 70),
+            asst_bubble_bg: Color::Rgb(25, 30, 40),
+            code_bg:        Color::Rgb(20, 20, 30),
+            code_fg:        Color::Rgb(200, 200, 210),
+            code_string:    Color::Rgb(150, 220, 130),
+            code_keyword:   Color::Rgb(130, 170, 255),
+            code_comment:   Color::Rgb(100, 110, 130),
+            code_number:    Color::Rgb(255, 180, 100),
+            reasoning_bg:   Color::Rgb(30, 30, 45),
+            reasoning_fg:   Color::Rgb(120, 130, 160),
         }
     }
 }
 
-fn hex_to_hsla(hex: u32) -> Hsla {
-    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
-    let b = (hex & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: 1.0 }.into()
-}
-
-fn hex_to_hsla_alpha(hex: u32, alpha: f32) -> Hsla {
-    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
-    let b = (hex & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: alpha }.into()
+impl Theme {
+    pub fn base(&self)       -> Style { Style::default().fg(self.text_primary).bg(self.bg) }
+    pub fn surface(&self)    -> Style { Style::default().bg(self.surface) }
+    pub fn border(&self)     -> Style { Style::default().fg(self.border) }
+    pub fn muted(&self)      -> Style { Style::default().fg(self.text_muted) }
+    pub fn accent(&self)     -> Style { Style::default().fg(self.accent) }
+    pub fn bold(&self)       -> Style { Style::default().fg(self.text_primary).add_modifier(Modifier::BOLD) }
+    pub fn italic(&self)     -> Style { Style::default().fg(self.text_primary).add_modifier(Modifier::ITALIC) }
+    pub fn success(&self)    -> Style { Style::default().fg(self.success) }
+    pub fn warning(&self)    -> Style { Style::default().fg(self.warning) }
+    pub fn error(&self)      -> Style { Style::default().fg(self.error) }
+    pub fn code_block(&self) -> Style { Style::default().fg(self.code_fg).bg(self.code_bg) }
+    pub fn inline_code(&self) -> Style { Style::default().fg(self.code_string) }
+    pub fn reasoning(&self)  -> Style { Style::default().fg(self.reasoning_fg).bg(self.reasoning_bg) }
+    pub fn user_label(&self) -> Style { Style::default().fg(self.accent).add_modifier(Modifier::BOLD) }
+    pub fn asst_label(&self) -> Style { Style::default().fg(self.text_secondary).add_modifier(Modifier::BOLD) }
 }

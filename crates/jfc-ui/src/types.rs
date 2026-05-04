@@ -4,12 +4,14 @@ pub enum Role {
     Assistant,
 }
 
+#[derive(Clone)]
 pub enum MessagePart {
     Text(String),
     Reasoning(String),
     Tool(ToolCall),
 }
 
+#[derive(Clone)]
 pub struct ToolCall {
     pub id: String,
     pub kind: ToolKind,
@@ -19,17 +21,20 @@ pub struct ToolCall {
     pub is_collapsed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToolKind {
     Edit,
     Write,
     Read,
     Bash,
+    Glob,
+    Grep,
     Search,
     ApplyPatch,
     Generic(String),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ToolStatus {
     Pending,
     Running,
@@ -37,11 +42,13 @@ pub enum ToolStatus {
     Failed,
 }
 
+#[derive(Clone, serde::Serialize)]
 pub enum ToolInput {
     Edit {
         file_path: String,
         old_string: String,
         new_string: String,
+        replace_all: bool,
     },
     Write {
         file_path: String,
@@ -49,12 +56,23 @@ pub enum ToolInput {
     },
     Read {
         file_path: String,
-        offset: Option<usize>,
-        limit: Option<usize>,
+        offset: Option<u64>,
+        limit: Option<u64>,
     },
     Bash {
         command: String,
+        timeout: Option<u64>,
         workdir: Option<String>,
+    },
+    Glob {
+        pattern: String,
+        path: Option<String>,
+    },
+    Grep {
+        pattern: String,
+        path: Option<String>,
+        glob: Option<String>,
+        output_mode: Option<String>,
     },
     Search {
         query: String,
@@ -68,6 +86,7 @@ pub enum ToolInput {
     },
 }
 
+#[derive(Clone)]
 pub enum ToolOutput {
     Text(String),
     Diff(DiffView),
@@ -85,6 +104,7 @@ pub enum ToolOutput {
     Empty,
 }
 
+#[derive(Clone)]
 pub struct DiffView {
     pub file_path: String,
     pub hunks: Vec<DiffHunk>,
@@ -92,6 +112,7 @@ pub struct DiffView {
     pub deletions: usize,
 }
 
+#[derive(Clone)]
 pub struct DiffHunk {
     pub old_start: usize,
     pub new_start: usize,
@@ -99,6 +120,7 @@ pub struct DiffHunk {
     pub lines: Vec<DiffLine>,
 }
 
+#[derive(Clone)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     pub old_line: Option<usize>,
@@ -113,6 +135,7 @@ pub enum DiffLineKind {
     Removed,
 }
 
+#[derive(Clone)]
 pub struct ChatMessage {
     pub role: Role,
     pub parts: Vec<MessagePart>,
@@ -158,14 +181,44 @@ impl ChatMessage {
 }
 
 impl ToolKind {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "Edit" | "str_replace_based_edit_tool" | "edit" => Self::Edit,
+            "Write" | "write_file" | "write" => Self::Write,
+            "Read" | "read_file" | "read" => Self::Read,
+            "Bash" | "run_bash" | "bash" => Self::Bash,
+            "Glob" | "glob" => Self::Glob,
+            "Grep" | "grep" => Self::Grep,
+            "codebase_search" | "search" => Self::Search,
+            "apply_patch" => Self::ApplyPatch,
+            other => Self::Generic(other.to_owned()),
+        }
+    }
+
     pub fn label(&self) -> &str {
         match self {
             Self::Edit => "Edit",
             Self::Write => "Write",
             Self::Read => "Read",
             Self::Bash => "Bash",
+            Self::Glob => "Glob",
+            Self::Grep => "Grep",
             Self::Search => "Search",
             Self::ApplyPatch => "Patch",
+            Self::Generic(name) => name.as_str(),
+        }
+    }
+
+    pub fn api_name(&self) -> &str {
+        match self {
+            Self::Edit => "Edit",
+            Self::Write => "Write",
+            Self::Read => "Read",
+            Self::Bash => "Bash",
+            Self::Glob => "Glob",
+            Self::Grep => "Grep",
+            Self::Search => "codebase_search",
+            Self::ApplyPatch => "apply_patch",
             Self::Generic(name) => name.as_str(),
         }
     }
@@ -185,30 +238,20 @@ impl ToolStatus {
 impl ToolInput {
     pub fn summary(&self) -> String {
         match self {
-            Self::Edit {
-                file_path,
-                old_string,
-                new_string,
-            } => format!(
-                "{} ({} → {} chars)",
-                file_path,
-                old_string.len(),
-                new_string.len()
-            ),
-            Self::Write { file_path, content } => {
-                format!("{} ({} bytes)", file_path, content.len())
-            }
-            Self::Read {
-                file_path,
-                offset,
-                limit,
-            } => match (offset, limit) {
-                (Some(offset), Some(limit)) => format!("{file_path}:{offset} (+{limit})"),
-                _ => file_path.clone(),
-            },
-            Self::Bash { command, workdir } => match workdir {
+            Self::Edit { file_path, .. } => file_path.clone(),
+            Self::Write { file_path, .. } => file_path.clone(),
+            Self::Read { file_path, .. } => file_path.clone(),
+            Self::Bash { command, workdir, .. } => match workdir {
                 Some(workdir) => format!("{command} in {workdir}"),
                 None => command.clone(),
+            },
+            Self::Glob { pattern, path } => match path {
+                Some(path) => format!("{pattern} in {path}"),
+                None => pattern.clone(),
+            },
+            Self::Grep { pattern, path, .. } => match path {
+                Some(path) => format!("{pattern} in {path}"),
+                None => pattern.clone(),
             },
             Self::Search { query, path } => match path {
                 Some(path) => format!("{query} in {path}"),
@@ -216,6 +259,120 @@ impl ToolInput {
             },
             Self::ApplyPatch { patch } => format!("apply patch ({} bytes)", patch.len()),
             Self::Generic { summary } => summary.clone(),
+        }
+    }
+
+    pub fn from_value(tool_name: &str, v: serde_json::Value) -> Self {
+        let obj = match &v {
+            serde_json::Value::Object(m) => Some(m),
+            _ => None,
+        };
+        let str_field = |key: &str| -> String {
+            obj.and_then(|m| m.get(key))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let opt_str_field = |key: &str| -> Option<String> {
+            obj.and_then(|m| m.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        };
+        let opt_u64_field = |key: &str| -> Option<u64> {
+            obj.and_then(|m| m.get(key))
+                .and_then(|v| v.as_u64())
+        };
+        let bool_field = |key: &str| -> bool {
+            obj.and_then(|m| m.get(key))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        };
+        match ToolKind::from_name(tool_name) {
+            ToolKind::Edit => Self::Edit {
+                file_path: str_field("file_path"),
+                old_string: str_field("old_string"),
+                new_string: str_field("new_string"),
+                replace_all: bool_field("replace_all"),
+            },
+            ToolKind::Write => Self::Write {
+                file_path: str_field("file_path"),
+                content: str_field("content"),
+            },
+            ToolKind::Read => Self::Read {
+                file_path: str_field("file_path"),
+                offset: opt_u64_field("offset"),
+                limit: opt_u64_field("limit"),
+            },
+            ToolKind::Bash => Self::Bash {
+                command: str_field("command"),
+                timeout: opt_u64_field("timeout"),
+                workdir: opt_str_field("workdir"),
+            },
+            ToolKind::Glob => Self::Glob {
+                pattern: str_field("pattern"),
+                path: opt_str_field("path"),
+            },
+            ToolKind::Grep => Self::Grep {
+                pattern: str_field("pattern"),
+                path: opt_str_field("path"),
+                glob: opt_str_field("glob"),
+                output_mode: opt_str_field("output_mode"),
+            },
+            ToolKind::Search => Self::Search {
+                query: str_field("query"),
+                path: opt_str_field("path"),
+            },
+            ToolKind::ApplyPatch => Self::ApplyPatch {
+                patch: str_field("patch"),
+            },
+            ToolKind::Generic(_) => Self::Generic {
+                summary: v.to_string(),
+            },
+        }
+    }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Edit { file_path, old_string, new_string, replace_all } => {
+                let mut v = json!({ "file_path": file_path, "old_string": old_string, "new_string": new_string });
+                if *replace_all { v["replace_all"] = json!(true); }
+                v
+            }
+            Self::Write { file_path, content } => json!({ "file_path": file_path, "content": content }),
+            Self::Read { file_path, offset, limit } => {
+                let mut v = json!({ "file_path": file_path });
+                if let Some(o) = offset { v["offset"] = json!(o); }
+                if let Some(l) = limit { v["limit"] = json!(l); }
+                v
+            }
+            Self::Bash { command, timeout, workdir } => {
+                let mut v = json!({ "command": command });
+                if let Some(t) = timeout { v["timeout"] = json!(t); }
+                if let Some(w) = workdir { v["workdir"] = json!(w); }
+                v
+            }
+            Self::Glob { pattern, path } => {
+                let mut v = json!({ "pattern": pattern });
+                if let Some(p) = path { v["path"] = json!(p); }
+                v
+            }
+            Self::Grep { pattern, path, glob, output_mode } => {
+                let mut v = json!({ "pattern": pattern });
+                if let Some(p) = path { v["path"] = json!(p); }
+                if let Some(g) = glob { v["glob"] = json!(g); }
+                if let Some(m) = output_mode { v["output_mode"] = json!(m); }
+                v
+            }
+            Self::Search { query, path } => {
+                let mut v = json!({ "query": query });
+                if let Some(p) = path { v["path"] = json!(p); }
+                v
+            }
+            Self::ApplyPatch { patch } => json!({ "patch": patch }),
+            Self::Generic { summary } => {
+                serde_json::from_str(summary).unwrap_or(json!({ "input": summary }))
+            }
         }
     }
 }
@@ -241,6 +398,7 @@ pub fn sample_tool_harness_message() -> ChatMessage {
                 file_path: "references/wgpui/crates/gpui_linux/src/linux/wayland/window.rs".into(),
                 old_string: "let w = state.bounds.size.width.0 as i32;".into(),
                 new_string: "let w = f32::from(state.bounds.size.width) as i32;".into(),
+                replace_all: false,
             },
             output: ToolOutput::Diff(diff),
             is_collapsed: false,
@@ -251,6 +409,7 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             status: ToolStatus::Complete,
             input: ToolInput::Bash {
                 command: "cargo check -p gpui_linux".into(),
+                timeout: None,
                 workdir: Some("references/wgpui".into()),
             },
             output: ToolOutput::Command {
