@@ -1402,8 +1402,21 @@ fn handle_slash_command(
             }
         }
         "/resume" => {
-            // Resume a specific session by id
-            let session_id = parts.get(1).copied().unwrap_or("").trim();
+            // Resume a specific session by id. Accepts an optional
+            // `--force` token to suppress the cwd-mismatch warning
+            // (mirrors codex-rs `tui/src/session_resume.rs:99-111`,
+            // where the user explicitly opts in to a cross-project
+            // resume).
+            let raw_args = parts.get(1).copied().unwrap_or("").trim();
+            let mut force = false;
+            let mut session_id = "";
+            for tok in raw_args.split_whitespace() {
+                if tok == "--force" {
+                    force = true;
+                } else if session_id.is_empty() {
+                    session_id = tok;
+                }
+            }
             if session_id.is_empty() {
                 // List available sessions
                 let sessions = crate::session::list_sessions();
@@ -1429,6 +1442,27 @@ fn handle_slash_command(
                 }
             } else if let Some(messages) = crate::session::load_session(session_id) {
                 let msg_count = messages.len();
+                // Compare the loaded session's recorded cwd against the
+                // current process cwd before mutating app state. The
+                // resume still proceeds either way — the toast is just
+                // informational so the user notices they may be
+                // pointing at the wrong project.
+                if !force {
+                    let session_cwd = crate::session::load_session_metadata(session_id)
+                        .and_then(|m| m.cwd);
+                    let current_cwd = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if let Some(msg) = crate::session::cwd_mismatch_message(
+                        session_cwd.as_deref(),
+                        &current_cwd,
+                    ) {
+                        crate::toast::push_with_cap(
+                            &mut app.toasts,
+                            crate::toast::Toast::new(crate::toast::ToastKind::Warning, msg),
+                        );
+                    }
+                }
                 app.messages = messages;
                 app.switch_session(Some(session_id.to_owned()));
                 app.streaming_text.clear();

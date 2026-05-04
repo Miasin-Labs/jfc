@@ -491,6 +491,25 @@ async fn run(
                     message_count = messages.len(),
                     "resuming specific session"
                 );
+                // CLI has no toast surface; emit a warn-level log so
+                // the user sees the cwd mismatch in stderr/journalctl
+                // and doesn't silently load a session from a different
+                // project. Mirrors codex-rs `session_resume.rs:99-111`.
+                let session_cwd = session::load_session_metadata(&session_id)
+                    .and_then(|m| m.cwd);
+                let current_cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Some(msg) = session::cwd_mismatch_message(
+                    session_cwd.as_deref(),
+                    &current_cwd,
+                ) {
+                    tracing::warn!(
+                        target: "jfc::session",
+                        session_id = %session_id,
+                        "{msg}"
+                    );
+                }
                 app.messages = messages;
                 app.current_session_id = Some(session_id);
             } else {
