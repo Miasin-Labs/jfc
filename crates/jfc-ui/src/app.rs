@@ -362,6 +362,9 @@ pub struct App {
     pub leader_key_active: bool,
     pub leader_key_timeout: Option<std::time::Instant>,
     pub viewing_task_id: Option<String>,
+    /// Drained at submit time; future Ctrl+V handlers push here. Anthropic
+    /// content-block conversion happens at provider-message-build time.
+    pub pending_attachments: Vec<crate::attachments::Attachment>,
 }
 
 impl App {
@@ -457,6 +460,7 @@ impl App {
             leader_key_active: false,
             leader_key_timeout: None,
             viewing_task_id: None,
+            pending_attachments: Vec::new(),
         };
         app.sync_selected_context_window();
         app
