@@ -1,16 +1,31 @@
 [package]
 name = "jfc-ui"
 version = "0.1.0"
-edition.workspace = true
-license.workspace = true
+edition = "2024"
 
 [[bin]]
 name = "jfc"
 path = "src/main.rs"
 
 [dependencies]
-gpui.workspace = true
-gpui_platform = { workspace = true, features = ["wayland"] }
-unicode-segmentation.workspace = true
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = { version = "0.7", features = ["crossterm"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = "0.1"
+futures = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+serde_json = { workspace = true }
+unicode-segmentation = { workspace = true }
+serde = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+async-trait = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"

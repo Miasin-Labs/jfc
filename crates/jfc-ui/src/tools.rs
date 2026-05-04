@@ -1,0 +1,410 @@
+use std::path::{Path, PathBuf};
+use tokio::process::Command;
+
+use crate::provider::ToolDef;
+use crate::types::{ToolInput, ToolKind, ToolOutput};
+
+/// REQ-TOOLS-001: Tool definitions sent to Anthropic API.
+/// Field names and schemas match claude-code source exactly to avoid 400 errors.
+pub fn all_tool_defs() -> Vec<ToolDef> {
+    vec![
+        ToolDef {
+            name: "Bash".into(),
+            description: "Executes a given bash command in a persistent shell session with optional timeout. Use for running commands, scripts, and terminal operations.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Optional timeout in milliseconds (max 600000)"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Clear, concise description of what this command does"
+                    }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDef {
+            name: "Read".into(),
+            description: "Read a file or directory from the local filesystem. Returns file contents with line numbers prefixed.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The absolute path to the file or directory to read"
+                    },
+                    "offset": {
+                        "type": "number",
+                        "description": "Line number to start reading from (1-indexed)"
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Maximum number of lines to read (defaults to 2000)"
+                    }
+                },
+                "required": ["file_path"]
+            }),
+        },
+        ToolDef {
+            name: "Write".into(),
+            description: "Write a file to the local filesystem. Overwrites existing file if present.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The absolute path to the file to write"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write to the file"
+                    }
+                },
+                "required": ["file_path", "content"]
+            }),
+        },
+        ToolDef {
+            name: "Edit".into(),
+            description: "Performs exact string replacements in a file. Use Read first to verify the exact content before editing.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The absolute path to the file to modify"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The text to replace (must match exactly, including whitespace)"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The replacement text"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace all occurrences (default false)"
+                    }
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }),
+        },
+        ToolDef {
+            name: "Glob".into(),
+            description: "Fast file pattern matching. Returns matching file paths sorted by modification time.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "The glob pattern to match files against"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "The directory to search in. Defaults to current working directory if omitted."
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
+            name: "Grep".into(),
+            description: "Fast content search using ripgrep. Searches file contents using regular expressions.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "The regex pattern to search for in file contents"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory to search in. Defaults to current working directory."
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "File pattern filter (e.g. '*.ts', '*.{ts,tsx}')"
+                    },
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                        "description": "Output mode: content shows matching lines, files_with_matches shows file paths, count shows match counts"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        },
+    ]
+}
+
+pub struct ExecutionResult {
+    pub output: String,
+    pub is_error: bool,
+}
+
+/// REQ-TOOLS-002: Tool executors — bash/read/write/edit/glob/grep via tokio + fs.
+pub async fn execute_tool(kind: ToolKind, input: ToolInput, cwd: std::path::PathBuf) -> ExecutionResult {
+    match (kind, input) {
+        (ToolKind::Bash, ToolInput::Bash { command, timeout, .. }) => {
+            execute_bash(&command, timeout, &cwd).await
+        }
+        (ToolKind::Read, ToolInput::Read { file_path, offset, limit }) => {
+            execute_read(&file_path, offset, limit).await
+        }
+        (ToolKind::Write, ToolInput::Write { file_path, content }) => {
+            execute_write(&file_path, &content).await
+        }
+        (ToolKind::Edit, ToolInput::Edit { file_path, old_string, new_string, replace_all }) => {
+            execute_edit(&file_path, &old_string, &new_string, replace_all).await
+        }
+        (ToolKind::Glob, ToolInput::Glob { pattern, path }) => {
+            execute_glob(&pattern, path.as_deref(), &cwd).await
+        }
+        (ToolKind::Grep, ToolInput::Grep { pattern, path, glob, output_mode }) => {
+            execute_grep(&pattern, path.as_deref(), glob.as_deref(), output_mode.as_deref(), &cwd).await
+        }
+        (kind, _) => ExecutionResult {
+            output: format!("Tool {:?} not yet implemented", kind),
+            is_error: true,
+        },
+    }
+}
+
+async fn execute_bash(command: &str, timeout_ms: Option<u64>, cwd: &Path) -> ExecutionResult {
+    let timeout = timeout_ms.unwrap_or(120_000);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(timeout),
+        Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .current_dir(cwd)
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(out)) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let is_error = !out.status.success();
+            let output = if stderr.is_empty() {
+                stdout.to_string()
+            } else if stdout.is_empty() {
+                stderr.to_string()
+            } else {
+                format!("{stdout}\n---stderr---\n{stderr}")
+            };
+            ExecutionResult { output: output.trim_end().to_string(), is_error }
+        }
+        Ok(Err(e)) => ExecutionResult {
+            output: format!("Failed to spawn bash: {e}"),
+            is_error: true,
+        },
+        Err(_) => ExecutionResult {
+            output: format!("Command timed out after {timeout}ms"),
+            is_error: true,
+        },
+    }
+}
+
+async fn execute_read(file_path: &str, offset: Option<u64>, limit: Option<u64>) -> ExecutionResult {
+    let path = PathBuf::from(file_path);
+
+    if path.is_dir() {
+        match tokio::fs::read_dir(&path).await {
+            Ok(mut entries) => {
+                let mut names = Vec::new();
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if entry.path().is_dir() {
+                        names.push(format!("{name}/"));
+                    } else {
+                        names.push(name);
+                    }
+                }
+                names.sort();
+                ExecutionResult { output: names.join("\n"), is_error: false }
+            }
+            Err(e) => ExecutionResult {
+                output: format!("Cannot read directory: {e}"),
+                is_error: true,
+            },
+        }
+    } else {
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => {
+                let max_lines = limit.unwrap_or(2000) as usize;
+                let start = offset.unwrap_or(1).saturating_sub(1) as usize;
+                let lines: Vec<&str> = content.lines().collect();
+                let slice = &lines[start.min(lines.len())..];
+                let slice = &slice[..slice.len().min(max_lines)];
+                let numbered: String = slice
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| format!("{}: {line}", start + i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ExecutionResult { output: numbered, is_error: false }
+            }
+            Err(e) => ExecutionResult {
+                output: format!("Cannot read file: {e}"),
+                is_error: true,
+            },
+        }
+    }
+}
+
+async fn execute_write(file_path: &str, content: &str) -> ExecutionResult {
+    let path = PathBuf::from(file_path);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return ExecutionResult {
+                output: format!("Cannot create directories: {e}"),
+                is_error: true,
+            };
+        }
+    }
+    match tokio::fs::write(&path, content).await {
+        Ok(_) => ExecutionResult {
+            output: format!("Written {} bytes to {file_path}", content.len()),
+            is_error: false,
+        },
+        Err(e) => ExecutionResult {
+            output: format!("Cannot write file: {e}"),
+            is_error: true,
+        },
+    }
+}
+
+async fn execute_edit(
+    file_path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> ExecutionResult {
+    match tokio::fs::read_to_string(file_path).await {
+        Ok(content) => {
+            if old_string.is_empty() && !content.is_empty() {
+                return ExecutionResult {
+                    output: "old_string is empty but file is not empty. Provide text to replace.".into(),
+                    is_error: true,
+                };
+            }
+            let count = content.matches(old_string).count();
+            if count == 0 {
+                return ExecutionResult {
+                    output: format!("old_string not found in {file_path}"),
+                    is_error: true,
+                };
+            }
+            if count > 1 && !replace_all {
+                return ExecutionResult {
+                    output: format!(
+                        "Found {count} matches for old_string in {file_path}. Use replace_all=true or provide more context."
+                    ),
+                    is_error: true,
+                };
+            }
+            let new_content = if replace_all {
+                content.replace(old_string, new_string)
+            } else {
+                content.replacen(old_string, new_string, 1)
+            };
+            match tokio::fs::write(file_path, &new_content).await {
+                Ok(_) => ExecutionResult {
+                    output: format!("Replaced {count} occurrence(s) in {file_path}"),
+                    is_error: false,
+                },
+                Err(e) => ExecutionResult {
+                    output: format!("Cannot write file after edit: {e}"),
+                    is_error: true,
+                },
+            }
+        }
+        Err(_) if old_string.is_empty() => {
+            match tokio::fs::write(file_path, new_string).await {
+                Ok(_) => ExecutionResult {
+                    output: format!("Created new file {file_path}"),
+                    is_error: false,
+                },
+                Err(e2) => ExecutionResult {
+                    output: format!("Cannot create file: {e2}"),
+                    is_error: true,
+                },
+            }
+        }
+        Err(e) => ExecutionResult {
+            output: format!("Cannot read file: {e}"),
+            is_error: true,
+        },
+    }
+}
+
+async fn execute_glob(pattern: &str, path: Option<&str>, cwd: &Path) -> ExecutionResult {
+    let base = path.map(PathBuf::from).unwrap_or_else(|| cwd.to_path_buf());
+    let mut cmd = Command::new("rg");
+    cmd.arg("--files").arg("--glob").arg(pattern).current_dir(&base);
+    match cmd.output().await {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if stdout.is_empty() {
+                ExecutionResult { output: "No files matched".into(), is_error: false }
+            } else {
+                ExecutionResult { output: stdout, is_error: false }
+            }
+        }
+        Err(_) => {
+            let cmd_str = format!("find '{}' -name '{}' 2>/dev/null | sort", base.display(), pattern);
+            execute_bash(&cmd_str, Some(10_000), cwd).await
+        }
+    }
+}
+
+async fn execute_grep(
+    pattern: &str,
+    path: Option<&str>,
+    glob: Option<&str>,
+    output_mode: Option<&str>,
+    cwd: &Path,
+) -> ExecutionResult {
+    let search_path = path.unwrap_or(".");
+    let mut cmd = Command::new("rg");
+    cmd.arg("--no-heading").arg("-n");
+
+    match output_mode.unwrap_or("content") {
+        "files_with_matches" => { cmd.arg("-l"); }
+        "count" => { cmd.arg("-c"); }
+        _ => {}
+    }
+
+    if let Some(g) = glob {
+        cmd.arg("--glob").arg(g);
+    }
+
+    cmd.arg(pattern).arg(search_path).current_dir(cwd);
+
+    match cmd.output().await {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if stdout.is_empty() && out.status.code() == Some(1) {
+                ExecutionResult { output: "No matches found".into(), is_error: false }
+            } else if !stderr.is_empty() && stdout.is_empty() {
+                ExecutionResult { output: stderr, is_error: true }
+            } else {
+                ExecutionResult { output: stdout, is_error: false }
+            }
+        }
+        Err(e) => ExecutionResult {
+            output: format!("rg not found or failed: {e}"),
+            is_error: true,
+        },
+    }
+}

@@ -41,6 +41,9 @@ zlog = { path = "references/wgpui/crates/zlog" }
 ztracing = { path = "references/wgpui/crates/ztracing" }
 
 anyhow = "1.0.86"
+async-trait = "0.1"
+eventsource-stream = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 ashpd = { version = "0.13", default-features = false, features = [
     "async-io",
     "notification",
@@ -152,6 +155,8 @@ serde_json_lenient = { version = "0.2", features = [
 ] }
 serde_urlencoded = "0.7"
 sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
 shlex = "1.3.0"
 slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
