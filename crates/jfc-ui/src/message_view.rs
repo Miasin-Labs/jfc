@@ -15,6 +15,11 @@ pub struct MessageView<'a> {
     pub app: &'a App,
 }
 
+pub fn message_view_total_lines(app: &App, inner_w: usize) -> usize {
+    let items = build_render_items(app, inner_w);
+    items.iter().map(|i| i.height(inner_w)).sum()
+}
+
 impl Widget for MessageView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let t = self.app.theme;
@@ -274,7 +279,7 @@ fn render_tool_block(tool: &ToolCall, area: Rect, t: Theme, buf: &mut Buffer, sk
         &t,
         status_icon,
         status_style,
-        area.width as usize,
+        area.width.saturating_sub(6) as usize,
     ));
 
     let full_h = tool_block_height(tool, area.width as usize) as u16;
@@ -378,8 +383,7 @@ fn build_title_spans<'a>(
         Span::styled(status_icon.to_owned(), status_style),
         Span::raw(" "),
     ];
-    // Reserve space for "▼ X " prefix (4 chars) plus border chars
-    spans.extend(build_header_inner_spans(tool, t, width.saturating_sub(8)));
+    spans.extend(build_header_inner_spans(tool, t, width.saturating_sub(4)));
     spans
 }
 

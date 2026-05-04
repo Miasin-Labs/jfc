@@ -485,7 +485,7 @@ fn messages(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let inner_width = area.width.saturating_sub(2) as usize;
-    let total_lines = message_view_total_lines(app, inner_width);
+    let total_lines = crate::message_view::message_view_total_lines(app, inner_width);
 
     app.total_lines = total_lines;
 
