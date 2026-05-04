@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use std::sync::Arc;
 
+use tokio::process::Command;
+use tokio::sync::Mutex;
+
+use crate::context::ReadDedupCache;
 use crate::provider::ToolDef;
-use crate::types::{ToolInput, ToolKind, ToolOutput};
+use crate::types::{ToolInput, ToolKind};
 
 /// REQ-TOOLS-001: Tool definitions sent to Anthropic API.
 /// Field names and schemas match claude-code source exactly to avoid 400 errors.
@@ -150,25 +154,73 @@ pub struct ExecutionResult {
 }
 
 /// REQ-TOOLS-002: Tool executors — bash/read/write/edit/glob/grep via tokio + fs.
-pub async fn execute_tool(kind: ToolKind, input: ToolInput, cwd: std::path::PathBuf) -> ExecutionResult {
+pub async fn execute_tool(
+    kind: ToolKind,
+    input: ToolInput,
+    cwd: std::path::PathBuf,
+    dedup: Option<Arc<Mutex<ReadDedupCache>>>,
+) -> ExecutionResult {
     match (kind, input) {
-        (ToolKind::Bash, ToolInput::Bash { command, timeout, .. }) => {
-            execute_bash(&command, timeout, &cwd).await
-        }
-        (ToolKind::Read, ToolInput::Read { file_path, offset, limit }) => {
-            execute_read(&file_path, offset, limit).await
-        }
+        (
+            ToolKind::Bash,
+            ToolInput::Bash {
+                command, timeout, ..
+            },
+        ) => execute_bash(&command, timeout, &cwd).await,
+        (
+            ToolKind::Read,
+            ToolInput::Read {
+                file_path,
+                offset,
+                limit,
+            },
+        ) => execute_read(&file_path, offset, limit, dedup.as_ref()).await,
         (ToolKind::Write, ToolInput::Write { file_path, content }) => {
-            execute_write(&file_path, &content).await
+            let result = execute_write(&file_path, &content).await;
+            if !result.is_error {
+                if let Some(cache) = &dedup {
+                    cache.lock().await.invalidate(Path::new(&file_path));
+                }
+            }
+            result
         }
-        (ToolKind::Edit, ToolInput::Edit { file_path, old_string, new_string, replace_all }) => {
-            execute_edit(&file_path, &old_string, &new_string, replace_all).await
+        (
+            ToolKind::Edit,
+            ToolInput::Edit {
+                file_path,
+                old_string,
+                new_string,
+                replace_all,
+            },
+        ) => {
+            let result = execute_edit(&file_path, &old_string, &new_string, replace_all).await;
+            if !result.is_error {
+                if let Some(cache) = &dedup {
+                    cache.lock().await.invalidate(Path::new(&file_path));
+                }
+            }
+            result
         }
         (ToolKind::Glob, ToolInput::Glob { pattern, path }) => {
             execute_glob(&pattern, path.as_deref(), &cwd).await
         }
-        (ToolKind::Grep, ToolInput::Grep { pattern, path, glob, output_mode }) => {
-            execute_grep(&pattern, path.as_deref(), glob.as_deref(), output_mode.as_deref(), &cwd).await
+        (
+            ToolKind::Grep,
+            ToolInput::Grep {
+                pattern,
+                path,
+                glob,
+                output_mode,
+            },
+        ) => {
+            execute_grep(
+                &pattern,
+                path.as_deref(),
+                glob.as_deref(),
+                output_mode.as_deref(),
+                &cwd,
+            )
+            .await
         }
         (kind, _) => ExecutionResult {
             output: format!("Tool {:?} not yet implemented", kind),
@@ -193,15 +245,30 @@ async fn execute_bash(command: &str, timeout_ms: Option<u64>, cwd: &Path) -> Exe
         Ok(Ok(out)) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let is_error = !out.status.success();
-            let output = if stderr.is_empty() {
+            // Bash semantics per Anthropic's reference tool: a non-zero exit
+            // code is part of the *output*, not a tool failure. Many shell
+            // utilities use exit 1 as a normal signal (`grep` with no matches,
+            // `diff` finding differences, `test` for false). Marking those
+            // Failed shows the tool row as red even though the command ran
+            // perfectly. Always Complete; the model reads the exit code in
+            // the output prefix and interprets.
+            let exit = out.status.code().unwrap_or(-1);
+            let header = if exit == 0 {
+                String::new()
+            } else {
+                format!("[exit {exit}]\n")
+            };
+            let body = if stderr.is_empty() {
                 stdout.to_string()
             } else if stdout.is_empty() {
                 stderr.to_string()
             } else {
                 format!("{stdout}\n---stderr---\n{stderr}")
             };
-            ExecutionResult { output: output.trim_end().to_string(), is_error }
+            ExecutionResult {
+                output: format!("{header}{}", body.trim_end()),
+                is_error: false,
+            }
         }
         Ok(Err(e)) => ExecutionResult {
             output: format!("Failed to spawn bash: {e}"),
@@ -214,7 +281,12 @@ async fn execute_bash(command: &str, timeout_ms: Option<u64>, cwd: &Path) -> Exe
     }
 }
 
-async fn execute_read(file_path: &str, offset: Option<u64>, limit: Option<u64>) -> ExecutionResult {
+async fn execute_read(
+    file_path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    dedup: Option<&Arc<Mutex<ReadDedupCache>>>,
+) -> ExecutionResult {
     let path = PathBuf::from(file_path);
 
     if path.is_dir() {
@@ -230,7 +302,10 @@ async fn execute_read(file_path: &str, offset: Option<u64>, limit: Option<u64>) 
                     }
                 }
                 names.sort();
-                ExecutionResult { output: names.join("\n"), is_error: false }
+                ExecutionResult {
+                    output: names.join("\n"),
+                    is_error: false,
+                }
             }
             Err(e) => ExecutionResult {
                 output: format!("Cannot read directory: {e}"),
@@ -238,6 +313,20 @@ async fn execute_read(file_path: &str, offset: Option<u64>, limit: Option<u64>) 
             },
         }
     } else {
+        if let Some(cache) = dedup {
+            let guard = cache.lock().await;
+            if guard.is_unchanged(&path) {
+                return ExecutionResult {
+                    output: "File unchanged since last read. The content from the \
+                             earlier Read tool_result in this conversation is still \
+                             current — refer to that instead of re-reading."
+                        .to_string(),
+                    is_error: false,
+                };
+            }
+            drop(guard);
+        }
+
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
                 let max_lines = limit.unwrap_or(2000) as usize;
@@ -251,7 +340,15 @@ async fn execute_read(file_path: &str, offset: Option<u64>, limit: Option<u64>) 
                     .map(|(i, line)| format!("{}: {line}", start + i + 1))
                     .collect::<Vec<_>>()
                     .join("\n");
-                ExecutionResult { output: numbered, is_error: false }
+
+                if let Some(cache) = dedup {
+                    cache.lock().await.record_read(path);
+                }
+
+                ExecutionResult {
+                    output: numbered,
+                    is_error: false,
+                }
             }
             Err(e) => ExecutionResult {
                 output: format!("Cannot read file: {e}"),
@@ -293,7 +390,8 @@ async fn execute_edit(
         Ok(content) => {
             if old_string.is_empty() && !content.is_empty() {
                 return ExecutionResult {
-                    output: "old_string is empty but file is not empty. Provide text to replace.".into(),
+                    output: "old_string is empty but file is not empty. Provide text to replace."
+                        .into(),
                     is_error: true,
                 };
             }
@@ -328,18 +426,16 @@ async fn execute_edit(
                 },
             }
         }
-        Err(_) if old_string.is_empty() => {
-            match tokio::fs::write(file_path, new_string).await {
-                Ok(_) => ExecutionResult {
-                    output: format!("Created new file {file_path}"),
-                    is_error: false,
-                },
-                Err(e2) => ExecutionResult {
-                    output: format!("Cannot create file: {e2}"),
-                    is_error: true,
-                },
-            }
-        }
+        Err(_) if old_string.is_empty() => match tokio::fs::write(file_path, new_string).await {
+            Ok(_) => ExecutionResult {
+                output: format!("Created new file {file_path}"),
+                is_error: false,
+            },
+            Err(e2) => ExecutionResult {
+                output: format!("Cannot create file: {e2}"),
+                is_error: true,
+            },
+        },
         Err(e) => ExecutionResult {
             output: format!("Cannot read file: {e}"),
             is_error: true,
@@ -350,18 +446,31 @@ async fn execute_edit(
 async fn execute_glob(pattern: &str, path: Option<&str>, cwd: &Path) -> ExecutionResult {
     let base = path.map(PathBuf::from).unwrap_or_else(|| cwd.to_path_buf());
     let mut cmd = Command::new("rg");
-    cmd.arg("--files").arg("--glob").arg(pattern).current_dir(&base);
+    cmd.arg("--files")
+        .arg("--glob")
+        .arg(pattern)
+        .current_dir(&base);
     match cmd.output().await {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if stdout.is_empty() {
-                ExecutionResult { output: "No files matched".into(), is_error: false }
+                ExecutionResult {
+                    output: "No files matched".into(),
+                    is_error: false,
+                }
             } else {
-                ExecutionResult { output: stdout, is_error: false }
+                ExecutionResult {
+                    output: stdout,
+                    is_error: false,
+                }
             }
         }
         Err(_) => {
-            let cmd_str = format!("find '{}' -name '{}' 2>/dev/null | sort", base.display(), pattern);
+            let cmd_str = format!(
+                "find '{}' -name '{}' 2>/dev/null | sort",
+                base.display(),
+                pattern
+            );
             execute_bash(&cmd_str, Some(10_000), cwd).await
         }
     }
@@ -379,8 +488,12 @@ async fn execute_grep(
     cmd.arg("--no-heading").arg("-n");
 
     match output_mode.unwrap_or("content") {
-        "files_with_matches" => { cmd.arg("-l"); }
-        "count" => { cmd.arg("-c"); }
+        "files_with_matches" => {
+            cmd.arg("-l");
+        }
+        "count" => {
+            cmd.arg("-c");
+        }
         _ => {}
     }
 
@@ -395,11 +508,20 @@ async fn execute_grep(
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             if stdout.is_empty() && out.status.code() == Some(1) {
-                ExecutionResult { output: "No matches found".into(), is_error: false }
+                ExecutionResult {
+                    output: "No matches found".into(),
+                    is_error: false,
+                }
             } else if !stderr.is_empty() && stdout.is_empty() {
-                ExecutionResult { output: stderr, is_error: true }
+                ExecutionResult {
+                    output: stderr,
+                    is_error: true,
+                }
             } else {
-                ExecutionResult { output: stdout, is_error: false }
+                ExecutionResult {
+                    output: stdout,
+                    is_error: false,
+                }
             }
         }
         Err(e) => ExecutionResult {

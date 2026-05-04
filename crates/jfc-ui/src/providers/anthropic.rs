@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::provider::{
-    EventStream, Provider, ProviderMessage, StreamOptions,
+    EventStream, ModelInfo, Provider, ProviderMessage, StreamConvention, StreamOptions,
 };
 
 use super::sse;
@@ -57,6 +57,35 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn stream_convention(&self) -> StreamConvention {
+        StreamConvention::AnthropicNative
+    }
+
+    fn available_models(&self) -> Vec<ModelInfo> {
+        super::anthropic_models::anthropic_first_party_models("anthropic")
+    }
+
+    async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        // Prefer the live models.dev catalog so we pick up new Anthropic models the
+        // moment they ship. Fall back to the embedded canonical list when the network
+        // is unavailable (offline / corp proxy / models.dev down).
+        match super::models_dev::fetch_provider_models(&self.client, "anthropic", "anthropic").await
+        {
+            Ok(m) if !m.is_empty() => Ok(m),
+            _ => Ok(self.available_models()),
+        }
+    }
+
+    #[tracing::instrument(
+        target = "jfc::provider::anthropic",
+        skip_all,
+        fields(
+            model = %options.model,
+            messages = messages.len(),
+            tools = options.tools.len(),
+        ),
+        err,
+    )]
     async fn stream(
         &self,
         messages: Vec<ProviderMessage>,
@@ -78,6 +107,12 @@ impl Provider for AnthropicProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            if let Some(model) = super::anthropic_oauth::parse_model_not_found(&text) {
+                anyhow::bail!(
+                    "{model} is not enabled on your Anthropic account. \
+                     Pin a model you have access to (Ctrl+M)."
+                );
+            }
             anyhow::bail!("Anthropic API error {status}: {text}");
         }
 

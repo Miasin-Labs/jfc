@@ -1,7 +1,6 @@
 /target/
 target/
-/references/*
-!/references/wgpui/
+/research/
 .env
 .env.*
 !.env.example

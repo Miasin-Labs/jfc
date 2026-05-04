@@ -1,24 +1,37 @@
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::provider::{
-    EventStream, ProviderContent, ProviderMessage, ProviderRole, StopReason,
-    StreamEvent, ToolDef,
+    EventStream, ProviderContent, ProviderMessage, ProviderRole, StopReason, StreamEvent, ToolDef,
 };
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {
-    MessageStart { message: MessageStart },
-    ContentBlockStart { index: usize, content_block: ContentBlock },
-    ContentBlockDelta { index: usize, delta: Delta },
-    ContentBlockStop { index: usize },
-    MessageDelta { delta: MessageDeltaData },
+    MessageStart {
+        message: MessageStart,
+    },
+    ContentBlockStart {
+        index: usize,
+        content_block: ContentBlock,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: Delta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
+    MessageDelta {
+        delta: MessageDeltaData,
+    },
     MessageStop,
     Ping,
-    Error { error: ErrorBody },
+    Error {
+        error: ErrorBody,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,8 +43,12 @@ pub struct MessageStart {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Thinking { thinking: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -62,9 +79,17 @@ pub struct ErrorBody {
 }
 
 pub enum BlockState {
-    Text { accumulated: String },
-    Thinking { accumulated: String },
-    ToolUse { id: String, name: String, input: String },
+    Text {
+        accumulated: String,
+    },
+    Thinking {
+        accumulated: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: String,
+    },
 }
 
 pub fn parse_stop_reason(s: Option<&str>) -> StopReason {
@@ -84,16 +109,25 @@ pub fn translate(
     stop_reason: &mut Option<StopReason>,
 ) -> Option<StreamEvent> {
     match event {
-        SseEvent::ContentBlockStart { index, content_block } => {
+        SseEvent::ContentBlockStart {
+            index,
+            content_block,
+        } => {
             while blocks.len() <= index {
                 blocks.push(None);
             }
             blocks[index] = Some(match content_block {
-                ContentBlock::Text { .. } => BlockState::Text { accumulated: String::new() },
-                ContentBlock::Thinking { .. } => BlockState::Thinking { accumulated: String::new() },
-                ContentBlock::ToolUse { id, name, .. } => {
-                    BlockState::ToolUse { id, name, input: String::new() }
-                }
+                ContentBlock::Text { .. } => BlockState::Text {
+                    accumulated: String::new(),
+                },
+                ContentBlock::Thinking { .. } => BlockState::Thinking {
+                    accumulated: String::new(),
+                },
+                ContentBlock::ToolUse { id, name, .. } => BlockState::ToolUse {
+                    id,
+                    name,
+                    input: String::new(),
+                },
             });
             None
         }
@@ -108,13 +142,19 @@ pub fn translate(
                 if let Some(Some(BlockState::Thinking { accumulated })) = blocks.get_mut(index) {
                     accumulated.push_str(&thinking);
                 }
-                Some(StreamEvent::ThinkingDelta { index, delta: thinking })
+                Some(StreamEvent::ThinkingDelta {
+                    index,
+                    delta: thinking,
+                })
             }
             Delta::InputJsonDelta { partial_json } => {
                 if let Some(Some(BlockState::ToolUse { input, .. })) = blocks.get_mut(index) {
                     input.push_str(&partial_json);
                 }
-                Some(StreamEvent::ToolDelta { index, delta: partial_json })
+                Some(StreamEvent::ToolDelta {
+                    index,
+                    delta: partial_json,
+                })
             }
             Delta::SignatureDelta { .. }
             | Delta::CitationsDelta {}
@@ -122,12 +162,14 @@ pub fn translate(
         },
         SseEvent::ContentBlockStop { index } => {
             match blocks.get_mut(index).and_then(|b| b.take()) {
-                Some(BlockState::Text { accumulated }) => {
-                    Some(StreamEvent::TextDone { index, text: accumulated })
-                }
-                Some(BlockState::Thinking { accumulated }) => {
-                    Some(StreamEvent::ThinkingDone { index, text: accumulated })
-                }
+                Some(BlockState::Text { accumulated }) => Some(StreamEvent::TextDone {
+                    index,
+                    text: accumulated,
+                }),
+                Some(BlockState::Thinking { accumulated }) => Some(StreamEvent::ThinkingDone {
+                    index,
+                    text: accumulated,
+                }),
                 Some(BlockState::ToolUse { id, name, input }) => Some(StreamEvent::ToolDone {
                     index,
                     tool_name: name,
@@ -144,7 +186,9 @@ pub fn translate(
         SseEvent::MessageStop => Some(StreamEvent::Done {
             stop_reason: stop_reason.take().unwrap_or(StopReason::EndTurn),
         }),
-        SseEvent::Error { error } => Some(StreamEvent::Error { message: error.message }),
+        SseEvent::Error { error } => Some(StreamEvent::Error {
+            message: error.message,
+        }),
         SseEvent::MessageStart { .. } | SseEvent::Ping => None,
     }
 }
@@ -162,7 +206,11 @@ pub fn build_messages(messages: &[ProviderMessage]) -> Value {
                 .iter()
                 .map(|c| match c {
                     ProviderContent::Text(t) => json!({ "type": "text", "text": t }),
-                    ProviderContent::ToolResult { tool_use_id, content, is_error } => json!({
+                    ProviderContent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
                         "content": content,
@@ -185,22 +233,26 @@ pub fn build_messages(messages: &[ProviderMessage]) -> Value {
 pub fn build_tools(tools: &[ToolDef]) -> Value {
     tools
         .iter()
-        .map(|t| json!({
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.input_schema,
-        }))
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            })
+        })
         .collect::<Vec<_>>()
         .into()
 }
 
-pub fn into_event_stream(
-    resp: reqwest::Response,
-) -> EventStream {
+pub fn into_event_stream(resp: reqwest::Response) -> EventStream {
     let byte_stream = resp
         .bytes_stream()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
 
+    // Tracing parity with the OpenWebUI provider: dump raw SSE bytes at TRACE,
+    // log every parsed event type at DEBUG, log finish_reason / errors at INFO.
+    // Flip `RUST_LOG=jfc::provider::anthropic_sse=trace` to see raw chunks
+    // when debugging upstream SSE weirdness.
     let event_stream = byte_stream
         .eventsource()
         .scan(
@@ -208,12 +260,33 @@ pub fn into_event_stream(
             |state, result| {
                 let (blocks, stop_reason) = state;
                 let out = result.ok().and_then(|ev| {
-                    if ev.event == "ping" || ev.data.is_empty() || ev.data == "[DONE]" {
+                    tracing::trace!(
+                        target: "jfc::provider::anthropic_sse",
+                        event = %ev.event,
+                        data = %&ev.data[..ev.data.len().min(400)],
+                        "sse raw"
+                    );
+                    if ev.event == "ping" || ev.data.is_empty() {
+                        return None;
+                    }
+                    if ev.data == "[DONE]" {
+                        tracing::debug!(target: "jfc::provider::anthropic_sse", "sse [DONE]");
                         return None;
                     }
                     match serde_json::from_str::<SseEvent>(&ev.data) {
-                        Ok(parsed) => translate(parsed, blocks, stop_reason).map(Ok),
-                        Err(e) => Some(Err(anyhow::anyhow!("SSE parse error: {e}"))),
+                        Ok(parsed) => {
+                            log_parsed_event(&parsed);
+                            translate(parsed, blocks, stop_reason).map(Ok)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "jfc::provider::anthropic_sse",
+                                error = %e,
+                                data = %&ev.data[..ev.data.len().min(200)],
+                                "sse parse error"
+                            );
+                            Some(Err(anyhow::anyhow!("SSE parse error: {e}")))
+                        }
                     }
                 });
                 futures::future::ready(Some(out))
@@ -224,10 +297,98 @@ pub fn into_event_stream(
     Box::pin(event_stream)
 }
 
+/// Per-event tracing for the Anthropic SSE pipeline. Mirrors what the OWUI
+/// provider logs (`chunk_finish` for stop signals, per-tool synthesis logs)
+/// so the two paths read consistently in the log file.
+fn log_parsed_event(event: &SseEvent) {
+    match event {
+        SseEvent::MessageStart { message } => {
+            tracing::debug!(
+                target: "jfc::provider::anthropic_sse",
+                id = %message.id,
+                "message_start"
+            );
+        }
+        SseEvent::ContentBlockStart {
+            index,
+            content_block,
+        } => {
+            let kind = match content_block {
+                ContentBlock::Text { .. } => "text",
+                ContentBlock::Thinking { .. } => "thinking",
+                ContentBlock::ToolUse { .. } => "tool_use",
+            };
+            if let ContentBlock::ToolUse { id, name, .. } = content_block {
+                tracing::info!(
+                    target: "jfc::provider::anthropic_sse",
+                    index,
+                    tool_name = %name,
+                    tool_use_id = %id,
+                    "content_block_start tool_use"
+                );
+            } else {
+                tracing::debug!(
+                    target: "jfc::provider::anthropic_sse",
+                    index,
+                    kind,
+                    "content_block_start"
+                );
+            }
+        }
+        SseEvent::ContentBlockDelta { index, delta } => {
+            let (kind, len) = match delta {
+                Delta::TextDelta { text } => ("text", text.len()),
+                Delta::ThinkingDelta { thinking } => ("thinking", thinking.len()),
+                Delta::InputJsonDelta { partial_json } => ("input_json", partial_json.len()),
+                Delta::SignatureDelta { signature } => ("signature", signature.len()),
+                Delta::CitationsDelta {} => ("citations", 0),
+                Delta::ConnectorTextDelta { connector_text } => {
+                    ("connector_text", connector_text.len())
+                }
+            };
+            tracing::trace!(
+                target: "jfc::provider::anthropic_sse",
+                index,
+                kind,
+                len,
+                "content_block_delta"
+            );
+        }
+        SseEvent::ContentBlockStop { index } => {
+            tracing::debug!(
+                target: "jfc::provider::anthropic_sse",
+                index,
+                "content_block_stop"
+            );
+        }
+        SseEvent::MessageDelta { delta } => {
+            tracing::info!(
+                target: "jfc::provider::anthropic_sse",
+                stop_reason = ?delta.stop_reason,
+                "message_delta"
+            );
+        }
+        SseEvent::MessageStop => {
+            tracing::debug!(target: "jfc::provider::anthropic_sse", "message_stop");
+        }
+        SseEvent::Error { error } => {
+            tracing::warn!(
+                target: "jfc::provider::anthropic_sse",
+                error = %error.message,
+                "sse error event"
+            );
+        }
+        SseEvent::Ping => {} // already filtered above by ev.event == "ping"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ProviderContent, ProviderMessage, ProviderRole, StopReason, StreamEvent, StreamOptions, ToolDef};
+    use crate::provider::{
+        ProviderContent, ProviderMessage, ProviderRole, StopReason, StreamEvent, StreamOptions,
+        ToolDef,
+    };
 
     fn make_user_msg(text: &str) -> ProviderMessage {
         ProviderMessage {
@@ -252,8 +413,14 @@ mod tests {
         assert_eq!(parse_stop_reason(Some("end_turn")), StopReason::EndTurn);
         assert_eq!(parse_stop_reason(Some("tool_use")), StopReason::ToolUse);
         assert_eq!(parse_stop_reason(Some("max_tokens")), StopReason::MaxTokens);
-        assert_eq!(parse_stop_reason(Some("stop_sequence")), StopReason::StopSequence);
-        assert_eq!(parse_stop_reason(Some("refusal")), StopReason::Other("refusal".into()));
+        assert_eq!(
+            parse_stop_reason(Some("stop_sequence")),
+            StopReason::StopSequence
+        );
+        assert_eq!(
+            parse_stop_reason(Some("refusal")),
+            StopReason::Other("refusal".into())
+        );
         assert_eq!(parse_stop_reason(None), StopReason::EndTurn);
     }
 
@@ -261,23 +428,45 @@ mod tests {
     fn translate_text_block_lifecycle() {
         let (mut blocks, mut sr) = empty_state();
         translate(
-            SseEvent::ContentBlockStart { index: 0, content_block: ContentBlock::Text { text: String::new() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Text {
+                    text: String::new(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
         assert!(matches!(blocks[0], Some(BlockState::Text { .. })));
 
         let out = translate(
-            SseEvent::ContentBlockDelta { index: 0, delta: Delta::TextDelta { text: "chunk1".into() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta {
+                    text: "chunk1".into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
         assert!(matches!(out, Some(StreamEvent::TextDelta { delta, .. }) if delta == "chunk1"));
 
         translate(
-            SseEvent::ContentBlockDelta { index: 0, delta: Delta::TextDelta { text: "chunk2".into() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta {
+                    text: "chunk2".into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
 
-        let out = translate(SseEvent::ContentBlockStop { index: 0 }, &mut blocks, &mut sr);
+        let out = translate(
+            SseEvent::ContentBlockStop { index: 0 },
+            &mut blocks,
+            &mut sr,
+        );
         assert!(matches!(out, Some(StreamEvent::TextDone { text, .. }) if text == "chunk1chunk2"));
         assert!(blocks[0].is_none());
     }
@@ -286,14 +475,28 @@ mod tests {
     fn translate_thinking_delta_accumulates() {
         let (mut blocks, mut sr) = empty_state();
         translate(
-            SseEvent::ContentBlockStart { index: 0, content_block: ContentBlock::Thinking { thinking: String::new() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Thinking {
+                    thinking: String::new(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
         let out = translate(
-            SseEvent::ContentBlockDelta { index: 0, delta: Delta::ThinkingDelta { thinking: "thought".into() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::ThinkingDelta {
+                    thinking: "thought".into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
-        assert!(matches!(out, Some(StreamEvent::ThinkingDelta { delta, .. }) if delta == "thought"));
+        assert!(
+            matches!(out, Some(StreamEvent::ThinkingDelta { delta, .. }) if delta == "thought")
+        );
     }
 
     #[test]
@@ -302,43 +505,80 @@ mod tests {
         translate(
             SseEvent::ContentBlockStart {
                 index: 0,
-                content_block: ContentBlock::ToolUse { id: "tu_1".into(), name: "bash".into(), input: Value::Null },
+                content_block: ContentBlock::ToolUse {
+                    id: "tu_1".into(),
+                    name: "bash".into(),
+                    input: Value::Null,
+                },
             },
-            &mut blocks, &mut sr,
+            &mut blocks,
+            &mut sr,
         );
         translate(
-            SseEvent::ContentBlockDelta { index: 0, delta: Delta::InputJsonDelta { partial_json: r#"{"cmd":"ls"}"#.into() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::InputJsonDelta {
+                    partial_json: r#"{"cmd":"ls"}"#.into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
-        let out = translate(SseEvent::ContentBlockStop { index: 0 }, &mut blocks, &mut sr);
-        assert!(matches!(out, Some(StreamEvent::ToolDone { tool_name, tool_use_id, input_json, .. })
-            if tool_name == "bash" && tool_use_id == "tu_1" && input_json == r#"{"cmd":"ls"}"#));
+        let out = translate(
+            SseEvent::ContentBlockStop { index: 0 },
+            &mut blocks,
+            &mut sr,
+        );
+        assert!(
+            matches!(out, Some(StreamEvent::ToolDone { tool_name, tool_use_id, input_json, .. })
+            if tool_name == "bash" && tool_use_id == "tu_1" && input_json == r#"{"cmd":"ls"}"#)
+        );
     }
 
     #[test]
     fn translate_message_stop_with_reason() {
         let (mut blocks, mut sr) = empty_state();
         translate(
-            SseEvent::MessageDelta { delta: MessageDeltaData { stop_reason: Some("end_turn".into()) } },
-            &mut blocks, &mut sr,
+            SseEvent::MessageDelta {
+                delta: MessageDeltaData {
+                    stop_reason: Some("end_turn".into()),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
         let out = translate(SseEvent::MessageStop, &mut blocks, &mut sr);
-        assert!(matches!(out, Some(StreamEvent::Done { stop_reason: StopReason::EndTurn })));
+        assert!(matches!(
+            out,
+            Some(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn
+            })
+        ));
     }
 
     #[test]
     fn translate_message_stop_defaults_end_turn() {
         let (mut blocks, mut sr) = empty_state();
         let out = translate(SseEvent::MessageStop, &mut blocks, &mut sr);
-        assert!(matches!(out, Some(StreamEvent::Done { stop_reason: StopReason::EndTurn })));
+        assert!(matches!(
+            out,
+            Some(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn
+            })
+        ));
     }
 
     #[test]
     fn translate_error_event() {
         let (mut blocks, mut sr) = empty_state();
         let out = translate(
-            SseEvent::Error { error: ErrorBody { message: "overloaded".into() } },
-            &mut blocks, &mut sr,
+            SseEvent::Error {
+                error: ErrorBody {
+                    message: "overloaded".into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
         assert!(matches!(out, Some(StreamEvent::Error { message }) if message == "overloaded"));
     }
@@ -347,39 +587,82 @@ mod tests {
     fn translate_ping_and_message_start_emit_nothing() {
         let (mut blocks, mut sr) = empty_state();
         assert!(translate(SseEvent::Ping, &mut blocks, &mut sr).is_none());
-        assert!(translate(
-            SseEvent::MessageStart { message: MessageStart { id: "msg_1".into() } },
-            &mut blocks, &mut sr,
-        ).is_none());
+        assert!(
+            translate(
+                SseEvent::MessageStart {
+                    message: MessageStart { id: "msg_1".into() }
+                },
+                &mut blocks,
+                &mut sr,
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn translate_block_stop_missing_index() {
         let (mut blocks, mut sr) = empty_state();
-        assert!(translate(SseEvent::ContentBlockStop { index: 99 }, &mut blocks, &mut sr).is_none());
+        assert!(
+            translate(
+                SseEvent::ContentBlockStop { index: 99 },
+                &mut blocks,
+                &mut sr
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn translate_multi_block_indices_independent() {
         let (mut blocks, mut sr) = empty_state();
         translate(
-            SseEvent::ContentBlockStart { index: 0, content_block: ContentBlock::Text { text: String::new() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Text {
+                    text: String::new(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
         translate(
-            SseEvent::ContentBlockStart { index: 1, content_block: ContentBlock::Thinking { thinking: String::new() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockStart {
+                index: 1,
+                content_block: ContentBlock::Thinking {
+                    thinking: String::new(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
         translate(
-            SseEvent::ContentBlockDelta { index: 0, delta: Delta::TextDelta { text: "a".into() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta { text: "a".into() },
+            },
+            &mut blocks,
+            &mut sr,
         );
         translate(
-            SseEvent::ContentBlockDelta { index: 1, delta: Delta::ThinkingDelta { thinking: "t".into() } },
-            &mut blocks, &mut sr,
+            SseEvent::ContentBlockDelta {
+                index: 1,
+                delta: Delta::ThinkingDelta {
+                    thinking: "t".into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
         );
-        let t0 = translate(SseEvent::ContentBlockStop { index: 0 }, &mut blocks, &mut sr);
-        let t1 = translate(SseEvent::ContentBlockStop { index: 1 }, &mut blocks, &mut sr);
+        let t0 = translate(
+            SseEvent::ContentBlockStop { index: 0 },
+            &mut blocks,
+            &mut sr,
+        );
+        let t1 = translate(
+            SseEvent::ContentBlockStop { index: 1 },
+            &mut blocks,
+            &mut sr,
+        );
         assert!(matches!(t0, Some(StreamEvent::TextDone { text, .. }) if text == "a"));
         assert!(matches!(t1, Some(StreamEvent::ThinkingDone { text, .. }) if text == "t"));
     }
@@ -389,7 +672,9 @@ mod tests {
         let json = r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EgYbOHMuAi0"}}"#;
         let event: SseEvent = serde_json::from_str(json).expect("signature_delta must parse");
         let (mut blocks, mut sr) = empty_state();
-        blocks.push(Some(BlockState::Thinking { accumulated: "thought".into() }));
+        blocks.push(Some(BlockState::Thinking {
+            accumulated: "thought".into(),
+        }));
         assert!(translate(event, &mut blocks, &mut sr).is_none());
     }
 
@@ -398,7 +683,9 @@ mod tests {
         let json = r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta"}}"#;
         let event: SseEvent = serde_json::from_str(json).expect("citations_delta must parse");
         let (mut blocks, mut sr) = empty_state();
-        blocks.push(Some(BlockState::Text { accumulated: String::new() }));
+        blocks.push(Some(BlockState::Text {
+            accumulated: String::new(),
+        }));
         assert!(translate(event, &mut blocks, &mut sr).is_none());
     }
 
@@ -407,7 +694,9 @@ mod tests {
         let json = r#"{"type":"content_block_delta","index":0,"delta":{"type":"connector_text_delta","connector_text":"\n\n"}}"#;
         let event: SseEvent = serde_json::from_str(json).expect("connector_text_delta must parse");
         let (mut blocks, mut sr) = empty_state();
-        blocks.push(Some(BlockState::Text { accumulated: String::new() }));
+        blocks.push(Some(BlockState::Text {
+            accumulated: String::new(),
+        }));
         assert!(translate(event, &mut blocks, &mut sr).is_none());
     }
 
@@ -419,7 +708,11 @@ mod tests {
 
     #[test]
     fn build_messages_roundtrip() {
-        let msgs = vec![make_user_msg("q1"), make_assistant_msg("a1"), make_user_msg("q2")];
+        let msgs = vec![
+            make_user_msg("q1"),
+            make_assistant_msg("a1"),
+            make_user_msg("q2"),
+        ];
         let v = build_messages(&msgs);
         assert_eq!(v[0]["role"], "user");
         assert_eq!(v[0]["content"][0]["text"], "q1");
@@ -489,7 +782,11 @@ mod tests {
     fn build_tools_order_preserved() {
         let tools: Vec<ToolDef> = ["alpha", "beta", "gamma"]
             .iter()
-            .map(|n| ToolDef { name: n.to_string(), description: n.to_string(), input_schema: serde_json::json!({}) })
+            .map(|n| ToolDef {
+                name: n.to_string(),
+                description: n.to_string(),
+                input_schema: serde_json::json!({}),
+            })
             .collect();
         let v = build_tools(&tools);
         let arr = v.as_array().unwrap();

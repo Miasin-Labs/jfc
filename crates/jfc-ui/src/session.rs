@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ChatMessage, MessagePart, Role, ToolCall, ToolInput, ToolKind, ToolOutput, ToolStatus};
+use crate::types::{
+    ChatMessage, MessagePart, Role, ToolCall, ToolInput, ToolKind, ToolOutput, ToolStatus,
+};
 
 #[derive(Serialize, Deserialize)]
 struct SerializedSession {
@@ -20,8 +22,12 @@ struct SerializedMessage {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SerializedPart {
-    Text { content: String },
-    Reasoning { content: String },
+    Text {
+        content: String,
+    },
+    Reasoning {
+        content: String,
+    },
     Tool {
         id: String,
         kind: String,
@@ -43,6 +49,7 @@ pub fn generate_session_id() -> String {
     format!("ses_{}", now.format("%Y%m%d_%H%M%S"))
 }
 
+#[tracing::instrument(target = "jfc::session", skip(messages), fields(n = messages.len()))]
 pub fn save_session(session_id: &str, messages: &[ChatMessage]) {
     let dir = sessions_dir();
     if std::fs::create_dir_all(&dir).is_err() {
@@ -66,7 +73,13 @@ pub fn load_session(session_id: &str) -> Option<Vec<ChatMessage>> {
     let path = sessions_dir().join(format!("{session_id}.json"));
     let content = std::fs::read_to_string(&path).ok()?;
     let session: SerializedSession = serde_json::from_str(&content).ok()?;
-    Some(session.messages.into_iter().map(deserialize_message).collect())
+    Some(
+        session
+            .messages
+            .into_iter()
+            .map(deserialize_message)
+            .collect(),
+    )
 }
 
 pub fn list_sessions() -> Vec<String> {
@@ -109,11 +122,18 @@ fn serialize_part(part: &MessagePart) -> SerializedPart {
                 _ => None,
             },
         },
+        MessagePart::CompactBoundary { pre_tokens } => SerializedPart::Text {
+            content: format!("[compact_boundary: pre={pre_tokens}]"),
+        },
     }
 }
 
 fn deserialize_message(msg: SerializedMessage) -> ChatMessage {
-    let role = if msg.role == "user" { Role::User } else { Role::Assistant };
+    let role = if msg.role == "user" {
+        Role::User
+    } else {
+        Role::Assistant
+    };
     let parts: Vec<MessagePart> = msg.parts.into_iter().map(deserialize_part).collect();
     ChatMessage {
         role,
@@ -129,23 +149,29 @@ fn deserialize_part(part: SerializedPart) -> MessagePart {
     match part {
         SerializedPart::Text { content } => MessagePart::Text(content),
         SerializedPart::Reasoning { content } => MessagePart::Reasoning(content),
-        SerializedPart::Tool { id, kind, status, input_summary, output } => {
-            MessagePart::Tool(ToolCall {
-                id,
-                kind: ToolKind::from_name(&kind),
-                status: match status.as_str() {
-                    "Complete" => ToolStatus::Complete,
-                    "Failed" => ToolStatus::Failed,
-                    "Running" => ToolStatus::Running,
-                    _ => ToolStatus::Complete,
-                },
-                input: ToolInput::Generic { summary: input_summary },
-                output: match output {
-                    Some(t) => ToolOutput::Text(t),
-                    None => ToolOutput::Empty,
-                },
-                is_collapsed: true,
-            })
-        }
+        SerializedPart::Tool {
+            id,
+            kind,
+            status,
+            input_summary,
+            output,
+        } => MessagePart::Tool(ToolCall {
+            id,
+            kind: ToolKind::from_name(&kind),
+            status: match status.as_str() {
+                "Complete" => ToolStatus::Complete,
+                "Failed" => ToolStatus::Failed,
+                "Running" => ToolStatus::Running,
+                _ => ToolStatus::Complete,
+            },
+            input: ToolInput::Generic {
+                summary: input_summary,
+            },
+            output: match output {
+                Some(t) => ToolOutput::Text(t),
+                None => ToolOutput::Empty,
+            },
+            is_collapsed: true,
+        }),
     }
 }

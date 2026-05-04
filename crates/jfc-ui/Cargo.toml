@@ -16,7 +16,10 @@ tokio-stream = "0.1"
 futures = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+serde_yaml = "0.9"
 dirs = "5"
 serde_json = { workspace = true }
 unicode-segmentation = { workspace = true }
@@ -29,3 +32,7 @@ async-trait = "0.1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+pulldown-cmark = "0.12"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
+ansi-to-tui = "7"
+itertools = "0.14"

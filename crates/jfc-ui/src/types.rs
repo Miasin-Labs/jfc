@@ -1,17 +1,58 @@
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MessagePart {
     Text(String),
     Reasoning(String),
     Tool(ToolCall),
+    CompactBoundary { pre_tokens: usize },
 }
 
-#[derive(Clone)]
+impl MessagePart {
+    pub fn approx_text_len(&self) -> usize {
+        match self {
+            Self::Text(s) | Self::Reasoning(s) => s.len(),
+            Self::Tool(tc) => tc.input.summary().len() + tc.output.approx_text_len(),
+            Self::CompactBoundary { .. } => 0,
+        }
+    }
+
+    pub fn text_only(&self) -> String {
+        match self {
+            Self::Text(s) | Self::Reasoning(s) => s.clone(),
+            Self::Tool(tc) => {
+                format!("[Tool: {} → {}]", tc.kind.label(), tc.output.text_only())
+            }
+            Self::CompactBoundary { pre_tokens } => {
+                format!("[Compact boundary, pre={pre_tokens} tokens]")
+            }
+        }
+    }
+
+    pub fn to_display_string(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Reasoning(s) => format!("[Reasoning: {}]", s),
+            Self::Tool(tc) => {
+                format!(
+                    "[Tool: {} | Input: {} | Output: {}]",
+                    tc.kind.label(),
+                    tc.input.summary(),
+                    tc.output.to_display_string(),
+                )
+            }
+            Self::CompactBoundary { pre_tokens } => {
+                format!("[Compact boundary, pre={pre_tokens} tokens]")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ToolCall {
     pub id: String,
     pub kind: ToolKind,
@@ -42,7 +83,7 @@ pub enum ToolStatus {
     Failed,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum ToolInput {
     Edit {
         file_path: String,
@@ -86,7 +127,7 @@ pub enum ToolInput {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ToolOutput {
     Text(String),
     Diff(DiffView),
@@ -104,7 +145,75 @@ pub enum ToolOutput {
     Empty,
 }
 
-#[derive(Clone)]
+impl ToolOutput {
+    pub fn approx_text_len(&self) -> usize {
+        match self {
+            Self::Text(s) => s.len(),
+            Self::Diff(d) => d
+                .hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .map(|l| l.content.len())
+                .sum(),
+            Self::FileContent { content, .. } => content.len(),
+            Self::Command { stdout, stderr, .. } => stdout.len() + stderr.len(),
+            Self::FileList(files) => files.iter().map(|f| f.len()).sum(),
+            Self::Empty => 0,
+        }
+    }
+
+    pub fn text_only(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Diff(d) => format!("{} (+{}/-{})", d.file_path, d.additions, d.deletions),
+            Self::FileContent { path, .. } => format!("[file: {}]", path),
+            Self::Command {
+                stdout,
+                stderr,
+                exit_code,
+            } => {
+                let code = exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into());
+                format!(
+                    "exit={} stdout={}B stderr={}B",
+                    code,
+                    stdout.len(),
+                    stderr.len()
+                )
+            }
+            Self::FileList(files) => format!("{} files", files.len()),
+            Self::Empty => String::new(),
+        }
+    }
+
+    pub fn to_display_string(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Diff(d) => format!("{} (+{}/-{})", d.file_path, d.additions, d.deletions),
+            Self::FileContent { path, content, .. } => {
+                format!("{} ({} chars)", path, content.len())
+            }
+            Self::Command {
+                stdout, exit_code, ..
+            } => {
+                let code = exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into());
+                let preview = if stdout.len() > 100 {
+                    format!("{}...", &stdout[..100])
+                } else {
+                    stdout.clone()
+                };
+                format!("exit={}: {}", code, preview)
+            }
+            Self::FileList(files) => format!("{} files", files.len()),
+            Self::Empty => "[empty]".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct DiffView {
     pub file_path: String,
     pub hunks: Vec<DiffHunk>,
@@ -112,7 +221,7 @@ pub struct DiffView {
     pub deletions: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DiffHunk {
     pub old_start: usize,
     pub new_start: usize,
@@ -120,7 +229,7 @@ pub struct DiffHunk {
     pub lines: Vec<DiffLine>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     pub old_line: Option<usize>,
@@ -128,14 +237,14 @@ pub struct DiffLine {
     pub content: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum DiffLineKind {
     Context,
     Added,
     Removed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub role: Role,
     pub parts: Vec<MessagePart>,
@@ -177,6 +286,30 @@ impl ChatMessage {
             cost_tier: Some("$$$$".into()),
             elapsed: Some("3.9s".into()),
         }
+    }
+
+    pub fn compact_boundary(summary: &str, pre_tokens: usize) -> Self {
+        Self {
+            role: Role::Assistant,
+            parts: vec![
+                MessagePart::CompactBoundary { pre_tokens },
+                MessagePart::Text(format!("Summary of earlier conversation:\n\n{}", summary)),
+            ],
+            agent_name: Some("system".into()),
+            model_name: None,
+            cost_tier: None,
+            elapsed: None,
+        }
+    }
+
+    pub fn role_is_user(&self) -> bool {
+        self.role == Role::User
+    }
+
+    pub fn is_compact_boundary(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::CompactBoundary { .. }))
     }
 }
 
@@ -241,7 +374,9 @@ impl ToolInput {
             Self::Edit { file_path, .. } => file_path.clone(),
             Self::Write { file_path, .. } => file_path.clone(),
             Self::Read { file_path, .. } => file_path.clone(),
-            Self::Bash { command, workdir, .. } => match workdir {
+            Self::Bash {
+                command, workdir, ..
+            } => match workdir {
                 Some(workdir) => format!("{command} in {workdir}"),
                 None => command.clone(),
             },
@@ -278,10 +413,8 @@ impl ToolInput {
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
         };
-        let opt_u64_field = |key: &str| -> Option<u64> {
-            obj.and_then(|m| m.get(key))
-                .and_then(|v| v.as_u64())
-        };
+        let opt_u64_field =
+            |key: &str| -> Option<u64> { obj.and_then(|m| m.get(key)).and_then(|v| v.as_u64()) };
         let bool_field = |key: &str| -> bool {
             obj.and_then(|m| m.get(key))
                 .and_then(|v| v.as_bool())
@@ -334,39 +467,79 @@ impl ToolInput {
     pub fn to_value(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
-            Self::Edit { file_path, old_string, new_string, replace_all } => {
+            Self::Edit {
+                file_path,
+                old_string,
+                new_string,
+                replace_all,
+            } => {
                 let mut v = json!({ "file_path": file_path, "old_string": old_string, "new_string": new_string });
-                if *replace_all { v["replace_all"] = json!(true); }
+                if *replace_all {
+                    v["replace_all"] = json!(true);
+                }
                 v
             }
-            Self::Write { file_path, content } => json!({ "file_path": file_path, "content": content }),
-            Self::Read { file_path, offset, limit } => {
+            Self::Write { file_path, content } => {
+                json!({ "file_path": file_path, "content": content })
+            }
+            Self::Read {
+                file_path,
+                offset,
+                limit,
+            } => {
                 let mut v = json!({ "file_path": file_path });
-                if let Some(o) = offset { v["offset"] = json!(o); }
-                if let Some(l) = limit { v["limit"] = json!(l); }
+                if let Some(o) = offset {
+                    v["offset"] = json!(o);
+                }
+                if let Some(l) = limit {
+                    v["limit"] = json!(l);
+                }
                 v
             }
-            Self::Bash { command, timeout, workdir } => {
+            Self::Bash {
+                command,
+                timeout,
+                workdir,
+            } => {
                 let mut v = json!({ "command": command });
-                if let Some(t) = timeout { v["timeout"] = json!(t); }
-                if let Some(w) = workdir { v["workdir"] = json!(w); }
+                if let Some(t) = timeout {
+                    v["timeout"] = json!(t);
+                }
+                if let Some(w) = workdir {
+                    v["workdir"] = json!(w);
+                }
                 v
             }
             Self::Glob { pattern, path } => {
                 let mut v = json!({ "pattern": pattern });
-                if let Some(p) = path { v["path"] = json!(p); }
+                if let Some(p) = path {
+                    v["path"] = json!(p);
+                }
                 v
             }
-            Self::Grep { pattern, path, glob, output_mode } => {
+            Self::Grep {
+                pattern,
+                path,
+                glob,
+                output_mode,
+            } => {
                 let mut v = json!({ "pattern": pattern });
-                if let Some(p) = path { v["path"] = json!(p); }
-                if let Some(g) = glob { v["glob"] = json!(g); }
-                if let Some(m) = output_mode { v["output_mode"] = json!(m); }
+                if let Some(p) = path {
+                    v["path"] = json!(p);
+                }
+                if let Some(g) = glob {
+                    v["glob"] = json!(g);
+                }
+                if let Some(m) = output_mode {
+                    v["output_mode"] = json!(m);
+                }
                 v
             }
             Self::Search { query, path } => {
                 let mut v = json!({ "query": query });
-                if let Some(p) = path { v["path"] = json!(p); }
+                if let Some(p) = path {
+                    v["path"] = json!(p);
+                }
                 v
             }
             Self::ApplyPatch { patch } => json!({ "patch": patch }),
@@ -379,25 +552,25 @@ impl ToolInput {
 
 pub fn sample_tool_harness_message() -> ChatMessage {
     let diff = parse_unified_diff(
-        "references/wgpui/crates/gpui_linux/src/linux/wayland/window.rs",
-        r#"@@ -1502,2 +1502,2 @@
--let w = state.bounds.size.width.0 as i32;
--let h = state.bounds.size.height.0 as i32;
-+let w = f32::from(state.bounds.size.width) as i32;
-+let h = f32::from(state.bounds.size.height) as i32;
+        "crates/jfc-ui/src/tools.rs",
+        r#"@@ -180,2 +180,2 @@
+-async fn execute_bash(command: &str, timeout_ms: Option<u64>, cwd: &Path) -> ExecutionResult {
+-    let timeout = timeout_ms.unwrap_or(120_000);
++async fn execute_bash(command: &str, timeout_ms: Option<u64>, cwd: &Path) -> ExecutionResult {
++    let timeout = timeout_ms.unwrap_or(300_000);
 "#,
     );
 
     ChatMessage::assistant_parts(vec![
-        MessagePart::Reasoning("Pixels has private fields. Use the same f32::from pattern.".into()),
+        MessagePart::Reasoning("Increase default bash timeout from 2min to 5min.".into()),
         MessagePart::Tool(ToolCall {
             id: "edit-1".into(),
             kind: ToolKind::Edit,
             status: ToolStatus::Complete,
             input: ToolInput::Edit {
-                file_path: "references/wgpui/crates/gpui_linux/src/linux/wayland/window.rs".into(),
-                old_string: "let w = state.bounds.size.width.0 as i32;".into(),
-                new_string: "let w = f32::from(state.bounds.size.width) as i32;".into(),
+                file_path: "crates/jfc-ui/src/tools.rs".into(),
+                old_string: "let timeout = timeout_ms.unwrap_or(120_000);".into(),
+                new_string: "let timeout = timeout_ms.unwrap_or(300_000);".into(),
                 replace_all: false,
             },
             output: ToolOutput::Diff(diff),
@@ -408,9 +581,9 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             kind: ToolKind::Bash,
             status: ToolStatus::Complete,
             input: ToolInput::Bash {
-                command: "cargo check -p gpui_linux".into(),
+                command: "cargo check -p jfc-ui".into(),
                 timeout: None,
-                workdir: Some("references/wgpui".into()),
+                workdir: None,
             },
             output: ToolOutput::Command {
                 stdout: "Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.38s"
@@ -432,7 +605,8 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             output: ToolOutput::FileContent {
                 path: "crates/jfc-ui/src/main.rs".into(),
                 language: "rust".into(),
-                content: "mod text_input;\nmod theme;\n\nuse gpui::*;\nuse theme::Theme;".into(),
+                content: "mod app;\nmod context;\n\nuse std::sync::Arc;\nuse tokio::sync::mpsc;"
+                    .into(),
             },
             is_collapsed: true,
         }),
