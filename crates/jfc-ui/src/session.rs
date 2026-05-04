@@ -17,6 +17,12 @@ pub struct SerializedSession {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub first_prompt: Option<String>,
+    /// Working directory the session was created in. None for legacy
+    /// sessions written before this field was added — those skip the
+    /// cwd-mismatch warning so they don't false-alarm on every resume.
+    /// Mirrors codex-rs `tui/src/session_resume.rs:99-111`.
+    #[serde(default)]
+    pub cwd: Option<String>,
     pub messages: Vec<SerializedMessage>,
 }
 
@@ -260,18 +266,27 @@ pub fn save_session(session_id: &str, messages: &[ChatMessage]) {
     let now = chrono::Utc::now();
     let path = dir.join(format!("{session_id}.json"));
 
-    // Try to load existing session to preserve created_at
-    let created_at = std::fs::read_to_string(&path)
+    // Try to load existing session to preserve created_at + cwd. cwd is
+    // pinned at creation time so that resuming from a different shell
+    // still surfaces a warning if the original cwd no longer matches.
+    let (created_at, existing_cwd) = std::fs::read_to_string(&path)
         .ok()
         .and_then(|content| serde_json::from_str::<SerializedSession>(&content).ok())
-        .map(|s| s.created_at)
-        .unwrap_or_else(|| now.to_rfc3339());
+        .map(|s| (s.created_at, s.cwd))
+        .unwrap_or_else(|| (now.to_rfc3339(), None));
+
+    let cwd = existing_cwd.or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    });
 
     let serialized = SerializedSession {
         id: session_id.to_owned(),
         created_at,
         updated_at: Some(now.to_rfc3339()),
         first_prompt: extract_first_prompt(messages),
+        cwd,
         messages: messages.iter().map(serialize_message).collect(),
     };
 
@@ -303,6 +318,7 @@ pub fn load_session_metadata(session_id: &str) -> Option<SessionMetadata> {
         created_at: session.created_at,
         updated_at: session.updated_at,
         first_prompt: session.first_prompt,
+        cwd: session.cwd,
         message_count: session.messages.len(),
     })
 }
@@ -313,7 +329,31 @@ pub struct SessionMetadata {
     pub created_at: String,
     pub updated_at: Option<String>,
     pub first_prompt: Option<String>,
+    /// cwd recorded when the session was first saved. None for legacy
+    /// sessions; consumers must treat None as "no warning" — see
+    /// `cwd_mismatch_message`.
+    pub cwd: Option<String>,
     pub message_count: usize,
+}
+
+/// Pure helper: produces a warning message when a resumed session's
+/// recorded cwd differs from the current cwd. Returns `None` if the
+/// session has no cwd (legacy file), if the current cwd is empty (we
+/// can't compare to anything meaningful), or if the two paths match.
+///
+/// Mirrors codex-rs `tui/src/session_resume.rs:99-111` — the surface
+/// is informational; the resume still proceeds.
+pub fn cwd_mismatch_message(session_cwd: Option<&str>, current_cwd: &str) -> Option<String> {
+    let session_cwd = session_cwd?;
+    if current_cwd.is_empty() {
+        return None;
+    }
+    if session_cwd == current_cwd {
+        return None;
+    }
+    Some(format!(
+        "Session was created in {session_cwd}; current cwd is {current_cwd}"
+    ))
 }
 
 pub fn list_sessions() -> Vec<String> {
@@ -898,6 +938,48 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn cwd_mismatch_returns_none_when_match_normal() {
+        // Same paths -> no warning. The happy case for resume in the
+        // same project the session was created in.
+        let same = "/home/user/project";
+        assert_eq!(cwd_mismatch_message(Some(same), same), None);
+    }
+
+    #[test]
+    fn cwd_mismatch_returns_message_when_different_normal() {
+        // Different paths -> Some, message contains both. Mirrors
+        // codex-rs `session_resume.rs:99-111`.
+        let session_cwd = "/home/user/project-a";
+        let current_cwd = "/home/user/project-b";
+        let msg = cwd_mismatch_message(Some(session_cwd), current_cwd)
+            .expect("differing paths should produce a warning");
+        assert!(
+            msg.contains(session_cwd),
+            "message should contain session cwd: {msg}"
+        );
+        assert!(
+            msg.contains(current_cwd),
+            "message should contain current cwd: {msg}"
+        );
+    }
+
+    #[test]
+    fn cwd_mismatch_returns_none_for_legacy_unset_robust() {
+        // Legacy sessions written before the cwd field existed have
+        // session_cwd=None. We must NOT warn — there's nothing to
+        // compare against.
+        assert_eq!(cwd_mismatch_message(None, "/anywhere"), None);
+    }
+
+    #[test]
+    fn cwd_mismatch_returns_none_for_empty_current_robust() {
+        // current_cwd="" means `std::env::current_dir()` failed (e.g.
+        // the cwd was deleted). We don't have a real path to compare
+        // to, so suppress the warning rather than surface noise.
+        assert_eq!(cwd_mismatch_message(Some("/home/user/project"), ""), None);
     }
 
     #[test]
