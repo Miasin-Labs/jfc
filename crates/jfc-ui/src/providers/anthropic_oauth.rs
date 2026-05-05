@@ -460,7 +460,9 @@ fn build_body(
     if !opts.tools.is_empty() {
         body["tools"] = sse::build_tools(&opts.tools);
     }
-    if let Some(budget) = opts.thinking_budget {
+    if opts.adaptive_thinking {
+        body["thinking"] = json!({ "type": "adaptive" });
+    } else if let Some(budget) = opts.thinking_budget {
         body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
     }
     body

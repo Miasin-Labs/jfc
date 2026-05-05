@@ -195,7 +195,7 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,reqwest=warn,hyper=warn,h2=warn"));
+        .unwrap_or_else(|_| EnvFilter::new("debug,reqwest=warn,hyper=warn,h2=warn"));
 
     if let Err(e) = tracing_subscriber::fmt()
         .with_env_filter(filter)

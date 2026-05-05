@@ -168,10 +168,21 @@ pub async fn stream_response(
             system_prompt.push_str(&block);
         }
     }
-    let opts = StreamOptions::new(model)
-        .system(system_prompt)
-        .tools(tools::all_tool_defs())
-        .thinking(8000);
+    // Thinking: use adaptive for all thinking-capable models. The API accepts
+    // adaptive on Opus 4.5+/Sonnet 4.5+ (v126 still uses budget_tokens for 4.5
+    // but the docs mark that as deprecated). Haiku 4.5 and unknown models don't
+    // support thinking at all — sending any thinking param causes a 400.
+    let has_thinking_support = model_supports_thinking(model.as_str());
+    let opts = {
+        let base = StreamOptions::new(model)
+            .system(system_prompt)
+            .tools(tools::all_tool_defs());
+        if has_thinking_support {
+            base.adaptive()
+        } else {
+            base
+        }
+    };
 
     let mut stream = match provider.stream(messages, &opts).await {
         Ok(s) => s,
@@ -445,6 +456,48 @@ pub async fn continue_agentic_loop(app: &mut App, tx: &mpsc::UnboundedSender<App
     });
 }
 
+/// Returns true for models that require `{"type": "adaptive"}` thinking and
+/// reject the legacy `budget_tokens` parameter. Matches v126's
+/// `modelSupportsAdaptiveThinking` (claude.ts:1602).
+fn model_supports_adaptive_thinking(model: &str) -> bool {
+    let m = model.to_lowercase();
+    // Opus 4.6, Opus 4.7, Sonnet 4.6 — all reject budget_tokens.
+    // Future models (5.x) will also use adaptive, so default to adaptive
+    // for any model whose version segment is >= 4.6.
+    if m.contains("opus-4-6")
+        || m.contains("opus-4-7")
+        || m.contains("opus-4-8")
+        || m.contains("opus-4-9")
+        || m.contains("opus-5")
+        || m.contains("sonnet-4-6")
+        || m.contains("sonnet-4-7")
+        || m.contains("sonnet-4-8")
+        || m.contains("sonnet-4-9")
+        || m.contains("sonnet-5")
+    {
+        return true;
+    }
+    false
+}
+
+/// Returns true if the model supports thinking at all. Haiku 4.5 does NOT
+/// support the thinking parameter — sending it causes a 400. Opus 4.x and
+/// Sonnet 4.5+ do support thinking. For unknown models (OWUI custom routes),
+/// we default to NOT sending thinking params (safe fallback — the model just
+/// won't think).
+fn model_supports_thinking(model: &str) -> bool {
+    let m = model.to_lowercase();
+    // Known thinking-capable families
+    if m.contains("opus") || m.contains("sonnet-4-5") || m.contains("sonnet-4-6")
+        || m.contains("sonnet-4-7") || m.contains("sonnet-4-8") || m.contains("sonnet-4-9")
+        || m.contains("sonnet-5")
+    {
+        return true;
+    }
+    // Haiku and unknown models: no thinking
+    false
+}
+
 pub fn build_provider_messages(msgs: &[ChatMessage]) -> Vec<ProviderMessage> {
     let out: Vec<ProviderMessage> = msgs
         .iter()
@@ -471,37 +524,37 @@ pub fn build_provider_messages(msgs: &[ChatMessage]) -> Vec<ProviderMessage> {
             })
         })
         .collect();
-    strip_trailing_empty_assistant(out)
+    ensure_user_last(out)
 }
 
-/// Drop a trailing assistant message that contains no real content before
-/// sending to the provider.
+/// Ensure the message list ends with a user-role message before sending to
+/// the provider.
 ///
-/// `continue_agentic_loop` (this file, ~line 400) pushes a placeholder
-/// `ChatMessage::assistant(String::new())` onto `app.messages` before the
-/// stream task starts, to reserve the slot for the streamed response. That
-/// empty assistant is sliced off (`&app.messages[..assistant_idx]`) before
-/// being passed to `build_provider_messages_with_tool_results`, but other
-/// callers — and any future code path that forgets the slice — can leak an
-/// empty assistant tail into the provider request.
+/// ## Why this is needed
 ///
-/// Bedrock-via-LiteLLM (OWUI deployment) hard-rejects this with:
-///     `BedrockException — "This model does not support assistant message
-///     prefill. The conversation must end with a user message."`
-/// The native Anthropic API silently treats a trailing assistant turn as
-/// prefill, which is also wrong for the agentic continuation use case (we
-/// want a fresh assistant turn, not a continuation of an empty one). Thus
-/// the strip is provider-agnostic: a trailing empty assistant is wrong
-/// everywhere and has no legitimate semantic meaning here.
+/// Opus 4.6+ rejects any trailing assistant message with:
+///     `"This model does not support assistant message prefill.
+///      The conversation must end with a user message."`
 ///
-/// Empty means: every `content` block is `Text(s)` with `s.trim().is_empty()`,
-/// or the `content` vec is empty. Any non-blank text or any `ToolUse` /
-/// `ToolResult` block keeps the message — those are real partial turns we
-/// must not lose. The strip is intentionally non-recursive: two empty
-/// assistants in a row only loses the very last one, because a deeper
-/// build-up of empties points to a separate bug we want to surface.
-fn strip_trailing_empty_assistant(mut msgs: Vec<ProviderMessage>) -> Vec<ProviderMessage> {
-    let last_is_empty_assistant = msgs
+/// Bedrock-via-LiteLLM returns the same error for any Anthropic model.
+///
+/// The native pre-4.6 API *silently* treats a trailing assistant as prefill,
+/// which is also wrong for the agentic continuation use case (we want a
+/// fresh assistant turn, not a continuation of an old one).
+///
+/// ## What we do
+///
+/// 1. Strip trailing assistant messages that are empty (only blank text).
+/// 2. If the last message is still an assistant with real content (e.g. a
+///    compact boundary summary, or a text-only end_turn that ended up last
+///    due to filtering), **keep it but append a synthetic empty user turn**
+///    so the API sees user-last ordering. This matches v126's behavior:
+///    `normalizeMessagesForAPI` never produces a conversation ending in
+///    assistant — tool_result blocks always follow tool_use blocks in a
+///    trailing user message.
+fn ensure_user_last(mut msgs: Vec<ProviderMessage>) -> Vec<ProviderMessage> {
+    // First: strip trailing empty assistants (placeholder leak from continue_agentic_loop)
+    while msgs
         .last()
         .map(|m| {
             m.role == ProviderRole::Assistant
@@ -510,15 +563,51 @@ fn strip_trailing_empty_assistant(mut msgs: Vec<ProviderMessage>) -> Vec<Provide
                     _ => false,
                 })
         })
-        .unwrap_or(false);
-    if last_is_empty_assistant {
+        .unwrap_or(false)
+    {
         tracing::info!(
             target: "jfc::stream",
             "stripped trailing empty assistant before send"
         );
         msgs.pop();
     }
-    msgs
+
+    // Second: if the conversation still ends with an assistant (real content),
+    // append a minimal user turn. The Anthropic API requires alternating
+    // user/assistant roles and user-last ordering.
+    if msgs
+        .last()
+        .map(|m| m.role == ProviderRole::Assistant)
+        .unwrap_or(false)
+    {
+        tracing::info!(
+            target: "jfc::stream",
+            "appending synthetic user turn to satisfy user-last ordering"
+        );
+        msgs.push(ProviderMessage {
+            role: ProviderRole::User,
+            content: vec![ProviderContent::Text(
+                "Continue from where you left off.".to_owned(),
+            )],
+        });
+    }
+
+    // Third: merge consecutive same-role messages. The Anthropic API requires
+    // strictly alternating user/assistant turns. Consecutive same-role
+    // messages happen when: (a) a compact_boundary (assistant) is followed by
+    // a text-only assistant, (b) queued prompts produce adjacent user
+    // messages, (c) filtering removes messages and collapses the alternation.
+    let mut merged: Vec<ProviderMessage> = Vec::with_capacity(msgs.len());
+    for msg in msgs {
+        if let Some(last) = merged.last_mut() {
+            if last.role == msg.role {
+                last.content.extend(msg.content);
+                continue;
+            }
+        }
+        merged.push(msg);
+    }
+    merged
 }
 
 fn build_provider_messages_with_tool_results(msgs: &[ChatMessage]) -> Vec<ProviderMessage> {
@@ -634,11 +723,11 @@ fn build_provider_messages_with_tool_results(msgs: &[ChatMessage]) -> Vec<Provid
             });
         }
     }
-    strip_trailing_empty_assistant(out)
+    ensure_user_last(out)
 }
 
 #[cfg(test)]
-mod strip_trailing_empty_assistant_tests {
+mod ensure_user_last_tests {
     use super::*;
 
     fn user_text(s: &str) -> ProviderMessage {
@@ -661,7 +750,7 @@ mod strip_trailing_empty_assistant_tests {
     #[test]
     fn strip_drops_trailing_empty_assistant_normal() {
         let input = vec![user_text("hi"), assistant_text("")];
-        let out = strip_trailing_empty_assistant(input);
+        let out = ensure_user_last(input);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].role, ProviderRole::User);
     }
@@ -671,26 +760,28 @@ mod strip_trailing_empty_assistant_tests {
     #[test]
     fn strip_drops_trailing_whitespace_only_assistant_normal() {
         let input = vec![user_text("hi"), assistant_text("   \n")];
-        let out = strip_trailing_empty_assistant(input);
+        let out = ensure_user_last(input);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].role, ProviderRole::User);
     }
 
-    // Robust: real assistant text must not be dropped — that would silently
-    // discard model output and create a worse bug than the one we're fixing.
+    // Normal: real assistant text at the end gets a synthetic user turn
+    // appended so the API sees user-last ordering. Opus 4.6 rejects trailing
+    // assistant even with content.
     #[test]
-    fn strip_keeps_assistant_with_real_content_robust() {
+    fn appends_user_when_assistant_has_real_content() {
         let input = vec![user_text("hi"), assistant_text("hello")];
-        let out = strip_trailing_empty_assistant(input.clone());
-        assert_eq!(out.len(), 2);
+        let out = ensure_user_last(input);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[1].role, ProviderRole::Assistant);
+        assert_eq!(out[2].role, ProviderRole::User);
     }
 
-    // Robust: an assistant turn whose only content is a tool_use is a real
-    // mid-flight turn (model called a tool, we're about to send the result
-    // back). Dropping it would orphan the tool_use_id on the next request.
+    // Normal: an assistant turn with a tool_use gets a synthetic user turn
+    // appended (the tool_result would normally follow, but ensure_user_last
+    // acts as a safety net).
     #[test]
-    fn strip_keeps_assistant_with_only_toolcall_robust() {
+    fn appends_user_when_assistant_has_only_toolcall() {
         let assistant_with_tool = ProviderMessage {
             role: ProviderRole::Assistant,
             content: vec![ProviderContent::ToolUse {
@@ -700,42 +791,52 @@ mod strip_trailing_empty_assistant_tests {
             }],
         };
         let input = vec![user_text("hi"), assistant_with_tool];
-        let out = strip_trailing_empty_assistant(input);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[1].role, ProviderRole::Assistant);
+        let out = ensure_user_last(input);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2].role, ProviderRole::User);
     }
 
     // Normal: if the conversation already ends with a user message (the
-    // common tool_result-injection case), the strip is a no-op.
+    // common tool_result-injection case), the function is a no-op.
     #[test]
-    fn strip_no_op_on_user_last_normal() {
+    fn no_op_on_user_last_normal() {
         let input = vec![assistant_text("hi"), user_text("ok")];
-        let out = strip_trailing_empty_assistant(input);
+        let out = ensure_user_last(input);
         assert_eq!(out.len(), 2);
         assert_eq!(out[1].role, ProviderRole::User);
     }
 
-    // Robust: empty input must round-trip — no panic on `.last()` of an
-    // empty vec, no spurious `pop()`.
+    // Robust: empty input must round-trip — no panic.
     #[test]
-    fn strip_no_op_on_empty_input_robust() {
-        let out = strip_trailing_empty_assistant(Vec::<ProviderMessage>::new());
+    fn no_op_on_empty_input_robust() {
+        let out = ensure_user_last(Vec::<ProviderMessage>::new());
         assert!(out.is_empty());
     }
 
-    // Robust: non-recursive by design. Two empty assistants in a row means
-    // something else is wrong upstream; we drop only the last one so the
-    // remaining empty assistant surfaces the bug instead of hiding it.
+    // Normal: multiple trailing empty assistants are ALL stripped.
     #[test]
-    fn strip_only_drops_one_trailing_robust() {
+    fn strips_multiple_trailing_empty_assistants() {
         let input = vec![
             user_text("hi"),
             assistant_text(""),
             assistant_text(""),
         ];
-        let out = strip_trailing_empty_assistant(input);
-        assert_eq!(out.len(), 2);
+        let out = ensure_user_last(input);
+        // Both empties stripped, "hi" remains. User-last already satisfied.
+        assert_eq!(out.len(), 1);
         assert_eq!(out[0].role, ProviderRole::User);
+    }
+
+    // Normal: consecutive same-role messages get merged.
+    #[test]
+    fn merges_consecutive_user_messages() {
+        let input = vec![user_text("a"), user_text("b"), assistant_text("c")];
+        let out = ensure_user_last(input);
+        // Two users merged into one, then assistant, then synthetic user
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].role, ProviderRole::User);
+        assert_eq!(out[0].content.len(), 2); // merged
         assert_eq!(out[1].role, ProviderRole::Assistant);
+        assert_eq!(out[2].role, ProviderRole::User); // synthetic
     }
 }

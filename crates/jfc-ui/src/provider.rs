@@ -168,6 +168,9 @@ pub struct StreamOptions {
     pub max_tokens: u32,
     pub tools: Vec<ToolDef>,
     pub thinking_budget: Option<u32>,
+    /// When true, use `{"type": "adaptive"}` instead of budget_tokens.
+    /// Required for Opus 4.6+ and Sonnet 4.6+ which reject budget_tokens.
+    pub adaptive_thinking: bool,
 }
 
 impl StreamOptions {
@@ -178,6 +181,7 @@ impl StreamOptions {
             max_tokens: 8192,
             tools: Vec::new(),
             thinking_budget: None,
+            adaptive_thinking: false,
         }
     }
 
@@ -193,6 +197,12 @@ impl StreamOptions {
 
     pub fn thinking(mut self, budget: u32) -> Self {
         self.thinking_budget = Some(budget);
+        self
+    }
+
+    /// Use adaptive thinking (Opus 4.6+, Sonnet 4.6+). Ignores budget_tokens.
+    pub fn adaptive(mut self) -> Self {
+        self.adaptive_thinking = true;
         self
     }
 

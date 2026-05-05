@@ -383,6 +383,14 @@ mod tests {
                     input: serde_json::json!({"command": "echo hi"}),
                 }],
             },
+            ProviderMessage {
+                role: ProviderRole::User,
+                content: vec![ProviderContent::ToolResult {
+                    tool_use_id: "call_abc".into(),
+                    content: "hi".into(),
+                    is_error: false,
+                }],
+            },
         ];
         let body = build_body(history, &opts_with_bash_tool());
         let msgs = body
@@ -442,6 +450,16 @@ mod tests {
                         name: "ApplyPatch".into(),
                         input: serde_json::json!({}),
                     },
+                ],
+            },
+            // Tool results follow the assistant turn so the conversation
+            // ends on a user/tool turn (Bedrock prefill compat).
+            ProviderMessage {
+                role: ProviderRole::User,
+                content: vec![
+                    ProviderContent::ToolResult { tool_use_id: "c1".into(), content: "ok".into(), is_error: false },
+                    ProviderContent::ToolResult { tool_use_id: "c2".into(), content: "ok".into(), is_error: false },
+                    ProviderContent::ToolResult { tool_use_id: "c3".into(), content: "ok".into(), is_error: false },
                 ],
             },
         ];
@@ -1167,6 +1185,35 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> Value {
         let mut full = vec![json!({ "role": "system", "content": sys })];
         full.extend(body["messages"].as_array().cloned().unwrap_or_default());
         body["messages"] = json!(full);
+    }
+
+    // Bedrock / LiteLLM prefill stripping: if the final message is
+    // role=assistant, pop it. Bedrock rejects "This model does not support
+    // assistant message prefill. The conversation must end with a user message."
+    // even on models that the native Anthropic API accepts prefill for.
+    // Mirrors opencode-anthropic-auth index.ts:1286-1304.
+    if let Some(arr) = body["messages"].as_array_mut() {
+        while arr
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            == Some("assistant")
+        {
+            tracing::info!(
+                target: "jfc::provider::openwebui",
+                "stripped trailing assistant message for Bedrock/LiteLLM prefill compat"
+            );
+            arr.pop();
+        }
+        // If stripping left us with no user message at the end (only system),
+        // append a minimal user turn so the request is well-formed.
+        let last_role = arr
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str());
+        if last_role != Some("user") && last_role != Some("tool") {
+            arr.push(json!({"role": "user", "content": "Continue."}));
+        }
     }
 
     // Apply Bedrock-compat scrubbing to the messages array. Sonnet-on-Bedrock
