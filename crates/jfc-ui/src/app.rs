@@ -647,6 +647,8 @@ impl App {
             // prior runs left `~/.config/jfc/tasks/<old>.json` on disk. The
             // store is re-opened in `switch_session` whenever the session id
             // changes (load from sidebar, /continue, /clear).
+            // NOTE: initialized as in_memory here; re-opened with the real
+            // session_id after construction (see below).
             task_store: crate::tasks::TaskStore::in_memory(),
             task_completion_times: HashMap::new(),
             show_task_panel: false,
@@ -675,6 +677,10 @@ impl App {
             tool_hit_regions: RefCell::new(Vec::new()),
             render_cache: RefCell::new(RenderCache::new()),
         };
+        // Open the task store with the real session id so tasks persist to disk.
+        if let Some(ref sid) = app.current_session_id {
+            app.task_store = crate::tasks::TaskStore::open(sid);
+        }
         app.sync_selected_context_window();
         tracing::info!(
             target: "jfc::app",
@@ -701,8 +707,8 @@ impl App {
             new_session_id = %new_id,
             "switch_session"
         );
-        self.current_session_id = Some(new_id);
-        self.task_store = crate::tasks::TaskStore::in_memory();
+        self.current_session_id = Some(new_id.clone());
+        self.task_store = crate::tasks::TaskStore::open(&new_id);
         self.task_completion_times.clear();
         self.task_activities.clear();
         self.task_panel_selected = 0;
