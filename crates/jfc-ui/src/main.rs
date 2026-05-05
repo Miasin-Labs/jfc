@@ -1075,6 +1075,24 @@ async fn run(
                 app.last_usage_input = input_tokens;
                 app.last_usage_output = output_tokens;
                 app.tool_ctx.approx_tokens = input_tokens as usize + output_tokens as usize;
+                // Stamp the cumulative usage onto the streaming
+                // assistant message. v126 attaches usage to each
+                // assistant message (cli.js:416673) so on resume
+                // `Wd(messages)` (cli.js:197282) can walk back to
+                // recover the gauge total. We do the same: at
+                // resume time the picker reads the last message's
+                // `usage` rather than a default of 0.
+                if let Some(idx) = app.streaming_assistant_idx {
+                    if let Some(msg) = app.messages.get_mut(idx) {
+                        msg.usage = Some(crate::types::ModelUsage {
+                            input_tokens: input_tokens as u64,
+                            output_tokens: output_tokens as u64,
+                            cache_read_tokens: cache_read_tokens as u64,
+                            cache_write_tokens: cache_write_tokens as u64,
+                            cost_usd: None,
+                        });
+                    }
+                }
                 let model_key = app.model.as_str().to_owned();
                 let cum = (
                     input_tokens,

@@ -536,15 +536,41 @@ impl App {
         self.recompute_token_estimate();
     }
 
-    /// Recompute `tool_ctx.approx_tokens` from the current `messages`. Call
-    /// after a session resume so the Context gauge and the pre-submit
-    /// compact gate reflect the loaded conversation — without this, both
-    /// read 0 until the next stream's `StreamUsage` event lands, and the
-    /// pre-submit compact silently mis-estimates a huge resumed history
-    /// as "fits". Mirrors v126's token-recount on `loadConversation`
-    /// (cli.js:537970+).
+    /// Recompute `tool_ctx.approx_tokens` and the live-usage cache fields
+    /// (`last_usage_input` / `last_usage_output`) from the current
+    /// `messages`. Call after a session resume so the Context gauge and
+    /// the pre-submit compact gate reflect the loaded conversation —
+    /// without this, both read 0 until the next stream's `StreamUsage`
+    /// event lands, and the pre-submit compact silently mis-estimates a
+    /// huge resumed history as "fits".
+    ///
+    /// Strategy mirrors v126 `Wd(messages)` (cli.js:197282-197294): walk
+    /// the messages backwards looking for the most recent assistant
+    /// message with `usage` attached. If found, that's the authoritative
+    /// resume baseline (matches what the wire reported). If not (e.g. a
+    /// pre-usage-tracking session file), fall back to
+    /// `compact::estimate_tokens` over message content — same heuristic
+    /// the live token counter uses.
     pub fn recompute_token_estimate(&mut self) {
-        self.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&self.messages);
+        let last_usage = self
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| m.usage.as_ref());
+        if let Some(u) = last_usage {
+            self.last_usage_input = u.input_tokens as u32;
+            self.last_usage_output = u.output_tokens as u32;
+            // Anthropic counts input + cache_creation + cache_read +
+            // output as the "context tokens used" — same as v126's W_$
+            // (cli.js:197281). The Context gauge reads
+            // `tool_ctx.approx_tokens` so writing the totalled value
+            // there gives the user-visible bar the right fill.
+            self.tool_ctx.approx_tokens = u.total_context_tokens() as usize;
+        } else {
+            self.last_usage_input = 0;
+            self.last_usage_output = 0;
+            self.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&self.messages);
+        }
     }
 
     pub fn scroll_to_bottom(&mut self) {
