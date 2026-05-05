@@ -2,7 +2,7 @@ use crossterm::event::{self, KeyCode, KeyModifiers};
 use ratatui::style::Style;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::app::{App, AppEvent, ApprovalChoice};
 use crate::stream;
@@ -37,7 +37,7 @@ fn cursor_index(value: usize) -> u16 {
 
 fn move_input_cursor_visual_up(app: &mut App) {
     let width = app.input_wrap_width.max(1);
-    let (line, col) = app.textarea.cursor();
+    let cursor = app.textarea.cursor(); let (line, col) = (cursor.0, cursor.1);
 
     if col >= width {
         app.textarea.move_cursor(CursorMove::Jump(
@@ -63,7 +63,7 @@ fn move_input_cursor_visual_up(app: &mut App) {
 
 fn move_input_cursor_visual_down(app: &mut App) {
     let width = app.input_wrap_width.max(1);
-    let (line, col) = app.textarea.cursor();
+    let cursor = app.textarea.cursor(); let (line, col) = (cursor.0, cursor.1);
     let line_len = input_line_char_len(app, line);
 
     if col + width <= line_len {
@@ -1064,7 +1064,7 @@ pub async fn handle_key(
 
 /// Replace the active `@<query>` token in the textarea with the picked
 /// path + trailing space. Reconstructs the textarea from the resulting
-/// string so cursor positioning is correct (the `tui_textarea` API
+/// string so cursor positioning is correct (the `ratatui_textarea` API
 /// doesn't expose a "replace range" operation).
 fn apply_mention_pick(app: &mut App, pick: &str) {
     let buffer = app.textarea.lines().join("\n");
@@ -1084,7 +1084,7 @@ fn apply_mention_pick(app: &mut App, pick: &str) {
 /// whitespace) or update its query (already-active, more chars typed
 /// or backspace shrunk the buffer).
 fn update_mention_state_after_input(app: &mut App) {
-    let (line_idx, col) = app.textarea.cursor();
+    let cursor = app.textarea.cursor(); let (line_idx, col) = (cursor.0, cursor.1);
     let line = match app.textarea.lines().get(line_idx) {
         Some(s) => s.clone(),
         None => return,

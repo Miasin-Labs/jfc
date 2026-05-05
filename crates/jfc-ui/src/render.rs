@@ -43,7 +43,9 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // Spinner is also shown during pre-submit / `/compact` compaction so a
     // long compact request doesn't read as a frozen UI. v126 cli.js does
     // the same — the spinner verb just changes to "Compacting".
-    let show_spinner = app.is_streaming || app.compacting_started_at.is_some();
+    let show_spinner = app.is_streaming
+        || app.compacting_started_at.is_some()
+        || !app.pending_tool_calls.is_empty();
     let spinner_row_height: u16 = if show_spinner { 2 } else { 0 };
     // Diagnostic summary row — only shown when there are *new*
     // (unacknowledged) entries. v126 cli.js:231025-231036 keeps a
@@ -393,7 +395,7 @@ fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         )]));
 
         // Show in-progress tasks with activity
-        for task in in_progress.iter().take(3) {
+        for task in &in_progress {
             let activity = app
                 .task_activities
                 .get(&task.id)
@@ -416,11 +418,8 @@ fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
-        // Show pending tasks (cap visible rows at 3 minus what in_progress
-        // already used). usize annotation avoids the integer-literal `3` being
-        // ambiguous when calling `saturating_sub`.
-        let pending_slots: usize = 3usize.saturating_sub(in_progress.len());
-        for task in pending.iter().take(pending_slots) {
+        // Show all pending tasks (no cap)
+        for task in &pending {
             let blocked = !task.blocked_by.is_empty();
             let icon = if blocked { "○" } else { "◇" };
             let color = if blocked {
@@ -459,17 +458,6 @@ fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                         .add_modifier(Modifier::CROSSED_OUT),
                 ),
             ]));
-        }
-
-        // Show "+N more" if truncated
-        let shown =
-            in_progress.len().min(3) + pending.len().min(3usize.saturating_sub(in_progress.len()));
-        let hidden = task_total.saturating_sub(shown);
-        if hidden > 0 {
-            lines.push(Line::from(vec![Span::styled(
-                format!("  … +{} more (Ctrl+T)", hidden),
-                Style::default().fg(t.text_muted),
-            )]));
         }
 
         lines.push(Line::from(""));
@@ -1428,7 +1416,7 @@ fn input_visual_line_count(app: &App, content_width: usize) -> usize {
 fn input_soft_wrapped_lines(app: &App, content_width: usize) -> (Vec<String>, usize, usize) {
     let width = content_width.max(1);
     let logical_lines = app.textarea.lines();
-    let (cursor_line, cursor_col) = app.textarea.cursor();
+    let cursor = app.textarea.cursor(); let (cursor_line, cursor_col) = (cursor.0, cursor.1);
     let mut out = Vec::new();
     let mut visual_cursor_row = 0usize;
     let mut visual_cursor_col = 0usize;

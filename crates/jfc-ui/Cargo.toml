@@ -8,9 +8,9 @@ name = "jfc"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-tui-textarea = { version = "0.7", features = ["crossterm"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+ratatui-textarea = "0.9"
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = "0.1"
 futures = { workspace = true }
@@ -43,7 +43,7 @@ syntect = { version = "5", default-features = false, features = ["default-syntax
 # Fish, Hare, Roc, etc. without hand-rolling .sublime-syntax files. Themes
 # include Catppuccin variants used as adaptive defaults.
 two-face = "0.5"
-ansi-to-tui = "7"
+ansi-to-tui = "8"
 itertools = "0.14"
 clap = { version = "4", features = ["derive"] }
 rand = "0.10.1"

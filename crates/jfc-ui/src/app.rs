@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::widgets::TableState;
 use tokio::sync::Mutex;
 
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use crate::auto_mode::AutoModeConfig;
 
