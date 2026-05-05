@@ -685,22 +685,30 @@ impl ChatMessage {
 
 impl ToolKind {
     pub fn from_name(name: &str) -> Self {
-        match name {
-            "Edit" | "str_replace_based_edit_tool" | "edit" => Self::Edit,
-            "Write" | "write_file" | "write" => Self::Write,
-            "Read" | "read_file" | "read" => Self::Read,
-            "Bash" | "run_bash" | "bash" => Self::Bash,
-            "Glob" | "glob" => Self::Glob,
-            "Grep" | "grep" => Self::Grep,
-            "codebase_search" | "search" => Self::Search,
-            "apply_patch" => Self::ApplyPatch,
-            "TaskCreate" | "task_create" => Self::TaskCreate,
-            "TaskUpdate" | "task_update" => Self::TaskUpdate,
-            "TaskList" | "task_list" => Self::TaskList,
-            "TaskDone" | "task_done" => Self::TaskDone,
-            "Task" | "task" => Self::Task,
-            "Skill" | "skill" => Self::Skill,
-            other => Self::Generic(other.to_owned()),
+        // Normalize: lowercase + strip underscores. v126's native names
+        // are PascalCase ("TaskCreate"), Anthropic's structured-tools are
+        // snake_case ("apply_patch"), and OWUI/LiteLLM cross-provider
+        // proxies sometimes flatten to lowercase-concatenated
+        // ("taskcreate"). Without this, a Bedrock/OWUI session sees
+        // `taskcreate` arrive as a Generic tool and the dispatcher
+        // returns "not yet implemented" — exactly what the user hit.
+        let norm = name.to_ascii_lowercase().replace('_', "");
+        match norm.as_str() {
+            "edit" | "strreplacebasededittool" => Self::Edit,
+            "write" | "writefile" => Self::Write,
+            "read" | "readfile" => Self::Read,
+            "bash" | "runbash" => Self::Bash,
+            "glob" => Self::Glob,
+            "grep" => Self::Grep,
+            "codebasesearch" | "search" => Self::Search,
+            "applypatch" => Self::ApplyPatch,
+            "taskcreate" => Self::TaskCreate,
+            "taskupdate" => Self::TaskUpdate,
+            "tasklist" => Self::TaskList,
+            "taskdone" => Self::TaskDone,
+            "task" => Self::Task,
+            "skill" => Self::Skill,
+            _ => Self::Generic(name.to_owned()),
         }
     }
 
@@ -1418,5 +1426,58 @@ mod tests {
         let lt = LargeText::new("abc\ndef\n".into());
         let out = ToolOutput::LargeText(lt);
         assert_eq!(out.to_api_text(), "abc\ndef\n");
+    }
+
+    // OWUI/LiteLLM cross-provider proxies sometimes flatten tool names
+    // to lowercase-no-separator (`taskcreate` instead of `TaskCreate`).
+    // Without normalization the dispatcher routes them to
+    // `Generic("taskcreate")` and the user sees "not yet implemented"
+    // even though we have a perfectly good handler. Mirrors v126's
+    // case-insensitive tool routing behind setStreamMode("tool-input").
+    #[test]
+    fn from_name_handles_lowercase_concat_robust() {
+        assert!(matches!(
+            ToolKind::from_name("taskcreate"),
+            ToolKind::TaskCreate
+        ));
+        assert!(matches!(
+            ToolKind::from_name("taskupdate"),
+            ToolKind::TaskUpdate
+        ));
+        assert!(matches!(
+            ToolKind::from_name("tasklist"),
+            ToolKind::TaskList
+        ));
+        assert!(matches!(
+            ToolKind::from_name("taskdone"),
+            ToolKind::TaskDone
+        ));
+        assert!(matches!(
+            ToolKind::from_name("applypatch"),
+            ToolKind::ApplyPatch
+        ));
+    }
+
+    // The PascalCase, snake_case, and lowercase-concat variants must all
+    // resolve to the same kind so a session that switched providers
+    // mid-conversation doesn't fragment tool history.
+    #[test]
+    fn from_name_normalizes_across_separators_normal() {
+        for n in ["TaskCreate", "task_create", "taskcreate", "TASKCREATE"] {
+            assert!(
+                matches!(ToolKind::from_name(n), ToolKind::TaskCreate),
+                "expected TaskCreate for {n}"
+            );
+        }
+    }
+
+    // Truly unknown names still fall through to Generic — we don't want
+    // to silently swallow a typo and dispatch the wrong tool.
+    #[test]
+    fn from_name_unknown_falls_through_to_generic_robust() {
+        match ToolKind::from_name("not_a_real_tool") {
+            ToolKind::Generic(s) => assert_eq!(s, "not_a_real_tool"),
+            other => panic!("expected Generic, got {other:?}"),
+        }
     }
 }
