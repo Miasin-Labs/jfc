@@ -846,16 +846,29 @@ impl App {
     pub fn sync_selected_context_window(&mut self) {
         let old = self.max_context_tokens;
         self.max_context_tokens = self.selected_context_window_tokens();
-        // When the model/provider changes, stale usage from the previous model's
-        // tokenizer is unreliable. Force a fresh heuristic estimate.
-        self.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&self.messages);
+        // When the model/provider changes, re-estimate token count. But if
+        // we already have a usage-based estimate from a loaded session
+        // (recompute_token_estimate found a message with `usage`), prefer
+        // that over the rough heuristic — it's accurate to the token.
+        // Without this guard, an async `ModelsLoaded` event firing after
+        // session resume clobbers the 298k accurate value with a ~75k
+        // chars/4 heuristic, making the gauge jump down to near-zero.
+        let has_usage_based_estimate = self
+            .messages
+            .iter()
+            .rev()
+            .any(|m| m.usage.is_some());
+        if !has_usage_based_estimate {
+            self.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&self.messages);
+        }
         tracing::info!(
             target: "jfc::app",
             old_max_context_tokens = old,
             new_max_context_tokens = self.max_context_tokens,
             approx_tokens = self.tool_ctx.approx_tokens,
+            has_usage_based_estimate,
             model = %self.model,
-            "sync_selected_context_window (token estimate refreshed)"
+            "sync_selected_context_window"
         );
     }
 
