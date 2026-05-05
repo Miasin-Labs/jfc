@@ -210,7 +210,11 @@ pub async fn compact(
     let mut preserve_count: usize = 1;
     let mut attempt: u32 = 0;
     let mut strip_media = false;
-    let last_token_gap: Option<usize> = None;
+    // Sourced from API error bodies: `actualTokens - limitTokens` for
+    // prompt_too_long / 529 responses. Mirrors v126 `ol$` → `To1` in
+    // cli.2.1.126.js so `token_gap_step` can size the next compaction
+    // step instead of falling back to halving.
+    let mut last_token_gap: Option<usize> = None;
 
     loop {
         attempt += 1;
@@ -246,6 +250,18 @@ pub async fn compact(
 
         match provider.complete(compact_messages, &compact_options).await {
             Ok(response) => {
+                if !is_usable_summary(&response.content) {
+                    tracing::warn!(
+                        target: "jfc::compact",
+                        len = response.content.len(),
+                        "summary response empty or itself an error — retrying with larger preserve"
+                    );
+                    let step =
+                        token_gap_step(last_token_gap, &group_tokens, split_point);
+                    preserve_count =
+                        (preserve_count + step).min(total_groups - 1);
+                    continue;
+                }
                 let summary_msg = ChatMessage::compact_boundary(&response.content, pre_tokens);
                 let mut compacted = vec![summary_msg];
                 compacted.extend(to_preserve);
@@ -262,15 +278,27 @@ pub async fn compact(
                 // pass produces a Success that's still over Blocked.
                 let blocked = blocked_override()
                     .unwrap_or_else(|| window.saturating_sub(BLOCKED_HEADROOM));
-                if post_tokens >= blocked && preserve_count > 0 {
-                    tracing::info!(
+                if post_tokens >= blocked {
+                    if preserve_count > 0 {
+                        tracing::info!(
+                            target: "jfc::compact",
+                            post_tokens, blocked, preserve_count,
+                            "post-compact still blocked — dropping a preserved group and retrying"
+                        );
+                        preserve_count -= 1;
+                        strip_media = true;
+                        last_token_gap = Some(post_tokens.saturating_sub(blocked));
+                        continue;
+                    }
+                    // Returning Success while still over `blocked` would let
+                    // the caller immediately resubmit and re-trigger compaction
+                    // forever. Surface Exhausted instead.
+                    tracing::warn!(
                         target: "jfc::compact",
-                        post_tokens, blocked, preserve_count,
-                        "post-compact still blocked — dropping a preserved group and retrying"
+                        post_tokens, blocked, attempts = attempt,
+                        "post-compact still blocked with no groups left — returning Exhausted"
                     );
-                    preserve_count -= 1;
-                    strip_media = true;
-                    continue;
+                    return CompactResult::Exhausted { attempts: attempt };
                 }
 
                 let user_turns_since = count_user_turns_since_last_compact(&compacted);
@@ -295,15 +323,26 @@ pub async fn compact(
 
                 if err_msg.contains("too_large") || err_msg.contains("media") {
                     if !strip_media {
+                        tracing::info!(
+                            target: "jfc::compact",
+                            "summary call rejected by media size — retrying with strip_media"
+                        );
                         strip_media = true;
                         continue;
                     }
+                    tracing::warn!(
+                        target: "jfc::compact",
+                        attempts = attempt,
+                        "media too large even after strip — returning Unsupported"
+                    );
+                    return CompactResult::Unsupported;
                 }
 
                 if err_msg.contains("too_long")
                     || err_msg.contains("token")
                     || err_msg.contains("context")
                 {
+                    last_token_gap = parse_token_gap_from_error(&err_msg).or(last_token_gap);
                     let step = token_gap_step(last_token_gap, &group_tokens, split_point);
                     preserve_count = (preserve_count + step).min(total_groups - 1);
                     continue;
@@ -318,6 +357,62 @@ pub async fn compact(
             }
         }
     }
+}
+
+/// Reject summary outputs that are unusable as a compact boundary:
+/// empty, whitespace-only, or themselves an API error string the LLM
+/// echoed back. Mirrors v126's `!V || Od(V)` check before accepting a
+/// summary.
+fn is_usable_summary(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    const ERROR_MARKERS: &[&str] = &[
+        "prompt is too long",
+        "input is too long",
+        "context window",
+        "exceeds context",
+        "rate_limit",
+        "rate limit exceeded",
+        "overloaded_error",
+        "request_too_large",
+    ];
+    !ERROR_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Extract `actualTokens - limitTokens` from an Anthropic error body.
+///
+/// Mirrors `ol$` in cli.2.1.126.js — recognises:
+///   "prompt is too long: 410234 tokens > 200000 maximum"
+///   "input length and `max_tokens` exceed context limit: 350000 + 4096 > 200000"
+fn parse_token_gap_from_error(err_msg: &str) -> Option<usize> {
+    let msg = err_msg.to_lowercase();
+    let bytes = msg.as_bytes();
+    let mut i = 0;
+    let mut nums: Vec<usize> = Vec::new();
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if let Ok(n) = msg[start..i].parse::<usize>() {
+                nums.push(n);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if nums.len() >= 2 {
+        let &actual = nums.first()?;
+        let &limit = nums.last()?;
+        if actual > limit {
+            return Some(actual - limit);
+        }
+    }
+    None
 }
 
 fn count_user_turns_since_last_compact(messages: &[ChatMessage]) -> u32 {
@@ -501,5 +596,55 @@ mod level_tests {
         // territory). Importantly: no panic, no underflow.
         assert_eq!(compact_threshold(5_000), 0);
         assert_eq!(compact_level(1, 5_000), CompactLevel::Compact);
+    }
+
+    #[test]
+    fn parse_token_gap_recognises_anthropic_too_long_format() {
+        let msg = "prompt is too long: 410234 tokens > 200000 maximum";
+        assert_eq!(parse_token_gap_from_error(msg), Some(210_234));
+    }
+
+    #[test]
+    fn parse_token_gap_recognises_input_plus_max_tokens_format() {
+        let msg = "input length and `max_tokens` exceed context limit: \
+                   350000 + 4096 > 200000 tokens";
+        // gap = first integer (actual=350000) - last integer (limit=200000).
+        assert_eq!(parse_token_gap_from_error(msg), Some(150_000));
+    }
+
+    #[test]
+    fn parse_token_gap_returns_none_when_no_overflow() {
+        assert_eq!(
+            parse_token_gap_from_error("ok: 100 tokens of 200000"),
+            None
+        );
+        assert_eq!(
+            parse_token_gap_from_error("connection reset"),
+            None
+        );
+    }
+
+    #[test]
+    fn is_usable_summary_rejects_empty_or_whitespace() {
+        assert!(!is_usable_summary(""));
+        assert!(!is_usable_summary("   \n\t  "));
+    }
+
+    #[test]
+    fn is_usable_summary_rejects_echoed_api_errors() {
+        assert!(!is_usable_summary(
+            "prompt is too long: 410234 tokens > 200000 maximum"
+        ));
+        assert!(!is_usable_summary(
+            "Sorry, this exceeds context window."
+        ));
+        assert!(!is_usable_summary("Rate limit exceeded for tier 4"));
+    }
+
+    #[test]
+    fn is_usable_summary_accepts_real_summary() {
+        let real = "Session summary:\n- User asked about compaction.\n- \
+                    Implemented post-compact validation.";
+        assert!(is_usable_summary(real));
     }
 }

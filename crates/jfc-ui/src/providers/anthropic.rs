@@ -41,7 +41,11 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
         body["tools"] = sse::build_tools(&opts.tools);
     }
 
-    if let Some(budget) = opts.thinking_budget {
+    if opts.adaptive_thinking {
+        body["thinking"] = json!({
+            "type": "adaptive",
+        });
+    } else if let Some(budget) = opts.thinking_budget {
         body["thinking"] = json!({
             "type": "enabled",
             "budget_tokens": budget,
