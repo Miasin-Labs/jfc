@@ -1380,12 +1380,28 @@ async fn run(
                 tracing::debug!(target: "jfc::compact", "CompactionStarted event received — showing spinner");
                 app.compacting_started_at = Some(std::time::Instant::now());
                 app.compacting_output_chars = 0;
+                app.compacting_attempt_baseline = 0;
+                app.compacting_last_progress = 0;
             }
             AppEvent::CompactionProgress { output_chars } => {
                 // Live token feedback during compact streaming. Mirrors
                 // v126's PB7 addResponseLength → spinner refresh
                 // (cli.js:396989).
-                app.compacting_output_chars = output_chars;
+                //
+                // `compact()` retries internally when post_tokens is
+                // still over the Blocked threshold or the model returns
+                // a truncated summary. Each retry streams a fresh
+                // response from 0 chars, so the per-attempt counter
+                // regresses. Detect that and bump a baseline so the
+                // spinner shows a monotonically-increasing total — the
+                // user sees the true work-done across attempts instead
+                // of a flickering counter that jumps `↓3k → ↓92 → ↓1k`.
+                if output_chars < app.compacting_last_progress {
+                    app.compacting_attempt_baseline += app.compacting_last_progress;
+                }
+                app.compacting_last_progress = output_chars;
+                app.compacting_output_chars =
+                    app.compacting_attempt_baseline + output_chars;
             }
             AppEvent::CompactionDone {
                 messages,
@@ -1405,6 +1421,8 @@ async fn run(
                 app.tool_ctx.approx_tokens = post_tokens;
                 app.compacting_started_at = None;
                 app.compacting_output_chars = 0;
+                app.compacting_attempt_baseline = 0;
+                app.compacting_last_progress = 0;
                 // Surface the compaction outcome to the user via a toast
                 // — they don't have to scroll to see the boundary marker.
                 let saved_k = saved / 1000;
@@ -1428,6 +1446,8 @@ async fn run(
                 }
                 app.compacting_started_at = None;
                 app.compacting_output_chars = 0;
+                app.compacting_attempt_baseline = 0;
+                app.compacting_last_progress = 0;
                 toast::push_with_cap(
                     &mut app.toasts,
                     toast::Toast::new(

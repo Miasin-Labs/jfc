@@ -400,12 +400,23 @@ pub struct App {
     /// compaction doesn't look like a frozen UI.
     pub compacting_started_at: Option<Instant>,
     /// Cumulative summary-text length collected during the in-flight
-    /// compact. Updated on every `CompactionProgress` event (driven by
-    /// the streaming compact's text_delta loop). The spinner divides by
-    /// 4 to get a chars-per-token estimate and renders `↓ Nk tokens` —
+    /// compact (across all retry attempts). The spinner divides by 4 to
+    /// get a chars-per-token estimate and renders `↓ Nk tokens` —
     /// matches the regular streaming spinner's live counter so the user
     /// sees the same kind of feedback during compaction.
     pub compacting_output_chars: u64,
+    /// Sum of completed retry attempts' final output sizes. `compact()`
+    /// retries internally when post_tokens is still over the Blocked
+    /// threshold, and each attempt streams a fresh response from 0.
+    /// Without this baseline, `compacting_output_chars` would jump back
+    /// down at every retry boundary — visible to the user as a
+    /// flickering/resetting counter. The handler bumps this whenever it
+    /// detects the per-attempt counter regressing.
+    pub compacting_attempt_baseline: u64,
+    /// Last `output_chars` value seen this attempt. Used to detect a
+    /// regression (new attempt starting) so the baseline gets the prior
+    /// attempt's high-water added.
+    pub compacting_last_progress: u64,
     /// Set each frame by the renderer. Used for page-scroll math.
     pub viewport_height: usize,
     pub input_wrap_width: usize,
@@ -602,6 +613,8 @@ impl App {
             force_compact_pending: false,
             compacting_started_at: None,
             compacting_output_chars: 0,
+            compacting_attempt_baseline: 0,
+            compacting_last_progress: 0,
             max_context_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             viewport_height: 0,
             input_wrap_width: 1,
