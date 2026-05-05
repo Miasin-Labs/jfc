@@ -48,6 +48,15 @@ pub struct SerializedMessage {
     pub cost_tier: Option<String>,
     #[serde(default)]
     pub elapsed: Option<String>,
+    /// Per-message cumulative usage at the END of this assistant turn.
+    /// Mirrors v126's per-message `usage` field (cli.js:416673,
+    /// 197282-197294) — on resume the picker walks the messages
+    /// backwards to find the last `Some(usage)` and uses that to seed
+    /// the Context gauge, so the user doesn't see "0 tokens / 0%" on a
+    /// resumed million-token session. Optional + serde(default) so old
+    /// session files (no usage) still load.
+    #[serde(default)]
+    pub usage: Option<crate::types::ModelUsage>,
     pub parts: Vec<SerializedPart>,
 }
 
@@ -618,6 +627,7 @@ fn serialize_message(msg: &ChatMessage) -> SerializedMessage {
         model_name: msg.model_name.clone(),
         cost_tier: msg.cost_tier.clone(),
         elapsed: msg.elapsed.clone(),
+        usage: msg.usage.clone(),
         parts: msg.parts.iter().map(serialize_part).collect(),
     }
 }
@@ -853,6 +863,7 @@ fn deserialize_message(msg: SerializedMessage) -> ChatMessage {
         model_name: msg.model_name,
         cost_tier: msg.cost_tier,
         elapsed: msg.elapsed,
+        usage: msg.usage,
     }
 }
 
@@ -1447,5 +1458,52 @@ mod cwd_filter_tests {
         // We surface them in any cwd's listing so the user doesn't lose
         // history — they can still `/continue all` to find them.
         assert!(matches_filter(None, Some("/a")));
+    }
+
+    // Round-trip: usage attached to an assistant message survives
+    // serde → JSON → serde. Without serde wiring on `ModelUsage` the
+    // resume gauge would always read 0.
+    #[test]
+    fn message_usage_round_trips_through_serde_normal() {
+        use crate::types::{ChatMessage, MessagePart, ModelUsage, Role};
+        let mut msg = ChatMessage::assistant("hi".into());
+        msg.usage = Some(ModelUsage {
+            input_tokens: 12_345,
+            output_tokens: 678,
+            cache_read_tokens: 9_000,
+            cache_write_tokens: 100,
+            cost_usd: None,
+        });
+        let serialized = serialize_message(&msg);
+        let json = serde_json::to_string(&serialized).expect("ser");
+        let parsed: SerializedMessage = serde_json::from_str(&json).expect("de");
+        let round = deserialize_message(parsed);
+        let u = round.usage.expect("usage preserved");
+        assert_eq!(u.input_tokens, 12_345);
+        assert_eq!(u.output_tokens, 678);
+        assert_eq!(u.cache_read_tokens, 9_000);
+        assert_eq!(u.cache_write_tokens, 100);
+        // Total context tokens = sum of all four (matches v126 W_$).
+        assert_eq!(u.total_context_tokens(), 12_345 + 678 + 9_000 + 100);
+        // Suppress unused-variant warnings via discriminant check.
+        match round.role {
+            Role::Assistant => {}
+            Role::User => panic!("role should round-trip"),
+        }
+        assert!(matches!(round.parts.first(), Some(MessagePart::Text(_))));
+    }
+
+    // Robust: legacy session JSON without `usage` field still loads,
+    // with `usage = None`. Old session files must keep working.
+    #[test]
+    fn message_without_usage_field_loads_with_none_robust() {
+        let legacy = r#"{
+            "role": "assistant",
+            "parts": [{ "type": "text", "content": "hi" }]
+        }"#;
+        let parsed: SerializedMessage = serde_json::from_str(legacy).expect("legacy load");
+        assert!(parsed.usage.is_none());
+        let round = deserialize_message(parsed);
+        assert!(round.usage.is_none());
     }
 }

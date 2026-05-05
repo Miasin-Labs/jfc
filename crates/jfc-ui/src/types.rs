@@ -35,16 +35,28 @@ pub struct LspServerInfo {
     pub status: LspStatus,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ModelUsage {
+    #[serde(default)]
     pub input_tokens: u64,
+    #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
     pub cache_read_tokens: u64,
+    #[serde(default)]
     pub cache_write_tokens: u64,
+    #[serde(default)]
     pub cost_usd: Option<f64>,
 }
 
 impl ModelUsage {
+    /// v126's `W_$()` (cli.js:197281): the visible "context tokens used"
+    /// for the gauge — input + cache_creation + cache_read + output.
+    /// All four count against the prompt/completion limit.
+    pub fn total_context_tokens(&self) -> u64 {
+        self.input_tokens + self.cache_write_tokens + self.cache_read_tokens + self.output_tokens
+    }
+
     pub fn add_delta(&mut self, input: u32, output: u32, cache_read: u32, cache_write: u32) {
         self.input_tokens += input as u64;
         self.output_tokens += output as u64;
@@ -591,6 +603,15 @@ pub struct ChatMessage {
     pub model_name: Option<String>,
     pub cost_tier: Option<String>,
     pub elapsed: Option<String>,
+    /// Token usage as of the END of this assistant turn. Set on
+    /// `StreamUsage` (via `apply_to_last_assistant`) so when the
+    /// session is later resumed, `App::recompute_token_estimate` can
+    /// walk backwards to the last assistant message with usage and
+    /// re-seat the Context gauge at the correct value. Mirrors v126's
+    /// `Wd(messages)` (cli.js:197282-197294) which finds the last
+    /// usage block and totals input + cache_read + cache_write +
+    /// output.
+    pub usage: Option<ModelUsage>,
 }
 
 impl ChatMessage {
@@ -602,6 +623,7 @@ impl ChatMessage {
             model_name: None,
             cost_tier: None,
             elapsed: None,
+            usage: None,
         }
     }
 
@@ -619,6 +641,7 @@ impl ChatMessage {
             model_name: None,
             cost_tier: None,
             elapsed: None,
+            usage: None,
         }
     }
 
@@ -630,6 +653,7 @@ impl ChatMessage {
             model_name: None,
             cost_tier: None,
             elapsed: None,
+            usage: None,
         }
     }
 
@@ -644,6 +668,7 @@ impl ChatMessage {
             model_name: None,
             cost_tier: None,
             elapsed: None,
+            usage: None,
         }
     }
 
