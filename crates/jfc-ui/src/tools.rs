@@ -641,7 +641,11 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
                     },
                     "validate": {
                         "type": "boolean",
-                        "description": "When true, blocks edits that would break callers. Default false."
+                        "description": "When true, blocks edits that would break callers and computes the cascade plan. Default false."
+                    },
+                    "dispatch_cascade": {
+                        "type": "boolean",
+                        "description": "When true (and validate=true), the cascade plan is auto-queued into the project's task list — one entry per affected file, tagged kind=\"cascade\". Run /cascade or use TaskList to view, then dispatch Task tool sub-agents per queued item. Default false."
                     }
                 },
                 "required": ["handle", "new_content"]
@@ -990,7 +994,7 @@ pub async fn execute_tool(
                 Err(e) => ExecutionResult::failure(format!("Graph query error: {e}")),
             }
         }
-        (ToolKind::SymbolEdit, ToolInput::SymbolEdit { handle, new_content, validate }) => {
+        (ToolKind::SymbolEdit, ToolInput::SymbolEdit { handle, new_content, validate, dispatch_cascade }) => {
             let session = get_or_build_graph_session(&cwd);
             let entry = match session.symbols().resolve(&handle) {
                 Some(e) => e.clone(),
@@ -1057,6 +1061,74 @@ pub async fn execute_tool(
                         files = cascade.len(),
                         "symbol_edit produced cascade"
                     );
+                    // Optional auto-queue: when the caller passed
+                    // `dispatch_cascade=true` AND a TaskStore is
+                    // available, drop one entry per file into the
+                    // store so the user (and the model, via /tasks)
+                    // sees the cascade plan as concrete trackable
+                    // work. metadata.kind = "cascade" lets the UI
+                    // and `/cascade` filter for these specifically.
+                    if dispatch_cascade && let Some(ts) = task_store.as_ref() {
+                        let mut queued_ids: Vec<String> = Vec::new();
+                        for ct in &cascade {
+                            let file_disp = ct
+                                .call_sites
+                                .first()
+                                .map(|s| s.file_path.display().to_string())
+                                .unwrap_or_else(|| "<unknown>".to_owned());
+                            let subject = format!(
+                                "Update {} call site{} in {}",
+                                ct.call_sites.len(),
+                                if ct.call_sites.len() == 1 { "" } else { "s" },
+                                file_disp,
+                            );
+                            let active = format!("Updating call sites in {file_disp}");
+                            match ts.create::<crate::tasks::TaskId>(
+                                subject,
+                                ct.instruction.clone(),
+                                Some(active),
+                                Vec::new(),
+                            ) {
+                                Ok(t) => {
+                                    let metadata = serde_json::json!({
+                                        "kind": "cascade",
+                                        "source_handle": handle,
+                                        "file": file_disp,
+                                        "callers": ct
+                                            .call_sites
+                                            .iter()
+                                            .map(|s| s.caller_name.clone())
+                                            .collect::<Vec<_>>(),
+                                        "new_signature": ct.new_signature,
+                                    });
+                                    let _ = ts.update(
+                                        t.id.as_str(),
+                                        crate::tasks::TaskPatch {
+                                            metadata: Some(metadata),
+                                            ..Default::default()
+                                        },
+                                    );
+                                    queued_ids.push(t.id.to_string());
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "jfc::tools",
+                                        error = %e,
+                                        "cascade task create failed"
+                                    );
+                                }
+                            }
+                        }
+                        if !queued_ids.is_empty() {
+                            cascade_summary.push_str(&format!(
+                                "\n\nQueued {} cascade task{} ({}). Use the Task tool with the \
+                                 task IDs above as descriptions, or run /cascade to view them.",
+                                queued_ids.len(),
+                                if queued_ids.len() == 1 { "" } else { "s" },
+                                queued_ids.join(", "),
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -2152,7 +2224,7 @@ pub async fn execute_task(
             // `stream::stream_response`.
             tool_results.push(ProviderContent::ToolResult {
                 tool_use_id: id.clone(),
-                content: crate::stream::truncate_tool_result(&result.output),
+                content: crate::stream::cap_tool_result(&result.output),
                 is_error,
             });
             total_tool_uses = total_tool_uses.saturating_add(1);

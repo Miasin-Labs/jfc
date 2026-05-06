@@ -2636,6 +2636,68 @@ fn handle_slash_command(
             app.messages.push(ChatMessage::user("/agents".into()));
             app.messages.push(ChatMessage::assistant(body));
         }
+        "/cascade" => {
+            // Filter the task store for cascade-tagged entries
+            // produced by symbol_edit's `dispatch_cascade=true`. The
+            // metadata.kind="cascade" tag is the signal we emit when
+            // queuing them. Group by file (one Task ≈ one file) and
+            // show status + caller list per group.
+            let tasks = app.task_store.list(crate::tasks::DeletedFilter::Exclude);
+            let cascade: Vec<&crate::tasks::Task> = tasks
+                .iter()
+                .filter(|t| {
+                    t.metadata
+                        .as_ref()
+                        .and_then(|m| m.get("kind"))
+                        .and_then(|k| k.as_str())
+                        == Some("cascade")
+                })
+                .collect();
+            let body = if cascade.is_empty() {
+                "No cascade tasks. Cascade entries are queued by `symbol_edit` \
+                 when called with `dispatch_cascade: true` and the edit changes \
+                 a function signature with downstream callers.".to_owned()
+            } else {
+                let mut s = format!(
+                    "**{} cascade task{}** (from `symbol_edit dispatch_cascade=true`):\n\n",
+                    cascade.len(),
+                    if cascade.len() == 1 { "" } else { "s" }
+                );
+                for t in &cascade {
+                    let status_marker = match t.status {
+                        crate::tasks::TaskStatus::Completed => "✓",
+                        crate::tasks::TaskStatus::InProgress => "⏵",
+                        crate::tasks::TaskStatus::Pending => "•",
+                        crate::tasks::TaskStatus::Deleted => "✗",
+                    };
+                    let file = t
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("file"))
+                        .and_then(|f| f.as_str())
+                        .unwrap_or("<unknown>");
+                    let callers = t
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("callers"))
+                        .and_then(|c| c.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    s.push_str(&format!(
+                        "{status_marker} `{}` — {}\n  callers: {callers}\n  → {}\n\n",
+                        t.id, file, t.subject,
+                    ));
+                }
+                s
+            };
+            app.messages.push(ChatMessage::user("/cascade".into()));
+            app.messages.push(ChatMessage::assistant(body));
+        }
         "/graph-history" => {
             let records = crate::tools::graph_history_snapshot();
             let body = if records.is_empty() {
@@ -5426,6 +5488,92 @@ mod tests {
         let mut app = test_app();
         run_slash_command(&mut app, "/swarm-deny abc-123");
         assert!(!app.messages.is_empty());
+    }
+
+    // Normal: /cascade with no cascade-tagged tasks shows the empty-
+    // state hint, not an error or crash.
+    #[test]
+    fn slash_cascade_empty_state_normal() {
+        let mut app = test_app();
+        run_slash_command(&mut app, "/cascade");
+        assert!(!app.messages.is_empty());
+        let last = app.messages.last().unwrap();
+        let body: String = last
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                crate::types::MessagePart::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            body.contains("No cascade tasks"),
+            "expected empty-state hint, got: {body}"
+        );
+    }
+
+    // Normal: /cascade only surfaces tasks whose metadata.kind is
+    // "cascade" — non-cascade tasks must not pollute the listing.
+    // Confirms the metadata filter actually filters.
+    #[test]
+    fn slash_cascade_filters_by_metadata_normal() {
+        let mut app = test_app();
+        // A regular (non-cascade) task — should NOT appear.
+        let regular = app
+            .task_store
+            .create::<crate::tasks::TaskId>(
+                "regular work".into(),
+                "should not appear in /cascade".into(),
+                None,
+                Vec::new(),
+            )
+            .expect("create regular task");
+        // A cascade task — SHOULD appear.
+        let cascade = app
+            .task_store
+            .create::<crate::tasks::TaskId>(
+                "Update 2 call sites in src/foo.rs".into(),
+                "cascade work".into(),
+                None,
+                Vec::new(),
+            )
+            .expect("create cascade task");
+        let _ = app.task_store.update(
+            cascade.id.as_str(),
+            crate::tasks::TaskPatch {
+                metadata: Some(serde_json::json!({
+                    "kind": "cascade",
+                    "file": "src/foo.rs",
+                    "callers": ["alpha", "beta"],
+                })),
+                ..Default::default()
+            },
+        );
+        run_slash_command(&mut app, "/cascade");
+        let body: String = app
+            .messages
+            .last()
+            .unwrap()
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                crate::types::MessagePart::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            body.contains("src/foo.rs"),
+            "/cascade should list cascade-tagged task: {body}"
+        );
+        assert!(
+            !body.contains("regular work"),
+            "/cascade must not show non-cascade tasks: {body}"
+        );
+        assert!(
+            body.contains("alpha") && body.contains("beta"),
+            "/cascade should list caller names from metadata: {body}"
+        );
+        let _ = regular; // suppress unused
     }
 
     // Normal: /graph-history with no recorded queries shows the empty-

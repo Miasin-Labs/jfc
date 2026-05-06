@@ -830,7 +830,7 @@ async fn run_single_turn(
 
             tool_results.push(ProviderContent::ToolResult {
                 tool_use_id: id.clone(),
-                content: crate::stream::truncate_tool_result(&result.output),
+                content: crate::stream::cap_tool_result(&result.output),
                 is_error: result.is_error(),
             });
         }
