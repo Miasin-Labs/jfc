@@ -23,6 +23,89 @@ pub(crate) const MAX_TOOL_RESULT_CHARS: usize = ToolOutput::APPROX_LEN_CAP;
 /// mirror that so the model gets a recognizable amount of head context.
 pub(crate) const TRUNCATION_PREVIEW_CHARS: usize = 2_000;
 
+/// Tool results above this size get spilled to a temp file on disk
+/// instead of being held entirely in memory + the conversation. v131
+/// uses 400_000 bytes as `EIK` for the same gate. Below this limit,
+/// the in-memory `truncate_tool_result` path applies (50KB cap, head
+/// + tail preview).
+pub(crate) const TOOL_RESULT_DISK_PERSIST_BYTES: usize = 400_000;
+
+/// Persist `body` to a temp file under `/tmp/jfc-tool-results/` and
+/// return a v131-style `<persisted-output>` reference the model can
+/// read. The reference includes the original byte count, the
+/// absolute on-disk path (so the model can `Read` the full output if
+/// it really needs it), and a 2000-char head preview so the common
+/// case ("just check the start") doesn't require an extra tool call.
+///
+/// On any I/O failure (full disk, read-only /tmp, ENOSPC) the
+/// fallback is `truncate_tool_result(body)` — better to ship a
+/// truncated in-line version than to silently drop the result.
+pub(crate) fn persist_tool_result(body: &str) -> String {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join("jfc-tool-results");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            target: "jfc::stream",
+            error = %e,
+            "failed to create tool-result spill dir, falling back to in-memory truncation"
+        );
+        return truncate_tool_result(body);
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let path = dir.join(format!("{id}.txt"));
+    let file_open = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    let mut file = match file_open {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                target: "jfc::stream",
+                path = %path.display(),
+                error = %e,
+                "failed to create tool-result spill file, falling back"
+            );
+            return truncate_tool_result(body);
+        }
+    };
+    if let Err(e) = file.write_all(body.as_bytes()) {
+        tracing::warn!(
+            target: "jfc::stream",
+            path = %path.display(),
+            error = %e,
+            "failed to write tool-result spill, falling back"
+        );
+        let _ = std::fs::remove_file(&path);
+        return truncate_tool_result(body);
+    }
+    let preview_end = floor_char_boundary(body, TRUNCATION_PREVIEW_CHARS);
+    let preview = &body[..preview_end];
+    let total = body.len();
+    format!(
+        "<persisted-output original_bytes=\"{total}\" path=\"{}\">\n\
+         Output too large for inline conversation ({total} bytes). \
+         Full output saved to: {}\n\n\
+         Preview (first {preview_end} chars):\n\
+         {preview}\n…\n\
+         </persisted-output>",
+        path.display(),
+        path.display()
+    )
+}
+
+/// Apply the appropriate cap to a tool result: spill to disk above
+/// 400KB, head/tail truncate above 50KB, otherwise pass through.
+/// This is the single entry point callers should use — it picks the
+/// right strategy based on size.
+pub(crate) fn cap_tool_result(body: &str) -> String {
+    if body.len() > TOOL_RESULT_DISK_PERSIST_BYTES {
+        persist_tool_result(body)
+    } else {
+        truncate_tool_result(body)
+    }
+}
+
 /// Truncate `s` to at most `MAX_TOOL_RESULT_CHARS` bytes when oversized.
 /// The marker mirrors v131's `<persisted-output>` structure (without
 /// disk persistence — preview only): first 2000 chars, then a tagged
@@ -1954,7 +2037,7 @@ fn build_provider_messages_with_tool_results(msgs: &[ChatMessage]) -> Vec<Provid
                     };
                     Some(ProviderContent::ToolResult {
                         tool_use_id: tc.id.clone(),
-                        content: truncate_tool_result(&result_text),
+                        content: cap_tool_result(&result_text),
                         is_error,
                     })
                 }
@@ -2601,6 +2684,80 @@ mod truncate_more_tests {
         let s: String = "y".repeat(MAX_TOOL_RESULT_CHARS + 1);
         let out = truncate_tool_result(&s);
         assert!(out.contains("<truncated-output"));
+    }
+
+    // ─── disk persistence (cap_tool_result / persist_tool_result) ──────
+
+    // Normal: small bodies pass through unchanged (no persist, no
+    // truncation marker).
+    #[test]
+    fn cap_tool_result_small_body_pass_through_normal() {
+        let body = "tiny output";
+        assert_eq!(cap_tool_result(body), body);
+    }
+
+    // Normal: medium bodies (over 50KB but under 400KB) hit the
+    // in-memory truncation path, not disk persistence.
+    #[test]
+    fn cap_tool_result_medium_body_truncates_inline_normal() {
+        let body: String = "x".repeat(100_000);
+        let out = cap_tool_result(&body);
+        assert!(
+            out.contains("<truncated-output"),
+            "expected inline truncation marker"
+        );
+        assert!(
+            !out.contains("<persisted-output"),
+            "should not persist below 400KB threshold"
+        );
+    }
+
+    // Normal: bodies above 400KB get spilled to disk and the
+    // returned string is the v131-style <persisted-output>
+    // reference. Verify the file was actually written and contains
+    // the original content.
+    #[test]
+    fn cap_tool_result_large_body_persists_to_disk_normal() {
+        let body: String = "y".repeat(TOOL_RESULT_DISK_PERSIST_BYTES + 100);
+        let out = cap_tool_result(&body);
+        assert!(
+            out.contains("<persisted-output"),
+            "expected persisted-output reference: {}",
+            &out[..200.min(out.len())]
+        );
+        assert!(out.contains("path=\""));
+        assert!(out.contains(&format!("original_bytes=\"{}\"", body.len())));
+        // Extract the path from the reference and verify the file
+        // was actually written with the full body.
+        let path_start = out.find("path=\"").map(|p| p + "path=\"".len()).unwrap();
+        let path_end = out[path_start..].find('"').map(|p| path_start + p).unwrap();
+        let path = &out[path_start..path_end];
+        let on_disk = std::fs::read_to_string(path).expect("spilled file should exist");
+        assert_eq!(on_disk.len(), body.len());
+        // Cleanup so the temp dir doesn't accumulate test artifacts.
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Robust: the persisted-output reference includes a head
+    // preview so the model gets some context without `Read`-ing the
+    // spill file. v131 uses 2000 chars; we mirror.
+    #[test]
+    fn cap_tool_result_persisted_includes_preview_robust() {
+        let head = "HEADMARKER";
+        let body = format!("{head}{}", "z".repeat(TOOL_RESULT_DISK_PERSIST_BYTES));
+        let out = cap_tool_result(&body);
+        assert!(
+            out.contains(head),
+            "preview missing head marker: {}",
+            &out[..200.min(out.len())]
+        );
+        // Cleanup
+        if let Some(s) = out.find("path=\"") {
+            let s = s + "path=\"".len();
+            if let Some(e) = out[s..].find('"') {
+                let _ = std::fs::remove_file(&out[s..s + e]);
+            }
+        }
     }
 
     // Normal: floor_char_boundary at byte 0 returns 0; at the end returns len.

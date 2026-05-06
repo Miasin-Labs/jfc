@@ -436,6 +436,10 @@ pub enum ToolKind {
     /// promote/demote a teammate (e.g. plan → default) without
     /// respawning it.
     TeamMemberMode,
+    /// Query the code graph using pipe-based DSL.
+    GraphQuery,
+    /// Edit code by symbol handle (semantic editing).
+    SymbolEdit,
     Generic(String),
 }
 
@@ -533,6 +537,26 @@ pub enum ToolInput {
     TeamMemberMode {
         member_name: String,
         mode: String,
+    },
+    GraphQuery {
+        query: String,
+        max_tokens: Option<usize>,
+    },
+    SymbolEdit {
+        handle: String,
+        new_content: String,
+        #[serde(default)]
+        validate: bool,
+        /// When true, the cascade plan produced by `validate=true` is
+        /// also auto-queued into the project's TaskStore — one entry
+        /// per file, tagged with metadata.kind="cascade". The model
+        /// can then drive the actual call-site updates by spawning
+        /// Task tool sub-agents against the queued items, and the
+        /// user sees them in the standard task panel + `/cascade`
+        /// slash command. Requires `validate=true` to have any
+        /// effect — without validation we don't compute the cascade.
+        #[serde(default, rename = "dispatch_cascade")]
+        dispatch_cascade: bool,
     },
     Generic {
         summary: String,
@@ -828,6 +852,8 @@ impl ToolKind {
             "teamdelete" => Self::TeamDelete,
             "sendmessage" => Self::SendMessage,
             "teammembermode" => Self::TeamMemberMode,
+            "graphquery" => Self::GraphQuery,
+            "symboledit" => Self::SymbolEdit,
             _ => Self::Generic(name.to_owned()),
         }
     }
@@ -854,6 +880,8 @@ impl ToolKind {
             Self::TeamDelete => "TeamDelete",
             Self::SendMessage => "SendMessage",
             Self::TeamMemberMode => "TeamMemberMode",
+            Self::GraphQuery => "GraphQuery",
+            Self::SymbolEdit => "SymbolEdit",
             Self::Generic(name) => name.as_str(),
         }
     }
@@ -880,6 +908,8 @@ impl ToolKind {
             Self::TeamDelete => "TeamDelete",
             Self::SendMessage => "SendMessage",
             Self::TeamMemberMode => "TeamMemberMode",
+            Self::GraphQuery => "graph_query",
+            Self::SymbolEdit => "symbol_edit",
             Self::Generic(name) => name.as_str(),
         }
     }
@@ -947,6 +977,8 @@ impl ToolInput {
             Self::TeamMemberMode { member_name, mode } => {
                 format!("set {member_name} → {mode}")
             }
+            Self::GraphQuery { query, .. } => query.clone(),
+            Self::SymbolEdit { handle, .. } => format!("edit: {handle}"),
             Self::Generic { summary } => summary.clone(),
         }
     }
@@ -1090,6 +1122,16 @@ impl ToolInput {
             ToolKind::TeamMemberMode => Self::TeamMemberMode {
                 member_name: str_field("member_name"),
                 mode: str_field("mode"),
+            },
+            ToolKind::GraphQuery => Self::GraphQuery {
+                query: str_field("query"),
+                max_tokens: obj.and_then(|m| m.get("max_tokens")).and_then(|v| v.as_u64()).map(|v| v as usize),
+            },
+            ToolKind::SymbolEdit => Self::SymbolEdit {
+                handle: str_field("handle"),
+                new_content: str_field("new_content"),
+                validate: bool_field("validate"),
+                dispatch_cascade: bool_field("dispatch_cascade"),
             },
             ToolKind::Generic(_) => Self::Generic {
                 summary: v.to_string(),
@@ -1287,6 +1329,23 @@ impl ToolInput {
             }
             Self::TeamMemberMode { member_name, mode } => {
                 json!({ "member_name": member_name, "mode": mode })
+            }
+            Self::GraphQuery { query, max_tokens } => {
+                let mut v = json!({ "query": query });
+                if let Some(mt) = max_tokens {
+                    v["max_tokens"] = json!(mt);
+                }
+                v
+            }
+            Self::SymbolEdit { handle, new_content, validate, dispatch_cascade } => {
+                let mut v = json!({ "handle": handle, "new_content": new_content });
+                if *validate {
+                    v["validate"] = json!(true);
+                }
+                if *dispatch_cascade {
+                    v["dispatch_cascade"] = json!(true);
+                }
+                v
             }
             Self::Generic { summary } => {
                 serde_json::from_str(summary).unwrap_or(json!({ "input": summary }))
