@@ -132,7 +132,7 @@ impl Default for Charter {
         );
 
         Self {
-            max_budget_per_bounty: 10000,
+            max_budget_per_bounty: u64::MAX,
             max_solvers: 3,
             max_validators: 2,
             min_trust_for_solver: 30,

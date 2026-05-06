@@ -1087,17 +1087,20 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "post_bounty".into(),
-            description: "Post a coding-task bounty into the agent economy. \
-                Multiple solver agents will compete to produce solutions; \
-                validator agents will adversarially challenge each one; \
-                only solutions surviving validation are returned. Use this \
-                for tasks where you want a *robust* result (multiple \
-                independent attempts + adversarial review) rather than \
-                a single-shot edit. Budget is tracked as real LLM tokens — \
-                the orchestrator's CFO gates spending so the market can't \
-                exceed it. After posting, run `market_status` (or \
-                /market) to inspect state, queued bids, and the composite \
-                health score (efficiency × fairness × trust × budget).".into(),
+            description: "Register a coding-task bounty in the agent \
+                economy market. By default this only registers — solvers \
+                and validators DO NOT run until you also call \
+                `run_bounty(bounty_id)`, OR pass `auto_dispatch: true` \
+                here to register and run in one shot. Once dispatched, \
+                multiple solver agents compete (real LLM sub-calls in \
+                parallel git worktrees), validators adversarially challenge \
+                each surviving solution (sealed sessions, no peer \
+                pressure), and only solutions surviving validation are \
+                ranked + paid. Budget is tracked as real LLM tokens; the \
+                orchestrator's CFO layer gates spending so the cycle \
+                can't exceed it. Use post+run when you want competitive, \
+                cross-validated output instead of a single-shot edit. \
+                Inspect state via `market_status` or /market.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1119,6 +1122,33 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
                     }
                 },
                 "required": ["description", "budget", "acceptance_criteria"]
+            }),
+        },
+        ToolDef {
+            name: "run_bounty".into(),
+            description: "Drive an already-posted Open bounty through the \
+                full Solve→Validate→Settle cycle. Pair this with \
+                `post_bounty` (auto_dispatch=false) when you want to \
+                register the bounty first and dispatch later — the post \
+                step is cheap; this is the expensive step that actually \
+                spawns solver + validator subagent LLM calls. Returns the \
+                settlement (winner, total cost, payout count) when the \
+                cycle completes. Errors fast if the bounty is not in \
+                Open state or the provider isn't registered with the \
+                tool layer.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "bounty_id": {
+                        "type": "string",
+                        "description": "The bounty ID returned by post_bounty (e.g. `bounty_a1a8…`)."
+                    },
+                    "max_solvers": {
+                        "type": "number",
+                        "description": "Optional override for the number of competing solvers (1-5, default 2)."
+                    }
+                },
+                "required": ["bounty_id"]
             }),
         },
         ToolDef {
@@ -1736,10 +1766,13 @@ pub async fn execute_tool(
             };
             if !auto_dispatch {
                 return ExecutionResult::success(format!(
-                    "Posted bounty `{bounty_id}` (budget {budget} tok, max \
-                     solvers {max_solvers_text}). State: Open. Use \
-                     market_status to inspect; pass auto_dispatch=true to \
-                     run the full Post→Solve→Validate→Settle cycle now."
+                    "Bounty `{bounty_id}` registered. State=Open, budget={budget} tok, \
+                     max_solvers={max_solvers_text}. Solvers and validators have NOT \
+                     run yet — the post step only registers the bounty in the market. \
+                     To execute the full Post→Solve→Validate→Settle cycle (real LLM \
+                     subagents compete + cross-validate), call run_bounty with \
+                     bounty_id=\"{bounty_id}\". Or repost with auto_dispatch=true to \
+                     register and run in one shot."
                 ));
             }
             // Drive the real cycle. The orchestrator mutex is
@@ -1748,13 +1781,12 @@ pub async fn execute_tool(
             // round-trips.
             let Some((provider, model)) = snapshot_active_provider() else {
                 return ExecutionResult::success(format!(
-                    "Posted bounty `{bounty_id}` (budget {budget} tok, max \
-                     solvers {max_solvers_text}). State: Open. \
-                     \n\nNOTE: auto_dispatch=true was requested but no \
-                     active provider is registered with the tool layer \
-                     (call `tools::register_active_provider` from main.rs \
-                     once the provider is built). Bounty stays Open — \
-                     dispatch manually via market_status."
+                    "Bounty `{bounty_id}` registered (budget {budget} tok, \
+                     max_solvers={max_solvers_text}, State=Open). \
+                     auto_dispatch=true was requested but the tool layer \
+                     has no active provider registered, so the cycle did \
+                     not run. The bounty stays Open — call run_bounty \
+                     once the provider is wired."
                 ));
             };
             let invoker = EconomyAgentInvoker::new(provider, model);
@@ -1789,6 +1821,69 @@ pub async fn execute_tool(
                 )),
                 Err(e) => ExecutionResult::failure(format!(
                     "auto_dispatch cycle for `{bounty_id}` failed: {e}"
+                )),
+            }
+        }
+        (
+            ToolKind::RunBounty,
+            ToolInput::RunBounty { bounty_id, max_solvers },
+        ) => {
+            // Drive an already-posted Open bounty through the full
+            // Solve→Validate→Settle cycle. Same code path as
+            // PostBounty's auto_dispatch=true, just without the
+            // post step. Lets the model post first (cheap registration)
+            // and dispatch later when ready, instead of all-or-nothing.
+            let Some((provider, model)) = snapshot_active_provider() else {
+                return ExecutionResult::failure(
+                    "run_bounty: no active provider registered with the \
+                     tool layer. main.rs must call \
+                     tools::register_active_provider during startup.",
+                );
+            };
+            // Verify the bounty exists and is in Open state before
+            // we go through all the worktree + LLM-call setup.
+            let state = {
+                let orch = market_orchestrator().lock().await;
+                orch.bounty_state(&bounty_id)
+            };
+            let Some(state) = state else {
+                return ExecutionResult::failure(format!(
+                    "run_bounty: bounty `{bounty_id}` not found"
+                ));
+            };
+            if !matches!(state, jfc_economy::types::MarketState::Open) {
+                return ExecutionResult::failure(format!(
+                    "run_bounty: bounty `{bounty_id}` is in state {state:?}, \
+                     not Open — only Open bounties can be dispatched"
+                ));
+            }
+            let invoker = EconomyAgentInvoker::new(provider, model);
+            let swarm = EconomySwarmProvider::new(cwd.clone());
+            let n_solvers = max_solvers.unwrap_or(2).clamp(1, 5);
+            let cycle_result = {
+                let mut orch = market_orchestrator().lock().await;
+                orch.run_bounty_cycle(&bounty_id, &invoker, &swarm, n_solvers, 1)
+                    .await
+            };
+            match cycle_result {
+                Ok(settlement) => ExecutionResult::success(format!(
+                    "Bounty `{bounty_id}` settled.\n\
+                     Winner: {}\n\
+                     Total cost: {} tok\n\
+                     Payouts: {}\n\
+                     Trust updates: {}\n\
+                     Run /market or market_status to see updated trust + budget.",
+                    settlement
+                        .winner
+                        .as_ref()
+                        .map(|a| a.0.as_str())
+                        .unwrap_or("(no winning solution)"),
+                    settlement.total_cost,
+                    settlement.payouts.len(),
+                    settlement.trust_updates.len(),
+                )),
+                Err(e) => ExecutionResult::failure(format!(
+                    "run_bounty cycle for `{bounty_id}` failed: {e}"
                 )),
             }
         }
@@ -1830,6 +1925,11 @@ pub async fn execute_tool(
                 && let Some(state) = orch.bounty_state(&id)
             {
                 body.push_str(&format!("\nBounty `{id}` state: {state:?}"));
+                if matches!(state, jfc_economy::types::MarketState::Open) {
+                    body.push_str(
+                        " — call run_bounty to drive Solve→Validate→Settle.",
+                    );
+                }
             }
             ExecutionResult::success(body)
         }
@@ -3272,6 +3372,7 @@ mod tests {
             "graph_query",
             "symbol_edit",
             "post_bounty",
+            "run_bounty",
             "market_status",
         ] {
             assert!(
@@ -3598,23 +3699,68 @@ mod tests {
         );
     }
 
-    // Robust: post_bounty rejects requests that exceed
-    // charter.max_budget_per_bounty. The tool must surface the
-    // error string rather than silently capping or panicking.
+    // Normal: run_bounty is in the canonical tool list and the
+    // catalogue test (above) enforces it. Verify here that its
+    // dispatch arm rejects an unknown bounty_id with a clear
+    // error — most common LLM mistake will be a typo'd ID.
     #[tokio::test(flavor = "current_thread")]
-    async fn post_bounty_rejects_oversized_budget_robust() {
+    async fn run_bounty_unknown_id_errors_robust() {
         let _g = market_test_lock().lock().unwrap_or_else(|p| p.into_inner());
-        let cap = {
-            let orch = market_orchestrator().lock().await;
-            orch.charter().max_budget_per_bounty
-        };
+        // Register a stub provider so the "no provider" path
+        // doesn't fire first and mask the unknown-id check.
+        struct NoopProvider;
+        #[async_trait::async_trait]
+        impl crate::provider::Provider for NoopProvider {
+            fn name(&self) -> &str { "noop" }
+            fn available_models(&self) -> Vec<crate::provider::ModelInfo> { vec![] }
+            async fn stream(
+                &self,
+                _: Vec<crate::provider::ProviderMessage>,
+                _: &crate::provider::StreamOptions,
+            ) -> anyhow::Result<crate::provider::EventStream> {
+                Err(anyhow::anyhow!("noop"))
+            }
+        }
+        register_active_provider(
+            std::sync::Arc::new(NoopProvider),
+            crate::provider::ModelId::new("noop"),
+        );
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let res = execute_tool(
+            crate::types::ToolKind::RunBounty,
+            crate::types::ToolInput::RunBounty {
+                bounty_id: "bounty_does_not_exist".into(),
+                max_solvers: None,
+            },
+            cwd,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(res.is_error(), "should fail on unknown id");
+        assert!(
+            res.output.contains("not found"),
+            "error should mention 'not found': {}",
+            res.output
+        );
+    }
+
+    // Normal: post_bounty (auto_dispatch=false, the default) returns
+    // a success string that explicitly tells the model the cycle
+    // hasn't run yet and how to drive it. This is the wire-fix:
+    // the previous wording made the LLM think the path wasn't
+    // implemented and bypass to direct Bash execution.
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_bounty_default_returns_actionable_message_normal() {
+        let _g = market_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let res = execute_tool(
             crate::types::ToolKind::PostBounty,
             crate::types::ToolInput::PostBounty {
-                description: "oversized".into(),
-                budget: cap + 1,
-                acceptance_criteria: "any".into(),
+                description: "smoke test".into(),
+                budget: 200,
+                acceptance_criteria: "cargo test".into(),
                 max_solvers: None,
                 auto_dispatch: false,
             },
@@ -3624,13 +3770,31 @@ mod tests {
             None,
         )
         .await;
-        assert!(res.is_error(), "should reject over-cap budget");
+        assert!(!res.is_error(), "post should succeed: {}", res.output);
+        // The new wording should make it crystal clear the cycle
+        // didn't run and that run_bounty is the next step. Without
+        // these phrases the LLM's tendency is to bypass.
         assert!(
-            res.output.contains("budget exceeded") || res.output.contains("BudgetExceeded"),
-            "error should mention budget cap: {}",
+            res.output.contains("have NOT run yet"),
+            "must explicitly say solvers haven't run: {}",
+            res.output
+        );
+        assert!(
+            res.output.contains("run_bounty"),
+            "must point at run_bounty as next step: {}",
             res.output
         );
     }
+
+    // The previous over-cap-budget rejection test against the
+    // global orchestrator is no longer reachable from the tool
+    // layer because the default charter now sets
+    // `max_budget_per_bounty: u64::MAX` (any in-band tool call
+    // would have to pass literal u64::MAX as the budget to trip
+    // the gate). The rejection mechanism is still covered by
+    // `jfc_economy::orchestrator::tests::test_budget_exceeded`,
+    // which constructs a charter with a tight cap and verifies
+    // the path end-to-end.
 
     // ─── agent economy cycle (real LLM-driven path) ───────────────────
 
