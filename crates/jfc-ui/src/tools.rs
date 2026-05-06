@@ -1600,12 +1600,30 @@ pub async fn execute_task(
             options = options.system(sp.clone());
         }
 
-        // Cap the running history before each request. Without this, a
-        // research subagent that calls `Read` on dozens of files across
-        // many turns can balloon past the model's context window —
-        // exactly the 8.85M-token Bedrock 400 surfaced as
-        // `litellm.ContextWindowExceededError`. The cap drops oldest
-        // assistant/tool-result pairs and keeps the original prompt.
+        // Two-stage context safety, matching v131 Claude Code's
+        // approach. (1) When the running estimate crosses 100k tokens,
+        // try an LLM-based summarization pass — that's the proper
+        // mirror of cli.2.1.131's `Sp7()` auto-compaction. The
+        // subagent's transcript is folded into a `<summary>` block
+        // and the loop continues with the original prompt + summary +
+        // most recent pair. (2) If compaction is skipped or fails,
+        // fall through to a byte-budget eviction so a single oversized
+        // tool result still can't blow the request past Bedrock's
+        // 1M-token cap (the original 8.85M-token 400).
+        let compacted = crate::stream::auto_compact_subagent_history(
+            &mut conversation,
+            provider,
+            model.clone(),
+        )
+        .await;
+        if compacted {
+            tracing::info!(
+                target: "jfc::tools",
+                task_id = ?task_id,
+                turn,
+                "subagent transcript auto-compacted"
+            );
+        }
         let elided = crate::stream::cap_messages_for_budget(
             &mut conversation,
             crate::stream::SUBAGENT_HISTORY_BUDGET_BYTES,
@@ -1615,7 +1633,7 @@ pub async fn execute_task(
                 target: "jfc::tools",
                 task_id = ?task_id,
                 turn,
-                "subagent history elided to fit budget"
+                "subagent history elided to fit byte budget"
             );
         }
 

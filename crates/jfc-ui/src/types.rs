@@ -586,7 +586,12 @@ impl ToolOutput {
     /// the context is full when the API only received 30KB of it. That
     /// mismatch is what made compaction trigger on every tool batch with a
     /// large file in it.
-    pub const APPROX_LEN_CAP: usize = 30_000;
+    /// Matches Claude Code v2.1.131's per-tool default cap (`yIK = 5e4` in
+    /// the deob bundle). Was 30KB; 50KB lets a Read on a typical source
+    /// file land entirely in the head slice without triggering the
+    /// truncation marker, while still keeping the per-result wire size
+    /// bounded so a single tool call can't blow a 1M-token request.
+    pub const APPROX_LEN_CAP: usize = 50_000;
 
     pub fn approx_text_len(&self) -> usize {
         let raw = match self {
