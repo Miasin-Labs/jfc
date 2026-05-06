@@ -49,15 +49,28 @@ pub fn message_view_total_lines(app: &App, inner_w: usize) -> usize {
                     let lines = cache.get_or_insert_with(text, width, |t_text, w| {
                         markdown::to_lines(t_text, &t, w as usize)
                     });
-                    // Sum wrapped heights of each line
+                    // Use ratatui's own word-wrap line count instead
+                    // of `div_ceil(inner_w)`. ratatui's `Paragraph`
+                    // wraps at WORD boundaries (not column boundaries)
+                    // so a `width=80` line in a 60-col area can take 3
+                    // rows when no good word break lands near col 60,
+                    // even though `div_ceil(80, 60) = 2`. The earlier
+                    // mismatch made `total_lines` undercount the actual
+                    // rendered height, so `follow_bottom` pinned to a
+                    // scroll_offset that left the true last row off-
+                    // screen — exactly the symptom in the user's
+                    // screenshot.
+                    use ratatui::widgets::{Paragraph, Wrap};
                     for line in lines {
-                        let w = line.width();
-                        let h = if w == 0 || inner_w == 0 {
-                            1
+                        if line.width() == 0 {
+                            total += 1;
+                        } else if inner_w == 0 {
+                            total += 1;
                         } else {
-                            w.div_ceil(inner_w).max(1)
-                        };
-                        total += h;
+                            let p = Paragraph::new(line.clone())
+                                .wrap(Wrap { trim: false });
+                            total += p.line_count(inner_w as u16).max(1);
+                        }
                     }
                 }
                 MessagePart::Reasoning(text) => {
@@ -377,11 +390,18 @@ impl<'a> RenderItem<'a> {
         match self {
             RenderItem::Blank => 1,
             RenderItem::TextLine(line) => {
-                let w = line.width();
-                if w == 0 || width == 0 {
+                if line.width() == 0 || width == 0 {
                     1
                 } else {
-                    w.div_ceil(width).max(1)
+                    // Use ratatui's actual word-wrap count, same as
+                    // `message_view_total_lines` does. `div_ceil(width)`
+                    // assumed character-wrap and could be off by 1+
+                    // rows for a line whose word boundaries don't land
+                    // at the column edge.
+                    use ratatui::widgets::{Paragraph, Wrap};
+                    let p = Paragraph::new(line.clone())
+                        .wrap(Wrap { trim: false });
+                    p.line_count(width as u16).max(1)
                 }
             }
             RenderItem::ToolBlock(_, tool) => tool_block_height(tool, width),
@@ -1396,33 +1416,77 @@ fn render_tool_content_with_skip(
             // keeps the existing ANSI-aware rendering for arbitrary
             // commands. Stderr always renders red; exit-code line
             // stays as before.
-            let lang_hint = infer_lang_from_tool(tool);
-            if let Some(lang) = lang_hint
-                .as_deref()
-                .filter(|_| !stdout.is_empty() && exit_code.unwrap_or(-1) == 0)
-            {
-                render_cat_output_skip(
-                    lang,
-                    stdout,
-                    stderr,
-                    *exit_code,
-                    area,
-                    t,
-                    buf,
-                    skip,
-                    tool.expanded,
-                );
-            } else {
-                render_command_output_skip(
-                    stdout,
-                    stderr,
-                    *exit_code,
-                    area,
-                    t,
-                    buf,
-                    skip,
-                    tool.expanded,
-                );
+            // Bash output routing:
+            //   - Structured tools (grep/rg/find/ls/git diff/git log)
+            //     get dedicated parsers + colored renderers.
+            //   - cat/head/tail get markdown-or-syntax rendering as
+            //     before (markdown wins when content sniffs md-y).
+            //   - Everything else falls through to plain command
+            //     output (which already does ANSI passthrough).
+            let cmd_str = match &tool.input {
+                ToolInput::Bash { command, .. } => command.as_str(),
+                _ => "",
+            };
+            let cmd_kind = classify_bash_cmd(cmd_str);
+            let success = !stdout.is_empty() && exit_code.unwrap_or(-1) == 0;
+            // grep returns 1 for "no matches" — treat as success
+            // visually so the renderer fires even when the result
+            // is just the header.
+            let grep_success = matches!(cmd_kind, BashCmdKind::Grep)
+                && !stdout.is_empty()
+                && exit_code.unwrap_or(-1) <= 1;
+            // git diff returns 1 when there are diffs (with --exit-code).
+            let gitdiff_success = matches!(cmd_kind, BashCmdKind::GitDiff)
+                && !stdout.is_empty()
+                && exit_code.unwrap_or(-1) <= 1;
+
+            match cmd_kind {
+                BashCmdKind::Grep if grep_success => render_grep_output_skip(
+                    stdout, stderr, *exit_code, area, t, buf, skip, tool.expanded,
+                ),
+                BashCmdKind::PathList if success => render_path_list_output_skip(
+                    stdout, stderr, *exit_code, area, t, buf, skip, tool.expanded,
+                ),
+                BashCmdKind::GitDiff if gitdiff_success => render_git_diff_output_skip(
+                    stdout, stderr, *exit_code, area, t, buf, skip, tool.expanded,
+                ),
+                BashCmdKind::GitLog if success => render_git_log_output_skip(
+                    stdout, stderr, *exit_code, area, t, buf, skip, tool.expanded,
+                ),
+                _ => {
+                    // cat/head/tail path — fall through to the
+                    // existing markdown-or-syntect routing.
+                    let lang_hint = infer_lang_from_tool(tool);
+                    let lang_lc = lang_hint.as_deref().map(|l| l.to_ascii_lowercase());
+                    let is_markdown_lang = lang_lc
+                        .as_deref()
+                        .map(|l| matches!(l, "md" | "markdown" | "mdx" | "mkd" | "mdown"))
+                        .unwrap_or(false);
+                    let content_is_md = !is_markdown_lang && looks_like_markdown(stdout);
+                    if success && (is_markdown_lang || content_is_md) {
+                        render_cat_markdown_output_skip(
+                            stdout, stderr, *exit_code, area, t, buf, skip,
+                        );
+                    } else if let Some(lang) =
+                        lang_hint.as_deref().filter(|_| success)
+                    {
+                        render_cat_output_skip(
+                            lang, stdout, stderr, *exit_code, area, t, buf, skip,
+                            tool.expanded,
+                        );
+                    } else {
+                        render_command_output_skip(
+                            stdout,
+                            stderr,
+                            *exit_code,
+                            area,
+                            t,
+                            buf,
+                            skip,
+                            tool.expanded,
+                        );
+                    }
+                }
             }
         }
         ToolOutput::Diff(diff) => render_diff_skip(diff, area, t, buf, skip),
@@ -1741,19 +1805,44 @@ fn lang_from_path(path: &str) -> Option<String> {
 /// file cats) — those need their own treatment, and over-applying
 /// syntax highlighting to e.g. piped output breaks readability.
 fn infer_lang_from_bash(command: &str) -> Option<String> {
-    let trimmed = command.trim();
-    // First-token sniff: only single-command lines are eligible.
-    // Anything piped/&-chained/$()-ed gets plain-text rendering.
-    if trimmed.contains('|')
+    // Pipeline + chain aware. `cmd1 || cmd2` takes cmd1; `cmd | less`
+    // takes cmd; `cd X && cat README.md` takes the LAST segment
+    // (the cat). Same logic as `classify_bash_cmd` so the two
+    // dispatch paths agree.
+    let primary_alt = command
+        .split("||")
+        .next()
+        .unwrap_or(command)
+        .split('|')
+        .next()
+        .unwrap_or(command);
+    let primary = primary_alt
+        .split("&&")
+        .filter(|s| !s.trim().is_empty())
+        .last()
+        .unwrap_or(primary_alt);
+    let trimmed = primary.trim();
+
+    // Reject command-substitution / backticks / lone `&` / `;` —
+    // those still indicate the cat is wrapped in something funky
+    // and the file-path sniff would lie. `&&` was already split
+    // out so any `&` here is the lone-background form.
+    if trimmed.contains('$')
+        || trimmed.contains('`')
         || trimmed.contains('&')
         || trimmed.contains(';')
-        || trimmed.contains('$')
-        || trimmed.contains('`')
-        || trimmed.contains('>')
     {
         return None;
     }
-    let mut it = trimmed.split_whitespace();
+    // Strip stderr-redirect tokens like `2>/dev/null` or `2>&1`
+    // so the file-path sniff works on the cat side. Splitting on
+    // whitespace and dropping any token starting with `2>` /
+    // `>` covers the common forms.
+    let toks: Vec<&str> = trimmed
+        .split_whitespace()
+        .filter(|t| !t.starts_with("2>") && !t.starts_with(">"))
+        .collect();
+    let mut it = toks.into_iter();
     let verb = it.next()?;
     if !matches!(verb, "cat" | "head" | "tail" | "bat" | "less" | "more") {
         return None;
@@ -1761,7 +1850,7 @@ fn infer_lang_from_bash(command: &str) -> Option<String> {
     // Pick the first non-flag, non-numeric arg as the file path.
     // Handles `head -50 file.rs`, `tail -n 100 file.py`, etc.
     let mut file: Option<&str> = None;
-    while let Some(arg) = it.next() {
+    for arg in it {
         if arg.starts_with('-') {
             continue;
         }
@@ -1773,6 +1862,42 @@ fn infer_lang_from_bash(command: &str) -> Option<String> {
     }
     let path = file?;
     lang_from_path(path)
+}
+
+/// Heuristic: does this text look like markdown content? Used when
+/// the file path didn't tell us (e.g. `.sisyphus`, `README` with no
+/// extension, hidden dotfile that happens to be MD). Counts the
+/// most distinctive markers in the first 2KB so a long file's
+/// detection is cheap.
+fn looks_like_markdown(text: &str) -> bool {
+    let prefix: &str = if text.len() > 2048 {
+        &text[..2048]
+    } else {
+        text
+    };
+    let mut score = 0;
+    // Header lines are the strongest signal — `# ` / `## ` at start
+    // of any line is rare in non-markdown text.
+    for line in prefix.lines().take(60) {
+        let l = line.trim_start();
+        if l.starts_with("# ") || l.starts_with("## ") || l.starts_with("### ") {
+            score += 2;
+        }
+        if l.starts_with("- ") || l.starts_with("* ") {
+            score += 1;
+        }
+        if l.starts_with("```") {
+            score += 2;
+        }
+        if l.contains("**") {
+            score += 1;
+        }
+        if l.contains("|") && l.contains("---") {
+            // Table separator row.
+            score += 2;
+        }
+    }
+    score >= 4
 }
 
 fn render_highlighted_block_skip(
@@ -1802,6 +1927,818 @@ fn render_highlighted_block_skip(
     }
     Paragraph::new(lines)
         .style(Style::default().bg(t.bg))
+        .scroll((skip as u16, 0))
+        .render(area, buf);
+}
+
+/// What kind of bash command produced this output, derived purely
+/// from the command string. Drives renderer dispatch — each kind
+/// has its own visual treatment.
+#[derive(Debug, Clone)]
+enum BashCmdKind {
+    /// `grep` / `rg` / `ack` results: `path:line:match` per line.
+    Grep,
+    /// `find` / `ls` / `tree` etc. — flat path list.
+    PathList,
+    /// `git diff` / `git show` — unified diff with +/- lines.
+    GitDiff,
+    /// `git log` — commit metadata + body.
+    GitLog,
+    /// Plain command (default).
+    Other,
+}
+
+/// Classify the *primary* command (first segment of `||` / `|`)
+/// for output-rendering dispatch. Independent of the
+/// `infer_lang_from_bash` path which is for cat-and-friends file
+/// content; this one routes structured tools (grep, find, git).
+fn classify_bash_cmd(command: &str) -> BashCmdKind {
+    // Pipeline / chain decomposition. We walk in this order:
+    //   1. split on `||` (cat-with-fallback pattern),
+    //   2. split on `|` (pipe to less etc.),
+    //   3. split on `&&` (cd-and-then pattern: `cd X && grep …`).
+    // For (3) we take the LAST segment because the chain semantically
+    // ends with the meaningful command — `cd ~/dir && cat README.md`
+    // is "the cat is what produces output", not the cd.
+    let primary_alt = command
+        .split("||")
+        .next()
+        .unwrap_or(command)
+        .split('|')
+        .next()
+        .unwrap_or(command);
+    let primary = primary_alt
+        .split("&&")
+        .filter(|s| !s.trim().is_empty())
+        .last()
+        .unwrap_or(primary_alt);
+    let trimmed = primary.trim();
+    // Reject only the *truly* fancy patterns now: command
+    // substitution, backticks, sequential `;`, background `&` not
+    // covered by `&&` (single-`&` daemonization). The earlier
+    // version blanket-rejected `&` which broke `cd X && cmd` for
+    // every structured tool.
+    if trimmed.contains('$')
+        || trimmed.contains('`')
+        || trimmed.contains(';')
+    {
+        return BashCmdKind::Other;
+    }
+    // Reject lone `&` (background) — but `&&` was already split
+    // out above, so any `&` left here is the lone form.
+    if trimmed.contains('&') {
+        return BashCmdKind::Other;
+    }
+    let toks: Vec<&str> = trimmed
+        .split_whitespace()
+        .filter(|t| !t.starts_with("2>") && !t.starts_with(">"))
+        .collect();
+    let Some(verb) = toks.first() else {
+        return BashCmdKind::Other;
+    };
+    // git subcommand routing — `git diff`, `git show`, `git log`
+    // each get their own renderer.
+    if *verb == "git" {
+        if let Some(sub) = toks.get(1) {
+            match *sub {
+                "diff" | "show" => return BashCmdKind::GitDiff,
+                "log" => return BashCmdKind::GitLog,
+                _ => return BashCmdKind::Other,
+            }
+        }
+        return BashCmdKind::Other;
+    }
+    match *verb {
+        "grep" | "rg" | "ack" | "ag" => BashCmdKind::Grep,
+        "find" | "ls" | "tree" | "fd" => BashCmdKind::PathList,
+        _ => BashCmdKind::Other,
+    }
+}
+
+/// Style a file path differently by its extension/family. Covers
+/// the common languages that `grep -rn`, `find`, and `ls` results
+/// surface. Falls back to muted gray for anything unknown — paths
+/// still read clearly but don't pull attention.
+fn path_color(path: &str, t: Theme) -> Color {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        // Code
+        "rs" | "go" | "py" | "js" | "ts" | "tsx" | "jsx" | "rb" | "java" | "c" | "cpp" | "h"
+        | "hpp" | "swift" | "kt" | "lua" | "zig" | "ml" | "hs" | "ex" | "exs" => t.accent,
+        // Config / data
+        "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "env" | "lock" => {
+            t.text_secondary
+        }
+        // Docs
+        "md" | "mdx" | "rst" | "txt" | "adoc" => t.text_primary,
+        // Web
+        "html" | "css" | "scss" | "sass" | "less" | "vue" | "svelte" => t.success,
+        // Shell
+        "sh" | "bash" | "zsh" | "fish" => t.warning,
+        _ => t.text_muted,
+    }
+}
+
+/// Parsed grep/rg result line. `Match` covers both real match
+/// rows (`:` separator) and context rows (`-` separator from
+/// grep `-A`/`-B`/`-C`); `HeadingPath` is the rg `--heading`
+/// bare-path-on-its-own-line form.
+enum GrepLine<'a> {
+    Match {
+        path: &'a str,
+        lineno: Option<&'a str>,
+        col: Option<&'a str>,
+        body: &'a str,
+        is_context: bool,
+    },
+    HeadingPath(&'a str),
+}
+
+/// Parse a single grep / rg result line into its components.
+/// Tries the structured forms in order: column-form
+/// (`path:line:col:body`), match (`path:line:body`), file-only
+/// (`path:body`), single-file `<line>:<body>` (no path prefix),
+/// context with `-` separators, then bare-path heading.
+fn parse_grep_line<'a>(raw: &'a str) -> Option<GrepLine<'a>> {
+    // Try `:` separator first (most common).
+    if let Some(parsed) = parse_grep_with_sep(raw, ':', false) {
+        return Some(parsed);
+    }
+    // Then `-` for context lines.
+    if let Some(parsed) = parse_grep_with_sep(raw, '-', true) {
+        return Some(parsed);
+    }
+    // No path prefix: `grep -n pat single-file` emits `<lineno>:<body>`.
+    // Also rg `--no-filename`. Detect by leading digits + `:`.
+    if let Some(parsed) = parse_grep_no_path(raw, ':', false) {
+        return Some(parsed);
+    }
+    // No-path context (grep `-A`/`-B`/`-C` against single file):
+    // `<lineno>-<body>`.
+    if let Some(parsed) = parse_grep_no_path(raw, '-', true) {
+        return Some(parsed);
+    }
+    // Fall back to bare-path detection: a line that *looks like* a
+    // file path (has slash or extension) and contains no `:` or
+    // `-` markers is probably a heading.
+    let trimmed = raw.trim();
+    if !trimmed.is_empty()
+        && (trimmed.contains('/')
+            || std::path::Path::new(trimmed).extension().is_some())
+        && !trimmed.contains(':')
+    {
+        return Some(GrepLine::HeadingPath(trimmed));
+    }
+    None
+}
+
+/// Parse the path-less `<lineno><sep><body>` form. Used by single-
+/// file grep invocations where the filename isn't repeated on each
+/// line. Returns `Match` with `path = ""` so the renderer skips
+/// the path span entirely.
+fn parse_grep_no_path<'a>(
+    raw: &'a str,
+    sep: char,
+    is_context: bool,
+) -> Option<GrepLine<'a>> {
+    let bytes = raw.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
+        return None;
+    }
+    let mut j = 0;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    // After the digit run, expect the separator. Reject if the
+    // digit run is the whole line (just a number, no body).
+    if j >= bytes.len() || bytes[j] != sep as u8 {
+        return None;
+    }
+    let lineno = &raw[..j];
+    let body = &raw[j + 1..];
+    // Reasonable line numbers are 1..=10M. Anything wildly larger
+    // is probably a different format (a hex offset, a hash) we
+    // shouldn't false-match.
+    if lineno.parse::<u32>().is_err() {
+        return None;
+    }
+    Some(GrepLine::Match {
+        path: "",
+        lineno: Some(lineno),
+        col: None,
+        body,
+        is_context,
+    })
+}
+
+/// Look for `path<sep>lineno<sep>[col<sep>]body` in `raw`.
+/// Returns None if the structure doesn't match — caller falls
+/// through to the next separator or the heading-path fallback.
+fn parse_grep_with_sep<'a>(
+    raw: &'a str,
+    sep: char,
+    is_context: bool,
+) -> Option<GrepLine<'a>> {
+    // Walk the string finding `<sep><digits><sep>` — that
+    // anchors the "this is a (path, lineno) prefix" claim. Without
+    // the digit-bracketed pattern, a path like
+    // `src/foo:bar.rs:10:hi` would mis-parse.
+    let bytes = raw.as_bytes();
+    let sep_b = sep as u8;
+    let mut i = 0;
+    let mut path_end: Option<usize> = None;
+    while i < bytes.len() {
+        if bytes[i] == sep_b {
+            // Tentative path ends at i. After i+1, we want digits
+            // then another sep.
+            let after = i + 1;
+            let mut j = after;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > after && j < bytes.len() && bytes[j] == sep_b {
+                path_end = Some(i);
+                break;
+            }
+        }
+        i += 1;
+    }
+    let p_end = path_end?;
+    let path = &raw[..p_end];
+    if path.is_empty() {
+        return None;
+    }
+    let after_path = p_end + 1;
+    let mut lineno_end = after_path;
+    while lineno_end < bytes.len() && bytes[lineno_end].is_ascii_digit() {
+        lineno_end += 1;
+    }
+    if lineno_end == after_path || lineno_end >= bytes.len() || bytes[lineno_end] != sep_b {
+        return None;
+    }
+    let lineno = &raw[after_path..lineno_end];
+    let after_lineno = lineno_end + 1;
+    // Optional column: another `<digits><sep>` block.
+    let mut col: Option<&str> = None;
+    let body_start;
+    let mut col_end = after_lineno;
+    while col_end < bytes.len() && bytes[col_end].is_ascii_digit() {
+        col_end += 1;
+    }
+    if col_end > after_lineno && col_end < bytes.len() && bytes[col_end] == sep_b {
+        col = Some(&raw[after_lineno..col_end]);
+        body_start = col_end + 1;
+    } else {
+        body_start = after_lineno;
+    }
+    let body = &raw[body_start..];
+    Some(GrepLine::Match {
+        path,
+        lineno: Some(lineno),
+        col,
+        body,
+        is_context,
+    })
+}
+
+/// Render `grep -rn` / `rg` / `ack` output. Handles all the
+/// formats those tools emit (verified against ripgrep's
+/// `crates/printer/src/standard.rs` and GNU grep's `print_sep`):
+///
+/// - `path:line:col:match`   (rg with `--column`)
+/// - `path:line:match`       (default rg / `grep -n`)
+/// - `path:match`            (no line numbers, e.g. `grep -h`)
+/// - `path-line-context`     (grep `-A`/`-B`/`-C`, context uses `-`)
+/// - `--`                    (group separator between matches)
+/// - bare path on its own line (rg `--heading` mode)
+///
+/// Path gets its language-tinted color, line number warning-yellow
+/// (matches grep's default), `:` separators muted, match body in
+/// surface text color. Context lines (`-` separator) dim their
+/// body to differentiate from matches.
+#[allow(clippy::too_many_arguments)]
+fn render_grep_output_skip(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    area: Rect,
+    t: Theme,
+    buf: &mut Buffer,
+    skip: usize,
+    expanded: bool,
+) {
+    let max_lines = if expanded { 500usize } else { 80usize };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(code) = exit_code {
+        // grep returns 1 for "no matches found" — that's not a
+        // failure visually, just an empty result. Only color the
+        // exit code red for truly weird codes (>1).
+        if code > 1 {
+            lines.push(Line::from(Span::styled(
+                format!("[exit {code}]"),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    let mut total = 0usize;
+    for raw in stdout.lines() {
+        total += 1;
+        if lines.len() >= max_lines {
+            continue;
+        }
+        // Group separator from grep `-A`/`-B`/`-C`: literal `--`.
+        if raw == "--" {
+            lines.push(Line::from(Span::styled(
+                "──".to_string(),
+                Style::default().fg(t.text_muted),
+            )));
+            continue;
+        }
+
+        // Try to peel off `path<sep1><lineno><sep2>[<col><sep3>]<body>`
+        // where `sep1` and `sep2` are both `:` for matches, both `-`
+        // for context lines (per GNU grep's `print_sep` and rg's
+        // `write_prelude`). Mixing `:` and `-` doesn't happen — each
+        // line is either fully match or fully context.
+        let parsed = parse_grep_line(raw);
+        match parsed {
+            Some(GrepLine::Match {
+                path,
+                lineno,
+                col,
+                body,
+                is_context,
+            }) => {
+                let sep_color = if is_context {
+                    t.text_muted
+                } else {
+                    t.text_muted
+                };
+                let body_color = if is_context {
+                    t.text_muted
+                } else {
+                    t.text_secondary
+                };
+                let lineno_color = if is_context {
+                    t.text_muted
+                } else {
+                    t.warning
+                };
+                let sep_str = if is_context { "-" } else { ":" };
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                // Skip the path span when grep was invoked against a
+                // single file and didn't repeat the filename on each
+                // line — `parse_grep_line` returns `path = ""` for
+                // that form.
+                if !path.is_empty() {
+                    spans.push(Span::styled(
+                        path.to_owned(),
+                        Style::default().fg(path_color(path, t)),
+                    ));
+                }
+                if let Some(n) = lineno {
+                    if !path.is_empty() {
+                        spans.push(Span::styled(
+                            sep_str.to_owned(),
+                            Style::default().fg(sep_color),
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        n.to_owned(),
+                        Style::default().fg(lineno_color),
+                    ));
+                }
+                if let Some(c) = col {
+                    spans.push(Span::styled(
+                        sep_str.to_owned(),
+                        Style::default().fg(sep_color),
+                    ));
+                    spans.push(Span::styled(
+                        c.to_owned(),
+                        Style::default().fg(t.text_muted),
+                    ));
+                }
+                spans.push(Span::styled(
+                    sep_str.to_owned(),
+                    Style::default().fg(sep_color),
+                ));
+                spans.push(Span::styled(body.to_owned(), Style::default().fg(body_color)));
+                lines.push(Line::from(spans));
+            }
+            Some(GrepLine::HeadingPath(path)) => {
+                // `--heading` mode: bare path on its own line.
+                lines.push(Line::from(Span::styled(
+                    path.to_owned(),
+                    Style::default()
+                        .fg(path_color(path, t))
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    raw.to_owned(),
+                    Style::default().fg(t.text_secondary),
+                )));
+            }
+        }
+    }
+    if total > max_lines {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "… {} more lines · click or press o to expand",
+                total - max_lines
+            ),
+            Style::default().fg(t.text_muted).add_modifier(Modifier::ITALIC),
+        )));
+    }
+    if !stderr.is_empty() {
+        lines.push(Line::from(""));
+        for sl in stderr.lines() {
+            lines.push(Line::from(Span::styled(
+                sl.to_owned(),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    Paragraph::new(lines)
+        .style(Style::default().bg(t.bg))
+        .scroll((skip as u16, 0))
+        .render(area, buf);
+}
+
+/// Render `find` / `ls` / `tree` / `fd` output as a list of paths
+/// colored by file extension. Multi-column `ls` output (no flags)
+/// is split on whitespace and each entry gets its own colored
+/// span; `ls -l` lines get split by column with file mode in muted,
+/// size right-aligned, name colored.
+#[allow(clippy::too_many_arguments)]
+fn render_path_list_output_skip(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    area: Rect,
+    t: Theme,
+    buf: &mut Buffer,
+    skip: usize,
+    expanded: bool,
+) {
+    let max_lines = if expanded { 500usize } else { 80usize };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(code) = exit_code {
+        if code != 0 {
+            lines.push(Line::from(Span::styled(
+                format!("[exit {code}]"),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    let mut total = 0usize;
+    for raw in stdout.lines() {
+        total += 1;
+        if lines.len() >= max_lines {
+            continue;
+        }
+        // `ls -l` long format: `<perms> <links> <user> <group> <size> <date> <name>`
+        // — first char is a file-type indicator (`-`, `d`, `l`, etc.).
+        let is_ls_long = raw
+            .chars()
+            .next()
+            .map(|c| matches!(c, '-' | 'd' | 'l' | 'c' | 'b' | 'p' | 's'))
+            .unwrap_or(false)
+            && raw.split_whitespace().count() >= 7;
+        if is_ls_long {
+            let cols: Vec<&str> = raw.splitn(9, char::is_whitespace).collect();
+            // Re-split smarter: we want file mode, ..., name (which
+            // may contain spaces in `ls -lQ` etc.).
+            let parts: Vec<&str> = raw.split_whitespace().collect();
+            if parts.len() >= 8 {
+                let perms = parts[0];
+                // Find the size column (5th non-empty token after links)
+                let name_start = parts[..parts.len() - 1]
+                    .iter()
+                    .map(|s| s.len())
+                    .sum::<usize>()
+                    + parts.len() - 2; // approximation
+                let name = parts.last().copied().unwrap_or("");
+                let _ = name_start;
+                let _ = cols;
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                spans.push(Span::styled(
+                    perms.to_owned(),
+                    Style::default().fg(t.text_muted),
+                ));
+                spans.push(Span::raw(" "));
+                // Middle columns rendered muted as one block.
+                let middle = parts[1..parts.len() - 1].join(" ");
+                spans.push(Span::styled(middle, Style::default().fg(t.text_muted)));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    name.to_owned(),
+                    Style::default().fg(path_color(name, t)),
+                ));
+                lines.push(Line::from(spans));
+                continue;
+            }
+        }
+        // Simple path-per-line: tint by extension.
+        let trimmed = raw.trim_end();
+        if trimmed.is_empty() {
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(Span::styled(
+                raw.to_owned(),
+                Style::default().fg(path_color(trimmed, t)),
+            )));
+        }
+    }
+    if total > max_lines {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "… {} more lines · click or press o to expand",
+                total - max_lines
+            ),
+            Style::default().fg(t.text_muted).add_modifier(Modifier::ITALIC),
+        )));
+    }
+    if !stderr.is_empty() {
+        lines.push(Line::from(""));
+        for sl in stderr.lines() {
+            lines.push(Line::from(Span::styled(
+                sl.to_owned(),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    Paragraph::new(lines)
+        .style(Style::default().bg(t.bg))
+        .scroll((skip as u16, 0))
+        .render(area, buf);
+}
+
+/// Render `git diff` / `git show` output as colored unified diff.
+/// Each line gets a per-prefix color: `+` green, `-` red, `@@`
+/// cyan, file headers bold, index/`diff --git` lines muted.
+#[allow(clippy::too_many_arguments)]
+fn render_git_diff_output_skip(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    area: Rect,
+    t: Theme,
+    buf: &mut Buffer,
+    skip: usize,
+    expanded: bool,
+) {
+    let max_lines = if expanded { 1000usize } else { 200usize };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(code) = exit_code {
+        // git diff exits 1 when there are differences (with --exit-code).
+        // 0 = no diffs, 1 = diffs found, >1 = real error.
+        if code > 1 {
+            lines.push(Line::from(Span::styled(
+                format!("[exit {code}]"),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    let mut total = 0usize;
+    for raw in stdout.lines() {
+        total += 1;
+        if lines.len() >= max_lines {
+            continue;
+        }
+        let style = if raw.starts_with("diff --git ") || raw.starts_with("index ") {
+            Style::default().fg(t.text_muted)
+        } else if raw.starts_with("--- ") || raw.starts_with("+++ ") {
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD)
+        } else if raw.starts_with("@@") {
+            Style::default().fg(t.accent)
+        } else if raw.starts_with('+') {
+            Style::default().fg(t.success)
+        } else if raw.starts_with('-') {
+            Style::default().fg(t.error)
+        } else {
+            Style::default().fg(t.text_secondary)
+        };
+        lines.push(Line::from(Span::styled(raw.to_owned(), style)));
+    }
+    if total > max_lines {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "… {} more lines · click or press o to expand",
+                total - max_lines
+            ),
+            Style::default().fg(t.text_muted).add_modifier(Modifier::ITALIC),
+        )));
+    }
+    if !stderr.is_empty() {
+        lines.push(Line::from(""));
+        for sl in stderr.lines() {
+            lines.push(Line::from(Span::styled(
+                sl.to_owned(),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    Paragraph::new(lines)
+        .style(Style::default().bg(t.bg))
+        .scroll((skip as u16, 0))
+        .render(area, buf);
+}
+
+/// Render `git log` output. Detects two formats:
+///   - `--oneline`: `SHA message` — SHA in accent, rest plain
+///   - default: `commit SHA\nAuthor: ...\nDate: ...\n\n    body\n`
+///     — `commit` line in accent, Author/Date muted, body italic.
+#[allow(clippy::too_many_arguments)]
+fn render_git_log_output_skip(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    area: Rect,
+    t: Theme,
+    buf: &mut Buffer,
+    skip: usize,
+    expanded: bool,
+) {
+    let max_lines = if expanded { 500usize } else { 100usize };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(code) = exit_code {
+        if code != 0 {
+            lines.push(Line::from(Span::styled(
+                format!("[exit {code}]"),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    let mut total = 0usize;
+    for raw in stdout.lines() {
+        total += 1;
+        if lines.len() >= max_lines {
+            continue;
+        }
+        // Default format heuristic: lines starting with `commit `
+        // followed by a hex SHA; `Author:` / `Date:` headers; body
+        // indented with 4 spaces; everything else default.
+        if let Some(rest) = raw.strip_prefix("commit ") {
+            // Split SHA from any trailing decorations like
+            // `(HEAD -> main, origin/main)`.
+            let (sha, decoration) = rest
+                .split_once(' ')
+                .map(|(s, d)| (s, Some(d)))
+                .unwrap_or((rest, None));
+            let mut spans = vec![
+                Span::styled("commit ", Style::default().fg(t.text_muted)),
+                Span::styled(
+                    sha.to_owned(),
+                    Style::default()
+                        .fg(t.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if let Some(d) = decoration {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    d.to_owned(),
+                    Style::default().fg(t.warning),
+                ));
+            }
+            lines.push(Line::from(spans));
+        } else if raw.starts_with("Author:") || raw.starts_with("Date:") {
+            lines.push(Line::from(Span::styled(
+                raw.to_owned(),
+                Style::default().fg(t.text_muted),
+            )));
+        } else if raw.starts_with("    ") {
+            // 4-space-indented body line.
+            lines.push(Line::from(Span::styled(
+                raw.to_owned(),
+                Style::default().fg(t.text_secondary),
+            )));
+        } else {
+            // `--oneline` format: <SHA> <msg>. Sniff a short hex
+            // SHA at the start.
+            if let Some(space) = raw.find(' ') {
+                let (head, tail) = raw.split_at(space);
+                let head_clean = head.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+                if !head_clean.is_empty()
+                    && head_clean.len() >= 6
+                    && head_clean.len() <= 40
+                    && head_clean.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            head.to_owned(),
+                            Style::default()
+                                .fg(t.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            tail.to_owned(),
+                            Style::default().fg(t.text_secondary),
+                        ),
+                    ]));
+                    continue;
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                raw.to_owned(),
+                Style::default().fg(t.text_secondary),
+            )));
+        }
+    }
+    if total > max_lines {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "… {} more lines · click or press o to expand",
+                total - max_lines
+            ),
+            Style::default().fg(t.text_muted).add_modifier(Modifier::ITALIC),
+        )));
+    }
+    if !stderr.is_empty() {
+        lines.push(Line::from(""));
+        for sl in stderr.lines() {
+            lines.push(Line::from(Span::styled(
+                sl.to_owned(),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+    Paragraph::new(lines)
+        .style(Style::default().bg(t.bg))
+        .scroll((skip as u16, 0))
+        .render(area, buf);
+}
+
+/// Render `cat <markdown-file>` output as actual rendered markdown
+/// (formatted headers, tables, code fences) instead of syntax-
+/// highlighted source. The user expects `cat README.md` to show
+/// the document the way the model's prose is shown — not the raw
+/// `# Header` characters with syntax coloring. Mirrors v126's
+/// markdown rendering for tool output.
+#[allow(clippy::too_many_arguments)]
+fn render_cat_markdown_output_skip(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    area: Rect,
+    t: Theme,
+    buf: &mut Buffer,
+    skip: usize,
+) {
+    const MAX_LINES: usize = 500;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Optional exit-code badge for the rare case where a `cat`
+    // succeeds but emits a non-zero exit (shouldn't happen, but
+    // mirrors the behavior of the syntect path for parity).
+    if let Some(code) = exit_code {
+        if code != 0 {
+            lines.push(Line::from(Span::styled(
+                format!("[exit {code}]"),
+                Style::default().fg(t.warning),
+            )));
+        }
+    }
+
+    // The actual markdown render — same pipeline the assistant's
+    // text uses. `to_lines` handles headers, tables, code fences,
+    // bullets, etc.
+    let body = markdown::to_lines(stdout, &t, inner_w.max(1));
+    lines.extend(body);
+
+    if lines.len() > MAX_LINES {
+        let total = lines.len();
+        lines.truncate(MAX_LINES);
+        lines.push(Line::from(Span::styled(
+            format!("… {} more lines · click or press o to expand", total - MAX_LINES),
+            Style::default()
+                .fg(t.text_muted)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    if !stderr.is_empty() {
+        lines.push(Line::from(""));
+        for sl in stderr.lines() {
+            lines.push(Line::from(Span::styled(
+                sl.to_owned(),
+                Style::default().fg(t.error),
+            )));
+        }
+    }
+
+    Paragraph::new(lines)
+        .style(Style::default().bg(t.bg))
+        .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((skip as u16, 0))
         .render(area, buf);
 }
@@ -2760,5 +3697,257 @@ mod hit_test_tests {
         assert_eq!(find_tool_at(&regions, 5, 4), Some("tool"));
         assert_eq!(find_tool_at(&regions, 6, 3), None);
         assert_eq!(find_tool_at(&regions, 2, 5), None);
+    }
+}
+
+#[cfg(test)]
+mod bash_output_tests {
+    use super::*;
+
+    // Normal: cat <file.md> classifies as Other (cat falls through
+    // to the markdown / lang sniff path, not the structured tool
+    // dispatch).
+    #[test]
+    fn classify_cat_is_other_normal() {
+        assert!(matches!(classify_bash_cmd("cat README.md"), BashCmdKind::Other));
+    }
+
+    // Normal: grep / rg / ack / ag all dispatch to the Grep renderer.
+    #[test]
+    fn classify_grep_family_normal() {
+        for cmd in &["grep -rn x src/", "rg \"TODO\" --type rust", "ack pat", "ag pat"] {
+            assert!(matches!(classify_bash_cmd(cmd), BashCmdKind::Grep), "{cmd}");
+        }
+    }
+
+    // Normal: find / ls / tree / fd all dispatch to PathList.
+    #[test]
+    fn classify_path_list_family_normal() {
+        for cmd in &["find . -name '*.rs'", "ls -la", "tree", "fd rust"] {
+            assert!(matches!(classify_bash_cmd(cmd), BashCmdKind::PathList), "{cmd}");
+        }
+    }
+
+    // Normal: git diff / git show / git log dispatch correctly.
+    #[test]
+    fn classify_git_subcommands_normal() {
+        assert!(matches!(classify_bash_cmd("git diff HEAD"), BashCmdKind::GitDiff));
+        assert!(matches!(classify_bash_cmd("git show abc123"), BashCmdKind::GitDiff));
+        assert!(matches!(classify_bash_cmd("git log --oneline -20"), BashCmdKind::GitLog));
+        assert!(matches!(classify_bash_cmd("git status"), BashCmdKind::Other));
+    }
+
+    // Robust: pipeline-aware classification — first segment of `||` or `|`
+    // wins. The cat-with-fallback pattern is common.
+    #[test]
+    fn classify_pipeline_takes_first_segment_robust() {
+        assert!(matches!(
+            classify_bash_cmd("rg foo 2>/dev/null || rg bar"),
+            BashCmdKind::Grep
+        ));
+        assert!(matches!(
+            classify_bash_cmd("git diff | less"),
+            BashCmdKind::GitDiff
+        ));
+    }
+
+    // Robust: `2>/dev/null` and `>file` redirects don't break the verb sniff.
+    #[test]
+    fn classify_strips_redirects_robust() {
+        assert!(matches!(
+            classify_bash_cmd("grep -rn pat src/ 2>/dev/null"),
+            BashCmdKind::Grep
+        ));
+        assert!(matches!(
+            classify_bash_cmd("find . -name '*.rs' >list.txt"),
+            BashCmdKind::PathList
+        ));
+    }
+
+    // Robust: command substitution / backticks / & / ; reject (those
+    // change semantics in ways the simple sniff can't reason about).
+    #[test]
+    fn classify_rejects_complex_shell_robust() {
+        assert!(matches!(classify_bash_cmd("echo $(grep x y)"), BashCmdKind::Other));
+        assert!(matches!(
+            classify_bash_cmd("grep x y; echo done"),
+            BashCmdKind::Other
+        ));
+        assert!(matches!(classify_bash_cmd("grep x y &"), BashCmdKind::Other));
+    }
+
+    // Normal: parse a standard `path:line:body` grep result.
+    #[test]
+    fn parse_grep_path_line_body_normal() {
+        let line = "src/main.rs:42:fn main() {";
+        match parse_grep_line(line) {
+            Some(GrepLine::Match {
+                path,
+                lineno,
+                col,
+                body,
+                is_context,
+            }) => {
+                assert_eq!(path, "src/main.rs");
+                assert_eq!(lineno, Some("42"));
+                assert_eq!(col, None);
+                assert_eq!(body, "fn main() {");
+                assert!(!is_context);
+            }
+            other => panic!("expected match, got {other:?}", other = other.is_some()),
+        }
+    }
+
+    // Normal: rg with --column emits `path:line:col:body`.
+    #[test]
+    fn parse_grep_with_column_normal() {
+        let line = "src/foo.rs:15:5:    let x = 1;";
+        match parse_grep_line(line) {
+            Some(GrepLine::Match {
+                path,
+                lineno,
+                col,
+                body,
+                is_context,
+            }) => {
+                assert_eq!(path, "src/foo.rs");
+                assert_eq!(lineno, Some("15"));
+                assert_eq!(col, Some("5"));
+                assert_eq!(body, "    let x = 1;");
+                assert!(!is_context);
+            }
+            other => panic!("expected match, got {other:?}", other = other.is_some()),
+        }
+    }
+
+    // Normal: grep -B/-C context lines use `-` separators.
+    #[test]
+    fn parse_grep_context_lines_use_dash_normal() {
+        let line = "src/foo.rs-41-/// docstring";
+        match parse_grep_line(line) {
+            Some(GrepLine::Match {
+                path,
+                lineno,
+                body,
+                is_context,
+                ..
+            }) => {
+                assert_eq!(path, "src/foo.rs");
+                assert_eq!(lineno, Some("41"));
+                assert_eq!(body, "/// docstring");
+                assert!(is_context);
+            }
+            other => panic!("expected context match, got {other:?}", other = other.is_some()),
+        }
+    }
+
+    // Robust: a path containing `:` (Windows-style) shouldn't false-match.
+    // The parser anchors on `:digits:` so a colon in the path doesn't break it.
+    #[test]
+    fn parse_grep_handles_path_with_colon_robust() {
+        let line = "C:/code/main.rs:99:hello";
+        match parse_grep_line(line) {
+            Some(GrepLine::Match { path, lineno, body, .. }) => {
+                assert_eq!(path, "C:/code/main.rs");
+                assert_eq!(lineno, Some("99"));
+                assert_eq!(body, "hello");
+            }
+            _ => panic!("expected match"),
+        }
+    }
+
+    // Robust: rg --heading mode emits a bare path on its own line
+    // (no separators). Recognized as HeadingPath.
+    #[test]
+    fn parse_grep_heading_path_robust() {
+        let line = "src/utils/foo.rs";
+        match parse_grep_line(line) {
+            Some(GrepLine::HeadingPath(p)) => assert_eq!(p, "src/utils/foo.rs"),
+            _ => panic!("expected heading path"),
+        }
+    }
+
+    // Normal: markdown content sniff fires on a doc with headers + table.
+    #[test]
+    fn looks_like_markdown_detects_real_md_normal() {
+        let content = "# Title\n\nSome text\n\n## Section\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        assert!(looks_like_markdown(content));
+    }
+
+    // Robust: plain code shouldn't sniff as markdown even if it has `#` chars.
+    #[test]
+    fn looks_like_markdown_rejects_python_robust() {
+        let content = "# This is a Python comment\nprint('hello')\nx = 1\ny = 2\n";
+        assert!(!looks_like_markdown(content));
+    }
+}
+
+#[cfg(test)]
+mod bash_chain_tests {
+    use super::*;
+
+    // Normal: `cd X && grep ...` should classify as Grep — the LAST
+    // segment of an `&&` chain is the meaningful command, not the cd.
+    #[test]
+    fn classify_cd_and_then_grep_normal() {
+        assert!(matches!(
+            classify_bash_cmd("cd ~/src && grep -rn TODO"),
+            BashCmdKind::Grep
+        ));
+    }
+
+    // Normal: `cd X && cat README.md 2>/dev/null || cat docs/README.md`
+    // — the whole chain compiles down to `cat <markdown>` so the lang
+    // sniff should pick up `.md`.
+    #[test]
+    fn infer_lang_through_cd_and_chain_normal() {
+        let lang = infer_lang_from_bash(
+            "cd ~/proj && cat README.md 2>/dev/null || cat docs/README.md",
+        );
+        assert_eq!(lang.as_deref(), Some("md"));
+    }
+
+    // Robust: `cd X && cat foo &` (background) still rejected.
+    #[test]
+    fn classify_rejects_lone_background_robust() {
+        assert!(matches!(
+            classify_bash_cmd("cd ~/src && cat foo &"),
+            BashCmdKind::Other
+        ));
+    }
+
+    // Normal: `grep -n pat single-file.txt` emits `<lineno>:<body>`
+    // with no path prefix. Parser handles it.
+    #[test]
+    fn parse_grep_no_path_single_file_normal() {
+        let line = "187214:    var _X = \"ScheduleWakeup\";";
+        match parse_grep_line(line) {
+            Some(GrepLine::Match { path, lineno, body, .. }) => {
+                assert_eq!(path, "");
+                assert_eq!(lineno, Some("187214"));
+                assert_eq!(body, "    var _X = \"ScheduleWakeup\";");
+            }
+            _ => panic!("expected match"),
+        }
+    }
+
+    // Robust: a line starting with a number that isn't grep-style
+    // (no `:` after digits) shouldn't false-match.
+    #[test]
+    fn parse_grep_no_path_rejects_bare_numbers_robust() {
+        let line = "1234567 records processed";
+        // `1234567 ` is digits + space, no `:` or `-` after digits,
+        // so the no-path parser returns None and the line falls
+        // through to plain text.
+        assert!(parse_grep_line(line).is_none());
+    }
+
+    // Robust: hex/long IDs that look like digits but aren't reasonable
+    // line numbers are rejected. E.g. a SHA prefix.
+    #[test]
+    fn parse_grep_no_path_rejects_huge_lineno_robust() {
+        // 99999999999 (11 digits) — won't fit in u32, parser rejects.
+        let line = "99999999999:body";
+        assert!(parse_grep_line(line).is_none());
     }
 }

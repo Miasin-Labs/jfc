@@ -105,7 +105,17 @@ fn highlight_code_inner(
 
     let gutter_style = Style::default().fg(theme.border);
     let fallback_style = Style::default().fg(theme.text_secondary);
-    let wrap_w = inner_width.max(20);
+    // `inner_width == 0` means "don't wrap" — used by the diff
+    // renderer to keep a 1:1 input-line-to-output-line mapping
+    // so per-row tinting (the green/red bg) lines up with the
+    // hunk's diff lines. Callers that want wrapping pass a real
+    // column width; we floor that at 20 cells so a comically-narrow
+    // input still produces *something* readable.
+    let wrap_w = if inner_width == 0 {
+        0
+    } else {
+        inner_width.max(20)
+    };
 
     let lower = lang.to_lowercase();
     let (syntax, active_set) =

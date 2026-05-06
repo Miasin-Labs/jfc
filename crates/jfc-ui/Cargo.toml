@@ -8,7 +8,12 @@ name = "jfc"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.30"
+# `unstable-rendered-line-info` opts into `Paragraph::line_count(width)` which
+# we need for accurate scroll math. ratatui's word-wrap can produce more rows
+# than `div_ceil(width)` for the same line, so without this feature the
+# message-area total height was undercounted and `follow_bottom` left the
+# real last row offscreen until the next chunk's recompute caught up.
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 ratatui-textarea = "0.9"
 tokio = { workspace = true, features = ["full"] }

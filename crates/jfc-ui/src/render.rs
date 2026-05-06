@@ -29,7 +29,38 @@ pub fn frame(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Block::default().style(Style::default().bg(t.bg)), f.area());
 
-    let input_lines = input_visual_line_count(app, f.area().width.saturating_sub(4) as usize);
+    // Input width is the messages-column width MINUS the input
+    // box's chrome: 2 border cols + 2 padding cols + 2 prompt-strip
+    // cols = 6 cols of overhead. Earlier this called
+    // `input_visual_line_count(app, f.area().width - 4)` against
+    // the *full screen* width, ignoring sidebar visibility AND the
+    // 2-col prompt strip. A multi-line draft was visually wrapped
+    // at the narrower real width but counted at the wider fake
+    // width → input_height too small → the textarea ate into the
+    // message column or hid the user's bottom row of typing.
+    //
+    // Replicate the same sidebar-width math the layout below uses
+    // so we get the right number first try (no chicken-and-egg).
+    let total_w_pre = f.area().width as usize;
+    let show_left_pre = app.show_sidebar;
+    let show_right_pre = app.show_info_sidebar && f.area().width >= 100;
+    let left_w_pre = if show_left_pre {
+        (total_w_pre / 5).clamp(20, 32)
+    } else {
+        0
+    };
+    let right_w_pre = if show_right_pre {
+        if total_w_pre < 140 {
+            32
+        } else {
+            (total_w_pre / 6).clamp(36, 48)
+        }
+    } else {
+        0
+    };
+    let mid_w_pre = total_w_pre.saturating_sub(left_w_pre + right_w_pre);
+    let input_content_w = mid_w_pre.saturating_sub(6);
+    let input_lines = input_visual_line_count(app, input_content_w);
     let input_height = (input_lines + 2).min(8) as u16;
     // Two rows when in task view: tab strip on top, key-hint row
     // below. Was 1 when the footer was a flat back/next string;
@@ -49,9 +80,23 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // Spinner is also shown during pre-submit / `/compact` compaction so a
     // long compact request doesn't read as a frozen UI. v126 cli.js does
     // the same — the spinner verb just changes to "Compacting".
+    // Spinner visibility = "is the user's turn still in flight?". The
+    // earlier gate (`is_streaming || compacting || pending_tool_calls`)
+    // dropped to false during the brief gap between SSE end and the
+    // next stream's start mid-agentic-loop — the spinner blinked off
+    // and back on. Adding `turn_started_at.is_some()` keeps it lit
+    // for the *whole* turn (set at submit, cleared at the
+    // turn-complete event). Background tasks count too so a fan of
+    // subagents keeps the spinner alive even if the leader finished.
+    let any_alive_subagent = app
+        .background_tasks
+        .values()
+        .any(|bt| bt.status.is_alive());
     let show_spinner = app.is_streaming
         || app.compacting_started_at.is_some()
-        || !app.pending_tool_calls.is_empty();
+        || !app.pending_tool_calls.is_empty()
+        || app.turn_started_at.is_some()
+        || any_alive_subagent;
     // When a team is active, the spinner area expands to show the teammate tree:
     // 2 base rows (spinner + next-task hint) + 1 leader row + N teammate rows.
     // For non-team parallel subagents (the "fire 5 Explore agents" case),
@@ -221,7 +266,8 @@ fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(t.border));
+        .border_style(Style::default().fg(t.border))
+        .padding(Padding::new(1, 0, 1, 0)); // left=1, right=0, top=1, bottom=0
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -826,6 +872,235 @@ fn highlight_mentions_in(s: &str, t: Theme, phase: f32) -> Vec<Span<'static>> {
     spans
 }
 
+/// Enumerate every cell along the border of `area` in clockwise
+/// order, starting at the top-left corner. Used by the border-comet
+/// painter to walk the perimeter at a steady speed regardless of
+/// rect aspect ratio.
+fn perimeter_cells(area: Rect) -> Vec<(u16, u16)> {
+    let mut cells: Vec<(u16, u16)> = Vec::new();
+    if area.width < 2 || area.height < 2 {
+        return cells;
+    }
+    let right = area.x + area.width - 1;
+    let bottom = area.y + area.height - 1;
+    // Top edge: left-to-right, including both corners.
+    for x in area.x..=right {
+        cells.push((x, area.y));
+    }
+    // Right edge: top-to-bottom, skip the top-right (already added).
+    for y in (area.y + 1)..=bottom {
+        cells.push((right, y));
+    }
+    // Bottom edge: right-to-left, skip the bottom-right (already added).
+    if right > area.x {
+        for x in (area.x..right).rev() {
+            cells.push((x, bottom));
+        }
+    }
+    // Left edge: bottom-to-top, skip the bottom-left and top-left.
+    if bottom > area.y + 1 {
+        for y in ((area.y + 1)..bottom).rev() {
+            cells.push((area.x, y));
+        }
+    }
+    cells
+}
+
+/// Configuration for `paint_border_comets`. All knobs that callers
+/// might want to vary at runtime live here so the painter stays
+/// declarative — pass a struct, get a render.
+struct CometConfig {
+    /// Number of comets evenly spaced around the perimeter. 1..=4.
+    count: u32,
+    /// Lap duration in ms — full perimeter traversal time. Lower
+    /// = faster comets. Drives by streaming velocity in the input
+    /// renderer; can be hard-overridden via env.
+    lap_ms: u128,
+    /// Trail length in cells. 6 is the standard comet shape.
+    trail_len: usize,
+    /// Resting border color (the comet fades to this at the tail end).
+    base: Color,
+    /// Comet head color (the lead cell blends fully to this).
+    head: Color,
+    /// When true, comets at odd indices counter-rotate (go
+    /// counter-clockwise) so a count=2 setup produces two comets
+    /// going opposite directions, meeting at corners.
+    counter_rotate: bool,
+    /// Reverse the clockwise base direction. Combined with
+    /// `counter_rotate`, this lets the tool-use signal flip every
+    /// comet's direction at once.
+    reverse_base: bool,
+}
+
+/// Paint N border comets traveling around the rectangle's perimeter
+/// at a steady speed. Each comet is a `trail_len`-cell trail (head
+/// at brightest blend toward `head` color, tail fading to `base`).
+fn paint_border_comets(f: &mut Frame, area: Rect, cfg: &CometConfig) {
+    let perim = perimeter_cells(area);
+    if perim.is_empty() || cfg.count == 0 {
+        return;
+    }
+    let total = perim.len();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let head_pos_signed = ((now_ms * total as u128) / cfg.lap_ms.max(1)) as i64;
+
+    let buf = f.buffer_mut();
+
+    for c in 0..cfg.count {
+        // Direction: even-indexed comets follow the base direction;
+        // odd-indexed comets reverse if `counter_rotate` is set.
+        // `reverse_base` flips the base on top of that.
+        let counter = cfg.counter_rotate && c % 2 == 1;
+        let direction_positive = match (cfg.reverse_base, counter) {
+            (false, false) => true,
+            (true, false) => false,
+            (false, true) => false,
+            (true, true) => true,
+        };
+        // Even spacing around the perimeter.
+        let offset = (c as usize * total) / cfg.count.max(1) as usize;
+        // Position of this comet's head this frame.
+        let head_idx = if direction_positive {
+            ((head_pos_signed as i64 + offset as i64).rem_euclid(total as i64)) as usize
+        } else {
+            ((-head_pos_signed as i64 + offset as i64).rem_euclid(total as i64)) as usize
+        };
+        for trail in 0..cfg.trail_len {
+            // Trail cells trail "behind" the head along its
+            // direction of travel.
+            let pos = if direction_positive {
+                (head_idx + total - trail) % total
+            } else {
+                (head_idx + trail) % total
+            };
+            let (x, y) = perim[pos];
+            if x >= buf.area().right() || y >= buf.area().bottom() {
+                continue;
+            }
+            // Squared falloff: head bright, tail dies off quickly.
+            let pct = trail as f32 / cfg.trail_len as f32;
+            let intensity = (1.0 - pct).powi(2);
+            let blended = pulse_color(cfg.base, cfg.head, intensity);
+            let cell = &mut buf[(x, y)];
+            let mut style = cell.style();
+            style.fg = Some(blended);
+            cell.set_style(style);
+        }
+    }
+}
+
+/// Compute the comet config from the current app state. Centralizes
+/// all the "what color, what speed, which direction" logic in one
+/// place so the input renderer just calls this once.
+fn comet_config_from_state(app: &App, t: Theme, count: u32) -> CometConfig {
+    // Bash-mode detection: the user is composing a shell command
+    // (input starts with `!`). Mirrors v126's bash-mode prompt
+    // indicator. Color goes warning so the comets clearly signal
+    // "this isn't a normal prompt".
+    let bash_mode = app
+        .textarea
+        .lines()
+        .iter()
+        .next()
+        .map(|line| line.trim_start().starts_with('!'))
+        .unwrap_or(false);
+
+    // Tool-use detection: any tool currently `Running` in the most
+    // recent assistant turn (the streaming placeholder OR the last
+    // committed message). Drives the reverse-direction +
+    // warning-color override so the user sees "the model is
+    // executing something" at a glance.
+    let any_tool_running = app
+        .messages
+        .iter()
+        .rev()
+        .take(2)
+        .any(|m| {
+            m.parts.iter().any(|p| {
+                if let MessagePart::Tool(tc) = p {
+                    matches!(tc.status, ToolStatus::Running | ToolStatus::Pending)
+                } else {
+                    false
+                }
+            })
+        })
+        || !app.pending_tool_calls.is_empty();
+
+    let head_color = if bash_mode {
+        // Bash mode trumps tool-use coloring — it's the highest-
+        // signal state because it's the user's explicit choice.
+        t.warning
+    } else if any_tool_running {
+        t.warning
+    } else {
+        t.accent
+    };
+
+    // Speed = streaming velocity. Compute a rough tokens/sec rate
+    // from the cumulative output and the turn elapsed time. Map to
+    // a lap_ms with a few buckets so the speed change is
+    // perceptible (smooth interpolation reads as "did it just
+    // change?"). Resting (idle) sits at 3500ms.
+    let now = std::time::Instant::now();
+    let elapsed = app
+        .turn_started_at
+        .or(app.streaming_started_at)
+        .map(|t0| now.duration_since(t0))
+        .unwrap_or_default();
+    let secs = elapsed.as_secs_f64().max(0.5);
+    let live = app
+        .last_usage_output
+        .max((app.streaming_response_bytes / 4) as u32);
+    let rate = (live as f64) / secs;
+    let mut lap_ms: u128 = if !app.is_streaming {
+        3500
+    } else if rate > 60.0 {
+        1200 // hot: fast laps
+    } else if rate > 30.0 {
+        2000 // warm
+    } else {
+        3500 // cold / first chunks
+    };
+    // Hard env override wins regardless.
+    if let Some(forced) = std::env::var("JFC_BORDER_COMET_SPEED")
+        .ok()
+        .and_then(|s| s.parse::<u128>().ok())
+    {
+        lap_ms = forced.max(200);
+    }
+
+    let trail_len: usize = std::env::var("JFC_BORDER_COMET_TRAIL")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(6)
+        .clamp(2, 12);
+
+    // Counter-rotation is opt-in (matches v126's "two flames
+    // chasing" pattern). Off by default — single-direction reads
+    // calmer for an idle prompt.
+    let counter_rotate = matches!(
+        std::env::var("JFC_BORDER_COMET_COUNTER").as_deref(),
+        Ok("1") | Ok("true")
+    );
+
+    CometConfig {
+        count,
+        lap_ms,
+        trail_len,
+        base: t.border,
+        head: head_color,
+        counter_rotate,
+        // Tool-use reverses the base direction so the comets visibly
+        // change which way they're going — strong signal that the
+        // model is doing something the user can't see (running a
+        // tool offscreen or in a long bash).
+        reverse_base: any_tool_running && !bash_mode,
+    }
+}
+
 /// Prompt-character animation mode. Selects which glyph (or glyph
 /// cycle) appears at the start of the input. Picked by parsing the
 /// `JFC_PROMPT_CHAR` env var: a leading `:` denotes a named animation
@@ -1288,7 +1563,26 @@ fn messages(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let inner_width = area.width.saturating_sub(2) as usize;
+    // Reserve the scrollbar's 1-cell column up front so the
+    // total-lines computation uses the SAME width MessageView will
+    // actually render at. Earlier we computed total at full inner
+    // width and then chopped 1 col when the scrollbar showed —
+    // long lines wrapped at the smaller width during render but
+    // weren't counted in the wider-width total, so `follow_bottom`
+    // pinned to a position that still left the true last row
+    // offscreen until the next chunk's recompute caught up.
+    //
+    // Always reserving the column is cheap (1 col) and makes the
+    // scroll math consistent across "needs scrolling vs doesn't"
+    // states. A pure visual cost when no scrollbar is visible:
+    // ~1.5% of a 60-col message column.
+    //
+    // Total horizontal overhead for the message box:
+    //   borders (1 left + 1 right)  = 2
+    //   padding (1 left + 1 right)  = 2
+    //   scrollbar reserve           = 1
+    //                         total  = 5
+    let inner_width = area.width.saturating_sub(5) as usize;
     let total_lines = crate::message_view::message_view_total_lines(app, inner_width);
 
     app.total_lines = total_lines;
@@ -1310,41 +1604,17 @@ fn messages(f: &mut Frame, app: &mut App, area: Rect) {
         String::new()
     };
 
-    // No left-side title. The frame is just a rounded border with
-    // 1-cell horizontal padding so prose doesn't kiss the border. The
-    // right-side overflow indicator (`↓ N more`) still surfaces when
-    // the user has scrolled up — that's information the user actually
-    // needs visible. The "jfc" brand label was redundant: the user
-    // already knows they're in jfc.
+    // No left-side title, no breathing animation. The frame is
+    // just a static rounded border with 1-cell horizontal padding
+    // so prose doesn't kiss the border. The right-side overflow
+    // indicator (`↓ N more`) still surfaces when the user has
+    // scrolled up.
     //
-    // Border breathing: while streaming or compacting, the border
-    // color cycles between `t.border` (resting) and `t.accent` (lit)
-    // on a ~1.5s loop. Reads as a soft heartbeat — the whole frame
-    // feels alive without the user having to track a 1-cell glyph.
-    // Resting state is plain `t.border` so an idle session looks
-    // calm.
-    let breathing_active = (app.is_streaming || app.compacting_started_at.is_some())
-        && !crate::spinner::reduced_motion();
-    let border_color = if breathing_active {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let phase = (now.as_millis() % 1500) as f32 / 1500.0;
-        // Ease-in-out triangle so the brightest moment lingers
-        // briefly rather than spiking instantly through.
-        let intensity = if phase < 0.5 {
-            phase * 2.0
-        } else {
-            (1.0 - phase) * 2.0
-        };
-        // Cap the blend so the resting state stays the dominant
-        // color — a full-brightness border every cycle reads as
-        // strobing. 0.6 keeps the lit state distinctly the accent
-        // color while still feeling like a pulse, not a flash.
-        pulse_color(t.border, t.accent, intensity * 0.6)
-    } else {
-        t.border
-    };
+    // (Earlier this border pulsed `t.border ↔ t.accent` on a 1.5s
+    // loop while streaming. Removed at user request — the spinner
+    // row already signals streaming activity, the breathing
+    // border was decoration on top.)
+    let border_color = t.border;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1411,18 +1681,16 @@ fn messages(f: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(t.bg));
         f.render_widget(placeholder, inner);
     } else {
-        // Reserve a 1-col gutter on the right for the scrollbar so
-        // long lines don't render under it. The scrollbar itself
-        // renders the full block area (including the border) so its
-        // thumb glyphs sit on the right border line.
+        // Reserve a 1-col gutter on the right for the scrollbar
+        // ALWAYS (not just when scrollbar is visible). The total-
+        // lines computation above uses width-3 (border + scrollbar)
+        // so the rendering must use the same width or the scroll
+        // math gets off-by-N when the gutter goes from "absent" to
+        // "present" mid-stream.
         let scrollbar_visible = total_lines > visible && visible > 0;
-        let content_inner = if scrollbar_visible {
-            Rect {
-                width: inner.width.saturating_sub(1),
-                ..inner
-            }
-        } else {
-            inner
+        let content_inner = Rect {
+            width: inner.width.saturating_sub(1),
+            ..inner
         };
         MessageView { app }.render(content_inner, f.buffer_mut());
 
@@ -1658,7 +1926,21 @@ fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_id: &str) {
         ]));
     }
 
-    let total_lines = body_lines.len();
+    // Compute total *visual* rows accounting for word-wrap. Each
+    // `Line` can occupy more than one visual row when it wraps at
+    // `inner.width`. Counting logical lines (`body_lines.len()`)
+    // undercounts and makes follow_bottom stop short of the true end.
+    let render_width = inner.width;
+    let total_lines: usize = body_lines.iter().map(|line| {
+        if line.width() == 0 || render_width == 0 {
+            1
+        } else {
+            Paragraph::new(line.clone())
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .line_count(render_width)
+                .max(1)
+        }
+    }).sum();
     let visible = inner.height as usize;
 
     // Pin to bottom while the task is streaming so each new chunk is
@@ -1687,14 +1969,14 @@ fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_id: &str) {
         .style(Style::default().bg(t.bg));
         f.render_widget(placeholder, inner);
     } else {
-        let visible_lines: Vec<Line> = body_lines
-            .into_iter()
-            .skip(app.scroll_offset)
-            .take(visible)
-            .collect();
-        let para = Paragraph::new(visible_lines)
+        // Use Paragraph::scroll() instead of manual skip/take so
+        // the scroll offset operates in visual rows (matching the
+        // word-wrap-aware total_lines above). Manual skip/take
+        // operates per logical Line which desyncs when lines wrap.
+        let para = Paragraph::new(body_lines)
             .style(Style::default().bg(t.bg))
-            .wrap(ratatui::widgets::Wrap { trim: false });
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((app.scroll_offset as u16, 0));
         f.render_widget(para, inner);
     }
 }
@@ -2470,11 +2752,6 @@ fn input(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         prompt_mode_frame(&mode, streaming_for_anim, now_ms).to_string()
     };
-    // Only `:comet` gets a streak tail; other modes carry their
-    // animation in the glyph itself, so the trail is wasted real
-    // estate for them. Disable the tail when the user picks
-    // something other than the comet.
-    let show_streak_tail = matches!(mode, PromptMode::Comet);
 
     let (prompt_color, border_color) = if in_edit_mode {
         (t.warning, t.warning)
@@ -2507,87 +2784,42 @@ fn input(f: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Reserve 3 cells at the left of inner for the streak tail +
-    // comet glyph. Layout: `· · ☄ ` then the typing surface starts.
-    // (2 trail cells + the glyph cell = 3, then a space before
-    // textarea.)
-    const PROMPT_RESERVED: u16 = 4;
-    let prompt_cells_avail = inner.width.min(PROMPT_RESERVED);
-    let textarea_x = inner.x + prompt_cells_avail;
-    let textarea_w = inner.width.saturating_sub(prompt_cells_avail);
+    // Prompt strip: 2 cells reserved (glyph + trailing space).
+    let prompt_cells: u16 = 2;
+    let textarea_x = inner.x + prompt_cells.min(inner.width);
+    let textarea_w = inner.width.saturating_sub(prompt_cells);
 
-    // Paint the prompt strip on the first row of inner.
+    // Paint the prompt glyph on the first row of inner.
     if inner.height > 0 && inner.y < f.buffer_mut().area().bottom() {
-        // Streak tail intensities. While streaming, two trail cells
-        // pulse in a wave: cell 0 leads (brightest at phase=0), cell
-        // 1 follows (brightest at phase=0.33), then both fade. While
-        // idle, the trail is dark (no streak).
-        let streaming = app.is_streaming && !crate::spinner::reduced_motion();
-        let phase = if streaming {
-            ((std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-                % 800) as f32)
-                / 800.0
-        } else {
-            0.0
-        };
-        // Per-cell brightness as a wave that travels right toward
-        // the comet head. Each trail cell peaks at a different
-        // phase, so the streak reads as motion rather than blink.
-        // Disabled for non-comet modes — those carry their own
-        // animation in the glyph itself.
-        let trail_intensity = |cell_index: usize| -> f32 {
-            if !streaming || !show_streak_tail {
-                return 0.0;
-            }
-            // Cell 0 (leftmost) peaks at phase 0.0; cell 1 peaks at 0.5.
-            let peak = (cell_index as f32) * 0.5;
-            let dist = (phase - peak).abs().min((phase - peak + 1.0).abs()).min((phase - peak - 1.0).abs());
-            (1.0 - dist * 2.5).max(0.0)
-        };
         let buf = f.buffer_mut();
-        // Trail cells.
-        for i in 0..(prompt_cells_avail.saturating_sub(2)) as usize {
-            let x = inner.x + i as u16;
-            if x >= buf.area().right() {
-                break;
-            }
-            let intensity = trail_intensity(i);
-            let cell = &mut buf[(x, inner.y)];
-            if intensity > 0.05 {
-                cell.set_symbol("·");
-                let blended = pulse_color(t.surface, t.accent, intensity);
-                cell.set_style(Style::default().fg(blended).bg(t.surface));
+        // Glyph cell.
+        let glyph_x = inner.x;
+        if glyph_x < buf.area().right() {
+            let cell = &mut buf[(glyph_x, inner.y)];
+            cell.set_symbol(&prompt_char);
+            let invert = matches!(
+                std::env::var("JFC_PROMPT_INVERT").as_deref(),
+                Ok("1") | Ok("true")
+            );
+            let style = if invert {
+                Style::default()
+                    .fg(t.surface)
+                    .bg(prompt_color)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                cell.set_symbol(" ");
-                cell.set_style(Style::default().bg(t.surface));
-            }
+                Style::default()
+                    .fg(prompt_color)
+                    .bg(t.surface)
+                    .add_modifier(Modifier::BOLD)
+            };
+            cell.set_style(style);
         }
-        // Comet glyph in cell `prompt_cells_avail - 2`.
-        if prompt_cells_avail >= 2 {
-            let comet_x = inner.x + prompt_cells_avail - 2;
-            if comet_x < buf.area().right() {
-                let cell = &mut buf[(comet_x, inner.y)];
-                cell.set_symbol(&prompt_char);
-                cell.set_style(
-                    Style::default()
-                        .fg(prompt_color)
-                        .bg(t.surface)
-                        .add_modifier(Modifier::BOLD),
-                );
-            }
-        }
-        // Trailing space before the textarea so the glyph isn't
-        // glued to the user's first char.
-        if prompt_cells_avail >= 1 {
-            let space_x = inner.x + prompt_cells_avail - 1;
-            if space_x < buf.area().right() {
-                let cell = &mut buf[(space_x, inner.y)];
-                cell.set_symbol(" ");
-                cell.set_style(Style::default().bg(t.surface));
-            }
+        // Trailing space so the glyph isn't glued to text.
+        let space_x = inner.x + 1;
+        if space_x < buf.area().right() {
+            let cell = &mut buf[(space_x, inner.y)];
+            cell.set_symbol(" ");
+            cell.set_style(Style::default().bg(t.surface));
         }
     }
 
@@ -2704,7 +2936,7 @@ fn input_soft_wrapped_lines(app: &App, content_width: usize) -> (Vec<String>, us
     let mut visual_cursor_col = 0usize;
 
     if logical_lines.iter().all(|line| line.is_empty()) {
-        out.push("Type a message… (Enter to send, Shift+Enter for newline)".to_string());
+        out.push("send a message…".to_string());
         return (out, 0, 0);
     }
 
@@ -2740,102 +2972,32 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
 
     let msg_count = app.messages.iter().filter(|m| m.role == Role::User).count();
 
-    // OAuth profile badge: subscription_type ("max"/"pro"/…) and seat_tier when set.
-    // Only shown if the profile fetch succeeded — otherwise the bar stays terse.
-    let profile_badge = match (&app.subscription_type, &app.seat_tier) {
-        (Some(sub), Some(tier)) => format!("  {}·{}", sub, tier),
-        (Some(sub), None) => format!("  {}", sub),
-        (None, Some(tier)) => format!("  {}", tier),
-        (None, None) => String::new(),
-    };
+    // Build status badges in priority order. Each badge is a short
+    // string fragment; we join them with a `·` separator and truncate
+    // from the right so low-priority badges drop first at narrow
+    // widths while the model name and git branch always show.
+    let mut badges: Vec<String> = Vec::new();
 
-    let mode_badge = match app.permission_mode {
-        crate::app::PermissionMode::Default => String::new(),
-        mode => format!("  {} {}", mode.symbol(), mode.label()),
-    };
+    // Model is always shown (highest priority)
+    badges.push(app.model.to_string());
 
-    // v126 input queueing: show how many prompts the user has queued behind
-    // the active stream. They render in the transcript with a `⏳` prefix and
-    // get drained when the turn ends.
-    let queue_badge = if !app.queued_prompts.is_empty() {
-        format!("  ⏳ {} queued", app.queued_prompts.len())
-    } else {
-        String::new()
-    };
+    // OAuth profile
+    match (&app.subscription_type, &app.seat_tier) {
+        (Some(sub), Some(tier)) => badges.push(format!("{}·{}", sub, tier)),
+        (Some(sub), None) => badges.push(sub.clone()),
+        (None, Some(tier)) => badges.push(tier.clone()),
+        (None, None) => {}
+    }
 
-    let leader_badge = if app.leader_key_active {
-        "  [^X …]".to_string()
-    } else if app.viewing_task_id.is_some() {
-        "  [task view]".to_string()
-    } else {
-        String::new()
-    };
+    // Permission mode (only non-default)
+    match app.permission_mode {
+        crate::app::PermissionMode::Default => {}
+        mode => badges.push(format!("{} {}", mode.symbol(), mode.label())),
+    }
 
-    // Surface active worktrees so the user knows isolation is in
-    // effect. The count is refreshed by the Tick handler (≈ once per
-    // second) into `app.worktree_count`; reading it here is just a
-    // field load, so render stays cheap.
-    let worktree_badge = if app.worktree_count > 0 {
-        format!("  ⌥ {} wt", app.worktree_count)
-    } else {
-        String::new()
-    };
-    // Git branch indicator. Truncated to 24 chars so a long
-    // branch name (`feat/some-feature-name-someone-typed-out`)
-    // doesn't push the rest of the status off-screen.
-    // Rolling session cost. Hidden when zero so unauth/free runs
-    // don't show a constant `$0.00`. Two decimal places when
-    // <$10, three when smaller so a $0.003 turn is still visible.
-    // In-flight subagents — same count the spinner-row shows but
-    // surfaced in the status bar so it's visible even when the user
-    // is not actively streaming. `Running` rather than total because
-    // completed background tasks don't deserve continued attention.
-    let active_subagents = app
-        .background_tasks
-        .values()
-        .filter(|bt| bt.status.is_alive())
-        .count();
-    let agents_badge = if active_subagents > 0 {
-        format!("  ⏵ {active_subagents}")
-    } else {
-        String::new()
-    };
-    // Pending tool approvals: the user has tools queued behind a
-    // modal. Without the badge they can't tell from a glance whether
-    // there's still input waiting on them mid-turn.
-    let approval_count = app
-        .approval_queue
-        .len()
-        + if app.pending_approval.is_some() { 1 } else { 0 };
-    let approvals_badge = if approval_count > 0 {
-        format!("  ⏸ {approval_count}")
-    } else {
-        String::new()
-    };
-
-    // Auto-save badge — flashes briefly each time the session is
-    // written. Tells the user their work is being persisted without
-    // them having to check a file manager. Fades after 2s so the
-    // status bar isn't permanently cluttered.
-    let saved_badge = match app.last_session_save_at {
-        Some(t) if t.elapsed().as_millis() < 2000 => "  ✓ saved".to_string(),
-        _ => String::new(),
-    };
-
-    let cost_total = crate::cost::total_cost(&app.usage_by_model);
-    let cost_badge = if cost_total > 0.001 {
-        if cost_total < 0.01 {
-            format!("  $ {:.4}", cost_total)
-        } else if cost_total < 10.0 {
-            format!("  $ {:.3}", cost_total)
-        } else {
-            format!("  $ {:.2}", cost_total)
-        }
-    } else {
-        String::new()
-    };
-    let git_badge = match app.git_branch.as_deref() {
-        Some(branch) if !branch.is_empty() => {
+    // Git branch
+    if let Some(branch) = app.git_branch.as_deref() {
+        if !branch.is_empty() {
             let trimmed: String = if branch.chars().count() > 24 {
                 let mut s: String = branch.chars().take(23).collect();
                 s.push('…');
@@ -2843,41 +3005,83 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 branch.to_owned()
             };
-            format!("  ⎇ {}", trimmed)
+            badges.push(format!("⎇ {}", trimmed));
         }
-        _ => String::new(),
-    };
+    }
 
-    let left = format!(
-        " {}{}{}{}{}{}{}{}{}{}{}  {}  {} msgs ",
-        app.model,
-        profile_badge,
-        mode_badge,
-        queue_badge,
-        leader_badge,
-        worktree_badge,
-        agents_badge,
-        approvals_badge,
-        git_badge,
-        cost_badge,
-        saved_badge,
-        cwd_display,
-        msg_count
-    );
+    // Cost
+    let cost_total = crate::cost::total_cost(&app.usage_by_model);
+    if cost_total > 0.001 {
+        let cost_str = if cost_total < 0.01 {
+            format!("${:.4}", cost_total)
+        } else if cost_total < 10.0 {
+            format!("${:.3}", cost_total)
+        } else {
+            format!("${:.2}", cost_total)
+        };
+        badges.push(cost_str);
+    }
+
+    // Leader key / task view state
+    if app.leader_key_active {
+        badges.push("[^X …]".to_string());
+    } else if app.viewing_task_id.is_some() {
+        badges.push("[task view]".to_string());
+    }
+
+    // Active subagents
+    let active_subagents = app
+        .background_tasks
+        .values()
+        .filter(|bt| bt.status.is_alive())
+        .count();
+    if active_subagents > 0 {
+        badges.push(format!("⏵ {active_subagents}"));
+    }
+
+    // Worktrees
+    if app.worktree_count > 0 {
+        badges.push(format!("⌥ {} wt", app.worktree_count));
+    }
+
+    // Queued prompts
+    if !app.queued_prompts.is_empty() {
+        badges.push(format!("⏳ {} queued", app.queued_prompts.len()));
+    }
+
+    // Pending approvals
+    let approval_count = app.approval_queue.len()
+        + if app.pending_approval.is_some() { 1 } else { 0 };
+    if approval_count > 0 {
+        badges.push(format!("⏸ {approval_count}"));
+    }
+
+    // Auto-save flash
+    if let Some(save_t) = app.last_session_save_at {
+        if save_t.elapsed().as_millis() < 2000 {
+            badges.push("✓ saved".to_string());
+        }
+    }
+
+    // Cwd + message count (lowest priority — dropped first at narrow widths)
+    badges.push(format!("{} · {} msgs", cwd_display, msg_count));
+
     // Single right-hand hint: the palette key. All other shortcuts are
     // discoverable inside the palette itself (Ctrl+P) — keeping just one
-    // pointer here de-clutters the status row and matches v126's layout
-    // where the bottom rail only points to the command index.
-    let right = " ? help · Ctrl+P palette ";
+    // pointer here de-clutters the status row and matches v126's layout.
+    let right = " ? help · ^P palette ";
 
     let total_width = area.width as usize;
     let right_start = total_width.saturating_sub(right.len());
-    let left_chars: usize = left.chars().count();
+
+    // Join badges with ` · ` separator, then truncate to fit.
+    let left_full = format!(" {} ", badges.join(" · "));
+    let left_chars: usize = left_full.chars().count();
     let left_truncated = if left_chars > right_start.saturating_sub(1) {
-        let truncated: String = left.chars().take(right_start.saturating_sub(2)).collect();
+        let truncated: String = left_full.chars().take(right_start.saturating_sub(2)).collect();
         format!("{truncated}…")
     } else {
-        left
+        left_full
     };
 
     let padding = " ".repeat(right_start.saturating_sub(left_truncated.chars().count()));
