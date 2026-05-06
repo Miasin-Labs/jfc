@@ -34,6 +34,72 @@ fn get_or_build_graph_session(cwd: &std::path::Path) -> Arc<jfc_graph::session::
     session
 }
 
+/// Process-global market orchestrator — task 14/15 from the
+/// agent-economy plan. Holds bounty state, ledger, trust scores,
+/// charter, collusion detector. One per process so consecutive
+/// `post_bounty` / `market_status` calls see consistent state and
+/// trust accumulates across bounties. Initialized lazily with the
+/// charter's defaults; user-tunable via `JFC_MARKET_BUDGET` env var
+/// (defaults to 100_000 tokens — the v131 auto-compact threshold).
+fn market_orchestrator() -> &'static std::sync::Mutex<jfc_economy::orchestrator::MarketOrchestrator> {
+    static M: OnceLock<std::sync::Mutex<jfc_economy::orchestrator::MarketOrchestrator>> = OnceLock::new();
+    M.get_or_init(|| {
+        let charter = jfc_economy::charter::Charter::default();
+        let budget = std::env::var("JFC_MARKET_BUDGET")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(100_000);
+        std::sync::Mutex::new(
+            jfc_economy::orchestrator::MarketOrchestrator::with_budget(charter, budget)
+        )
+    })
+}
+
+/// Companion collusion detector for the orchestrator. Kept separate
+/// because `MarketReport::generate` takes them as distinct args.
+fn collusion_detector() -> &'static std::sync::Mutex<jfc_economy::collusion::CollusionDetector> {
+    static C: OnceLock<std::sync::Mutex<jfc_economy::collusion::CollusionDetector>> = OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(jfc_economy::collusion::CollusionDetector::default()))
+}
+
+/// Render the current market report as the multi-line string used
+/// by both the `market_status` tool and the `/market` slash command.
+/// Pulled out so the slash command and the tool stay in sync — any
+/// future field added to the report appears in both surfaces.
+pub fn market_report_string() -> Result<String, String> {
+    let orch = market_orchestrator()
+        .lock()
+        .map_err(|e| format!("market orchestrator mutex poisoned: {e}"))?;
+    let detector = collusion_detector()
+        .lock()
+        .map_err(|e| format!("collusion detector mutex poisoned: {e}"))?;
+    let report = jfc_economy::reporting::MarketReport::generate(&orch, &detector, 0, 0);
+    let mut body = format!(
+        "**Agent economy snapshot**\n\n\
+         - Bounties: {} total ({} active)\n\
+         - Spend: {} tok used / {} tok remaining\n\
+         - Health (composite): {:.2}{}\n  \
+           efficiency={:.2} · fairness={:.2} · trust={:.2} · budget={:.2}",
+        report.total_bounties,
+        report.active_bounties,
+        report.total_spent,
+        report.remaining_budget,
+        report.health.composite,
+        if report.health.is_critical() { " **[CRITICAL]**" } else { "" },
+        report.health.efficiency,
+        report.health.fairness,
+        report.health.trust,
+        report.health.budget_adherence,
+    );
+    if !report.flagged_agents.is_empty() {
+        body.push_str("\n\n**Flagged agents:**");
+        for f in &report.flagged_agents {
+            body.push_str(&format!("\n- {f}"));
+        }
+    }
+    Ok(body)
+}
+
 /// Drop the cached graph for `cwd` (or every cached graph when `cwd` is
 /// `None`). Called after writes so the next graph query re-parses the
 /// affected file. Cheap — actual rebuild only happens on the next query.
@@ -656,6 +722,61 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
                 "required": ["handle", "new_content"]
             }),
         },
+        ToolDef {
+            name: "post_bounty".into(),
+            description: "Post a coding-task bounty into the agent economy. \
+                Multiple solver agents will compete to produce solutions; \
+                validator agents will adversarially challenge each one; \
+                only solutions surviving validation are returned. Use this \
+                for tasks where you want a *robust* result (multiple \
+                independent attempts + adversarial review) rather than \
+                a single-shot edit. Budget is tracked as real LLM tokens — \
+                the orchestrator's CFO gates spending so the market can't \
+                exceed it. After posting, run `market_status` (or \
+                /market) to inspect state, queued bids, and the composite \
+                health score (efficiency × fairness × trust × budget).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "What the task is. Concrete and self-contained — solvers won't see the surrounding conversation."
+                    },
+                    "budget": {
+                        "type": "number",
+                        "description": "Token budget for the entire bounty (all solvers + validators combined). Hard cap, enforced at runtime."
+                    },
+                    "acceptance_criteria": {
+                        "type": "string",
+                        "description": "Mechanistic pass/fail criteria — preferably commands like `cargo test --lib foo` that produce binary outcomes. Avoid soft criteria; agents will game them."
+                    },
+                    "max_solvers": {
+                        "type": "number",
+                        "description": "Optional cap on competing solvers (default from charter, typically 3). Range 1-5."
+                    }
+                },
+                "required": ["description", "budget", "acceptance_criteria"]
+            }),
+        },
+        ToolDef {
+            name: "market_status".into(),
+            description: "Read the agent economy's current state. Returns \
+                bounty count, spend, composite health score (efficiency × \
+                fairness × trust × budget; <0.3 = CRITICAL), and any agents \
+                flagged for collusion / rubber-stamping / griefing. \
+                Optionally pass `bounty_id` to get the specific bounty's \
+                phase (Posting / Bidding / Executing / Validating / \
+                Settling / Complete).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "bounty_id": {
+                        "type": "string",
+                        "description": "Optional bounty ID to drill into. Omit for global market summary."
+                    }
+                }
+            }),
+        },
     ]
 }
 
@@ -1207,6 +1328,86 @@ pub async fn execute_tool(
                 entry.file_path.display(),
                 cascade_summary
             ))
+        }
+        (
+            ToolKind::PostBounty,
+            ToolInput::PostBounty {
+                description,
+                budget,
+                acceptance_criteria,
+                max_solvers,
+            },
+        ) => {
+            // The orchestrator's lock is process-global; only one
+            // post_bounty runs at a time. That's fine — bounties are
+            // posted in the LLM's main loop, not from concurrent
+            // subagents. If two tool calls race, the second waits.
+            let mut orch = match market_orchestrator().lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    return ExecutionResult::failure(format!(
+                        "market orchestrator mutex poisoned: {e}"
+                    ));
+                }
+            };
+            match orch.post_bounty(description, budget, acceptance_criteria, max_solvers) {
+                Ok(id) => ExecutionResult::success(format!(
+                    "Posted bounty `{id}` (budget {budget} tok, max solvers \
+                     {}). State: Open. Use market_status to inspect.",
+                    max_solvers
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| orch.charter().max_solvers.to_string())
+                )),
+                Err(e) => ExecutionResult::failure(format!("post_bounty failed: {e}")),
+            }
+        }
+        (ToolKind::MarketStatus, ToolInput::MarketStatus { bounty_id }) => {
+            let orch = match market_orchestrator().lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    return ExecutionResult::failure(format!(
+                        "market orchestrator mutex poisoned: {e}"
+                    ));
+                }
+            };
+            let detector = match collusion_detector().lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    return ExecutionResult::failure(format!(
+                        "collusion detector mutex poisoned: {e}"
+                    ));
+                }
+            };
+            let report = jfc_economy::reporting::MarketReport::generate(&orch, &detector, 0, 0);
+            let critical = report.health.is_critical();
+            let mut body = format!(
+                "Market: {} bounties total ({} active) · spent {} / remaining {} tok\n\
+                 Health: composite={:.2} (eff={:.2}, fair={:.2}, trust={:.2}, budget={:.2})",
+                report.total_bounties,
+                report.active_bounties,
+                report.total_spent,
+                report.remaining_budget,
+                report.health.composite,
+                report.health.efficiency,
+                report.health.fairness,
+                report.health.trust,
+                report.health.budget_adherence,
+            );
+            if critical {
+                body.push_str(" [CRITICAL]");
+            }
+            if !report.flagged_agents.is_empty() {
+                body.push_str("\nFlagged agents:");
+                for f in &report.flagged_agents {
+                    body.push_str(&format!("\n  - {f}"));
+                }
+            }
+            if let Some(id) = bounty_id
+                && let Some(state) = orch.bounty_state(&id)
+            {
+                body.push_str(&format!("\nBounty `{id}` state: {state:?}"));
+            }
+            ExecutionResult::success(body)
         }
         (kind, _) => ExecutionResult::failure(format!("Tool {:?} not yet implemented", kind)),
     }
@@ -2646,6 +2847,8 @@ mod tests {
             "TeamMemberMode",
             "graph_query",
             "symbol_edit",
+            "post_bounty",
+            "market_status",
         ] {
             assert!(
                 names.contains(&required),
@@ -2708,9 +2911,19 @@ mod tests {
         }
     }
 
+    /// Serialize tests touching the process-global auto_context_queue
+    /// so they can't race each other (one test's `drain_auto_context_
+    /// queue()` would otherwise wipe another test's queued path
+    /// mid-assertion). Same pattern used by graph_history_test_lock.
+    fn auto_context_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     // Normal: empty queue means no block to inject. Render returns None.
     #[test]
     fn auto_context_empty_queue_returns_none_normal() {
+        let _g = auto_context_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         drain_auto_context_queue();
         let fixtures = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -2724,6 +2937,7 @@ mod tests {
     // file in three consecutive turns).
     #[test]
     fn record_edited_file_dedupes_robust() {
+        let _g = auto_context_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         drain_auto_context_queue();
         let p = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
         record_edited_file(p);
@@ -2738,6 +2952,7 @@ mod tests {
     // don't want the same file's callers re-injected on every turn).
     #[test]
     fn render_auto_context_drains_queue_normal() {
+        let _g = auto_context_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         drain_auto_context_queue();
         let p = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
         record_edited_file(p);
@@ -2760,6 +2975,7 @@ mod tests {
     // catch a regression where the query runs but produces no rows.
     #[test]
     fn render_auto_context_emits_rows_when_callers_exist_normal() {
+        let _g = auto_context_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         drain_auto_context_queue();
         let fixtures = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -2793,6 +3009,7 @@ mod tests {
     // grow without bound.
     #[test]
     fn render_auto_context_respects_size_cap_robust() {
+        let _g = auto_context_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         drain_auto_context_queue();
         let fixtures = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -2882,6 +3099,111 @@ mod tests {
             "test cascade for leaf",
         );
         assert!(tasks.is_empty(), "leaf must yield empty cascade");
+    }
+
+    // ─── agent economy wiring (PostBounty / MarketStatus) ─────────────
+
+    /// Tests against the process-global market orchestrator must serialize
+    /// through this lock — same pattern as graph_history. Otherwise the
+    /// posted-bounty count test races with the report-format test.
+    fn market_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    // Normal: the two market tools appear in the canonical-tool list
+    // (already covered by the broader catalogue test, but call it out
+    // explicitly so a regression on either name fails clearly).
+    #[test]
+    fn market_tools_in_catalogue_normal() {
+        let defs = all_tool_defs();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"post_bounty"));
+        assert!(names.contains(&"market_status"));
+    }
+
+    // Normal: market_report_string returns a well-formed snapshot
+    // string with the expected section headers — this is the same
+    // string the /market slash command surfaces, so a regression here
+    // breaks both the tool and the slash command.
+    #[test]
+    fn market_report_string_has_expected_sections_normal() {
+        let _g = market_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let body = market_report_string().expect("market report must render");
+        assert!(body.contains("Agent economy snapshot"));
+        assert!(body.contains("Bounties:"));
+        assert!(body.contains("Spend:"));
+        assert!(body.contains("Health"));
+    }
+
+    // Normal: posting a bounty via the tool dispatcher actually
+    // increments the orchestrator's bounty count. End-to-end smoke
+    // test that the wiring (ToolKind → ToolInput → execute_tool →
+    // orchestrator) is connected.
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_bounty_dispatch_increments_market_normal() {
+        let _g = market_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let before = {
+            let orch = market_orchestrator().lock().expect("orch lock");
+            orch.bounties.audit_log().len()
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let res = execute_tool(
+            crate::types::ToolKind::PostBounty,
+            crate::types::ToolInput::PostBounty {
+                description: "test bounty".into(),
+                budget: 100,
+                acceptance_criteria: "cargo test".into(),
+                max_solvers: Some(2),
+            },
+            cwd,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!res.is_error(), "post_bounty should succeed: {}", res.output);
+        let after = {
+            let orch = market_orchestrator().lock().expect("orch lock");
+            orch.bounties.audit_log().len()
+        };
+        assert!(
+            after > before,
+            "audit log should grow ({before} → {after})"
+        );
+    }
+
+    // Robust: post_bounty rejects requests that exceed
+    // charter.max_budget_per_bounty. The tool must surface the
+    // error string rather than silently capping or panicking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_bounty_rejects_oversized_budget_robust() {
+        let _g = market_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let cap = {
+            let orch = market_orchestrator().lock().expect("orch lock");
+            orch.charter().max_budget_per_bounty
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let res = execute_tool(
+            crate::types::ToolKind::PostBounty,
+            crate::types::ToolInput::PostBounty {
+                description: "oversized".into(),
+                budget: cap + 1,
+                acceptance_criteria: "any".into(),
+                max_solvers: None,
+            },
+            cwd,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(res.is_error(), "should reject over-cap budget");
+        assert!(
+            res.output.contains("budget exceeded") || res.output.contains("BudgetExceeded"),
+            "error should mention budget cap: {}",
+            res.output
+        );
     }
 
     // ─── outgoing call predicates (preconditions analysis) ────────────

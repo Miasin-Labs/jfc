@@ -978,6 +978,15 @@ fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
         ToolInput::SymbolEdit { handle, .. } => SerializedToolInput::Generic {
             summary: format!("SymbolEdit: {handle}"),
         },
+        ToolInput::PostBounty { description, budget, .. } => SerializedToolInput::Generic {
+            summary: format!("PostBounty({budget} tok): {}", description.chars().take(60).collect::<String>()),
+        },
+        ToolInput::MarketStatus { bounty_id } => SerializedToolInput::Generic {
+            summary: match bounty_id {
+                Some(id) => format!("MarketStatus: {id}"),
+                None => "MarketStatus".into(),
+            },
+        },
         ToolInput::Generic { summary } => SerializedToolInput::Generic {
             summary: summary.clone(),
         },

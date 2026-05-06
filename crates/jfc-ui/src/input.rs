@@ -2636,6 +2636,17 @@ fn handle_slash_command(
             app.messages.push(ChatMessage::user("/agents".into()));
             app.messages.push(ChatMessage::assistant(body));
         }
+        "/market" => {
+            // Surface the agent-economy snapshot — same data the
+            // `market_status` tool returns, but framed for the user
+            // rather than the model. No bounty_id filter for now.
+            let report_str = match crate::tools::market_report_string() {
+                Ok(s) => s,
+                Err(e) => format!("Market unavailable: {e}"),
+            };
+            app.messages.push(ChatMessage::user("/market".into()));
+            app.messages.push(ChatMessage::assistant(report_str));
+        }
         "/cascade" => {
             // Filter the task store for cascade-tagged entries
             // produced by symbol_edit's `dispatch_cascade=true`. The
@@ -5488,6 +5499,31 @@ mod tests {
         let mut app = test_app();
         run_slash_command(&mut app, "/swarm-deny abc-123");
         assert!(!app.messages.is_empty());
+    }
+
+    // Normal: /market renders the agent-economy snapshot via the
+    // shared market_report_string helper. Even with no bounties
+    // posted, the report has the standard headers.
+    #[test]
+    fn slash_market_renders_snapshot_normal() {
+        let mut app = test_app();
+        run_slash_command(&mut app, "/market");
+        assert!(!app.messages.is_empty());
+        let body: String = app
+            .messages
+            .last()
+            .unwrap()
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                crate::types::MessagePart::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            body.contains("Agent economy snapshot") || body.contains("Market unavailable"),
+            "expected snapshot or error, got: {body}"
+        );
     }
 
     // Normal: /cascade with no cascade-tagged tasks shows the empty-

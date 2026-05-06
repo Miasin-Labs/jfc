@@ -66,6 +66,7 @@ libc = "0.2.186"
 # `JFC_DISABLE_NOTIFICATIONS=1` so headless / SSH sessions don't error.
 notify-rust = { version = "4", default-features = false, features = ["d"] }
 jfc-graph = { path = "../jfc-graph" }
+jfc-economy = { path = "../jfc-economy" }
 
 [build-dependencies]
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "regex-onig", "yaml-load", "dump-create", "dump-load"] }

@@ -437,6 +437,8 @@ pub enum ToolKind {
     /// respawning it.
     TeamMemberMode,
     /// Query the code graph using pipe-based DSL.
+    PostBounty,
+    MarketStatus,
     GraphQuery,
     /// Edit code by symbol handle (semantic editing).
     SymbolEdit,
@@ -541,6 +543,17 @@ pub enum ToolInput {
     GraphQuery {
         query: String,
         max_tokens: Option<usize>,
+    },
+    PostBounty {
+        description: String,
+        budget: u64,
+        acceptance_criteria: String,
+        #[serde(default)]
+        max_solvers: Option<u8>,
+    },
+    MarketStatus {
+        #[serde(default)]
+        bounty_id: Option<String>,
     },
     SymbolEdit {
         handle: String,
@@ -854,6 +867,8 @@ impl ToolKind {
             "teammembermode" => Self::TeamMemberMode,
             "graphquery" => Self::GraphQuery,
             "symboledit" => Self::SymbolEdit,
+            "postbounty" | "post_bounty" => Self::PostBounty,
+            "marketstatus" | "market_status" => Self::MarketStatus,
             _ => Self::Generic(name.to_owned()),
         }
     }
@@ -882,6 +897,8 @@ impl ToolKind {
             Self::TeamMemberMode => "TeamMemberMode",
             Self::GraphQuery => "GraphQuery",
             Self::SymbolEdit => "SymbolEdit",
+            Self::PostBounty => "PostBounty",
+            Self::MarketStatus => "MarketStatus",
             Self::Generic(name) => name.as_str(),
         }
     }
@@ -910,6 +927,8 @@ impl ToolKind {
             Self::TeamMemberMode => "TeamMemberMode",
             Self::GraphQuery => "graph_query",
             Self::SymbolEdit => "symbol_edit",
+            Self::PostBounty => "post_bounty",
+            Self::MarketStatus => "market_status",
             Self::Generic(name) => name.as_str(),
         }
     }
@@ -979,6 +998,13 @@ impl ToolInput {
             }
             Self::GraphQuery { query, .. } => query.clone(),
             Self::SymbolEdit { handle, .. } => format!("edit: {handle}"),
+            Self::PostBounty { description, budget, .. } => {
+                format!("bounty ({budget} tok): {}", description.chars().take(60).collect::<String>())
+            }
+            Self::MarketStatus { bounty_id } => match bounty_id {
+                Some(id) => format!("market status: {id}"),
+                None => "market status".into(),
+            },
             Self::Generic { summary } => summary.clone(),
         }
     }
@@ -1132,6 +1158,24 @@ impl ToolInput {
                 new_content: str_field("new_content"),
                 validate: bool_field("validate"),
                 dispatch_cascade: bool_field("dispatch_cascade"),
+            },
+            ToolKind::PostBounty => Self::PostBounty {
+                description: str_field("description"),
+                budget: obj
+                    .and_then(|m| m.get("budget"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                acceptance_criteria: str_field("acceptance_criteria"),
+                max_solvers: obj
+                    .and_then(|m| m.get("max_solvers"))
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.min(255) as u8),
+            },
+            ToolKind::MarketStatus => Self::MarketStatus {
+                bounty_id: obj
+                    .and_then(|m| m.get("bounty_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
             },
             ToolKind::Generic(_) => Self::Generic {
                 summary: v.to_string(),
@@ -1344,6 +1388,24 @@ impl ToolInput {
                 }
                 if *dispatch_cascade {
                     v["dispatch_cascade"] = json!(true);
+                }
+                v
+            }
+            Self::PostBounty { description, budget, acceptance_criteria, max_solvers } => {
+                let mut v = json!({
+                    "description": description,
+                    "budget": budget,
+                    "acceptance_criteria": acceptance_criteria,
+                });
+                if let Some(n) = max_solvers {
+                    v["max_solvers"] = json!(n);
+                }
+                v
+            }
+            Self::MarketStatus { bounty_id } => {
+                let mut v = json!({});
+                if let Some(id) = bounty_id {
+                    v["bounty_id"] = json!(id);
                 }
                 v
             }
