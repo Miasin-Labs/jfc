@@ -410,24 +410,22 @@ impl<'a> RenderItem<'a> {
                 if skip > 0 || area.height == 0 {
                     return;
                 }
-                if area.x < buf.area().right() && area.y < buf.area().bottom() {
-                    let cell = &mut buf[(area.x, area.y)];
-                    cell.set_symbol("▌");
-                    cell.set_style(Style::default().fg(*kind_color));
-                }
+                // No leading gutter glyph — the `▶ N reads ·` text
+                // already reads as a teaser. The `▶` triangle marks
+                // it as expandable; kind color goes on the count
+                // text. Same simplification as the other tool paths.
                 let plural = if *count == 1 {
                     kind_label.clone()
                 } else {
                     format!("{}s", kind_label.to_lowercase())
                 };
                 let row = Rect {
-                    x: area.x + 1,
+                    x: area.x,
                     y: area.y,
-                    width: area.width.saturating_sub(1),
+                    width: area.width,
                     height: 1,
                 };
                 Paragraph::new(Line::from(vec![
-                    Span::styled("▶ ", Style::default().fg(t.text_muted)),
                     Span::styled(
                         format!("{count} {plural}"),
                         Style::default()
@@ -846,26 +844,17 @@ fn render_tool_block(app: &App, tool: &ToolCall, area: Rect, t: Theme, buf: &mut
 
     if tool.is_collapsed {
         if skip == 0 {
-            let kind_color = tool_kind_color(&tool.kind, &t);
-            let gutter_color = match tool.status {
-                ToolStatus::Pending => t.warning,
-                ToolStatus::Running => kind_color,
-                ToolStatus::Complete => kind_color,
-                ToolStatus::Failed => t.error,
-            };
-            if area.x < buf.area().right() && area.y < buf.area().bottom() {
-                let cell = &mut buf[(area.x, area.y)];
-                cell.set_symbol("▌");
-                cell.set_style(Style::default().fg(gutter_color));
-            }
+            // Collapsed-tool header: no gutter glyph (matching the
+            // expanded path). The header itself includes the status
+            // icon and kind-colored title which carry the same info.
             let header = build_collapsed_header(tool, &t, area.width as usize);
             Paragraph::new(header)
                 .style(Style::default().bg(t.bg))
                 .render(
                     Rect {
-                        x: area.x + 1,
+                        x: area.x,
                         y: area.y,
-                        width: area.width.saturating_sub(1),
+                        width: area.width,
                         height: 1,
                     },
                     buf,
@@ -885,42 +874,18 @@ fn render_tool_block(app: &App, tool: &ToolCall, area: Rect, t: Theme, buf: &mut
         return;
     }
 
-    // ─── Left gutter frame ───────────────────────────────────────────────
-    // Draw a colored vertical bar down the left edge of the block,
-    // tinted to the tool's status. This frames the tool block as a
-    // distinct visual unit (Read, Edit, Bash, …) rather than letting
-    // its body bleed into surrounding prose. Mirrors Claude Code's
-    // tool-block frame from `MessageResponse.tsx`. Status color cycles
-    // with the same frame index as the bullet so a running tool's
-    // gutter pulses in lockstep with its glyph.
-    // Gutter color blends tool-kind identity with status: Failed
-    // forces red regardless of kind (a failed Bash should still read
-    // as failed), Running pulses between the kind color and muted,
-    // Complete uses the kind color directly, Pending uses warning.
-    let kind_color = tool_kind_color(&tool.kind, &t);
-    let gutter_color = match tool.status {
-        ToolStatus::Pending => t.warning,
-        ToolStatus::Running => {
-            let pulse = (frame_idx / 2) % 2 == 0;
-            if pulse { kind_color } else { t.text_muted }
-        }
-        ToolStatus::Complete => kind_color,
-        ToolStatus::Failed => t.error,
-    };
-    let gutter_style = Style::default().fg(gutter_color);
-    for row in 0..(full_h.saturating_sub(skip as u16)).min(area.height) {
-        if area.x >= buf.area().right() {
-            break;
-        }
-        let cell = &mut buf[(area.x, area.y + row)];
-        cell.set_symbol("▌");
-        cell.set_style(gutter_style);
-    }
+    // No more full-height left gutter bar. The tool's identity is
+    // already shown three different ways — title text (`Bash(...)`,
+    // `Read(...)`), the status icon (`●`/`○`/`✓`/`✘`), and the
+    // kind-colored title — so painting a fourth signal as a column
+    // down the left edge was redundant decoration. Same problem
+    // the sidebar gutters had. v126's actual tool rendering uses
+    // just title-line + indent; mirroring that here.
 
     // Sparkle on tool complete: when this tool just finished
-    // successfully, flash a `✦` to the *left* of the gutter for
-    // 600ms with a fade. Reduced-motion skips it. Skip when skip>0
-    // (we're scrolled past the tool head and the sparkle is offscreen).
+    // successfully, flash a `✦` next to the title for 600ms with a
+    // fade. Reduced-motion skips it. Now sits at column 0 (where
+    // the gutter used to be) since there's no bar to compete with.
     if skip == 0
         && matches!(tool.status, crate::types::ToolStatus::Complete)
         && !crate::spinner::reduced_motion()
@@ -929,14 +894,10 @@ fn render_tool_block(app: &App, tool: &ToolCall, area: Rect, t: Theme, buf: &mut
             if id == &tool.id {
                 let age = when.elapsed();
                 if age < std::time::Duration::from_millis(600) {
-                    let intensity =
-                        1.0 - (age.as_millis() as f32 / 600.0);
-                    if area.x > 0 {
-                        let cell = &mut buf[(area.x - 1, area.y)];
+                    let intensity = 1.0 - (age.as_millis() as f32 / 600.0);
+                    if area.x < buf.area().right() {
+                        let cell = &mut buf[(area.x, area.y)];
                         cell.set_symbol("✦");
-                        // Fade from accent → bg as the sparkle
-                        // expires. The bg stop produces a clean
-                        // disappearance instead of a hard cut.
                         let blended = crate::render::pulse_color_pub(
                             t.bg, t.accent, intensity,
                         );
@@ -952,16 +913,16 @@ fn render_tool_block(app: &App, tool: &ToolCall, area: Rect, t: Theme, buf: &mut
         &t,
         status_icon,
         status_style,
-        area.width.saturating_sub(3) as usize,
+        area.width.saturating_sub(2) as usize,
     );
 
-    // Title sits one column to the right of the gutter so it doesn't
-    // collide with the bar.
+    // Title now sits at column 0 (no gutter to dodge). The status
+    // icon at the start of `title_spans` is the visual anchor.
     if skip == 0 && area.height > 0 {
         let title_area = Rect {
-            x: area.x + 1,
+            x: area.x,
             y: area.y,
-            width: area.width.saturating_sub(1),
+            width: area.width,
             height: 1,
         };
         Paragraph::new(Line::from(title_spans))
@@ -976,8 +937,11 @@ fn render_tool_block(app: &App, tool: &ToolCall, area: Rect, t: Theme, buf: &mut
     if content_h == 0 {
         return;
     }
-    // Body indents two columns (one for the gutter bar, one for visual
-    // padding). Width shrinks by the same amount.
+    // Body indents 2 columns from the title's left edge so it
+    // visually nests under the tool's status icon. With the gutter
+    // gone, the indent is a pure visual cue: title at column 0, body
+    // starts at column 2. Mirrors how `gh pr view`, `git log`, and
+    // most CLI tools nest output under their headers.
     let content_area = Rect {
         x: area.x + 2,
         y: content_y,
@@ -1000,12 +964,16 @@ fn build_collapsed_header<'a>(tool: &'a ToolCall, t: &Theme, width: usize) -> Li
         .map(|d| (d.as_millis() / 80) as usize)
         .unwrap_or(0);
     let (status_icon, status_style) = tool_status_icon_animated(tool, t, frame_idx);
+    // Collapsed-tool header: status icon + title. The chevron `▶`
+    // that used to mark "expandable" was redundant — a collapsed
+    // tool is already visibly missing its body. The status icon is
+    // the only visual anchor that carries unique info, so it gets
+    // the front spot.
     let mut spans = vec![
-        Span::styled("▶ ", Style::default().fg(t.text_muted)),
         Span::styled(status_icon.to_owned(), status_style),
         Span::raw(" "),
     ];
-    spans.extend(build_header_inner_spans(tool, t, width.saturating_sub(6)));
+    spans.extend(build_header_inner_spans(tool, t, width.saturating_sub(4)));
     Line::from(spans)
 }
 
@@ -1031,8 +999,10 @@ fn build_title_spans<'a>(
     status_style: Style,
     width: usize,
 ) -> Vec<Span<'a>> {
+    // Expanded-tool title: status icon + title. The `▼` chevron that
+    // used to mark "expanded" was redundant — the body's presence
+    // underneath already shows it's expanded. Cleaner without it.
     let mut spans = vec![
-        Span::styled("▼ ", Style::default().fg(t.text_muted)),
         Span::styled(status_icon.to_owned(), status_style),
         Span::raw(" "),
     ];
