@@ -3,6 +3,50 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::OnceLock;
+
+/// Process-global cache of code-graph sessions keyed by canonicalized
+/// workspace root. Without this, every `graph_query` / `symbol_edit`
+/// tool call rebuilt the graph from scratch by re-running tree-sitter
+/// across every Rust file in the workspace — slow on a real codebase
+/// and wasteful when the LLM chains 5 graph queries in one turn.
+/// `invalidate_graph_session_cache()` is called after `symbol_edit`,
+/// `Edit`, and `Write` modify a file so the next query reflects the
+/// change. Uses `std::sync::Mutex` (NOT tokio's) because the critical
+/// section is purely synchronous map insert/get — fully-qualified path
+/// avoids colliding with `tokio::sync::Mutex` elsewhere in the file.
+fn graph_session_cache() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<jfc_graph::session::GraphSession>>> {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<jfc_graph::session::GraphSession>>>> = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Get-or-build a cached `GraphSession` for `cwd`. Cheap on cache hit
+/// (one HashMap lookup); first call per workspace pays the full
+/// tree-sitter parse cost.
+fn get_or_build_graph_session(cwd: &std::path::Path) -> Arc<jfc_graph::session::GraphSession> {
+    let key = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut cache = graph_session_cache().lock().expect("graph cache mutex poisoned");
+    if let Some(existing) = cache.get(&key) {
+        return Arc::clone(existing);
+    }
+    let session = Arc::new(jfc_graph::session::GraphSession::from_directory(&key));
+    cache.insert(key.clone(), Arc::clone(&session));
+    session
+}
+
+/// Drop the cached graph for `cwd` (or every cached graph when `cwd` is
+/// `None`). Called after writes so the next graph query re-parses the
+/// affected file. Cheap — actual rebuild only happens on the next query.
+pub fn invalidate_graph_session_cache(cwd: Option<&std::path::Path>) {
+    let mut cache = graph_session_cache().lock().expect("graph cache mutex poisoned");
+    match cwd {
+        Some(c) => {
+            let key = c.canonicalize().unwrap_or_else(|_| c.to_path_buf());
+            cache.remove(&key);
+        }
+        None => cache.clear(),
+    }
+}
 
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -430,6 +474,66 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
                 "required": ["member_name", "mode"]
             }),
         },
+        ToolDef {
+            name: "graph_query".into(),
+            description: "Query the project's code graph using a pipe-based DSL. \
+                Use to surgically find callers, callees, type usages, or trace data \
+                taint without loading whole files. Operators (chain with `|`): \
+                `fn(\"name\")` selects functions by substring; `type(\"name\")` selects \
+                struct/enum/trait; `callers` / `callees` walk Calls edges; `depth N` \
+                limits traversal (use 1-3 for narrow context, 5+ for full reach); \
+                `filter kind=Function|Struct|Enum|Module|Trait` filters; \
+                `show fields|signature|body` controls projection; `taint \"var\"` \
+                traces a parameter through call chains. Examples: \
+                `fn(\"execute_tool\") | callees | depth 2`, \
+                `type(\"Config\") | callers`, \
+                `fn(\"parse\") | taint \"input\" | depth 5`. \
+                Cycles are auto-detected (mutual recursion terminates). Output is \
+                token-budgeted; truncated results report \"Showing N/M nodes\".".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "DSL query string (e.g. `fn(\"foo\") | callees | depth 2`)"
+                    },
+                    "max_tokens": {
+                        "type": "number",
+                        "description": "Optional token budget (default 4000). Output truncates to fit."
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
+            name: "symbol_edit".into(),
+            description: "Edit a function/struct/etc. by *symbol handle* instead of \
+                file:line. Handles look like `fn:module::name` or `struct:Name` and \
+                are returned by `graph_query`. The tool resolves the handle to its \
+                exact span and replaces it atomically. With `validate=true`, runs \
+                signature-compatibility checks against all callers first and refuses \
+                edits that would break call sites. Prefer this over Edit when \
+                changing signatures, since it surfaces affected callers automatically. \
+                If the handle isn't found, the error suggests up to 5 fuzzy matches.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "description": "Symbol handle from graph_query, e.g. `fn:tools::execute_task`."
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "Full replacement text for the symbol's span (function body, struct decl, etc.)"
+                    },
+                    "validate": {
+                        "type": "boolean",
+                        "description": "When true, blocks edits that would break callers. Default false."
+                    }
+                },
+                "required": ["handle", "new_content"]
+            }),
+        },
     ]
 }
 
@@ -637,6 +741,9 @@ pub async fn execute_tool(
                 if let Some(cache) = &dedup {
                     cache.lock().await.invalidate(Path::new(&file_path));
                 }
+                // Drop the cached graph for this workspace so the next
+                // graph_query reflects the new file content.
+                invalidate_graph_session_cache(Some(&cwd));
             }
             result
         }
@@ -654,6 +761,7 @@ pub async fn execute_tool(
                 if let Some(cache) = &dedup {
                     cache.lock().await.invalidate(Path::new(&file_path));
                 }
+                invalidate_graph_session_cache(Some(&cwd));
             }
             result
         }
@@ -740,6 +848,75 @@ pub async fn execute_tool(
         }
         (ToolKind::TeamMemberMode, ToolInput::TeamMemberMode { member_name, mode }) => {
             execute_team_member_mode(&member_name, &mode, active_team_name).await
+        }
+        (ToolKind::GraphQuery, ToolInput::GraphQuery { query, max_tokens }) => {
+            let budget = max_tokens.unwrap_or(4000);
+            let session = get_or_build_graph_session(&cwd);
+            match session.query(&query, budget) {
+                Ok(output) => {
+                    if output.was_truncated {
+                        ExecutionResult::success(format!(
+                            "{}\n\n[Showing {}/{} nodes]",
+                            output.text, output.nodes_shown, output.nodes_total
+                        ))
+                    } else {
+                        ExecutionResult::success(output.text)
+                    }
+                }
+                Err(e) => ExecutionResult::failure(format!("Graph query error: {e}")),
+            }
+        }
+        (ToolKind::SymbolEdit, ToolInput::SymbolEdit { handle, new_content, validate }) => {
+            let session = get_or_build_graph_session(&cwd);
+            let entry = match session.symbols().resolve(&handle) {
+                Some(e) => e.clone(),
+                None => {
+                    let fuzzy = session.symbols().resolve_fuzzy(&handle);
+                    if fuzzy.is_empty() {
+                        return ExecutionResult::failure(format!(
+                            "Symbol not found: '{}'. Use graph_query to discover handles.", handle
+                        ));
+                    }
+                    return ExecutionResult::failure(format!(
+                        "Symbol '{}' not found. Did you mean: {}?",
+                        handle,
+                        fuzzy.iter().take(5).map(|e| e.handle.as_str()).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            };
+
+            if validate {
+                let validator = jfc_graph::validation::VirtualValidator::new(&session.graph);
+                let affected = validator.preview_affected_call_sites(&entry.node_id);
+                if !affected.is_empty() {
+                    let _sites: Vec<String> = affected.iter()
+                        .map(|s| format!("  - {} ({}:{})", s.caller_name, s.call_span.file.display(), s.call_span.start_line))
+                        .collect();
+                    tracing::info!("SymbolEdit validation: {} affected call sites", affected.len());
+                }
+            }
+
+            let file_content = match std::fs::read_to_string(&entry.file_path) {
+                Ok(c) => c,
+                Err(e) => return ExecutionResult::failure(format!("Read failed: {e}")),
+            };
+
+            let start = entry.span.byte_range.start;
+            let end = entry.span.byte_range.end;
+            if end > file_content.len() {
+                return ExecutionResult::failure("Span out of bounds — file changed since graph was built");
+            }
+
+            let new_file = format!("{}{}{}", &file_content[..start], new_content, &file_content[end..]);
+            if let Err(e) = std::fs::write(&entry.file_path, &new_file) {
+                return ExecutionResult::failure(format!("Write failed: {e}"));
+            }
+            // Invalidate the cached graph session for this workspace so
+            // the next graph_query re-parses the modified file and the
+            // user sees the symbol's new shape.
+            invalidate_graph_session_cache(Some(&cwd));
+
+            ExecutionResult::success(format!("Edited symbol '{}' in {}", handle, entry.file_path.display()))
         }
         (kind, _) => ExecutionResult::failure(format!("Tool {:?} not yet implemented", kind)),
     }
@@ -2177,12 +2354,60 @@ mod tests {
             "TeamDelete",
             "SendMessage",
             "TeamMemberMode",
+            "graph_query",
+            "symbol_edit",
         ] {
             assert!(
                 names.contains(&required),
                 "all_tool_defs missing {required}; got {names:?}",
             );
         }
+    }
+
+    // ─── graph_session_cache ─────────────────────────────────────────────
+
+    // Normal: repeated `get_or_build_graph_session` calls for the same cwd
+    // return Arc clones (same pointer), so the graph is built once.
+    #[test]
+    fn graph_session_cache_reuses_same_session_normal() {
+        // The fixtures dir under jfc-graph is a stable target.
+        let fixtures = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../jfc-graph/tests/fixtures"
+        ));
+        invalidate_graph_session_cache(Some(fixtures));
+        let a = get_or_build_graph_session(fixtures);
+        let b = get_or_build_graph_session(fixtures);
+        assert!(Arc::ptr_eq(&a, &b), "cache should return identical Arc");
+    }
+
+    // Robust: `invalidate_graph_session_cache` causes the next call to
+    // build a fresh session (different Arc pointer).
+    #[test]
+    fn graph_session_cache_invalidate_drops_session_robust() {
+        let fixtures = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../jfc-graph/tests/fixtures"
+        ));
+        invalidate_graph_session_cache(Some(fixtures));
+        let a = get_or_build_graph_session(fixtures);
+        invalidate_graph_session_cache(Some(fixtures));
+        let b = get_or_build_graph_session(fixtures);
+        assert!(!Arc::ptr_eq(&a, &b), "post-invalidate must build fresh");
+    }
+
+    // Robust: `invalidate_graph_session_cache(None)` clears every entry,
+    // not just one workspace.
+    #[test]
+    fn graph_session_cache_invalidate_all_clears_robust() {
+        let fixtures = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../jfc-graph/tests/fixtures"
+        ));
+        let _ = get_or_build_graph_session(fixtures);
+        invalidate_graph_session_cache(None);
+        let after = graph_session_cache().lock().expect("cache lock").len();
+        assert_eq!(after, 0);
     }
 
     #[test]
