@@ -987,6 +987,9 @@ fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
                 None => "MarketStatus".into(),
             },
         },
+        ToolInput::RunBounty { bounty_id, .. } => SerializedToolInput::Generic {
+            summary: format!("RunBounty: {bounty_id}"),
+        },
         ToolInput::Generic { summary } => SerializedToolInput::Generic {
             summary: summary.clone(),
         },

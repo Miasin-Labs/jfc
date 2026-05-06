@@ -438,6 +438,7 @@ pub enum ToolKind {
     TeamMemberMode,
     /// Query the code graph using pipe-based DSL.
     PostBounty,
+    RunBounty,
     MarketStatus,
     GraphQuery,
     /// Edit code by symbol handle (semantic editing).
@@ -563,6 +564,16 @@ pub enum ToolInput {
     MarketStatus {
         #[serde(default)]
         bounty_id: Option<String>,
+    },
+    /// Drive an already-posted Open bounty through the full
+    /// Solve→Validate→Settle cycle. The split from PostBounty
+    /// exists so the model can reason about market state in
+    /// stages (post first, decide whether to dispatch later)
+    /// without paying the dispatch cost on every post call.
+    RunBounty {
+        bounty_id: String,
+        #[serde(default)]
+        max_solvers: Option<u8>,
     },
     SymbolEdit {
         handle: String,
@@ -878,6 +889,7 @@ impl ToolKind {
             "symboledit" => Self::SymbolEdit,
             "postbounty" | "post_bounty" => Self::PostBounty,
             "marketstatus" | "market_status" => Self::MarketStatus,
+            "runbounty" | "run_bounty" => Self::RunBounty,
             _ => Self::Generic(name.to_owned()),
         }
     }
@@ -907,6 +919,7 @@ impl ToolKind {
             Self::GraphQuery => "GraphQuery",
             Self::SymbolEdit => "SymbolEdit",
             Self::PostBounty => "PostBounty",
+            Self::RunBounty => "RunBounty",
             Self::MarketStatus => "MarketStatus",
             Self::Generic(name) => name.as_str(),
         }
@@ -937,6 +950,7 @@ impl ToolKind {
             Self::GraphQuery => "graph_query",
             Self::SymbolEdit => "symbol_edit",
             Self::PostBounty => "post_bounty",
+            Self::RunBounty => "run_bounty",
             Self::MarketStatus => "market_status",
             Self::Generic(name) => name.as_str(),
         }
@@ -1014,6 +1028,7 @@ impl ToolInput {
                 Some(id) => format!("market status: {id}"),
                 None => "market status".into(),
             },
+            Self::RunBounty { bounty_id, .. } => format!("run bounty: {bounty_id}"),
             Self::Generic { summary } => summary.clone(),
         }
     }
@@ -1186,6 +1201,13 @@ impl ToolInput {
                     .and_then(|m| m.get("bounty_id"))
                     .and_then(|v| v.as_str())
                     .map(str::to_owned),
+            },
+            ToolKind::RunBounty => Self::RunBounty {
+                bounty_id: str_field("bounty_id"),
+                max_solvers: obj
+                    .and_then(|m| m.get("max_solvers"))
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.min(255) as u8),
             },
             ToolKind::Generic(_) => Self::Generic {
                 summary: v.to_string(),
@@ -1419,6 +1441,13 @@ impl ToolInput {
                 let mut v = json!({});
                 if let Some(id) = bounty_id {
                     v["bounty_id"] = json!(id);
+                }
+                v
+            }
+            Self::RunBounty { bounty_id, max_solvers } => {
+                let mut v = json!({ "bounty_id": bounty_id });
+                if let Some(n) = max_solvers {
+                    v["max_solvers"] = json!(n);
                 }
                 v
             }

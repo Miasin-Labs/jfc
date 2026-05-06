@@ -403,13 +403,18 @@ mod tests {
 
     #[test]
     fn test_budget_exceeded() {
-        let mut orch = MarketOrchestrator::new(default_charter());
+        // Default charter has `max_budget_per_bounty: u64::MAX` so
+        // post_bounty never rejects on size by default. Use a
+        // tighter custom charter to exercise the rejection path.
+        let mut charter = default_charter();
+        charter.max_budget_per_bounty = 10_000;
+        let mut orch = MarketOrchestrator::new(charter);
         let result = orch.post_bounty("Big task".into(), 99999, "criteria".into(), None);
         assert!(result.is_err());
         match result.unwrap_err() {
             OrchestratorError::BudgetExceeded { requested, max } => {
                 assert_eq!(requested, 99999);
-                assert_eq!(max, 10000);
+                assert_eq!(max, 10_000);
             }
             other => panic!("expected BudgetExceeded, got: {other:?}"),
         }

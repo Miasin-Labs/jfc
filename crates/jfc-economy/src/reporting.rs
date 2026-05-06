@@ -472,10 +472,12 @@ mod tests {
 
     #[test]
     fn test_e2e_budget_exceeded_rejected() {
-        let charter = Charter::default();
+        // Default charter caps per-bounty at u64::MAX; tighten it so
+        // the rejection path is reachable.
+        let mut charter = Charter::default();
+        charter.max_budget_per_bounty = 10_000;
         let mut orchestrator = MarketOrchestrator::with_budget(charter, 500);
-        // Try to post bounty exceeding charter max_budget_per_bounty
-        let result = orchestrator.post_bounty("big task".into(), 99999, "criteria".into(), None);
+        let result = orchestrator.post_bounty("big task".into(), 99_999, "criteria".into(), None);
         assert!(result.is_err());
     }
 
