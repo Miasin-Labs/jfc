@@ -628,11 +628,27 @@ async fn run_single_turn(
             .system(system.clone())
             .tools(tools::all_tool_defs());
 
-        // Cap teammate history before each request — same protection
-        // applied to the Task-tool subagent loop. A teammate doing
-        // multi-turn research with `Read`/`Glob`/`Grep` accumulates
-        // unbounded tool output across turns; without this it can
-        // blow the model's context window mid-session.
+        // Two-stage context safety mirroring v131 Claude Code: (1) try
+        // LLM-based auto-compaction at 100k tokens, (2) fall through
+        // to byte-budget eviction if compaction is skipped or fails.
+        // Same logic as `tools::execute_task` — a long-running teammate
+        // doing multi-turn research can otherwise blow the context
+        // window before its final summary turn.
+        let compacted = crate::stream::auto_compact_subagent_history(
+            history,
+            provider.as_ref(),
+            model.clone(),
+        )
+        .await;
+        if compacted {
+            tracing::info!(
+                target: "jfc::swarm::runner",
+                task_id,
+                turn,
+                agent_id = %identity.agent_id,
+                "teammate transcript auto-compacted"
+            );
+        }
         let elided = crate::stream::cap_messages_for_budget(
             history,
             crate::stream::SUBAGENT_HISTORY_BUDGET_BYTES,
@@ -643,7 +659,7 @@ async fn run_single_turn(
                 task_id,
                 turn,
                 agent_id = %identity.agent_id,
-                "teammate history elided to fit budget"
+                "teammate history elided to fit byte budget"
             );
         }
 

@@ -18,24 +18,43 @@ use crate::types::*;
 /// `compact_level` will fire on phantom-large outputs that the API never sees.
 pub(crate) const MAX_TOOL_RESULT_CHARS: usize = ToolOutput::APPROX_LEN_CAP;
 
-/// Truncate `s` to at most `MAX_TOOL_RESULT_CHARS` bytes by keeping the first
-/// half and the last half, with an ellipsis marker in the middle. Slice
-/// boundaries are snapped to the nearest UTF-8 char boundary so the function
-/// can never panic on multi-byte content (emoji, accented chars, or binary
-/// blobs that happen to land in the slice — exactly the panic in the
-/// screenshot's stack trace at stream.rs:334:14, fired from inside
-/// build_provider_messages_with_tool_results' FilterMap closure).
+/// Bytes shown at each end of a truncated tool result. v131 Claude Code
+/// uses 2000 chars (`ImH = 2e3`) for its persisted-output preview; we
+/// mirror that so the model gets a recognizable amount of head context.
+pub(crate) const TRUNCATION_PREVIEW_CHARS: usize = 2_000;
+
+/// Truncate `s` to at most `MAX_TOOL_RESULT_CHARS` bytes when oversized.
+/// The marker mirrors v131's `<persisted-output>` structure (without
+/// disk persistence — preview only): first 2000 chars, then a tagged
+/// note disclosing the original byte count and how much was dropped,
+/// then the last 2000 chars. Slice boundaries are snapped to UTF-8
+/// codepoints so this can't panic on emoji/multi-byte content (the
+/// fix for the panic at stream.rs:334:14 from
+/// `build_provider_messages_with_tool_results`' FilterMap closure).
 pub(crate) fn truncate_tool_result(s: &str) -> String {
     if s.len() <= MAX_TOOL_RESULT_CHARS {
         return s.to_owned();
     }
-    let half = MAX_TOOL_RESULT_CHARS / 2;
-    let head_end = floor_char_boundary(s, half);
-    let tail_start = ceil_char_boundary(s, s.len().saturating_sub(half));
+    let preview = TRUNCATION_PREVIEW_CHARS.min(MAX_TOOL_RESULT_CHARS / 2);
+    let head_end = floor_char_boundary(s, preview);
+    let tail_start = ceil_char_boundary(s, s.len().saturating_sub(preview));
     let head = &s[..head_end];
     let tail = &s[tail_start..];
     let omitted = s.len() - head_end - (s.len() - tail_start);
-    format!("{head}\n\n... [{omitted} bytes omitted] ...\n\n{tail}")
+    let total = s.len();
+    format!(
+        "<truncated-output original_bytes=\"{total}\" omitted_bytes=\"{omitted}\">\n\
+         Output too large for the conversation. Showing first {preview} \
+         chars and last {preview} chars; {omitted} bytes omitted from the \
+         middle. If you need the elided section, ask the user or re-invoke \
+         the tool with a narrower scope (smaller path / line range / Grep \
+         pattern).\n\n\
+         --- preview head ---\n\
+         {head}\n\
+         --- preview tail ---\n\
+         {tail}\n\
+         </truncated-output>"
+    )
 }
 
 /// Round `i` down to the nearest UTF-8 char boundary in `s`. `str::is_char_boundary`
@@ -60,6 +79,205 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// Mirrors v131 Claude Code's `Yd6 = 1e5` constant — auto-compaction
+/// triggers when the running subagent transcript crosses this many
+/// estimated tokens. We multiply by `BYTES_PER_TOKEN` to convert to a
+/// byte threshold (the unit our `estimate_provider_message_bytes`
+/// returns). 100k tokens ≈ 400KB at 4 chars/tok; v131 uses the same
+/// figure for both main-loop and subagent compaction.
+pub(crate) const SUBAGENT_AUTO_COMPACT_TOKEN_THRESHOLD: usize = 100_000;
+
+/// Same chars-per-token heuristic v131 uses (`z_$ = 4`).
+pub(crate) const BYTES_PER_TOKEN: usize = 4;
+
+/// Verbatim summary prompt from v131 deob (`fd6` constant in
+/// cli.2.1.131.beautified.js). Kept word-for-word so subagent
+/// summaries match the structure Claude Code's main loop produces —
+/// future Claude Code releases that tweak this template are easy to
+/// re-port.
+pub(crate) const SUBAGENT_AUTO_COMPACT_PROMPT: &str = "\
+You have been working on the task described above but have not yet completed it. \
+Write a continuation summary that will allow you (or another instance of yourself) \
+to resume work efficiently in a future context window where the conversation history \
+will be replaced with this summary. Your summary should be structured, concise, and \
+actionable. Include:\n\
+1. Task Overview\n\
+The user's core request and success criteria\n\
+Any clarifications or constraints they specified\n\
+2. Current State\n\
+What has been completed so far\n\
+Files created, modified, or analyzed (with paths if relevant)\n\
+Key outputs or artifacts produced\n\
+3. Important Discoveries\n\
+Technical constraints or requirements uncovered\n\
+Decisions made and their rationale\n\
+Errors encountered and how they were resolved\n\
+What approaches were tried that didn't work (and why)\n\
+4. Next Steps\n\
+Specific actions needed to complete the task\n\
+Any blockers or open questions to resolve\n\
+\n\
+Wrap the entire summary in <summary>...</summary> tags so it can be parsed.";
+
+/// Render a provider message as plain text for inclusion in a summary
+/// request. Tool calls and tool results are flattened to a one-line
+/// description so the summary model sees the *shape* of what the
+/// subagent did without the full payload (which is what we're trying
+/// to compress in the first place).
+pub(crate) fn render_message_as_text(msg: &crate::provider::ProviderMessage) -> String {
+    use crate::provider::{ProviderContent, ProviderRole};
+    let role = match msg.role {
+        ProviderRole::User => "user",
+        ProviderRole::Assistant => "assistant",
+    };
+    let mut out = format!("[{role}] ");
+    for c in &msg.content {
+        match c {
+            ProviderContent::Text(t) => out.push_str(t),
+            ProviderContent::ToolUse { name, input, .. } => {
+                let preview = serde_json::to_string(input)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect::<String>();
+                out.push_str(&format!("\n  <tool_use name=\"{name}\" input=\"{preview}\"/>"));
+            }
+            ProviderContent::ToolResult { content, is_error, .. } => {
+                let head: String = content.chars().take(400).collect();
+                let err = if *is_error { " error" } else { "" };
+                out.push_str(&format!(
+                    "\n  <tool_result{err} bytes=\"{}\">{head}…</tool_result>",
+                    content.len()
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Pull the contents of a single `<summary>...</summary>` tag from the
+/// model's reply. v131's prompt asks the model to wrap the output, so
+/// we extract that span exactly. Falls back to `None` when the tag
+/// isn't present so callers can decide whether to use the raw text or
+/// abandon the compaction attempt.
+pub(crate) fn extract_summary_tag(s: &str) -> Option<String> {
+    let open = s.find("<summary>")?;
+    let after_open = open + "<summary>".len();
+    let close_rel = s[after_open..].find("</summary>")?;
+    Some(s[after_open..after_open + close_rel].trim().to_owned())
+}
+
+/// Run an LLM-based summarization pass over the subagent's running
+/// history. Mirrors v131's `Sp7()` compaction call. Returns `true`
+/// when the transcript was rewritten, `false` when nothing happened
+/// (under threshold, too short, or the summary call failed). On
+/// success the message list becomes:
+///
+///   `[ original_prompt, <summary message>, last_pair... ]`
+///
+/// preserving the original task description (so the subagent never
+/// loses sight of why it was spawned) and the most recent
+/// assistant+user-tool-result pair (so the loop's next iteration has
+/// a coherent immediate context to act on).
+pub(crate) async fn auto_compact_subagent_history(
+    messages: &mut Vec<crate::provider::ProviderMessage>,
+    provider: &dyn crate::provider::Provider,
+    model: crate::provider::ModelId,
+) -> bool {
+    use crate::provider::*;
+    use futures::StreamExt;
+
+    let total_bytes: usize = messages.iter().map(estimate_provider_message_bytes).sum();
+    let est_tokens = total_bytes / BYTES_PER_TOKEN;
+    if est_tokens < SUBAGENT_AUTO_COMPACT_TOKEN_THRESHOLD {
+        return false;
+    }
+    // Need at least: prompt + N evictable + last pair. With <4 messages
+    // there's nothing meaningful to compact — defer to byte budget
+    // eviction in that case.
+    if messages.len() < 4 {
+        return false;
+    }
+
+    let to_summarize_end = messages.len().saturating_sub(2);
+    let mut transcript = String::new();
+    for msg in messages.iter().take(to_summarize_end).skip(1) {
+        transcript.push_str(&render_message_as_text(msg));
+        transcript.push_str("\n\n");
+    }
+    if transcript.trim().is_empty() {
+        return false;
+    }
+
+    // Original task prompt as a header so the summary model knows what
+    // the subagent was *trying* to accomplish. Without this the model
+    // produces vague summaries like "the assistant ran some tools".
+    let original_task = messages
+        .first()
+        .map(render_message_as_text)
+        .unwrap_or_default();
+
+    let opts = StreamOptions::new(model)
+        .system(SUBAGENT_AUTO_COMPACT_PROMPT.to_owned())
+        .max_tokens(4_096);
+    let summary_request = vec![ProviderMessage {
+        role: ProviderRole::User,
+        content: vec![ProviderContent::Text(format!(
+            "Original task:\n{original_task}\n\nTranscript so far:\n{transcript}"
+        ))],
+    }];
+
+    let stream = match provider.stream(summary_request, &opts).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(target: "jfc::stream", error = %e, "subagent compaction stream failed");
+            return false;
+        }
+    };
+    futures::pin_mut!(stream);
+    let mut text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev {
+            Ok(StreamEvent::TextDelta { delta, .. }) => text.push_str(&delta),
+            Ok(StreamEvent::TextDone { text: t, .. }) => {
+                if text.is_empty() {
+                    text = t;
+                }
+            }
+            Ok(StreamEvent::Error { message }) => {
+                tracing::warn!(target: "jfc::stream", error = %message, "subagent compaction error");
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(target: "jfc::stream", error = %e, "subagent compaction stream error");
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    let summary = extract_summary_tag(&text).unwrap_or_else(|| text.trim().to_owned());
+    if summary.trim().is_empty() {
+        return false;
+    }
+
+    let summary_msg = ProviderMessage {
+        role: ProviderRole::Assistant,
+        content: vec![ProviderContent::Text(format!(
+            "[earlier subagent turns auto-compacted to fit context]\n\n<summary>\n{summary}\n</summary>"
+        ))],
+    };
+    messages.splice(1..to_summarize_end, std::iter::once(summary_msg));
+    tracing::info!(
+        target: "jfc::stream",
+        est_tokens_before = est_tokens,
+        summary_chars = summary.len(),
+        new_msg_count = messages.len(),
+        "subagent auto-compaction applied"
+    );
+    true
 }
 
 /// Soft cap on total request bytes for a subagent / teammate provider call.
@@ -190,15 +408,28 @@ mod truncate_tests {
         let _ = out.chars().count();
     }
 
-    // Normal: head and tail are preserved across truncation.
+    // Normal: head and tail markers from the input are preserved inside
+    // the v131-style `<truncated-output>` envelope.
     #[test]
     fn truncate_keeps_head_and_tail_normal() {
         let mid: String = "x".repeat(MAX_TOOL_RESULT_CHARS * 2);
         let s = format!("HEAD{mid}TAIL");
         let out = truncate_tool_result(&s);
-        assert!(out.starts_with("HEAD"));
-        assert!(out.ends_with("TAIL"));
-        assert!(out.contains("bytes omitted"));
+        assert!(out.starts_with("<truncated-output"));
+        assert!(out.contains("HEAD"));
+        assert!(out.contains("TAIL"));
+        assert!(out.contains("omitted_bytes"));
+        assert!(out.ends_with("</truncated-output>"));
+    }
+
+    // Normal: marker exposes original byte count so the model can judge
+    // whether a re-invocation with a narrower scope is worth it.
+    #[test]
+    fn truncate_marker_includes_original_byte_count_normal() {
+        let s = "x".repeat(MAX_TOOL_RESULT_CHARS * 3);
+        let out = truncate_tool_result(&s);
+        let expected = format!("original_bytes=\"{}\"", s.len());
+        assert!(out.contains(&expected), "marker missing byte count: {out}");
     }
 }
 
@@ -346,6 +577,271 @@ mod budget_tests {
     #[test]
     fn subagent_history_budget_constant_normal() {
         assert_eq!(SUBAGENT_HISTORY_BUDGET_BYTES, 500_000);
+    }
+}
+
+#[cfg(test)]
+mod auto_compact_tests {
+    use super::*;
+    use crate::provider::{
+        EventStream, ModelId, ModelInfo, Provider, ProviderContent, ProviderMessage,
+        ProviderRole, StopReason, StreamEvent, StreamOptions,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// Stub provider that returns a single canned text reply on every
+    /// `stream()` call. Used to verify the compaction wiring without
+    /// hitting a real model.
+    struct CannedSummaryProvider {
+        reply: String,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl CannedSummaryProvider {
+        fn new(reply: impl Into<String>) -> Self {
+            Self {
+                reply: reply.into(),
+                calls: Arc::new(Mutex::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CannedSummaryProvider {
+        fn name(&self) -> &str {
+            "canned"
+        }
+        fn available_models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo::new("stub", "Stub", "canned")]
+        }
+        async fn stream(
+            &self,
+            _messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            *self.calls.lock().unwrap() += 1;
+            let events = vec![
+                Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    delta: self.reply.clone(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// Provider that always returns an error from `stream()` — used to
+    /// verify the compaction call gracefully no-ops on transport errors
+    /// rather than corrupting the message list.
+    struct ErrorProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for ErrorProvider {
+        fn name(&self) -> &str {
+            "error"
+        }
+        fn available_models(&self) -> Vec<ModelInfo> {
+            vec![]
+        }
+        async fn stream(
+            &self,
+            _messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            Err(anyhow::anyhow!("simulated stream failure"))
+        }
+    }
+
+    fn user_text(s: &str) -> ProviderMessage {
+        ProviderMessage {
+            role: ProviderRole::User,
+            content: vec![ProviderContent::Text(s.to_owned())],
+        }
+    }
+    fn assistant_text(s: &str) -> ProviderMessage {
+        ProviderMessage {
+            role: ProviderRole::Assistant,
+            content: vec![ProviderContent::Text(s.to_owned())],
+        }
+    }
+    fn assistant_tool_use(id: &str, name: &str) -> ProviderMessage {
+        ProviderMessage {
+            role: ProviderRole::Assistant,
+            content: vec![ProviderContent::ToolUse {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                input: serde_json::json!({"path": "x"}),
+            }],
+        }
+    }
+    fn user_tool_result(id: &str, content: &str) -> ProviderMessage {
+        ProviderMessage {
+            role: ProviderRole::User,
+            content: vec![ProviderContent::ToolResult {
+                tool_use_id: id.to_owned(),
+                content: content.to_owned(),
+                is_error: false,
+            }],
+        }
+    }
+
+    // Normal: extract_summary_tag pulls content out of a wrapped reply.
+    #[test]
+    fn extract_summary_tag_finds_content_normal() {
+        let s = "preamble <summary>core fact</summary> afterword";
+        assert_eq!(extract_summary_tag(s), Some("core fact".to_owned()));
+    }
+
+    // Robust: missing tag returns None so callers can decide.
+    #[test]
+    fn extract_summary_tag_missing_returns_none_robust() {
+        assert_eq!(extract_summary_tag("no tags here"), None);
+    }
+
+    // Normal: render_message_as_text labels role and inlines text.
+    #[test]
+    fn render_message_text_basic_normal() {
+        let r = render_message_as_text(&user_text("hello"));
+        assert!(r.starts_with("[user]"));
+        assert!(r.contains("hello"));
+    }
+
+    // Normal: tool_result rendering shows byte count + truncated head,
+    // not the full content (the whole point of the summary input).
+    #[test]
+    fn render_message_text_tool_result_summarizes_body_normal() {
+        let big = "x".repeat(10_000);
+        let r = render_message_as_text(&user_tool_result("id1", &big));
+        assert!(r.contains("bytes=\"10000\""));
+        assert!(!r.contains(&"x".repeat(1_000)));
+    }
+
+    // Normal: under-threshold history is left alone (compaction skipped).
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_compact_under_threshold_no_op_normal() {
+        let provider = CannedSummaryProvider::new("<summary>x</summary>");
+        let mut msgs = vec![user_text("PROMPT"), assistant_text("hi"), user_text("ok")];
+        let did = auto_compact_subagent_history(&mut msgs, &provider, ModelId::new("stub")).await;
+        assert!(!did);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(*provider.calls.lock().unwrap(), 0);
+    }
+
+    // Normal: over-threshold transcript triggers an LLM call and is
+    // rewritten as [prompt, summary, last pair].
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_compact_over_threshold_summarizes_normal() {
+        let provider = CannedSummaryProvider::new(
+            "<summary>The agent read three files and reported their structure.</summary>",
+        );
+        let big = "x".repeat(200_000); // ~50k tokens per message at 4 chars/tok
+        let mut msgs = vec![
+            user_text("PROMPT"),
+            assistant_tool_use("t1", "Read"),
+            user_tool_result("t1", &big),
+            assistant_tool_use("t2", "Read"),
+            user_tool_result("t2", &big),
+            assistant_tool_use("t3", "Read"),
+            user_tool_result("t3", &big),
+            assistant_text("recent assistant"),
+            user_text("recent user"),
+        ];
+        let did = auto_compact_subagent_history(&mut msgs, &provider, ModelId::new("stub")).await;
+        assert!(did, "expected compaction to fire");
+        // [prompt, summary, last 2 messages] = 4
+        assert_eq!(msgs.len(), 4);
+        match &msgs[0].content[0] {
+            ProviderContent::Text(t) => assert_eq!(t, "PROMPT"),
+            _ => panic!("prompt not preserved"),
+        }
+        match &msgs[1].content[0] {
+            ProviderContent::Text(t) => {
+                assert!(t.contains("auto-compacted"));
+                assert!(t.contains("read three files"));
+            }
+            _ => panic!("expected summary message"),
+        }
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+    }
+
+    // Robust: provider error during compaction leaves the message list
+    // intact so the caller can fall through to byte-budget eviction.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_compact_provider_error_no_op_robust() {
+        let provider = ErrorProvider;
+        let big = "x".repeat(200_000);
+        let mut msgs = vec![
+            user_text("PROMPT"),
+            assistant_tool_use("t1", "Read"),
+            user_tool_result("t1", &big),
+            assistant_text("recent"),
+            user_text("ok"),
+        ];
+        let original_len = msgs.len();
+        let did = auto_compact_subagent_history(&mut msgs, &provider, ModelId::new("stub")).await;
+        assert!(!did);
+        assert_eq!(msgs.len(), original_len);
+    }
+
+    // Robust: empty summary text returned by the model is treated as a
+    // failure so the caller doesn't replace history with an empty
+    // <summary> block.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_compact_empty_summary_no_op_robust() {
+        let provider = CannedSummaryProvider::new("<summary>   </summary>");
+        let big = "x".repeat(200_000);
+        let mut msgs = vec![
+            user_text("PROMPT"),
+            assistant_tool_use("t1", "Read"),
+            user_tool_result("t1", &big),
+            assistant_tool_use("t2", "Read"),
+            user_tool_result("t2", &big),
+            assistant_text("recent"),
+            user_text("ok"),
+        ];
+        let original_len = msgs.len();
+        let did = auto_compact_subagent_history(&mut msgs, &provider, ModelId::new("stub")).await;
+        assert!(!did);
+        assert_eq!(msgs.len(), original_len);
+    }
+
+    // Robust: when the model omits the <summary> tags, the raw text is
+    // used as the summary body (best-effort). v131 prompt asks for tags
+    // but a stubborn model may not comply.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_compact_falls_back_to_raw_text_when_no_tags_robust() {
+        let provider = CannedSummaryProvider::new("the agent did things and finished.");
+        let big = "x".repeat(200_000);
+        let mut msgs = vec![
+            user_text("PROMPT"),
+            assistant_tool_use("t1", "Read"),
+            user_tool_result("t1", &big),
+            assistant_tool_use("t2", "Read"),
+            user_tool_result("t2", &big),
+            assistant_text("recent"),
+            user_text("ok"),
+        ];
+        let did = auto_compact_subagent_history(&mut msgs, &provider, ModelId::new("stub")).await;
+        assert!(did);
+        match &msgs[1].content[0] {
+            ProviderContent::Text(t) => assert!(t.contains("the agent did things")),
+            _ => panic!("expected summary body"),
+        }
+    }
+
+    // Normal: constants align with v131 deob figures.
+    #[test]
+    fn constants_match_v131_normal() {
+        assert_eq!(SUBAGENT_AUTO_COMPACT_TOKEN_THRESHOLD, 100_000);
+        assert_eq!(BYTES_PER_TOKEN, 4);
+        assert!(SUBAGENT_AUTO_COMPACT_PROMPT.contains("Task Overview"));
+        assert!(SUBAGENT_AUTO_COMPACT_PROMPT.contains("Current State"));
+        assert!(SUBAGENT_AUTO_COMPACT_PROMPT.contains("Important Discoveries"));
+        assert!(SUBAGENT_AUTO_COMPACT_PROMPT.contains("Next Steps"));
+        assert!(SUBAGENT_AUTO_COMPACT_PROMPT.contains("<summary>"));
     }
 }
 
@@ -2086,7 +2582,7 @@ mod truncate_more_tests {
         let s: String = "x".repeat(MAX_TOOL_RESULT_CHARS);
         let out = truncate_tool_result(&s);
         assert_eq!(out, s);
-        assert!(!out.contains("bytes omitted"));
+        assert!(!out.contains("<truncated-output"));
     }
 
     // Robust: a one-byte-over-cap input gets truncated. Verifies the >
@@ -2095,7 +2591,7 @@ mod truncate_more_tests {
     fn truncate_one_over_cap_does_truncate_robust() {
         let s: String = "y".repeat(MAX_TOOL_RESULT_CHARS + 1);
         let out = truncate_tool_result(&s);
-        assert!(out.contains("bytes omitted"));
+        assert!(out.contains("<truncated-output"));
     }
 
     // Normal: floor_char_boundary at byte 0 returns 0; at the end returns len.
