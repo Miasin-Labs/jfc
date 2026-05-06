@@ -189,7 +189,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
 
 ## TODOs
 
-- [ ] 1. Crate/Module Scaffolding
+- [x] 1. Crate/Module Scaffolding
 
   **What to do**:
   - Create `crates/jfc-economy/` (or `src/economy/` module in jfc-ui)
@@ -221,7 +221,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-1-state-machine.txt
   ```
 
-- [ ] 2. Token Ledger + Budget Gating (CFO Layer)
+- [x] 2. Token Ledger + Budget Gating (CFO Layer)
 
   **What to do**:
   - `TokenLedger`: tracks balance per agent, total budget, daily burn cap
@@ -263,7 +263,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-2-spawn-fee.txt
   ```
 
-- [ ] 3. Trust Scoring System
+- [x] 3. Trust Scoring System
 
   **What to do**:
   - `TrustScore` per agent: starts at 50, range [0, 100]
@@ -300,7 +300,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-3-tier-gate.txt
   ```
 
-- [ ] 4. Bounty Definition + Market State Machine
+- [x] 4. Bounty Definition + Market State Machine
 
   **What to do**:
   - `Bounty` struct: description, reward, acceptance_criteria, deadline, max_solvers
@@ -334,7 +334,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-4-surge.txt
   ```
 
-- [ ] 5. Governance Charter (as State-Transition Graph)
+- [x] 5. Governance Charter (as State-Transition Graph)
 
   **What to do**:
   - Define `Charter` struct (YAML-loadable, from Sovereign-OS):
@@ -384,7 +384,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-5-sanction.txt
   ```
 
-- [ ] 6. Sealed-Bid Auction Engine
+- [x] 6. Sealed-Bid Auction Engine
 
   **What to do**:
   - Solver agents submit bids: `(price: u64, approach: String, estimated_time: Duration)`
@@ -420,7 +420,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-6-isolation.txt
   ```
 
-- [ ] 7. Solver Agent Spawning
+- [x] 7. Solver Agent Spawning
 
   **What to do**:
   - Each selected solver gets: bounty description, acceptance criteria, graph_query access, git worktree
@@ -465,7 +465,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-7-forfeit.txt
   ```
 
-- [ ] 8. Solution Collection + Ranking
+- [x] 8. Solution Collection + Ranking
 
   **What to do**:
   - Collect all solutions after execution phase
@@ -503,7 +503,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-8-anti-gaming.txt
   ```
 
-- [ ] 9. Validator Agent Spawning
+- [x] 9. Validator Agent Spawning
 
   **What to do**:
   - For each surviving solution, spawn validator agent(s)
@@ -540,7 +540,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-9-reward.txt
   ```
 
-- [ ] 10. Validation Protocol (3-Round Structured Challenge)
+- [x] 10. Validation Protocol (3-Round Structured Challenge)
 
   **What to do**:
   - Round 1: Validator proposes a specific flaw (test case, edge case, logical error)
@@ -582,7 +582,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-10-early-term.txt
   ```
 
-- [ ] 11. Market Cycle Orchestrator
+- [x] 11. Market Cycle Orchestrator
 
   **What to do**:
   - Orchestrates the full 7-step cycle: Post → Bid → Select → Execute → Validate → Settle → Complete
@@ -616,7 +616,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-11-surge.txt
   ```
 
-- [ ] 12. Settlement Engine
+- [x] 12. Settlement Engine
 
   **What to do**:
   - Distribute rewards based on outcomes:
@@ -655,7 +655,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-12-floor.txt
   ```
 
-- [ ] 13. Anti-Collusion Enforcement
+- [x] 13. Anti-Collusion Enforcement
 
   **What to do**:
   - Identity separation: solver and validator are different agent instances
@@ -691,7 +691,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-13-griefing.txt
   ```
 
-- [ ] 14. Integration with jfc Swarm/Mailbox System
+- [x] 14. Integration with jfc Swarm/Mailbox System
 
   **What to do**:
   - Solver agents use existing jfc swarm spawning (worktrees, mailboxes)
@@ -725,7 +725,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-14-graph.txt
   ```
 
-- [ ] 15. User-Facing Bounty Tool
+- [x] 15. User-Facing Bounty Tool
 
   **What to do**:
   - Add `ToolKind::PostBounty` to jfc-ui
@@ -760,7 +760,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-15-budget.txt
   ```
 
-- [ ] 16. Market Status Reporting + Health Score
+- [x] 16. Market Status Reporting + Health Score
 
   **What to do**:
   - Current bounty status (which phase, how many bids, etc.)
@@ -801,7 +801,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/task-16-alert.txt
   ```
 
-- [ ] 17. End-to-End Integration Test
+- [x] 17. End-to-End Integration Test
 
   **What to do**:
   - Post a real bounty: "Add a function that computes fibonacci"
@@ -843,7 +843,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
 
 ## Final Verification Wave
 
-- [ ] F1. **Plan Compliance Audit** — verify all Must Have implemented, all Must NOT Have absent
+- [x] F1. **Plan Compliance Audit** — verify all Must Have implemented, all Must NOT Have absent
 
   **QA Scenario**:
   ```
@@ -869,7 +869,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/f1-must-not-have.txt
   ```
 
-- [ ] F2. **Code Quality Review** — clippy clean, tests pass, no unwrap in prod
+- [x] F2. **Code Quality Review** — clippy clean, tests pass, no unwrap in prod
 
   **QA Scenario**:
   ```
@@ -884,7 +884,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/f2-quality.txt
   ```
 
-- [ ] F3. **Real QA — Full Bounty Lifecycle** (agent-executed, no human)
+- [x] F3. **Real QA — Full Bounty Lifecycle** (agent-executed, no human)
 
   **QA Scenario**:
   ```
@@ -903,7 +903,7 @@ Unlike Diagon (general tasks) or Agent Hunt (theorem proving), our market is spe
     Evidence: .sisyphus/evidence/f3-real-qa.txt
   ```
 
-- [ ] F4. **Scope Fidelity Check** — no blockchain, no evolution, no unbounded spend
+- [x] F4. **Scope Fidelity Check** — no blockchain, no evolution, no unbounded spend
 
   **QA Scenario**:
   ```
