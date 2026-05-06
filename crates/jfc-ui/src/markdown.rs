@@ -589,10 +589,15 @@ where
                 // instead of trailing inline against prose. v126 SOP step 5
                 // (`Fs` component) does the same — header row, left gutter,
                 // matching close.
+                // Just the lang tag — the leading `▸` triangle was
+                // redundant decoration. The `┌─` border chrome
+                // already marks the start of the block; tagging the
+                // language ("rust", "bash", "code") is the only
+                // info the header needs to carry.
                 let header_label = if lang.is_empty() {
-                    "▸ code".to_string()
+                    "code".to_string()
                 } else {
-                    format!("▸ {lang}")
+                    lang.to_owned()
                 };
                 let header_style = Style::default()
                     .fg(self.theme.accent)
@@ -1261,7 +1266,7 @@ mod tests {
         let lines = render("```rust\nfn main() {}\n```");
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(
-            texts.iter().any(|t| t.starts_with("┌─ ▸ rust")),
+            texts.iter().any(|t| t.starts_with("┌─ rust")),
             "no framed header: {texts:?}"
         );
         assert!(texts.iter().any(|t| t == "└─"), "no closer: {texts:?}");
@@ -1274,7 +1279,7 @@ mod tests {
         let lines = render("```\nfoo\n```");
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(
-            texts.iter().any(|t| t.starts_with("┌─ ▸ code")),
+            texts.iter().any(|t| t.starts_with("┌─ code")),
             "no framed header for unlabeled fence: {texts:?}"
         );
     }

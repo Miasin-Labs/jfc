@@ -2352,37 +2352,153 @@ fn render_teammate_tree(f: &mut Frame, app: &App, area: Rect) {
 
 fn input(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
-    // Border + title stay constant whether or not we're streaming. v126
-    // never repaints the input bar mid-turn — the typing surface is the
-    // user's surface, the spinner is a separate row above it.
-    // Edit mode swaps the input title to "editing message N" and
-    // borders the input in warning-orange so the visual state is
-    // unambiguous — the user shouldn't fire-and-forget what was
-    // supposed to be a rewrite.
+    // Boxed input with rounded border. The prompt char sits INLINE
+    // at the start of the typing surface — like a shell prompt
+    // (`$ command`). Three cells before the textarea are reserved
+    // for the prompt + a 2-cell streak tail that animates while
+    // streaming. Layout per row:
+    //
+    //   ╭──────────────────────────────────────╮
+    //   │ · · ☄ send a message…                │
+    //   ╰──────────────────────────────────────╯
+    //
+    // The two `·` cells before the comet light up sequentially as
+    // a streak when streaming, then go dark while idle.
+    //
+    // Prompt char defaults to `☄` (comet); override with
+    // `JFC_PROMPT_CHAR=...`. Edit mode swaps to `✎` (pencil).
     let in_edit_mode = app.editing_message_idx.is_some();
-    let border_style = if in_edit_mode {
-        Style::default().fg(t.warning)
+    let base_char = std::env::var("JFC_PROMPT_CHAR")
+        .ok()
+        .filter(|s| !s.is_empty() && s.chars().count() <= 2)
+        .unwrap_or_else(|| "☄".to_string());
+    let prompt_char: String = if in_edit_mode {
+        "✎".to_string()
     } else {
-        Style::default().fg(t.border)
+        base_char
     };
-    let title = if let Some(idx) = app.editing_message_idx {
-        format!(" editing message #{} · Esc cancels ", idx)
+
+    let (prompt_color, border_color) = if in_edit_mode {
+        (t.warning, t.warning)
+    } else if app.is_streaming {
+        (t.accent, t.text_muted)
     } else {
-        " message ".to_string()
+        (t.accent, t.border)
     };
-    let title_style = if in_edit_mode {
-        Style::default().fg(t.warning).add_modifier(Modifier::BOLD)
+
+    // Edit-mode badge in the title (top border) so the user can't
+    // miss the editing state. Title is otherwise empty.
+    let title_line = if let Some(idx) = app.editing_message_idx {
+        Line::from(Span::styled(
+            format!(" editing #{idx} · Esc to cancel "),
+            Style::default()
+                .fg(t.warning)
+                .add_modifier(Modifier::BOLD),
+        ))
     } else {
-        Style::default().fg(t.text_muted)
+        Line::from("")
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(title, title_style))
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .padding(Padding::horizontal(1))
+        .title(title_line)
         .style(Style::default().bg(t.surface));
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    // Reserve 3 cells at the left of inner for the streak tail +
+    // comet glyph. Layout: `· · ☄ ` then the typing surface starts.
+    // (2 trail cells + the glyph cell = 3, then a space before
+    // textarea.)
+    const PROMPT_RESERVED: u16 = 4;
+    let prompt_cells_avail = inner.width.min(PROMPT_RESERVED);
+    let textarea_x = inner.x + prompt_cells_avail;
+    let textarea_w = inner.width.saturating_sub(prompt_cells_avail);
+
+    // Paint the prompt strip on the first row of inner.
+    if inner.height > 0 && inner.y < f.buffer_mut().area().bottom() {
+        // Streak tail intensities. While streaming, two trail cells
+        // pulse in a wave: cell 0 leads (brightest at phase=0), cell
+        // 1 follows (brightest at phase=0.33), then both fade. While
+        // idle, the trail is dark (no streak).
+        let streaming = app.is_streaming && !crate::spinner::reduced_motion();
+        let phase = if streaming {
+            ((std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+                % 800) as f32)
+                / 800.0
+        } else {
+            0.0
+        };
+        // Per-cell brightness as a wave that travels right toward
+        // the comet head. Each trail cell peaks at a different
+        // phase, so the streak reads as motion rather than blink.
+        let trail_intensity = |cell_index: usize| -> f32 {
+            if !streaming {
+                return 0.0;
+            }
+            // Cell 0 (leftmost) peaks at phase 0.0; cell 1 peaks at 0.5.
+            let peak = (cell_index as f32) * 0.5;
+            let dist = (phase - peak).abs().min((phase - peak + 1.0).abs()).min((phase - peak - 1.0).abs());
+            (1.0 - dist * 2.5).max(0.0)
+        };
+        let buf = f.buffer_mut();
+        // Trail cells.
+        for i in 0..(prompt_cells_avail.saturating_sub(2)) as usize {
+            let x = inner.x + i as u16;
+            if x >= buf.area().right() {
+                break;
+            }
+            let intensity = trail_intensity(i);
+            let cell = &mut buf[(x, inner.y)];
+            if intensity > 0.05 {
+                cell.set_symbol("·");
+                let blended = pulse_color(t.surface, t.accent, intensity);
+                cell.set_style(Style::default().fg(blended).bg(t.surface));
+            } else {
+                cell.set_symbol(" ");
+                cell.set_style(Style::default().bg(t.surface));
+            }
+        }
+        // Comet glyph in cell `prompt_cells_avail - 2`.
+        if prompt_cells_avail >= 2 {
+            let comet_x = inner.x + prompt_cells_avail - 2;
+            if comet_x < buf.area().right() {
+                let cell = &mut buf[(comet_x, inner.y)];
+                cell.set_symbol(&prompt_char);
+                cell.set_style(
+                    Style::default()
+                        .fg(prompt_color)
+                        .bg(t.surface)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        }
+        // Trailing space before the textarea so the glyph isn't
+        // glued to the user's first char.
+        if prompt_cells_avail >= 1 {
+            let space_x = inner.x + prompt_cells_avail - 1;
+            if space_x < buf.area().right() {
+                let cell = &mut buf[(space_x, inner.y)];
+                cell.set_symbol(" ");
+                cell.set_style(Style::default().bg(t.surface));
+            }
+        }
+    }
+
+    // Textarea inner rect (everything to the right of the prompt
+    // strip).
+    let inner = Rect {
+        x: textarea_x,
+        y: inner.y,
+        width: textarea_w,
+        height: inner.height,
+    };
 
     let content_width = inner.width.max(1) as usize;
     app.input_wrap_width = content_width;

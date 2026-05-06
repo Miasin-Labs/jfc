@@ -20,7 +20,7 @@ fn reset_input(app: &mut App) {
     app.textarea = TextArea::default();
     app.textarea.set_cursor_line_style(Style::default());
     app.textarea
-        .set_placeholder_text("Type a message… (Enter to send, Shift+Enter for newline)");
+        .set_placeholder_text("send a message…");
 }
 
 fn input_line_char_len(app: &App, line: usize) -> usize {
@@ -1109,7 +1109,7 @@ pub async fn handle_key(
                     );
                     app.textarea.set_cursor_line_style(Style::default());
                     app.textarea.set_placeholder_text(
-                        "Type a message… (Enter to send, Shift+Enter for newline)",
+                        "send a message…",
                     );
                     app.textarea.move_cursor(CursorMove::End);
                     return Ok(false);
@@ -1129,7 +1129,7 @@ pub async fn handle_key(
                     );
                     app.textarea.set_cursor_line_style(Style::default());
                     app.textarea.set_placeholder_text(
-                        "Type a message… (Enter to send, Shift+Enter for newline)",
+                        "send a message…",
                     );
                     app.textarea.move_cursor(CursorMove::End);
                     return Ok(false);
@@ -1936,7 +1936,7 @@ fn apply_mention_pick(app: &mut App, pick: &str) {
     app.textarea = TextArea::from(new_buf.lines().map(str::to_string).collect::<Vec<_>>());
     app.textarea.set_cursor_line_style(Style::default());
     app.textarea
-        .set_placeholder_text("Type a message… (Enter to send, Shift+Enter for newline)");
+        .set_placeholder_text("send a message…");
     app.textarea.move_cursor(CursorMove::End);
 }
 

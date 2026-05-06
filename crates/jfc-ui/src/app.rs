@@ -767,7 +767,10 @@ impl App {
             tokio::sync::mpsc::unbounded_channel::<crate::swarm::runner::TeammateEvent>();
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
-        textarea.set_placeholder_text("Type a message… (Enter to send, Shift+Enter for newline)");
+        // Minimal placeholder — the help overlay and `?` shortcut
+        // already document Enter / Shift+Enter; repeating it inline
+        // every render was noise. Just a soft prompt.
+        textarea.set_placeholder_text("send a message…");
 
         let cwd = std::env::current_dir()
             .ok()
