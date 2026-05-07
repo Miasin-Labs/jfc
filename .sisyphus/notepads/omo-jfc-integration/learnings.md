@@ -37,3 +37,13 @@
 
 - `HookHandler::IntentEnricher` remains non-mutating and returns `HookAction::Continue`; under `intent-gate` it now logs that enrichment was requested.
 - `tools::execute_tool` has the cfg-gated `hooks` marker for `BeforeToolDispatch` before permission checks and actual tool execution, but still does not execute hooks in the hot path.
+
+## Background agent state manager
+
+- `crates/jfc-ui/src/background.rs` keeps background agents as a synchronous, testable state manager: callers own actual tokio task spawning while the manager tracks IDs, status, capacity, and collection.
+- Completed or failed agents stop counting toward `max_concurrent`; collection takes the stored result once without removing the lifecycle entry.
+
+## Phase 3 TUI summaries and sandbox marker
+
+- `BackgroundManager::summaries()` returns stable ID-sorted `AgentSummary` values with cloned status, task description, and elapsed milliseconds so render code can display background agents without touching manager internals.
+- Economy bounty mechanistic verification now defines and logs an `SandboxPolicy::economy_solver(worktree)` under `landlock-sandbox`, applying it to the verification command as a marker until real Landlock enforcement lands.

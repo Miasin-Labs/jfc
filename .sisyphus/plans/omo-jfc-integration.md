@@ -967,7 +967,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 11-15)
 
-- [ ] 17. Background Agent Manager (Spawn, Track, Collect)
+- [x] 17. Background Agent Manager (Spawn, Track, Collect)
 
   **What to do**:
   - Create `crates/jfc-ui/src/background.rs` (behind `background-agents` feature)
@@ -1028,7 +1028,7 @@ Wave FINAL (Review):
   **Commit**: YES (groups with 18-22)
   - Message: `feat(agents): background agent manager + landlock sandbox`
 
-- [ ] 18. Background Agent Session Isolation
+- [x] 18. Background Agent Session Isolation
 
   **What to do**:
   - Each background agent gets: own message history, own token counter, own tool permissions
@@ -1071,7 +1071,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 17, 19-22)
 
-- [ ] 19. Background Agent TUI Output Routing
+- [x] 19. Background Agent TUI Output Routing
 
   **What to do**:
   - Add collapsed panel in TUI showing active background agents
@@ -1113,7 +1113,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 17, 18, 20-22)
 
-- [ ] 20. Landlock Sandbox Policy Builder
+- [x] 20. Landlock Sandbox Policy Builder
 
   **What to do**:
   - Create `crates/jfc-ui/src/sandbox/landlock.rs` (behind `landlock-sandbox` feature, Linux only)
@@ -1160,7 +1160,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 17-19, 21-22)
 
-- [ ] 21. Seccomp Filter for Economy Solver Processes
+- [x] 21. Seccomp Filter for Economy Solver Processes
 
   **What to do**:
   - Add seccomp filter that restricts: no network syscalls (socket, connect, bind), no process spawning beyond allowlist
@@ -1206,7 +1206,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 17-20, 22)
 
-- [ ] 22. Sandbox Integration with Economy Bounty Spawning
+- [x] 22. Sandbox Integration with Economy Bounty Spawning
 
   **What to do**:
   - When spawning economy solver agents, apply Landlock + seccomp policy
