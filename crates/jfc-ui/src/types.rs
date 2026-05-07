@@ -458,24 +458,29 @@ pub enum ToolKind {
     /// stays planning (rejected → mode unchanged + feedback echoed).
     ExitPlanMode,
     /// v132 parity: apply multiple edits to one file in a single
-    /// tool call. Saves a tool round-trip when the model needs
-    /// several local rewrites in the same source.
+    /// tool call.
     MultiEdit,
     /// v132 parity: ask the user a multi-choice question mid-turn.
-    /// Surfaces a structured prompt; the user's selection is the
-    /// tool result.
     AskUserQuestion,
     /// v132 parity: fetch a URL and return its contents.
     WebFetch,
     /// v132 parity: web search query → ranked results.
     WebSearch,
     /// MCP-advertised tool. The string is the full
-    /// `mcp__<server>__<tool>` advertised name, which
-    /// `mcp::tool_dispatch::dispatch_mcp_tool` unpacks to route the
-    /// call back to the right server. Carrying the namespaced name
-    /// (rather than just the inner tool) keeps display + dispatch
-    /// trivially round-trippable.
+    /// `mcp__<server>__<tool>` advertised name.
     Mcp(String),
+    /// Register a new cron job with the local daemon.
+    CronCreate,
+    /// List active cron jobs registered with the local daemon.
+    CronList,
+    /// Delete a cron job by ID.
+    CronDelete,
+    /// Schedule a one-shot wakeup that re-posts a prompt to the
+    /// conversation after `delay_seconds`. Persisted across restarts.
+    ScheduleWakeup,
+    /// Spawn a long-running command and stream stdout until a regex
+    /// matches OR a 60s timeout fires.
+    Monitor,
     Generic(String),
 }
 
@@ -624,22 +629,16 @@ pub enum ToolInput {
         #[serde(default, rename = "dispatch_cascade")]
         dispatch_cascade: bool,
     },
-    /// v132 ExitPlanMode tool input — the markdown-formatted plan
-    /// the model wants the user to approve before resuming with
-    /// destructive operations.
+    /// v132 ExitPlanMode tool input.
     ExitPlanMode {
         plan: String,
     },
     MultiEdit {
         file_path: String,
-        /// Each edit is { old_string, new_string, replace_all? }.
-        /// Applied in order; later edits see earlier edits' results.
-        /// Stored as a JSON array since the count is variable.
         edits: serde_json::Value,
     },
     AskUserQuestion {
         question: String,
-        /// JSON array of `{ label, description }` objects.
         options: serde_json::Value,
         multi_select: bool,
     },
@@ -651,14 +650,33 @@ pub enum ToolInput {
         query: String,
         max_results: Option<u32>,
     },
-    /// Input for an MCP-advertised tool. We don't try to type the
-    /// arguments — each MCP server's `inputSchema` is arbitrary, so we
-    /// keep the raw JSON the model produced and let the server validate.
-    /// `name` carries the full `mcp__server__tool` advertised name so
-    /// dispatch can route on it.
+    /// Input for an MCP-advertised tool. The arguments are raw JSON.
     Mcp {
         name: String,
         arguments: serde_json::Value,
+    },
+    /// `CronCreate { schedule, command, description }`.
+    CronCreate {
+        schedule: String,
+        command: String,
+        description: String,
+    },
+    /// `CronList { }` — no inputs.
+    CronList,
+    /// `CronDelete { id }`.
+    CronDelete {
+        id: String,
+    },
+    /// `ScheduleWakeup { delay_seconds, prompt, reason }`.
+    ScheduleWakeup {
+        delay_seconds: u32,
+        prompt: String,
+        reason: String,
+    },
+    /// `Monitor { command, until }`.
+    Monitor {
+        command: String,
+        until: String,
     },
     Generic {
         summary: String,
@@ -964,11 +982,14 @@ impl ToolKind {
             "postbounty" | "post_bounty" => Self::PostBounty,
             "marketstatus" | "market_status" => Self::MarketStatus,
             "runbounty" | "run_bounty" => Self::RunBounty,
-            // MCP-namespaced tools survive normalization because
-            // `name.to_ascii_lowercase().replace('_', "")` strips the
-            // `mcp__server__tool` separators. Match against the *raw*
-            // name's prefix instead so we route to the MCP variant
-            // without losing the server/tool identity.
+            "croncreate" | "cron_create" => Self::CronCreate,
+            "cronlist" | "cron_list" => Self::CronList,
+            "crondelete" | "cron_delete" => Self::CronDelete,
+            "schedulewakeup" | "schedule_wakeup" => Self::ScheduleWakeup,
+            "monitor" => Self::Monitor,
+            // MCP-namespaced tools route to the Mcp variant carrying
+            // the full `mcp__server__tool` name. Goes last so it
+            // doesn't shadow specific matches.
             _ if name.starts_with("mcp__") => Self::Mcp(name.to_owned()),
             _ => Self::Generic(name.to_owned()),
         }
@@ -1007,6 +1028,11 @@ impl ToolKind {
             Self::RunBounty => "RunBounty",
             Self::MarketStatus => "MarketStatus",
             Self::Mcp(name) => name.as_str(),
+            Self::CronCreate => "CronCreate",
+            Self::CronList => "CronList",
+            Self::CronDelete => "CronDelete",
+            Self::ScheduleWakeup => "ScheduleWakeup",
+            Self::Monitor => "Monitor",
             Self::Generic(name) => name.as_str(),
         }
     }
@@ -1044,6 +1070,11 @@ impl ToolKind {
             Self::RunBounty => "run_bounty",
             Self::MarketStatus => "market_status",
             Self::Mcp(name) => name.as_str(),
+            Self::CronCreate => "CronCreate",
+            Self::CronList => "CronList",
+            Self::CronDelete => "CronDelete",
+            Self::ScheduleWakeup => "ScheduleWakeup",
+            Self::Monitor => "Monitor",
             Self::Generic(name) => name.as_str(),
         }
     }
@@ -1142,15 +1173,27 @@ impl ToolInput {
             Self::WebFetch { url, .. } => format!("fetch: {url}"),
             Self::WebSearch { query, .. } => format!("search: {query}"),
             Self::Mcp { name, arguments } => {
-                // Show the bare tool segment (after `mcp__server__`) plus
-                // a short JSON preview so the chat row reads like
-                // "mcp(read_file): {path:..}". Falls back to the full
-                // namespaced name if split fails.
                 let label = crate::mcp::split_advertised(name)
                     .map(|(server, tool)| format!("{tool}@{server}"))
                     .unwrap_or_else(|| name.clone());
                 let preview: String = arguments.to_string().chars().take(60).collect();
                 format!("{label}: {preview}")
+            }
+            Self::CronCreate {
+                schedule,
+                description,
+                ..
+            } => format!("cron `{schedule}`: {description}"),
+            Self::CronList => "list cron jobs".into(),
+            Self::CronDelete { id } => format!("delete cron: {id}"),
+            Self::ScheduleWakeup {
+                delay_seconds,
+                reason,
+                ..
+            } => format!("wake in {delay_seconds}s: {reason}"),
+            Self::Monitor { command, until } => {
+                let preview: String = command.chars().take(40).collect();
+                format!("monitor `{preview}` until /{until}/")
             }
             Self::Generic { summary } => summary.clone(),
         }
@@ -1370,6 +1413,28 @@ impl ToolInput {
             ToolKind::Mcp(name) => Self::Mcp {
                 name,
                 arguments: v.clone(),
+            },
+            ToolKind::CronCreate => Self::CronCreate {
+                schedule: str_field("schedule"),
+                command: str_field("command"),
+                description: str_field("description"),
+            },
+            ToolKind::CronList => Self::CronList,
+            ToolKind::CronDelete => Self::CronDelete {
+                id: str_field("id"),
+            },
+            ToolKind::ScheduleWakeup => Self::ScheduleWakeup {
+                delay_seconds: obj
+                    .and_then(|m| m.get("delay_seconds"))
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.min(u32::MAX as u64) as u32)
+                    .unwrap_or(0),
+                prompt: str_field("prompt"),
+                reason: str_field("reason"),
+            },
+            ToolKind::Monitor => Self::Monitor {
+                command: str_field("command"),
+                until: str_field("until"),
             },
             ToolKind::Generic(_) => Self::Generic {
                 summary: v.to_string(),
@@ -1656,6 +1721,30 @@ impl ToolInput {
                 v
             }
             Self::Mcp { arguments, .. } => arguments.clone(),
+            Self::CronCreate {
+                schedule,
+                command,
+                description,
+            } => json!({
+                "schedule": schedule,
+                "command": command,
+                "description": description,
+            }),
+            Self::CronList => json!({}),
+            Self::CronDelete { id } => json!({ "id": id }),
+            Self::ScheduleWakeup {
+                delay_seconds,
+                prompt,
+                reason,
+            } => json!({
+                "delay_seconds": delay_seconds,
+                "prompt": prompt,
+                "reason": reason,
+            }),
+            Self::Monitor { command, until } => json!({
+                "command": command,
+                "until": until,
+            }),
             Self::Generic { summary } => {
                 serde_json::from_str(summary).unwrap_or(json!({ "input": summary }))
             }
