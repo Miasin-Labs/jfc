@@ -1201,6 +1201,12 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         ToolKind::PostBounty | ToolKind::RunBounty | ToolKind::MarketStatus => {
             Color::Rgb(255, 215, 100)
         } // gold
+        ToolKind::Lsp => Color::Rgb(140, 200, 240), // sky
+        ToolKind::PushNotification | ToolKind::RemoteTrigger => Color::Rgb(255, 180, 110), // tangerine
+        ToolKind::EnterPlanMode | ToolKind::EnterWorktree | ToolKind::ExitWorktree => {
+            Color::Rgb(180, 220, 180)
+        } // soft green
+        ToolKind::NotebookRead | ToolKind::NotebookEdit => Color::Rgb(255, 170, 100), // notebook orange
         ToolKind::Generic(_) => t.text_secondary,
     }
 }
