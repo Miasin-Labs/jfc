@@ -1252,7 +1252,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 17-21)
 
-- [ ] 23. Argus Code Review Agent Profile
+- [x] 23. Argus Code Review Agent Profile
 
   **What to do**:
   - Define agent profile config: system prompt, tool selection, review methodology
@@ -1296,7 +1296,7 @@ Wave FINAL (Review):
   **Commit**: YES (groups with 24-28)
   - Message: `feat(orchestration): argus review, ralph loop, tmux, handoff`
 
-- [ ] 24. Ralph Continuation Loop
+- [x] 24. Ralph Continuation Loop
 
   **What to do**:
   - Implement loop pattern: after agent completes, check if work is done
@@ -1340,7 +1340,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 23, 25-28)
 
-- [ ] 25. Tmux Interactive Tool
+- [x] 25. Tmux Interactive Tool
 
   **What to do**:
   - Add `ToolInput::Tmux` variant: `{ session: String, command: TmuxCommand }`
@@ -1384,7 +1384,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 23, 24, 26-28)
 
-- [ ] 26. Comment Checking Hook (AI-Slop Detection)
+- [x] 26. Comment Checking Hook (AI-Slop Detection)
 
   **What to do**:
   - Register `AfterToolDispatch` hook for Edit/Write tools
@@ -1430,7 +1430,7 @@ Wave FINAL (Review):
 
   **Commit**: YES (groups with 23-25, 27-28)
 
-- [ ] 27. Session Handoff Protocol
+- [x] 27. Session Handoff Protocol
 
   **What to do**:
   - Implement `/handoff` command: generates context summary for new session

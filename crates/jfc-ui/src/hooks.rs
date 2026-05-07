@@ -77,7 +77,24 @@ impl HookHandler {
                 HookAction::Continue
             }
             Self::CommentChecker => {
-                // Placeholder — actual integration in Task 26
+                let slop_patterns = [
+                    "// This function",
+                    "// This method",
+                    "// TODO: implement",
+                    "#[allow(unused)]",
+                    "/* eslint-disable */",
+                ];
+                let has_slop = slop_patterns
+                    .iter()
+                    .any(|pattern| ctx.tool_input.contains(pattern));
+                if has_slop {
+                    tracing::warn!(
+                        target: "jfc::hooks::comment_check",
+                        tool = %ctx.tool_name,
+                        "AI-slop pattern detected in tool output"
+                    );
+                }
+                // Advisory only — never blocks.
                 HookAction::Continue
             }
             Self::Custom { action, .. } => action.clone(),
@@ -296,5 +313,17 @@ mod tests {
         {
             tracing::trace!(target: "jfc::hooks", "hook integration point: BeforeToolDispatch");
         }
+    }
+
+    #[test]
+    fn test_comment_checker_detects_slop() {
+        let ctx = HookContext {
+            tool_name: "write".to_string(),
+            tool_input: "// This function updates state\nfn update() {}".to_string(),
+            session_id: "session-1".to_string(),
+            intent: None,
+        };
+
+        assert_continue(HookHandler::CommentChecker.execute(&ctx));
     }
 }
