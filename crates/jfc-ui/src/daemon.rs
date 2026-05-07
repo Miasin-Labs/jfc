@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 //! Fleet daemon — persistent headless agent management.
 //!
 //! Implements a background daemon process that manages multiple jfc sessions:
