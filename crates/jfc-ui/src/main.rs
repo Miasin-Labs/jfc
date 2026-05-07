@@ -35,6 +35,19 @@ mod tools;
 mod types;
 mod worktrees;
 
+#[cfg(feature = "background-agents")]
+mod background;
+#[cfg(feature = "hashline")]
+mod hashline;
+#[cfg(feature = "hooks")]
+mod hooks;
+#[cfg(feature = "intent-gate")]
+mod intent;
+#[cfg(feature = "permission-automation")]
+mod permissions;
+#[cfg(feature = "landlock-sandbox")]
+mod sandbox;
+
 use std::{io, sync::Arc, time::Duration};
 
 use clap::Parser;

@@ -72,4 +72,19 @@ jfc-economy = { path = "../jfc-economy" }
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "regex-onig", "yaml-load", "dump-create", "dump-load"] }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
 tempfile = "3.27.0"
+
+[features]
+default = []
+hashline = []
+permission-automation = []
+hooks = []
+background-agents = []
+intent-gate = []
+landlock-sandbox = []
+
+[[bench]]
+name = "hooks"
+harness = false
