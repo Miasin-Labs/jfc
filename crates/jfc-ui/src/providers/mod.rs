@@ -6,6 +6,7 @@ mod http;
 pub mod models_dev;
 pub mod openai;
 pub mod openwebui;
+pub mod retry;
 mod sse;
 
 pub use anthropic::AnthropicProvider;
