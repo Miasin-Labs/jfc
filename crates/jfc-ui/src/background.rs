@@ -48,6 +48,96 @@ pub struct AgentSummary {
     pub elapsed_ms: u64,
 }
 
+/// Configuration for a Ralph-style continuation loop.
+#[derive(Debug, Clone)]
+pub struct LoopConfig {
+    pub max_iterations: usize,
+    pub check_compile: bool,
+    pub check_tests: bool,
+}
+
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 3,
+            check_compile: true,
+            check_tests: true,
+        }
+    }
+}
+
+/// Reason why the loop should continue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinueReason {
+    CompilationFailed,
+    TestsFailed,
+    TodosRemaining(usize),
+}
+
+/// Check if work is complete or needs another iteration.
+pub fn should_continue(
+    compile_ok: bool,
+    tests_ok: bool,
+    todos_remaining: usize,
+    config: &LoopConfig,
+) -> Option<ContinueReason> {
+    if config.check_compile && !compile_ok {
+        return Some(ContinueReason::CompilationFailed);
+    }
+    if config.check_tests && !tests_ok {
+        return Some(ContinueReason::TestsFailed);
+    }
+    if todos_remaining > 0 {
+        return Some(ContinueReason::TodosRemaining(todos_remaining));
+    }
+    None
+}
+
+/// Tmux command types for interactive tool.
+#[derive(Debug, Clone)]
+pub enum TmuxCommand {
+    NewSession { name: String },
+    SendKeys { session: String, keys: String },
+    CapturePan { session: String },
+    KillSession { session: String },
+}
+
+/// Result of a tmux operation.
+#[derive(Debug, Clone)]
+pub struct TmuxResult {
+    pub output: String,
+    pub success: bool,
+}
+
+/// Generate a handoff summary for session continuation.
+#[derive(Debug, Clone)]
+pub struct HandoffSummary {
+    pub files_modified: Vec<String>,
+    pub decisions_made: Vec<String>,
+    pub todos_remaining: Vec<String>,
+    pub key_context: String,
+}
+
+impl HandoffSummary {
+    pub fn to_markdown(&self) -> String {
+        let mut md = String::from("# Session Handoff\n\n");
+        md.push_str("## Files Modified\n");
+        for f in &self.files_modified {
+            md.push_str(&format!("- {f}\n"));
+        }
+        md.push_str("\n## Decisions Made\n");
+        for d in &self.decisions_made {
+            md.push_str(&format!("- {d}\n"));
+        }
+        md.push_str("\n## Remaining TODOs\n");
+        for t in &self.todos_remaining {
+            md.push_str(&format!("- [ ] {t}\n"));
+        }
+        md.push_str(&format!("\n## Key Context\n{}\n", self.key_context));
+        md
+    }
+}
+
 /// Error when spawning fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
@@ -324,5 +414,52 @@ mod tests {
                 .iter()
                 .all(|summary| summary.elapsed_ms < u64::MAX)
         );
+    }
+
+    #[test]
+    fn test_should_continue_detects_failures() {
+        let config = LoopConfig::default();
+
+        assert_eq!(
+            should_continue(false, false, 0, &config),
+            Some(ContinueReason::CompilationFailed)
+        );
+        assert_eq!(
+            should_continue(true, false, 0, &config),
+            Some(ContinueReason::TestsFailed)
+        );
+        assert_eq!(
+            should_continue(true, true, 2, &config),
+            Some(ContinueReason::TodosRemaining(2))
+        );
+        assert_eq!(should_continue(true, true, 0, &config), None);
+
+        let advisory_config = LoopConfig {
+            check_compile: false,
+            check_tests: false,
+            ..LoopConfig::default()
+        };
+        assert_eq!(
+            should_continue(false, false, 1, &advisory_config),
+            Some(ContinueReason::TodosRemaining(1))
+        );
+    }
+
+    #[test]
+    fn test_handoff_summary_to_markdown() {
+        let summary = HandoffSummary {
+            files_modified: vec!["crates/jfc-ui/src/background.rs".to_string()],
+            decisions_made: vec!["Keep tmux support type-only for now".to_string()],
+            todos_remaining: vec!["Wire handoff into slash command".to_string()],
+            key_context: "Phase 4 primitives are additive.".to_string(),
+        };
+
+        let markdown = summary.to_markdown();
+
+        assert!(markdown.starts_with("# Session Handoff\n\n"));
+        assert!(markdown.contains("- crates/jfc-ui/src/background.rs\n"));
+        assert!(markdown.contains("- Keep tmux support type-only for now\n"));
+        assert!(markdown.contains("- [ ] Wire handoff into slash command\n"));
+        assert!(markdown.contains("## Key Context\nPhase 4 primitives are additive.\n"));
     }
 }

@@ -47,3 +47,9 @@
 
 - `BackgroundManager::summaries()` returns stable ID-sorted `AgentSummary` values with cloned status, task description, and elapsed milliseconds so render code can display background agents without touching manager internals.
 - Economy bounty mechanistic verification now defines and logs an `SandboxPolicy::economy_solver(worktree)` under `landlock-sandbox`, applying it to the verification command as a marker until real Landlock enforcement lands.
+
+## Phase 4 orchestration primitives
+
+- `.jfc/agents/argus.toml` is an example read-only review agent profile: Read/Grep/Glob/Lsp allowed, Edit/Write/Bash denied, P0-P3 structured review methodology.
+- `background.rs` now exposes additive orchestration primitives only: Ralph-style continuation checks, tmux command/result data types without execution, and markdown handoff summaries.
+- `HookHandler::CommentChecker` is advisory-only: it warns on known AI-slop comment patterns in tool input and always returns `HookAction::Continue`.
