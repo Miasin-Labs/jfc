@@ -1525,7 +1525,7 @@ Wave FINAL (Review):
 
 ## Final Verification Wave
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read plan end-to-end. For each "Must Have": verify implementation exists. For each "Must NOT Have": search for forbidden patterns. Check all feature flags exist and default to off.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | VERDICT`
 
@@ -1557,7 +1557,7 @@ Wave FINAL (Review):
     Evidence: .sisyphus/evidence/F1-must-not.txt
   ```
 
-- [ ] F2. **Code Quality Review** — `general`
+- [x] F2. **Code Quality Review** — `general`
   Run `cargo clippy --all-features -- -D warnings`. Check for `unsafe`, `unwrap()` in non-test code, trait objects in hot paths. Verify no new binary crates created. Verify ToolInput enum has only ADDITIVE changes (new variants like Tmux are allowed; existing variant signatures unchanged).
   Output: `Build [PASS/FAIL] | Clippy [PASS/FAIL] | Tests [N pass] | VERDICT`
 
@@ -1574,7 +1574,7 @@ Wave FINAL (Review):
     Evidence: .sisyphus/evidence/F2-quality.txt
   ```
 
-- [ ] F3. **Real QA** — `general` (+ `playwright` skill if UI)
+- [x] F3. **Real QA** — `general` (+ `playwright` skill if UI)
   Start from clean state. Execute EVERY QA scenario from EVERY task — follow exact steps, capture evidence. Test cross-task integration (features working together, not isolation). Test edge cases: empty state, invalid input, rapid actions. Save to `.sisyphus/evidence/final-qa/`.
   Output: `Scenarios [N/N pass] | Integration [N/N] | Edge Cases [N tested] | VERDICT`
 
@@ -1601,7 +1601,7 @@ Wave FINAL (Review):
     Evidence: .sisyphus/evidence/F3-empty-config.txt
   ```
 
-- [ ] F4. **Scope Fidelity Check** — `general`
+- [x] F4. **Scope Fidelity Check** — `general`
   Verify no scripting engine added. No more than 3 files per feature. No breaking ToolInput changes. Feature flags all present and default-off.
   Output: `Scope [CLEAN/N issues] | VERDICT`
 
