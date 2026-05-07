@@ -213,6 +213,41 @@ pub enum SerializedToolInput {
     MemoryDelete {
         path: String,
     },
+    Lsp {
+        kind: String,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    PushNotification {
+        message: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    RemoteTrigger {
+        trigger_id: String,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
+    EnterPlanMode {
+        reason: String,
+    },
+    EnterWorktree {
+        name: String,
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    ExitWorktree,
+    NotebookRead {
+        path: String,
+    },
+    NotebookEdit {
+        path: String,
+        cell_id: String,
+        new_source: String,
+        #[serde(default)]
+        edit_mode: Option<String>,
+    },
     Generic {
         summary: String,
     },
@@ -1076,6 +1111,48 @@ fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
         ToolInput::RunBounty { bounty_id, .. } => SerializedToolInput::Generic {
             summary: format!("RunBounty: {bounty_id}"),
         },
+        ToolInput::Lsp {
+            kind,
+            file,
+            line,
+            column,
+        } => SerializedToolInput::Lsp {
+            kind: kind.clone(),
+            file: file.clone(),
+            line: *line,
+            column: *column,
+        },
+        ToolInput::PushNotification { message, title } => SerializedToolInput::PushNotification {
+            message: message.clone(),
+            title: title.clone(),
+        },
+        ToolInput::RemoteTrigger {
+            trigger_id,
+            payload,
+        } => SerializedToolInput::RemoteTrigger {
+            trigger_id: trigger_id.clone(),
+            payload: payload.clone(),
+        },
+        ToolInput::EnterPlanMode { reason } => SerializedToolInput::EnterPlanMode {
+            reason: reason.clone(),
+        },
+        ToolInput::EnterWorktree { name, branch } => SerializedToolInput::EnterWorktree {
+            name: name.clone(),
+            branch: branch.clone(),
+        },
+        ToolInput::ExitWorktree => SerializedToolInput::ExitWorktree,
+        ToolInput::NotebookRead { path } => SerializedToolInput::NotebookRead { path: path.clone() },
+        ToolInput::NotebookEdit {
+            path,
+            cell_id,
+            new_source,
+            edit_mode,
+        } => SerializedToolInput::NotebookEdit {
+            path: path.clone(),
+            cell_id: cell_id.clone(),
+            new_source: new_source.clone(),
+            edit_mode: edit_mode.clone(),
+        },
         ToolInput::Generic { summary } => SerializedToolInput::Generic {
             summary: summary.clone(),
         },
@@ -1363,6 +1440,44 @@ fn deserialize_tool_input(input: SerializedToolInput) -> ToolInput {
             body,
         },
         SerializedToolInput::MemoryDelete { path } => ToolInput::MemoryDelete { path },
+        SerializedToolInput::Lsp {
+            kind,
+            file,
+            line,
+            column,
+        } => ToolInput::Lsp {
+            kind,
+            file,
+            line,
+            column,
+        },
+        SerializedToolInput::PushNotification { message, title } => {
+            ToolInput::PushNotification { message, title }
+        }
+        SerializedToolInput::RemoteTrigger {
+            trigger_id,
+            payload,
+        } => ToolInput::RemoteTrigger {
+            trigger_id,
+            payload,
+        },
+        SerializedToolInput::EnterPlanMode { reason } => ToolInput::EnterPlanMode { reason },
+        SerializedToolInput::EnterWorktree { name, branch } => {
+            ToolInput::EnterWorktree { name, branch }
+        }
+        SerializedToolInput::ExitWorktree => ToolInput::ExitWorktree,
+        SerializedToolInput::NotebookRead { path } => ToolInput::NotebookRead { path },
+        SerializedToolInput::NotebookEdit {
+            path,
+            cell_id,
+            new_source,
+            edit_mode,
+        } => ToolInput::NotebookEdit {
+            path,
+            cell_id,
+            new_source,
+            edit_mode,
+        },
         SerializedToolInput::Generic { summary } => ToolInput::Generic { summary },
     }
 }

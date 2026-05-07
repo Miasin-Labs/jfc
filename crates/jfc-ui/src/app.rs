@@ -186,6 +186,13 @@ pub enum AppEvent {
         agent_type: Option<String>,
         cwd: String,
     },
+    /// Model-callable plan-mode entry. Dispatched by the `EnterPlanMode`
+    /// tool — the main event loop flips `app.permission_mode` to
+    /// `PermissionMode::Plan` and surfaces a toast with the supplied
+    /// reason so the user knows why the model requested it.
+    EnterPlanModeRequested {
+        reason: String,
+    },
 }
 
 /// Permission modes matching v126 claude-code. Controls how tool execution
