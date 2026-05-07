@@ -1219,11 +1219,16 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         ToolKind::PostBounty | ToolKind::RunBounty | ToolKind::MarketStatus => {
             Color::Rgb(255, 215, 100)
         } // gold
-        ToolKind::ExitPlanMode => Color::Rgb(170, 200, 255), // cool blue — same family as the plan-mode indicator
-        ToolKind::MultiEdit => Color::Rgb(160, 230, 170), // mint — same family as Edit
-        ToolKind::AskUserQuestion => Color::Rgb(255, 200, 240), // soft pink — user-facing
-        ToolKind::WebFetch | ToolKind::WebSearch => Color::Rgb(120, 200, 220), // teal — networked tools
-        ToolKind::Mcp(_) => Color::Rgb(190, 170, 240), // soft violet — distinct from native lavender (Glob/Grep)
+        ToolKind::ExitPlanMode => Color::Rgb(170, 200, 255),
+        ToolKind::MultiEdit => Color::Rgb(160, 230, 170),
+        ToolKind::AskUserQuestion => Color::Rgb(255, 200, 240),
+        ToolKind::WebFetch | ToolKind::WebSearch => Color::Rgb(120, 200, 220),
+        ToolKind::Mcp(_) => Color::Rgb(190, 170, 240),
+        ToolKind::CronCreate
+        | ToolKind::CronList
+        | ToolKind::CronDelete
+        | ToolKind::ScheduleWakeup
+        | ToolKind::Monitor => Color::Rgb(180, 200, 255),
         ToolKind::Generic(_) => t.text_secondary,
     }
 }

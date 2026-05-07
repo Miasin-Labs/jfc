@@ -1084,9 +1084,6 @@ fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
             summary: format!("RunBounty: {bounty_id}"),
         },
         ToolInput::ExitPlanMode { plan } => SerializedToolInput::Generic {
-            // Persist the plan body in the session log so /resume
-            // sees it; the generic envelope is fine since plan-mode
-            // approval is in-memory state, not replayable on reload.
             summary: format!("ExitPlanMode: {plan}"),
         },
         ToolInput::MultiEdit { file_path, edits } => SerializedToolInput::Generic {
@@ -1105,11 +1102,33 @@ fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
             summary: format!("WebSearch: {query}"),
         },
         ToolInput::Mcp { name, arguments } => SerializedToolInput::Generic {
-            // Persist MCP calls as a Generic-shaped row. We don't lose
-            // information because session resume rehydrates ToolInput
-            // via from_value(), which routes mcp__-prefixed names to
-            // the Mcp variant unconditionally.
             summary: format!("{name}: {arguments}"),
+        },
+        ToolInput::CronCreate {
+            schedule,
+            description,
+            ..
+        } => SerializedToolInput::Generic {
+            summary: format!("CronCreate({schedule}): {description}"),
+        },
+        ToolInput::CronList => SerializedToolInput::Generic {
+            summary: "CronList".into(),
+        },
+        ToolInput::CronDelete { id } => SerializedToolInput::Generic {
+            summary: format!("CronDelete: {id}"),
+        },
+        ToolInput::ScheduleWakeup {
+            delay_seconds,
+            reason,
+            ..
+        } => SerializedToolInput::Generic {
+            summary: format!("ScheduleWakeup({delay_seconds}s): {reason}"),
+        },
+        ToolInput::Monitor { command, until } => SerializedToolInput::Generic {
+            summary: format!(
+                "Monitor `{}` until /{until}/",
+                command.chars().take(40).collect::<String>()
+            ),
         },
         ToolInput::Generic { summary } => SerializedToolInput::Generic {
             summary: summary.clone(),
