@@ -1870,8 +1870,24 @@ fn infer_lang_from_bash(command: &str) -> Option<String> {
         .collect();
     let mut it = toks.into_iter();
     let verb = it.next()?;
-    if !matches!(verb, "cat" | "head" | "tail" | "bat" | "less" | "more") {
+    if !matches!(verb, "cat" | "head" | "tail" | "bat" | "less" | "more"
+        | "sed" | "awk" | "perl" | "jq" | "yq" | "python" | "python3" | "node") {
         return None;
+    }
+
+    // jq/yq always output JSON/YAML
+    if matches!(verb, "jq") {
+        return Some("json".to_string());
+    }
+    if matches!(verb, "yq") {
+        return Some("yaml".to_string());
+    }
+    // python/node inline scripts — highlight as that language
+    if matches!(verb, "python" | "python3") {
+        return Some("python".to_string());
+    }
+    if matches!(verb, "node") {
+        return Some("javascript".to_string());
     }
     // Pick the first non-flag, non-numeric arg as the file path.
     // Handles `head -50 file.rs`, `tail -n 100 file.py`, etc.
@@ -1964,12 +1980,18 @@ fn render_highlighted_block_skip(
 enum BashCmdKind {
     /// `grep` / `rg` / `ack` results: `path:line:match` per line.
     Grep,
-    /// `find` / `ls` / `tree` etc. — flat path list.
+    /// `find` / `ls` / `tree` / `fd` etc. — flat path list.
     PathList,
     /// `git diff` / `git show` — unified diff with +/- lines.
     GitDiff,
     /// `git log` — commit metadata + body.
     GitLog,
+    /// `jq` — output is always JSON.
+    Json,
+    /// `cargo test` / `cargo check` / `make` — compiler/test output.
+    CompilerOutput,
+    /// `curl` — HTTP response (may be JSON/HTML/XML).
+    HttpResponse,
     /// Plain command (default).
     Other,
 }
@@ -2033,7 +2055,22 @@ fn classify_bash_cmd(command: &str) -> BashCmdKind {
     }
     match *verb {
         "grep" | "rg" | "ack" | "ag" => BashCmdKind::Grep,
-        "find" | "ls" | "tree" | "fd" => BashCmdKind::PathList,
+        "find" | "ls" | "tree" | "fd" | "exa" | "eza" => BashCmdKind::PathList,
+        "jq" | "yq" => BashCmdKind::Json,
+        "cargo" => {
+            if let Some(sub) = toks.get(1) {
+                match *sub {
+                    "test" | "check" | "build" | "clippy" => BashCmdKind::CompilerOutput,
+                    _ => BashCmdKind::Other,
+                }
+            } else {
+                BashCmdKind::Other
+            }
+        }
+        "make" | "cmake" | "gcc" | "g++" | "rustc" | "tsc" | "npm" | "yarn" | "pnpm" => {
+            BashCmdKind::CompilerOutput
+        }
+        "curl" | "wget" | "httpie" | "http" => BashCmdKind::HttpResponse,
         _ => BashCmdKind::Other,
     }
 }
