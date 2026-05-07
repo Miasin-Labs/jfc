@@ -53,3 +53,8 @@
 - `.jfc/agents/argus.toml` is an example read-only review agent profile: Read/Grep/Glob/Lsp allowed, Edit/Write/Bash denied, P0-P3 structured review methodology.
 - `background.rs` now exposes additive orchestration primitives only: Ralph-style continuation checks, tmux command/result data types without execution, and markdown handoff summaries.
 - `HookHandler::CommentChecker` is advisory-only: it warns on known AI-slop comment patterns in tool input and always returns `HookAction::Continue`.
+
+## E2E orchestration coverage
+
+- `hooks.rs` contains `test_e2e_orchestration_pipeline`, cfg-gated on hooks, hashline, permission automation, intent gate, and background agents.
+- The test exercises the orchestration path end-to-end: implementation intent classification, default permission Ask decision, logger/comment hooks, hashline edit target resolution, and background agent collection.

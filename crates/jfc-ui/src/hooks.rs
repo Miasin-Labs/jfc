@@ -326,4 +326,52 @@ mod tests {
 
         assert_continue(HookHandler::CommentChecker.execute(&ctx));
     }
+
+    #[cfg(all(
+        feature = "hooks",
+        feature = "hashline",
+        feature = "permission-automation",
+        feature = "intent-gate",
+        feature = "background-agents",
+    ))]
+    #[test]
+    fn test_e2e_orchestration_pipeline() {
+        use crate::config::feature_config::FeatureConfig;
+        use crate::{background, hashline, intent};
+
+        let classification = intent::classify("implement a new login page");
+        assert_eq!(classification.intent, intent::Intent::Implementation);
+
+        let config = FeatureConfig::default();
+        let rules = crate::permissions::RuleSet::from_config(&config);
+        let decision = rules.evaluate("Edit", Some("src/login.rs"));
+        assert_eq!(decision.action, crate::permissions::PermissionAction::Ask);
+
+        let mut registry = HookRegistry::new();
+        registry.register(HookPoint::BeforeToolDispatch, HookHandler::Logger);
+        registry.register(HookPoint::BeforeToolDispatch, HookHandler::CommentChecker);
+        let ctx = HookContext {
+            tool_name: "Edit".to_string(),
+            tool_input: "fn login() {}".to_string(),
+            session_id: "test-session".to_string(),
+            intent: Some("Implementation".to_string()),
+        };
+        assert_continue(registry.fire(HookPoint::BeforeToolDispatch, &ctx));
+
+        let content = "line1\nfn login() {}\nline3\n";
+        let resolution = hashline::try_resolve_edit_target(content, "fn login() {}", Some(1))
+            .expect("hashline resolves edit target");
+        assert_eq!(resolution.start_line, 1);
+
+        let mut manager = background::BackgroundManager::new(5);
+        let id = manager
+            .spawn(background::AgentConfig {
+                task_description: "parallel research".to_string(),
+                max_tokens: 1000,
+            })
+            .expect("background agent spawns");
+        manager.complete(id, "research done".to_string(), 500);
+        let result = manager.collect(id).expect("completed agent is collectable");
+        assert_eq!(result.output, "research done");
+    }
 }
