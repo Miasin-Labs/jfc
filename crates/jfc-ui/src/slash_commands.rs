@@ -40,6 +40,9 @@ pub enum SlashCommand {
     Daemon(Option<String>),
     /// /mcp [list|restart <name>|logs <name>] — MCP server management
     Mcp(Option<String>),
+    /// /login [provider] — sign in to a provider (anthropic, claudeai, bedrock,
+    /// vertex, console). Subcommand selects which wizard to drive.
+    Login(Option<String>),
     /// Unknown command
     Unknown(String),
 }
@@ -71,6 +74,8 @@ impl fmt::Display for SlashCommand {
             Self::Daemon(None) => write!(f, "/daemon"),
             Self::Mcp(Some(s)) => write!(f, "/mcp {s}"),
             Self::Mcp(None) => write!(f, "/mcp"),
+            Self::Login(Some(p)) => write!(f, "/login {p}"),
+            Self::Login(None) => write!(f, "/login"),
             Self::Unknown(s) => write!(f, "/{s}"),
         }
     }
@@ -104,6 +109,7 @@ pub fn parse_slash_command(input: &str) -> Option<SlashCommand> {
         "worktree" | "wt" => SlashCommand::Worktree(arg),
         "daemon" | "fleet" => SlashCommand::Daemon(arg),
         "mcp" => SlashCommand::Mcp(arg),
+        "login" => SlashCommand::Login(arg),
         other => SlashCommand::Unknown(other.to_string()),
     };
 
@@ -129,6 +135,7 @@ Available commands:
   /worktree [cmd]  Worktree management (create/list/remove/switch)
   /mcp [cmd]       MCP server management (list/restart <name>/logs <name>)
   /daemon [cmd]    Daemon management (start/stop/status/run/cron)
+  /login [target]  Sign in: anthropic | claudeai | bedrock | vertex | console
   /help            Show this help
   /exit            Exit the session"
 }
@@ -210,6 +217,35 @@ mod tests {
         assert_eq!(
             parse_slash_command("/mcp logs git"),
             Some(SlashCommand::Mcp(Some("logs git".to_string())))
+        );
+    }
+
+    // Normal: bare /login surfaces a None arg so the dispatcher can render
+    // a provider chooser. The named variants route to the provider-specific
+    // wizards (anthropic / claudeai / bedrock / vertex / console).
+    #[test]
+    fn parse_login_normal() {
+        assert_eq!(parse_slash_command("/login"), Some(SlashCommand::Login(None)));
+        assert_eq!(
+            parse_slash_command("/login bedrock"),
+            Some(SlashCommand::Login(Some("bedrock".to_string())))
+        );
+        assert_eq!(
+            parse_slash_command("/login vertex"),
+            Some(SlashCommand::Login(Some("vertex".to_string())))
+        );
+        assert_eq!(
+            parse_slash_command("/login console"),
+            Some(SlashCommand::Login(Some("console".to_string())))
+        );
+    }
+
+    // Robust: /login with extra whitespace round-trips through trim.
+    #[test]
+    fn parse_login_trims_whitespace_robust() {
+        assert_eq!(
+            parse_slash_command("/login   bedrock  "),
+            Some(SlashCommand::Login(Some("bedrock".to_string())))
         );
     }
 }
