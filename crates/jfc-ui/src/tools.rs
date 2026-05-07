@@ -862,6 +862,20 @@ async fn verify_bounty_solution(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    #[cfg(feature = "landlock-sandbox")]
+    {
+        use crate::sandbox::{SandboxPolicy, SandboxResult};
+
+        let policy = SandboxPolicy::economy_solver(worktree);
+        tracing::info!(
+            target: "jfc::sandbox",
+            worktree = %worktree.display(),
+            "applying sandbox policy to bounty solver verification"
+        );
+        // Policy is defined; actual enforcement pending landlock crate integration.
+        let _result: SandboxResult = policy.apply_to_command(command.as_std_mut());
+    }
+
     match tokio::time::timeout(std::time::Duration::from_secs(120), command.output()).await {
         Ok(Ok(output)) if output.status.success() => MechanisticVerification {
             passed: true,
