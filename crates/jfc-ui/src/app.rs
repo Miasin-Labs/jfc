@@ -186,6 +186,15 @@ pub enum AppEvent {
         agent_type: Option<String>,
         cwd: String,
     },
+    /// The model called `ExitPlanMode` and wants the user to see the
+    /// plan + transition out of plan mode. Carries the markdown plan
+    /// body so the main loop can render it as a labeled assistant
+    /// message and flip `app.permission_mode` to AcceptEdits. The
+    /// tool dispatcher emits this; the UI thread owns the mode
+    /// mutation so all state changes stay on one task.
+    ExitPlanModeRequested {
+        plan: String,
+    },
 }
 
 /// Permission modes matching v126 claude-code. Controls how tool execution
@@ -250,7 +259,12 @@ impl PermissionMode {
                 | ToolKind::TaskDone
                 | ToolKind::TeamCreate
                 | ToolKind::TeamDelete
-                | ToolKind::SendMessage => PermissionDecision::Approved,
+                | ToolKind::SendMessage
+                // ExitPlanMode is the *only* way the agent can leave
+                // plan mode programmatically. Auto-approving it lets
+                // the model surface a plan whenever it's ready —
+                // mirrors v132's `ExitPlanMode` contract.
+                | ToolKind::ExitPlanMode => PermissionDecision::Approved,
                 ToolKind::Bash => {
                     let cmd = tool.input.summary().to_lowercase();
                     if is_readonly_bash(&cmd) {
@@ -411,6 +425,10 @@ pub struct BackgroundTask {
 
 pub struct App {
     pub theme: Theme,
+    /// Verbosity / formatting style for assistant replies. Routes
+    /// through `OutputStyle::system_prompt_suffix()` at request-build
+    /// time. `Default` is the no-op (current jfc behaviour).
+    pub output_style: crate::output_style::OutputStyle,
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
     pub streaming_reasoning: String,
@@ -837,6 +855,7 @@ impl App {
 
         let mut app = Self {
             theme: Theme::dark(),
+            output_style: crate::output_style::OutputStyle::default(),
             messages: Vec::new(),
             streaming_text: String::new(),
             streaming_reasoning: String::new(),

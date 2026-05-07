@@ -65,6 +65,19 @@ pub struct Config {
     /// Experimental feature flags.
     #[serde(default)]
     pub experimental: Option<ExperimentalConfig>,
+    /// UI theme name (matches `Theme::by_name`). When omitted, jfc
+    /// boots with the built-in dark theme. The `/theme <name>`
+    /// command writes back to this field so the user's choice
+    /// persists across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    /// Output style for assistant replies. One of: `default`,
+    /// `brief`, `verbose`, `explanatory`, `learning`. Each style
+    /// appends a suffix to the system prompt that nudges the model
+    /// toward a different verbosity / scaffolding shape.
+    /// `/output-style <name>` writes back to this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_style: Option<String>,
 }
 
 /// Category-based model routing.
@@ -504,6 +517,70 @@ pub fn load() -> Config {
     }
 }
 
+/// Persist a chosen theme name to `~/.config/jfc/config.toml`,
+/// preserving every other field the user has set. Returns the path
+/// that was written, or an error string suitable for a toast.
+///
+/// We re-read the file (so we don't clobber concurrent edits the
+/// user made by hand), update only the `theme` key, and serialize
+/// back. When the file or its parent directory don't exist yet we
+/// create them — first-time `/theme <name>` should Just Work without
+/// the user having to `mkdir -p ~/.config/jfc/` themselves.
+pub fn save_theme(theme_name: &str) -> Result<std::path::PathBuf, String> {
+    save_theme_to(&config_path(), theme_name)
+}
+
+/// Test-friendly inner helper. Reads the file at `path` (treating
+/// missing/empty as a fresh `Config::default()`), updates the theme
+/// field, and writes the result back. Refuses to overwrite an
+/// unparseable file so a user typo doesn't get silently clobbered.
+pub fn save_theme_to(
+    path: &std::path::Path,
+    theme_name: &str,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(
+            target: "jfc::config",
+            path = %path.display(),
+            error = %e,
+            "save_theme: cannot create parent dir"
+        );
+        return Err(format!("cannot create {}: {e}", parent.display()));
+    }
+    let mut cfg: Config = match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => match toml::from_str(&s) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "jfc::config",
+                    path = %path.display(),
+                    error = %e,
+                    "save_theme: refusing to overwrite unparseable config"
+                );
+                return Err(format!(
+                    "{} is not valid TOML — fix it first ({e})",
+                    path.display()
+                ));
+            }
+        },
+        _ => Config::default(),
+    };
+    cfg.theme = Some(theme_name.to_string());
+    let serialized = toml::to_string_pretty(&cfg)
+        .map_err(|e| format!("serialize failed: {e}"))?;
+    std::fs::write(path, serialized)
+        .map_err(|e| format!("write {} failed: {e}", path.display()))?;
+    tracing::info!(
+        target: "jfc::config",
+        path = %path.display(),
+        theme = %theme_name,
+        "save_theme: persisted theme"
+    );
+    Ok(path.to_path_buf())
+}
+
 /// Resolve a prompt value that may be a `file://` URI.
 /// If it starts with `file://`, read the file contents.
 /// Otherwise return the string as-is.
@@ -584,6 +661,84 @@ mod tests {
 
     fn parse(src: &str) -> Config {
         toml::from_str::<Config>(src).expect("expected valid toml")
+    }
+
+    // Normal: save_theme_to writes the field to a fresh file.
+    #[test]
+    fn save_theme_to_creates_new_file_normal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nested").join("config.toml");
+        save_theme_to(&path, "dracula").expect("write");
+        assert!(path.exists(), "save_theme_to should create the file");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let parsed: Config = toml::from_str(&raw).expect("parse");
+        assert_eq!(parsed.theme.as_deref(), Some("dracula"));
+    }
+
+    // Normal: save_theme_to preserves existing fields. The user's
+    // model + agent block must survive a theme write — otherwise
+    // `/theme dracula` would silently destroy their config.
+    #[test]
+    fn save_theme_to_preserves_other_fields_normal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[default]
+model = "anthropic/claude-opus-4-7"
+
+[agents.researcher]
+model = "openai/gpt-5"
+"#,
+        )
+        .unwrap();
+        save_theme_to(&path, "tokyo-night").expect("write");
+        let cfg: Config =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.theme.as_deref(), Some("tokyo-night"));
+        assert_eq!(cfg.default.model.as_deref(), Some("anthropic/claude-opus-4-7"));
+        assert!(cfg.agents.contains_key("researcher"));
+    }
+
+    // Robust: a corrupted config must not get silently overwritten.
+    // Returning an error gives the toast layer something to surface.
+    #[test]
+    fn save_theme_to_refuses_to_overwrite_broken_file_robust() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "this = is not [ valid toml").unwrap();
+        let res = save_theme_to(&path, "dark");
+        assert!(res.is_err(), "should refuse to overwrite invalid TOML");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("not [ valid"),
+            "original contents must be preserved"
+        );
+    }
+
+    // Normal: an empty file is treated as a fresh config — first-run
+    // /theme should land in a clean file and parse afterwards.
+    #[test]
+    fn save_theme_to_treats_empty_file_as_fresh_normal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        save_theme_to(&path, "nord").expect("write");
+        let cfg: Config =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.theme.as_deref(), Some("nord"));
+    }
+
+    // Normal: theme field round-trips through serde.
+    #[test]
+    fn theme_field_roundtrips_normal() {
+        let mut cfg = Config::default();
+        cfg.theme = Some("monokai".into());
+        let s = toml::to_string(&cfg).expect("serialize");
+        assert!(s.contains("theme"));
+        let back: Config = toml::from_str(&s).expect("parse");
+        assert_eq!(back.theme.as_deref(), Some("monokai"));
     }
 
     #[test]
