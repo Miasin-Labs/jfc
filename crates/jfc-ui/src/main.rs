@@ -213,9 +213,9 @@ fn install_terminal_panic_hook() {
 /// (rolling daily). Returns the `WorkerGuard` from `tracing-appender::non_blocking`
 /// — caller must hold it until process exit so buffered logs flush.
 ///
-/// Falls back to a no-op `WorkerGuard` (writing to `io::sink`) when the log
-/// directory can't be created (read-only home, permission errors). We never
-/// log to stderr because that breaks the TUI's alternate screen.
+/// Logs to a per-session file: `~/.config/jfc/logs/<session_id>.log`
+/// with a `latest.log` symlink pointing to the current session.
+/// Falls back to a timestamped file if no session ID is available yet.
 fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     use tracing_subscriber::EnvFilter;
 
@@ -225,8 +225,38 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
         .join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
 
-    let appender = tracing_appender::rolling::daily(&log_dir, "jfc.log");
-    let (writer, guard) = tracing_appender::non_blocking(appender);
+    // Generate a session-scoped log filename. We use a timestamp-based name
+    // that matches the session ID format (ses_YYYYMMDD_HHMMSS) so logs
+    // correlate with sessions naturally.
+    let now = chrono::Local::now();
+    let log_filename = format!("ses_{}.log", now.format("%Y%m%d_%H%M%S"));
+    let log_path = log_dir.join(&log_filename);
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .unwrap_or_else(|_| {
+            // Fallback to /dev/null equivalent
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(if cfg!(unix) { "/dev/null" } else { "NUL" })
+                .expect("cannot open null device")
+        });
+
+    // Update the `latest.log` symlink
+    let latest_link = log_dir.join("latest.log");
+    let _ = std::fs::remove_file(&latest_link);
+    #[cfg(unix)]
+    {
+        let _ = std::os::unix::fs::symlink(&log_filename, &latest_link);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::copy(&log_path, &latest_link);
+    }
+
+    let (writer, guard) = tracing_appender::non_blocking(file);
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("debug,reqwest=warn,hyper=warn,h2=warn"));
