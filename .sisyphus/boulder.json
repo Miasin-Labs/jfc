@@ -1,12 +1,12 @@
 {
-  "active_plan": "/home/cole/RustProjects/active/jfc/.sisyphus/plans/agent-economy.md",
-  "started_at": "2026-05-06T19:31:10.970Z",
+  "active_plan": "/home/cole/RustProjects/active/jfc/.sisyphus/plans/omo-jfc-integration.md",
+  "started_at": "2026-05-07T03:15:08.409Z",
   "session_ids": [
-    "ses_202100077ffe4QBCSa4oQmvP7s"
+    "ses_200060ddaffeQ5DxPGmJnNa8k3"
   ],
   "session_origins": {
-    "ses_202100077ffe4QBCSa4oQmvP7s": "direct"
+    "ses_200060ddaffeQ5DxPGmJnNa8k3": "direct"
   },
-  "plan_name": "agent-economy",
+  "plan_name": "omo-jfc-integration",
   "agent": "atlas"
 }
