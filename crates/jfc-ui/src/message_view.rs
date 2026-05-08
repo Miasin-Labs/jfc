@@ -1757,6 +1757,12 @@ fn render_text_block_skip(
                 lines.push(Line::from(spans));
             } else if let Some(spans) = colorize_git_log_line(&clean, text_style, t) {
                 lines.push(Line::from(spans));
+            } else if let Some(spans) = colorize_git_commit_line(&clean, text_style, t) {
+                lines.push(Line::from(spans));
+            } else if let Some(spans) = colorize_git_push_line(&clean, text_style, t) {
+                lines.push(Line::from(spans));
+            } else if let Some(spans) = colorize_diagnostic_prefix(&clean, text_style, t) {
+                lines.push(Line::from(spans));
             } else {
                 lines.push(Line::from(Span::styled(
                     clean,
@@ -2034,6 +2040,280 @@ fn colorize_git_log_line(
         Style::default().fg(fallback),
     ));
     Some(spans)
+}
+
+/// Colorize the rows that `git commit` emits after a successful commit:
+///
+/// - `[branch hash] subject`               → branch green, hash yellow
+/// - `N files changed, X insertions(+), Y deletions(-)` → green/red on the deltas
+/// - `create mode 100644 path`             → entire line green
+/// - `delete mode 100644 path`             → entire line red
+/// - `rename path1 => path2 (NN%)`          → magenta
+/// - `mode change 100644 => 100755 path`   → yellow
+///
+/// Returns `None` when the line doesn't match any known commit-output shape.
+fn colorize_git_commit_line(
+    line: &str,
+    fallback: Color,
+    t: Theme,
+) -> Option<Vec<Span<'static>>> {
+    // `[branch <hash>] subject`
+    if line.starts_with('[') {
+        let close = line.find(']')?;
+        let inside = &line[1..close];
+        let mut parts = inside.splitn(2, ' ');
+        let branch = parts.next()?;
+        let hash = parts.next()?;
+        let subject = &line[close + 1..];
+        if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        return Some(vec![
+            Span::styled("[".to_owned(), Style::default().fg(fallback)),
+            Span::styled(
+                branch.to_owned(),
+                Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ".to_owned(), Style::default().fg(fallback)),
+            Span::styled(
+                hash.to_owned(),
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("]".to_owned(), Style::default().fg(fallback)),
+            Span::styled(subject.to_owned(), Style::default().fg(fallback)),
+        ]);
+    }
+    // ` N files changed, X insertions(+), Y deletions(-)`
+    if line.trim_start().starts_with(|c: char| c.is_ascii_digit())
+        && line.contains("files changed") || line.contains("file changed")
+    {
+        // Walk the line and color `(+)` green and `(-)` red wherever they appear.
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut buf = String::new();
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '(' {
+                if matches!(chars.peek(), Some('+') | Some('-')) {
+                    if !buf.is_empty() {
+                        spans.push(Span::styled(
+                            std::mem::take(&mut buf),
+                            Style::default().fg(fallback),
+                        ));
+                    }
+                    let sign = chars.next().unwrap();
+                    let style = if sign == '+' {
+                        Style::default().fg(t.success)
+                    } else {
+                        Style::default().fg(t.error)
+                    };
+                    spans.push(Span::styled(
+                        format!("({sign})"),
+                        style,
+                    ));
+                    // Consume closing `)` if present (we already consumed sign).
+                    if matches!(chars.peek(), Some(')')) {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+            buf.push(c);
+        }
+        if !buf.is_empty() {
+            spans.push(Span::styled(buf, Style::default().fg(fallback)));
+        }
+        return Some(spans);
+    }
+    // `create mode 100644 path`
+    if line.starts_with(" create mode ") || line.starts_with("create mode ") {
+        return Some(vec![Span::styled(
+            line.to_owned(),
+            Style::default().fg(t.success),
+        )]);
+    }
+    if line.starts_with(" delete mode ") || line.starts_with("delete mode ") {
+        return Some(vec![Span::styled(
+            line.to_owned(),
+            Style::default().fg(t.error),
+        )]);
+    }
+    if line.starts_with(" rename ") || line.starts_with("rename ") {
+        return Some(vec![Span::styled(
+            line.to_owned(),
+            Style::default().fg(t.accent),
+        )]);
+    }
+    if line.starts_with(" mode change ") || line.starts_with("mode change ") {
+        return Some(vec![Span::styled(
+            line.to_owned(),
+            Style::default().fg(t.warning),
+        )]);
+    }
+    if line.starts_with(" copy ") || line.starts_with("copy ") {
+        return Some(vec![Span::styled(
+            line.to_owned(),
+            Style::default().fg(t.accent),
+        )]);
+    }
+    None
+}
+
+/// Colorize `git push` / `git fetch` output:
+///
+/// - `To <url>`                                       → bold (header)
+/// - `   <hash>..<hash>  ref -> ref`                  → ref-pair green
+/// - `   * [new branch]      ref -> ref`              → green branch label, then green refs
+/// - `   - [deleted]         ref`                     → red label
+/// - `   + <hash>...<hash>   ref -> ref (forced update)` → red "forced update"
+fn colorize_git_push_line(
+    line: &str,
+    fallback: Color,
+    t: Theme,
+) -> Option<Vec<Span<'static>>> {
+    if line.starts_with("To ") || line.starts_with("From ") {
+        return Some(vec![Span::styled(
+            line.to_owned(),
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        )]);
+    }
+    if line.contains(" -> ") && !line.starts_with("rename ") {
+        // Match the `<sigil> <range> <ref> -> <ref> [(reason)]` shape.
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('*')
+            || trimmed.starts_with('+')
+            || trimmed.starts_with('-')
+            || trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_hexdigit())
+                .unwrap_or(false)
+        {
+            // Color "[new branch]", "[forced update]", "[deleted]" tags
+            // distinctly. Crude tokenization but readable.
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut chars = line.char_indices().peekable();
+            let mut last_end = 0usize;
+            while let Some((i, c)) = chars.next() {
+                if c == '[' {
+                    if i > last_end {
+                        spans.push(Span::styled(
+                            line[last_end..i].to_owned(),
+                            Style::default().fg(fallback),
+                        ));
+                    }
+                    let tag_start = i;
+                    let mut tag_end = i;
+                    for (j, c2) in chars.by_ref() {
+                        if c2 == ']' {
+                            tag_end = j + 1;
+                            break;
+                        }
+                    }
+                    let tag = &line[tag_start..tag_end];
+                    let style = if tag.contains("new") {
+                        Style::default().fg(t.success).add_modifier(Modifier::BOLD)
+                    } else if tag.contains("deleted") || tag.contains("rejected") {
+                        Style::default().fg(t.error).add_modifier(Modifier::BOLD)
+                    } else if tag.contains("forced") {
+                        Style::default().fg(t.warning).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(t.accent)
+                    };
+                    spans.push(Span::styled(tag.to_owned(), style));
+                    last_end = tag_end;
+                }
+            }
+            // Anything after the last tag — color the `ref -> ref` greenish.
+            let tail = &line[last_end..];
+            if let Some(arrow) = tail.find(" -> ") {
+                let before = &tail[..arrow];
+                let after = &tail[arrow + 4..];
+                spans.push(Span::styled(
+                    before.to_owned(),
+                    Style::default().fg(t.success),
+                ));
+                spans.push(Span::styled(
+                    " -> ".to_owned(),
+                    Style::default().fg(fallback),
+                ));
+                spans.push(Span::styled(
+                    after.to_owned(),
+                    Style::default().fg(t.success),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    tail.to_owned(),
+                    Style::default().fg(fallback),
+                ));
+            }
+            return Some(spans);
+        }
+    }
+    None
+}
+
+/// Colorize lines that begin with a diagnostic prefix git, rustc,
+/// cargo, npm, and most Unix CLIs use:
+///
+/// - `error:` / `error[Exxxx]:` → red bold
+/// - `fatal:`                    → red bold
+/// - `warning:`                  → yellow bold
+/// - `hint:`                     → yellow (matches git's advice slot)
+/// - `note:`                     → cyan
+/// - `help:`                     → green
+/// - `usage:`                    → yellow
+///
+/// Returns `None` for any line not starting with one of these.
+fn colorize_diagnostic_prefix(
+    line: &str,
+    fallback: Color,
+    t: Theme,
+) -> Option<Vec<Span<'static>>> {
+    let trimmed = line.trim_start();
+    let leading_ws = &line[..line.len() - trimmed.len()];
+
+    // rustc-style `error[E0382]: ...` — handle this BEFORE the simple
+    // `error: ` strip because the `[` won't match it.
+    if trimmed.starts_with("error[") {
+        let close = trimmed.find(']')?;
+        let colon = trimmed[close..].find(':')?;
+        let head_end = close + colon + 2;
+        let head = &trimmed[..head_end];
+        let rest = &trimmed[head_end..];
+        return Some(vec![
+            Span::styled(leading_ws.to_owned(), Style::default().fg(fallback)),
+            Span::styled(
+                head.to_owned(),
+                Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(rest.to_owned(), Style::default().fg(fallback)),
+        ]);
+    }
+
+    let (label, label_style, rest) = if let Some(r) = trimmed.strip_prefix("error: ") {
+        ("error: ", Style::default().fg(t.error).add_modifier(Modifier::BOLD), r)
+    } else if let Some(r) = trimmed.strip_prefix("fatal: ") {
+        ("fatal: ", Style::default().fg(t.error).add_modifier(Modifier::BOLD), r)
+    } else if let Some(r) = trimmed.strip_prefix("warning: ") {
+        ("warning: ", Style::default().fg(t.warning).add_modifier(Modifier::BOLD), r)
+    } else if let Some(r) = trimmed.strip_prefix("hint: ") {
+        ("hint: ", Style::default().fg(t.warning), r)
+    } else if let Some(r) = trimmed.strip_prefix("note: ") {
+        ("note: ", Style::default().fg(t.accent), r)
+    } else if let Some(r) = trimmed.strip_prefix("help: ") {
+        ("help: ", Style::default().fg(t.success), r)
+    } else if let Some(r) = trimmed.strip_prefix("usage: ") {
+        ("usage: ", Style::default().fg(t.warning), r)
+    } else {
+        return None;
+    };
+    Some(vec![
+        Span::styled(leading_ws.to_owned(), Style::default().fg(fallback)),
+        Span::styled(label.to_owned(), label_style),
+        Span::styled(rest.to_owned(), Style::default().fg(fallback)),
+    ])
 }
 
 fn render_highlighted_with_line_numbers(
