@@ -3099,16 +3099,12 @@ fn input(f: &mut Frame, app: &mut App, area: Rect) {
             .min(inner.bottom().saturating_sub(1));
         let buf = f.buffer_mut();
         if cursor_x < buf.area().right() && cursor_y < buf.area().bottom() {
-            let phase = (app.launched_at.elapsed().as_millis() % 1200) as f32 / 1200.0;
-            let intensity = if phase < 0.5 {
-                phase * 2.0
-            } else {
-                (1.0 - phase) * 2.0
-            };
-            // Subtle: cap at 0.35 blend so the typing area doesn't
-            // throb. Just a soft glow that says "the input is alive
-            // and waiting for you".
-            let bg = pulse_color(t.surface_raised, t.accent, intensity * 0.35);
+            // Static accent bg on the cursor cell. Previously this was a
+            // pulsing animation (sin wave on elapsed time) which caused
+            // ratatui to see a buffer diff every frame → 30fps terminal
+            // writes even during idle. A static tint eliminates the diff
+            // while still visually marking the cursor position.
+            let bg = pulse_color(t.surface_raised, t.accent, 0.18);
             let cell = &mut buf[(cursor_x, cursor_y)];
             cell.set_style(cell.style().bg(bg));
         }
