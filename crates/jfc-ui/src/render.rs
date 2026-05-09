@@ -59,12 +59,16 @@ fn render_ribbon(f: &mut Frame, app: &App, area: Rect) {
         model = app.model.as_str(),
     );
     let para = ratatui::widgets::Paragraph::new(body).style(
-        Style::default()
-            .fg(t.text_primary)
+        t.style_text_primary
             .bg(t.surface_raised)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(para, area);
+}
+
+/// Easing function for sidebar slide animation.
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
 }
 
 pub fn frame(f: &mut Frame, app: &mut App) {
@@ -197,7 +201,10 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     }
     let chunks = &chunks[1..];
 
-    let show_left = app.show_sidebar;
+    // TODO: Wire sidebar_progress to App animation fields once Agent A adds them.
+    // For now, snap to 0.0/1.0 so the ease_out_cubic path is exercised but
+    // the visual result is identical to the old binary toggle.
+    let sidebar_progress: f32 = if app.show_sidebar { 1.0 } else { 0.0 };
     let show_right = app.show_info_sidebar && f.area().width >= 100;
 
     // Responsive sidebars: at narrow widths the sessions sidebar
@@ -206,7 +213,9 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // does the same — sidebars scale with terminal width instead of
     // pinning to fixed column counts.
     let total_w = f.area().width as usize;
-    let left_w = (total_w / 5).clamp(20, 32) as u16;
+    let left_w_full = (total_w / 5).clamp(20, 32) as u16;
+    let left_w = (left_w_full as f32 * ease_out_cubic(sidebar_progress)) as u16;
+    let show_left = left_w > 0;
     let right_w = if total_w < 140 {
         32
     } else {
@@ -314,7 +323,7 @@ fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(t.border))
+        .border_style(t.style_border)
         .padding(Padding::new(1, 0, 1, 0)); // left=1, right=0, top=1, bottom=0
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -879,7 +888,7 @@ fn highlight_mentions_in(s: &str, t: Theme, phase: f32) -> Vec<Span<'static>> {
             if !buf.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(&mut buf),
-                    Style::default().fg(t.text_primary),
+                    t.style_text_primary,
                 ));
             }
             // Consume the `@` and the following non-whitespace token.
@@ -905,7 +914,7 @@ fn highlight_mentions_in(s: &str, t: Theme, phase: f32) -> Vec<Span<'static>> {
         }
     }
     if !buf.is_empty() {
-        spans.push(Span::styled(buf, Style::default().fg(t.text_primary)));
+        spans.push(Span::styled(buf, t.style_text_primary));
     }
     spans
 }
@@ -1481,15 +1490,15 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.border))
+        .border_style(t.style_border)
         .title(Span::styled(
             " sessions ",
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            t.style_accent_bold,
         ))
         .title_bottom(
             Line::from(Span::styled(
                 " ↑↓ · Enter ",
-                Style::default().fg(t.text_muted),
+                t.style_text_muted,
             ))
             .right_aligned(),
         )
@@ -1595,8 +1604,7 @@ fn visible_selected_row(app: &App) -> Option<usize> {
 fn separator_row(label: &str, t: Theme) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(
         format!("  {label}"),
-        Style::default()
-            .fg(t.text_muted)
+        t.style_text_muted
             .add_modifier(Modifier::DIM),
     )))
 }
@@ -1620,16 +1628,16 @@ fn session_row(
     let secondary = format!("    {cwd_label} · {when} · {msgs}");
 
     let title_style = if is_active {
-        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+        t.style_accent_bold
     } else {
-        Style::default().fg(t.text_primary)
+        t.style_text_primary
     };
 
     let line1 = Line::from(vec![
         Span::styled(bullet.to_owned(), title_style),
         Span::styled(title, title_style),
     ]);
-    let line2 = Line::from(Span::styled(secondary, Style::default().fg(t.text_muted)));
+    let line2 = Line::from(Span::styled(secondary, t.style_text_muted));
     ListItem::new(vec![line1, line2])
 }
 
@@ -1737,7 +1745,7 @@ fn messages(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(border_color))
         .padding(Padding::horizontal(1))
         .title_top(
-            Line::from(Span::styled(title_right, Style::default().fg(t.text_muted)))
+            Line::from(Span::styled(title_right, t.style_text_muted))
                 .right_aligned(),
         )
         .style(Style::default().bg(t.bg));
@@ -1768,9 +1776,9 @@ fn messages(f: &mut Frame, app: &mut App, area: Rect) {
                 .map(|(i, ch)| {
                     let dist = (i as i32 - cursor).abs();
                     let style = if dist <= 1 {
-                        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+                        t.style_accent_bold
                     } else {
-                        Style::default().fg(t.text_muted)
+                        t.style_text_muted
                     };
                     Span::styled(ch.to_string(), style)
                 })
@@ -1827,8 +1835,8 @@ fn messages(f: &mut Frame, app: &mut App, area: Rect) {
                 .end_symbol(Some("▼"))
                 .thumb_symbol("█")
                 .track_symbol(Some("│"))
-                .style(Style::default().fg(t.text_muted))
-                .thumb_style(Style::default().fg(t.accent));
+                .style(t.style_text_muted)
+                .thumb_style(t.style_accent);
             scrollbar.render(area, f.buffer_mut(), &mut state);
         }
 
@@ -1966,10 +1974,10 @@ fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_id: &str) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent))
+        .border_style(t.style_accent)
         .title(Span::styled(
             title_str,
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            t.style_accent_bold,
         ))
         .style(Style::default().bg(t.bg));
 
@@ -1992,10 +2000,7 @@ fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_id: &str) {
     // without staring at the panel for a few seconds.
     let mut body_lines = body_lines;
     if task_is_running {
-        let frame = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| (d.as_millis() / 80) as usize)
-            .unwrap_or(0);
+        let frame = (app.launched_at.elapsed().as_millis() / 80) as usize;
         let spinner_glyph = crate::app::SPINNER[frame % crate::app::SPINNER.len()];
         if !body_lines.is_empty() {
             body_lines.push(Line::from(""));
@@ -2122,10 +2127,7 @@ fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
             // Status glyph: animated for Running, static for Completed/Failed.
             let glyph = match bt.map(|b| &b.status) {
                 Some(crate::types::TaskLifecycle::Running) => {
-                    let frame = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| (d.as_millis() / 240) as usize)
-                        .unwrap_or(0);
+                    let frame = (app.launched_at.elapsed().as_millis() / 240) as usize;
                     ["✶", "✷", "✸", "✹"][frame % 4]
                 }
                 Some(crate::types::TaskLifecycle::Completed) => "●",
@@ -2142,14 +2144,13 @@ fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
 
     let tabs = Tabs::new(titles)
         .select(selected)
-        .style(Style::default().fg(t.text_secondary).bg(t.bg))
+        .style(t.style_text_secondary.bg(t.bg))
         .highlight_style(
-            Style::default()
-                .fg(t.accent)
+            t.style_accent
                 .bg(t.surface_raised)
                 .add_modifier(Modifier::BOLD),
         )
-        .divider(Span::styled("·", Style::default().fg(t.text_muted)))
+        .divider(Span::styled("·", t.style_text_muted))
         .padding(" ", " ");
     f.render_widget(tabs, split[0]);
 
@@ -2528,7 +2529,7 @@ fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )];
         s.extend(verb_spans);
-        s.push(Span::styled(tail_body, Style::default().fg(t.text_muted)));
+        s.push(Span::styled(tail_body, t.style_text_muted));
         s
     };
     if active_agents > 0 {
@@ -2539,7 +2540,7 @@ fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         };
         spans.push(Span::styled(
             format!("  ⏵ {active_agents} {plural}…"),
-            Style::default().fg(t.accent),
+            t.style_accent,
         ));
     }
     let line = Line::from(spans);
@@ -2741,14 +2742,13 @@ fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
                 .map(|id| id == bt.task_id.as_str())
                 .unwrap_or(false);
         let name_style = if is_active {
-            Style::default()
-                .fg(t.accent)
+            t.style_accent
                 .bg(t.surface_raised)
                 .add_modifier(Modifier::BOLD)
         } else if is_idle {
-            Style::default().fg(t.text_muted)
+            t.style_text_muted
         } else {
-            Style::default().fg(t.accent)
+            t.style_accent
         };
         lines.push(Line::from(vec![
             Span::styled(connector, Style::default().fg(t.text_muted)),
@@ -2899,10 +2899,7 @@ fn input(f: &mut Frame, app: &mut App, area: Rect) {
     let in_edit_mode = app.editing_message_idx.is_some();
     let raw_setting = std::env::var("JFC_PROMPT_CHAR").unwrap_or_else(|_| ":comet".to_string());
     let mode = parse_prompt_mode(&raw_setting);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let now_ms = app.launched_at.elapsed().as_millis();
     let streaming_for_anim = app.is_streaming && !crate::spinner::reduced_motion();
     let prompt_char: String = if in_edit_mode {
         "✎".to_string()
@@ -3005,12 +3002,7 @@ fn input(f: &mut Frame, app: &mut App, area: Rect) {
     let rainbow_phase = if crate::spinner::reduced_motion() {
         0.0_f32
     } else {
-        (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0) as f32
-            / 25.0)
-            % 360.0
+        (app.launched_at.elapsed().as_millis() as f32 / 25.0) % 360.0
     };
     let visible = lines
         .iter()
@@ -3055,12 +3047,7 @@ fn input(f: &mut Frame, app: &mut App, area: Rect) {
             .min(inner.bottom().saturating_sub(1));
         let buf = f.buffer_mut();
         if cursor_x < buf.area().right() && cursor_y < buf.area().bottom() {
-            let phase = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-                % 1200) as f32
-                / 1200.0;
+            let phase = (app.launched_at.elapsed().as_millis() % 1200) as f32 / 1200.0;
             let intensity = if phase < 0.5 {
                 phase * 2.0
             } else {
@@ -3333,8 +3320,8 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
     let label = context_gauge_label(used, max, pct);
     let gauge = LineGauge::default()
         .filled_style(Style::default().fg(bar_color))
-        .unfilled_style(Style::default().fg(t.border))
-        .label(Span::styled(label, Style::default().fg(t.text_secondary)))
+        .unfilled_style(t.style_border)
+        .label(Span::styled(label, t.style_text_secondary))
         .ratio(ratio);
     f.render_widget(gauge, rows[1]);
 }
@@ -3617,10 +3604,10 @@ fn slash_popup(f: &mut Frame, app: &App, prefix: &str) {
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent))
+        .border_style(t.style_accent)
         .title(Span::styled(
             " slash commands ",
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            t.style_accent_bold,
         ))
         .style(Style::default().bg(t.surface));
     let inner = block.inner(popup);
@@ -3639,12 +3626,12 @@ fn slash_popup(f: &mut Frame, app: &App, prefix: &str) {
                     .bg(t.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(t.text_primary)
+                t.style_text_primary
             };
             let desc_style = if active {
                 Style::default().fg(t.bg).bg(t.accent)
             } else {
-                Style::default().fg(t.text_muted)
+                t.style_text_muted
             };
             Line::from(vec![
                 Span::styled(format!(" {:<18}", cmd), row_style),
@@ -3742,10 +3729,10 @@ fn help_overlay(f: &mut Frame, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent))
+        .border_style(t.style_accent)
         .title(Span::styled(
             " keybindings · press ? or Esc to close ",
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            t.style_accent_bold,
         ))
         .style(Style::default().bg(t.surface));
     let inner = block.inner(popup);
@@ -3833,8 +3820,7 @@ fn help_overlay(f: &mut Frame, app: &App) {
         }
         lines.push(Line::from(Span::styled(
             (*section_name).to_string(),
-            Style::default()
-                .fg(t.accent)
+            t.style_accent
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         for (key, desc) in entries.iter() {
@@ -3889,8 +3875,7 @@ fn diagnostic_panel(f: &mut Frame, app: &App) {
     for (file, items) in &groups {
         lines.push(Line::from(Span::styled(
             file.clone(),
-            Style::default()
-                .fg(t.text_primary)
+            t.style_text_primary
                 .add_modifier(Modifier::BOLD),
         )));
         for entry in items {
@@ -3933,10 +3918,10 @@ fn diagnostic_panel(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(t.error))
+        .border_style(t.style_error)
         .title(Span::styled(
             title,
-            Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+            t.style_error.add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(t.surface));
     let inner = block.inner(rect);
@@ -4003,8 +3988,8 @@ fn mention_popup(f: &mut Frame, app: &App, input_area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(t.accent))
-        .title(Span::styled(title, Style::default().fg(t.accent)))
+        .border_style(t.style_accent)
+        .title(Span::styled(title, t.style_accent))
         .style(Style::default().bg(t.surface));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -4016,9 +4001,9 @@ fn mention_popup(f: &mut Frame, app: &App, input_area: Rect) {
         .map(|(i, path)| {
             let is_sel = i == app.mention.selected;
             let style = if is_sel {
-                Style::default().fg(t.text_primary).bg(t.accent)
+                t.style_text_primary.bg(t.accent)
             } else {
-                Style::default().fg(t.text_secondary)
+                t.style_text_secondary
             };
             let prefix = if is_sel { "▸ " } else { "  " };
             let max_w = inner.width.saturating_sub(prefix.len() as u16) as usize;
@@ -4051,10 +4036,10 @@ fn palette(f: &mut Frame, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent))
+        .border_style(t.style_accent)
         .title(Span::styled(
             " Command Palette ",
-            Style::default().fg(t.accent),
+            t.style_accent,
         ))
         .style(Style::default().bg(t.surface));
 
@@ -4082,12 +4067,10 @@ fn palette(f: &mut Frame, app: &App) {
         .enumerate()
         .map(|(i, label)| {
             let style = if i == app.palette_selected {
-                Style::default()
-                    .fg(t.accent)
-                    .add_modifier(Modifier::BOLD)
+                t.style_accent_bold
                     .bg(t.surface_raised)
             } else {
-                Style::default().fg(t.text_primary)
+                t.style_text_primary
             };
             ListItem::new(Line::from(Span::styled(*label, style)))
         })
@@ -4133,7 +4116,7 @@ fn theme_picker(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title(" Theme Picker ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent))
+        .border_style(t.style_accent)
         .padding(Padding::new(1, 1, 1, 1));
     f.render_widget(Clear, area);
     let inner = block.inner(area);
@@ -4237,7 +4220,7 @@ fn theme_picker(f: &mut Frame, app: &mut App) {
             ]),
         ])
         .wrap(ratatui::widgets::Wrap { trim: true })
-        .style(Style::default().fg(t.text_muted)),
+        .style(t.style_text_muted),
         chunks[2],
     );
 }
@@ -4271,10 +4254,10 @@ fn model_picker(f: &mut Frame, app: &mut App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent))
+        .border_style(t.style_accent)
         .title(Span::styled(
             title,
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            t.style_accent_bold,
         ))
         .title_bottom(
             Line::from(vec![
@@ -4328,8 +4311,7 @@ fn model_picker(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(filter_line), chunks[0]);
 
     // Build the table.
-    let header_style = Style::default()
-        .fg(t.text_muted)
+    let header_style = t.style_text_muted
         .add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
         Cell::from("  "),
@@ -4348,9 +4330,9 @@ fn model_picker(f: &mut Frame, app: &mut App) {
             let is_current = m.id == app.model;
             let marker = if is_current { " ● " } else { "   " };
             let name_style = if is_current {
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+                t.style_accent_bold
             } else {
-                Style::default().fg(t.text_primary)
+                t.style_text_primary
             };
             let badge_style = Style::default()
                 .fg(provider_color(&m.provider))
@@ -4481,27 +4463,25 @@ fn task_panel(f: &mut Frame, app: &mut App) {
         .map(|tk| {
             let (icon, status_style) = match tk.status {
                 crate::tasks::TaskStatus::Pending => {
-                    ("□ pending", Style::default().fg(t.text_muted))
+                    ("□ pending", t.style_text_muted)
                 }
                 crate::tasks::TaskStatus::InProgress => (
                     "▣ in_progress",
-                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                    t.style_accent_bold,
                 ),
                 crate::tasks::TaskStatus::Completed => (
                     "✓ completed",
-                    Style::default()
-                        .fg(t.success)
+                    t.style_success
                         .add_modifier(Modifier::CROSSED_OUT),
                 ),
-                _ => ("✗ deleted", Style::default().fg(t.error)),
+                _ => ("✗ deleted", t.style_error),
             };
 
             let subj_style = if tk.status == crate::tasks::TaskStatus::Completed {
-                Style::default()
-                    .fg(t.text_muted)
+                t.style_text_muted
                     .add_modifier(Modifier::CROSSED_OUT)
             } else {
-                Style::default().fg(t.text_primary)
+                t.style_text_primary
             };
 
             let open_blockers: Vec<&str> = tk
@@ -4537,14 +4517,14 @@ fn task_panel(f: &mut Frame, app: &mut App) {
     if all_tasks.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border))
+            .border_style(t.style_border)
             .title(Span::styled(
                 title.clone(),
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                t.style_accent_bold,
             ))
             .title_bottom(Span::styled(
                 " Esc close ",
-                Style::default().fg(t.text_muted),
+                t.style_text_muted,
             ))
             .style(Style::default().bg(t.surface));
         let inner = block.inner(popup);
@@ -4590,15 +4570,14 @@ fn task_panel(f: &mut Frame, app: &mut App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border))
+            .border_style(t.style_border)
             .title(Span::styled(
                 title,
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                t.style_accent_bold,
             ))
             .title_bottom(Span::styled(
                 " ↑↓ navigate · Esc close ",
-                Style::default()
-                    .fg(t.text_muted)
+                t.style_text_muted
                     .add_modifier(Modifier::ITALIC),
             ))
             .style(Style::default().bg(t.surface)),
@@ -4704,8 +4683,8 @@ fn approval(f: &mut Frame, app: &App) {
         let preview_lines = preview.unwrap();
         let preview_block = Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(t.border))
-            .title(Span::styled(" preview ", Style::default().fg(t.text_muted)));
+            .border_style(t.style_border)
+            .title(Span::styled(" preview ", t.style_text_muted));
         let inner_preview = preview_block.inner(rows[2]);
         f.render_widget(preview_block, rows[2]);
         f.render_widget(
@@ -4750,8 +4729,7 @@ fn build_diff_preview(tool: &ToolCall, t: &Theme) -> Option<Vec<Line<'static>>> 
             let mut lines: Vec<Line<'static>> = Vec::new();
             lines.push(Line::from(Span::styled(
                 format!(" {file_path}"),
-                Style::default()
-                    .fg(t.text_secondary)
+                t.style_text_secondary
                     .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
@@ -4770,23 +4748,21 @@ fn build_diff_preview(tool: &ToolCall, t: &Theme) -> Option<Vec<Line<'static>>> 
             let mut lines: Vec<Line<'static>> = Vec::new();
             lines.push(Line::from(Span::styled(
                 format!(" {file_path}  ({} bytes)", content.len()),
-                Style::default()
-                    .fg(t.text_secondary)
+                t.style_text_secondary
                     .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
             for ln in content.lines().take(30) {
                 lines.push(Line::from(Span::styled(
                     ln.to_owned(),
-                    Style::default().fg(t.text_primary),
+                    t.style_text_primary,
                 )));
             }
             let total = content.lines().count();
             if total > 30 {
                 lines.push(Line::from(Span::styled(
                     format!("… {} more lines", total - 30),
-                    Style::default()
-                        .fg(t.text_muted)
+                    t.style_text_muted
                         .add_modifier(Modifier::ITALIC),
                 )));
             }
@@ -4810,8 +4786,7 @@ fn build_diff_preview(tool: &ToolCall, t: &Theme) -> Option<Vec<Line<'static>>> 
             if total > 40 {
                 lines.push(Line::from(Span::styled(
                     format!("… {} more diff lines", total - 40),
-                    Style::default()
-                        .fg(t.text_muted)
+                    t.style_text_muted
                         .add_modifier(Modifier::ITALIC),
                 )));
             }
@@ -4852,7 +4827,7 @@ fn render_choice_list(
                     .add_modifier(Modifier::BOLD)
                     .bg(t.warning)
             } else {
-                Style::default().fg(t.text_primary)
+                t.style_text_primary
             };
             ListItem::new(Line::from(Span::styled(choice.label(), style)))
         })

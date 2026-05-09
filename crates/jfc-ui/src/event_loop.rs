@@ -10,7 +10,7 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::app::{self, App, AppEvent, PendingApproval, TICK_MS};
+use crate::app::{self, App, AppEvent, PendingApproval, ANIM_TICK_MS, IDLE_TICK_MS};
 use crate::provider::{ModelId, Provider, ProviderId};
 use crate::types::*;
 use crate::{
@@ -237,6 +237,7 @@ pub(crate) async fn run(
         // refactors don't introduce a regression.
         tracing::debug!(target: "jfc::render::cache", "theme switch — invalidating cache");
         app.render_cache.borrow_mut().clear();
+        crate::markdown::clear_highlight_cache();
     }
     if let Some(name) = crate::config::load().output_style.as_deref() {
         let parsed = crate::output_style::OutputStyle::from_str_loose(name);
@@ -444,10 +445,15 @@ pub(crate) async fn run(
 
     {
         let tx = tx.clone();
+        let wants_anim = app.wants_animation_frame.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
-                // Tick is non-critical; safe to drop — next tick arrives shortly.
+                let ms = if wants_anim.load(std::sync::atomic::Ordering::Relaxed) {
+                    ANIM_TICK_MS
+                } else {
+                    IDLE_TICK_MS
+                };
+                tokio::time::sleep(Duration::from_millis(ms)).await;
                 let _ = tx.try_send(AppEvent::Tick);
             }
         });
@@ -565,7 +571,7 @@ pub(crate) async fn run(
     }
 
     // Track when we last drew to implement frame-rate limiting.
-    // The UI only redraws at most once per TICK_MS (80ms = 12.5 FPS idle,
+    // The UI only redraws at most once per IDLE_TICK_MS (80ms = 12.5 FPS idle,
     // but input events always get a draw). This prevents the render loop
     // from starving input processing when 100s of StreamChunk events/sec
     // flood the channel during fast streaming.
@@ -650,8 +656,14 @@ pub(crate) async fn run(
                 AppEvent::Term(Event::Mouse(mouse)) => {
                     use crossterm::event::{MouseButton, MouseEventKind};
                     match mouse.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3),
-                        MouseEventKind::ScrollDown => app.scroll_down(3),
+                        MouseEventKind::ScrollUp => {
+                            app.scroll_velocity = (app.scroll_velocity - 12.0).max(-120.0);
+                            app.scroll_up(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll_velocity = (app.scroll_velocity + 12.0).min(120.0);
+                            app.scroll_down(3);
+                        }
                         MouseEventKind::Drag(MouseButton::Left) => {
                             // Drag-scroll: convert vertical delta into
                             // scroll_offset adjustments. Anchor on the
@@ -1108,6 +1120,28 @@ pub(crate) async fn run(
                     // place to do it — toasts have no creation-time timer.
                     toast::prune_expired(&mut app.toasts, std::time::Instant::now());
 
+                    // Kinetic scroll: apply velocity, decay, stop.
+                    {
+                        let now = std::time::Instant::now();
+                        let dt = now.duration_since(app.last_scroll_tick).as_secs_f32();
+                        app.last_scroll_tick = now;
+                        if app.scroll_velocity.abs() > 0.5 {
+                            let delta = app.scroll_velocity * dt;
+                            let lines = delta.round() as i32;
+                            if lines > 0 {
+                                app.scroll_down(lines as usize);
+                            } else if lines < 0 {
+                                app.scroll_up(lines.unsigned_abs() as usize);
+                            }
+                            app.scroll_velocity *= 0.85;
+                            if app.scroll_velocity.abs() < 0.5 {
+                                app.scroll_velocity = 0.0;
+                            }
+                        }
+                    }
+
+                    app.update_wants_animation_frame();
+
                     // v132 OnHeartbeat — fire every ~30s so registered
                     // handlers (telemetry batchers, MCP keep-alive, daemon
                     // wakeup probes) actually run. Async fire because we
@@ -1179,38 +1213,35 @@ pub(crate) async fn run(
                         );
                     }
 
-                    // Refresh the worktree count at most once per second
-                    // so the status-bar `⌥ N wt` badge reflects /worktree
-                    // create|remove and agent-isolation churn without
-                    // shelling to `git worktree list` on every render.
+                    // Refresh the worktree count at most once per 10s,
+                    // only if we're inside a git repo.
                     let now = std::time::Instant::now();
-                    let due = app
-                        .worktree_count_last_refresh
-                        .map(|t| now.duration_since(t).as_millis() >= 1_000)
-                        .unwrap_or(true);
+                    app.resolve_git_root();
+                    let is_git = matches!(app.git_root, Some(Some(_)));
+                    let due = is_git
+                        && app
+                            .worktree_count_last_refresh
+                            .map(|t| now.duration_since(t).as_millis() >= 10_000)
+                            .unwrap_or(true);
                     if due {
                         let cwd = std::env::current_dir().unwrap_or_default();
                         app.worktree_count = match crate::worktrees::list_worktrees_async(&cwd).await {
-                            // Entry 0 is the primary checkout — subtract it
-                            // so the badge counts agent-isolated trees only.
                             Ok(list) => list.len().saturating_sub(1),
                             Err(_) => 0,
                         };
                         app.worktree_count_last_refresh = Some(now);
                     }
 
-                    // Git branch refresh — every 5s. Reads `.git/HEAD`
-                    // directly (no shell-out): faster, doesn't spawn a
-                    // subprocess, and "ref: refs/heads/<branch>" is the
-                    // dominant form in normal workflows. Detached HEAD
-                    // (HEAD = sha) gets reported as "(detached)".
-                    let git_due = app
-                        .git_branch_last_refresh
-                        .map(|t| now.duration_since(t).as_millis() >= 5_000)
-                        .unwrap_or(true);
+                    // Git branch refresh — every 5s from cached git root.
+                    let git_due = is_git
+                        && app
+                            .git_branch_last_refresh
+                            .map(|t| now.duration_since(t).as_millis() >= 5_000)
+                            .unwrap_or(true);
                     if git_due {
-                        let cwd = std::env::current_dir().unwrap_or_default();
-                        app.git_branch = read_git_branch(&cwd).await;
+                        if let Some(Some(ref root)) = app.git_root {
+                            app.git_branch = read_git_branch_from_root(root).await;
+                        }
                         app.git_branch_last_refresh = Some(now);
                     }
 
@@ -1389,24 +1420,36 @@ pub(crate) async fn run(
                         if app.thinking_started_at.is_some() && app.thinking_ended_at.is_none() {
                             app.thinking_ended_at = Some(now);
                         }
-                        // v132 idle prefetch: scan the chunk for path
-                        // references and stash them so subsequent Read
-                        // tool calls hit the prefetch cache instead of
-                        // doing fresh I/O. Async-spawned reads happen
-                        // out-of-band so the UI thread never blocks on
-                        // disk. Bounded to 8 prefetches per chunk so
-                        // the model spitting out a directory listing
-                        // doesn't fan out 200 background reads.
-                        let prefetch_targets = crate::idle_prefetch::extract_candidates(&chunk);
-                        for path in prefetch_targets.into_iter().take(8) {
-                            if crate::idle_prefetch::get(&path, None, None).is_some() {
-                                continue;
-                            }
-                            tokio::spawn(async move {
-                                if let Ok(body) = tokio::fs::read_to_string(&path).await {
-                                    crate::idle_prefetch::put(&path, None, None, body);
+                        // Idle prefetch: throttled to one batch per 500ms,
+                        // max 2 concurrent in-flight reads.
+                        let prefetch_elapsed = now.duration_since(app.last_prefetch_at);
+                        if prefetch_elapsed >= std::time::Duration::from_millis(500) {
+                            let prefetch_targets = crate::idle_prefetch::extract_candidates(&chunk);
+                            let mut fired = 0usize;
+                            for path in prefetch_targets.into_iter() {
+                                if fired >= 2 {
+                                    break;
                                 }
-                            });
+                                let in_flight = app.prefetch_in_flight.load(std::sync::atomic::Ordering::Relaxed);
+                                if in_flight >= 2 {
+                                    break;
+                                }
+                                if crate::idle_prefetch::get(&path, None, None).is_some() {
+                                    continue;
+                                }
+                                app.prefetch_in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let counter = app.prefetch_in_flight.clone();
+                                tokio::spawn(async move {
+                                    if let Ok(body) = tokio::fs::read_to_string(&path).await {
+                                        crate::idle_prefetch::put(&path, None, None, body);
+                                    }
+                                    counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                });
+                                fired += 1;
+                            }
+                            if fired > 0 {
+                                app.last_prefetch_at = now;
+                            }
                         }
 
                         app.streaming_text.push_str(&chunk);
@@ -3037,23 +3080,16 @@ fn draw_synchronized(
     res.map(|_| ())
 }
 
-async fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
-    let mut dir = cwd.to_path_buf();
-    loop {
-        let head = dir.join(".git/HEAD");
-        // Try the read directly; `read_to_string` returns Err if missing,
-        // which is cheaper than a separate `metadata` probe + read.
-        if let Ok(content) = tokio::fs::read_to_string(&head).await {
-            let trimmed = content.trim();
-            if let Some(rest) = trimmed.strip_prefix("ref: refs/heads/") {
-                return Some(rest.to_owned());
-            }
-            return Some("(detached)".to_owned());
+async fn read_git_branch_from_root(git_root: &std::path::Path) -> Option<String> {
+    let head = git_root.join(".git/HEAD");
+    if let Ok(content) = tokio::fs::read_to_string(&head).await {
+        let trimmed = content.trim();
+        if let Some(rest) = trimmed.strip_prefix("ref: refs/heads/") {
+            return Some(rest.to_owned());
         }
-        if !dir.pop() {
-            return None;
-        }
+        return Some("(detached)".to_owned());
     }
+    None
 }
 
 fn set_terminal_title(app: &App) {

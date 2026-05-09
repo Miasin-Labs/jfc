@@ -50,6 +50,7 @@ fn apply_theme(app: &mut App, name: &str) {
         if let Some(theme) = Theme::by_name(choice.name) {
             app.theme = theme;
             app.render_cache.borrow_mut().clear();
+            crate::markdown::clear_highlight_cache();
             if let Err(err) = crate::config::save_theme(choice.name) {
                 crate::toast::push_with_cap(
                     &mut app.toasts,
