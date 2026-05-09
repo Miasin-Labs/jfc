@@ -1283,13 +1283,26 @@ where
     }
 
     fn on_code(&mut self, code: CowStr<'a>) {
+        let code_style = self.theme.inline_code();
         if let Some(ref mut table) = self.table {
-            table
-                .current_cell
-                .push(Span::styled(code.into_string(), self.theme.inline_code()));
+            // Inside a table cell: try swatch, otherwise plain
+            if let Some(spans) = colorize_inline_colors(code.as_ref(), code_style) {
+                for span in spans {
+                    table.current_cell.push(span);
+                }
+            } else {
+                table.current_cell.push(Span::styled(code.into_string(), code_style));
+            }
             return;
         }
-        self.push_span(Span::styled(code.into_string(), self.theme.inline_code()));
+        // Inline code outside tables: detect color literals and render swatch
+        if let Some(spans) = colorize_inline_colors(code.as_ref(), code_style) {
+            for span in spans {
+                self.push_span(span);
+            }
+        } else {
+            self.push_span(Span::styled(code.into_string(), code_style));
+        }
     }
 
     fn heading_style(&self, level: usize) -> Style {
@@ -2529,5 +2542,73 @@ mod color_swatch_tests {
         assert_eq!(result[0].style, style);
         assert_eq!(result[2].style, style);
         assert_eq!(result[3].style, style);
+    }
+
+    #[test]
+    fn shadotheme_hex_codes_detected_normal() {
+        // Real hex codes from the shadotheme implementation that should
+        // produce color swatches in prose/inline-code contexts.
+        let style = Style::default();
+        let codes = &[
+            ("#111119", Color::Rgb(0x11, 0x11, 0x19)),
+            ("#1b1b29", Color::Rgb(0x1b, 0x1b, 0x29)),
+            ("#505079", Color::Rgb(0x50, 0x50, 0x79)),
+            ("#dfb7e8", Color::Rgb(0xdf, 0xb7, 0xe8)),
+            ("#bd93f9", Color::Rgb(0xbd, 0x93, 0xf9)),
+            ("#37d4a7", Color::Rgb(0x37, 0xd4, 0xa7)),
+            ("#B52A5B", Color::Rgb(0xB5, 0x2A, 0x5B)),
+            ("#ff7ab2", Color::Rgb(0xff, 0x7a, 0xb2)),
+            ("#8677d9", Color::Rgb(0x86, 0x77, 0xd9)),
+        ];
+        for (hex, expected_color) in codes {
+            let result = colorize_inline_colors(hex, style)
+                .unwrap_or_else(|| panic!("should detect color in {hex}"));
+            // swatch span should have the correct fg color
+            let swatch = &result[0];
+            assert_eq!(
+                swatch.style.fg,
+                Some(*expected_color),
+                "wrong color for {hex}"
+            );
+            assert_eq!(swatch.content.as_ref(), "\u{2588} ");
+            // The code text itself follows
+            assert_eq!(result[1].content.as_ref(), *hex);
+        }
+    }
+
+    #[test]
+    fn inline_code_backtick_gets_swatch_via_to_lines_normal() {
+        // When markdown contains `#ff7ab2` (backtick-wrapped), the rendered
+        // output should include a swatch span with the color's fg.
+        let theme = crate::theme::Theme::dark();
+        let md = "The color is `#ff7ab2` in the theme.";
+        let lines = super::to_lines(md, &theme, 120);
+        // Flatten all spans
+        let all_spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        // At least one span should be the swatch character with fg=#ff7ab2
+        let has_swatch = all_spans.iter().any(|s| {
+            s.content.contains('\u{2588}')
+                && s.style.fg == Some(Color::Rgb(0xff, 0x7a, 0xb2))
+        });
+        assert!(
+            has_swatch,
+            "expected a swatch span with fg=#ff7ab2 in rendered output, got: {all_spans:?}"
+        );
+    }
+
+    #[test]
+    fn inline_code_rgb_gets_swatch_via_to_lines_normal() {
+        let theme = crate::theme::Theme::dark();
+        let md = "Use `rgb(55, 212, 167)` for green.";
+        let lines = super::to_lines(md, &theme, 120);
+        let all_spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let has_swatch = all_spans.iter().any(|s| {
+            s.content.contains('\u{2588}')
+                && s.style.fg == Some(Color::Rgb(55, 212, 167))
+        });
+        assert!(
+            has_swatch,
+            "expected a swatch span with fg=rgb(55,212,167) in rendered output, got: {all_spans:?}"
+        );
     }
 }
