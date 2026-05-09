@@ -405,7 +405,8 @@ pub struct QueuedPrompt {
 }
 
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-pub const TICK_MS: u64 = 80;
+pub const IDLE_TICK_MS: u64 = 80;
+pub const ANIM_TICK_MS: u64 = 33;
 /// Cap on how many turns of token usage we retain for the info-sidebar
 /// sparkline. 32 datapoints fit comfortably in a 30-col-wide sidebar
 /// while still showing a meaningful trend.
@@ -926,6 +927,23 @@ pub struct App {
     /// future config-toml field. When false, the slash command surfaces
     /// a hint message instead of running.
     pub advisor_enabled: bool,
+    /// Shared flag: true when the UI needs high-frequency ticks (animations,
+    /// kinetic scroll, boot sweep). The tick task reads this to choose
+    /// `ANIM_TICK_MS` vs `IDLE_TICK_MS`.
+    pub wants_animation_frame: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Kinetic scroll velocity (lines/sec). Wheel events inject impulse;
+    /// each animation tick decays by 0.85 and applies to `scroll_offset`.
+    pub scroll_velocity: f32,
+    /// Last tick instant for kinetic scroll dt calculation.
+    pub last_scroll_tick: std::time::Instant,
+    /// Throttle for idle_prefetch: last time a prefetch batch was fired.
+    pub last_prefetch_at: std::time::Instant,
+    /// Number of prefetch reads currently in-flight (capped at 2).
+    pub prefetch_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Cached git repository root. `None` = not yet resolved.
+    /// `Some(None)` = resolved, not in a git repo.
+    /// `Some(Some(path))` = resolved git root directory.
+    pub git_root: Option<Option<std::path::PathBuf>>,
 }
 
 impl App {
@@ -1098,6 +1116,12 @@ impl App {
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            wants_animation_frame: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scroll_velocity: 0.0,
+            last_scroll_tick: std::time::Instant::now(),
+            last_prefetch_at: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            prefetch_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            git_root: None,
         };
         // Open the task store with the real session id so tasks persist to disk.
         if let Some(ref sid) = app.current_session_id {
@@ -1111,6 +1135,40 @@ impl App {
             "App::new"
         );
         app
+    }
+
+    /// Recompute the `wants_animation_frame` flag based on current state.
+    /// Called once per tick so the tick task can adjust its sleep interval.
+    pub fn update_wants_animation_frame(&self) {
+        use std::sync::atomic::Ordering;
+        let dominated = self.launched_at.elapsed() < std::time::Duration::from_millis(1500)
+            || self.is_streaming
+            || self.scroll_velocity.abs() > 0.5
+            || self.toasts.iter().any(|t| !t.is_expired_at(std::time::Instant::now()));
+        self.wants_animation_frame.store(dominated, Ordering::Relaxed);
+    }
+
+    /// Resolve the git repository root by walking up from `cwd`.
+    /// Caches the result in `self.git_root`. Call `invalidate_git_root()`
+    /// on Resize to force re-resolution.
+    pub fn resolve_git_root(&mut self) {
+        if self.git_root.is_some() {
+            return;
+        }
+        let mut dir = std::env::current_dir().ok();
+        while let Some(d) = dir {
+            if d.join(".git").exists() {
+                self.git_root = Some(Some(d));
+                return;
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+        self.git_root = Some(None);
+    }
+
+    /// Invalidate the cached git root so it will be re-resolved on next access.
+    pub fn invalidate_git_root(&mut self) {
+        self.git_root = None;
     }
 
     /// Switch to a different session id and reset all per-session state

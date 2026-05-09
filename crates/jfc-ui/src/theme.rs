@@ -25,6 +25,17 @@ pub struct Theme {
     pub code_number: Color,
     pub reasoning_bg: Color,
     pub reasoning_fg: Color,
+
+    // ── Precomputed styles (hot-path cache) ──────────────────────────
+    pub style_text_secondary: Style,
+    pub style_text_muted: Style,
+    pub style_error: Style,
+    pub style_success: Style,
+    pub style_accent: Style,
+    pub style_accent_bold: Style,
+    pub style_border: Style,
+    pub style_text_primary: Style,
+    pub style_text_primary_bold: Style,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +144,23 @@ const AVAILABLE_THEME_NAMES: &[&str] = &[
 ];
 
 impl Theme {
+    fn with_cached_styles(mut self) -> Self {
+        self.style_text_secondary = Style::default().fg(self.text_secondary);
+        self.style_text_muted = Style::default().fg(self.text_muted);
+        self.style_error = Style::default().fg(self.error);
+        self.style_success = Style::default().fg(self.success);
+        self.style_accent = Style::default().fg(self.accent);
+        self.style_accent_bold = Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD);
+        self.style_border = Style::default().fg(self.border);
+        self.style_text_primary = Style::default().fg(self.text_primary);
+        self.style_text_primary_bold = Style::default()
+            .fg(self.text_primary)
+            .add_modifier(Modifier::BOLD);
+        self
+    }
+
     /// Default dark theme — high-contrast indigo/blue accents.
     pub fn dark() -> Self {
         Self {
@@ -157,7 +185,17 @@ impl Theme {
             code_number: Color::Rgb(255, 180, 100),
             reasoning_bg: Color::Rgb(30, 30, 45),
             reasoning_fg: Color::Rgb(120, 130, 160),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Light theme — soft cream background with conservative accents.
@@ -185,7 +223,17 @@ impl Theme {
             code_number: Color::Rgb(180, 90, 30),
             reasoning_bg: Color::Rgb(238, 234, 226),
             reasoning_fg: Color::Rgb(110, 100, 85),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Solarized dark — Ethan Schoonover's palette, mapped onto our
@@ -213,7 +261,17 @@ impl Theme {
             code_number: Color::Rgb(203, 75, 22),
             reasoning_bg: Color::Rgb(7, 54, 66),
             reasoning_fg: Color::Rgb(147, 161, 161),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Catppuccin mocha — popular pastel-on-dark palette. Mirrors
@@ -242,7 +300,17 @@ impl Theme {
             code_number: Color::Rgb(250, 179, 135), // Peach
             reasoning_bg: Color::Rgb(49, 50, 68),
             reasoning_fg: Color::Rgb(166, 173, 200),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Tokyo Night — folke/tokyonight.nvim. Cool indigo background
@@ -270,7 +338,17 @@ impl Theme {
             code_number: Color::Rgb(255, 158, 100),
             reasoning_bg: Color::Rgb(36, 40, 59),
             reasoning_fg: Color::Rgb(154, 165, 206),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Dracula — dracula/dracula. Vivid violet/pink/cyan on dark
@@ -298,7 +376,17 @@ impl Theme {
             code_number: Color::Rgb(189, 147, 249),
             reasoning_bg: Color::Rgb(50, 52, 68),
             reasoning_fg: Color::Rgb(180, 180, 200),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Nord — arcticicestudio/nord. Cold polar palette with subdued
@@ -326,7 +414,17 @@ impl Theme {
             code_number: Color::Rgb(180, 142, 173), // nord15
             reasoning_bg: Color::Rgb(59, 66, 82),
             reasoning_fg: Color::Rgb(180, 188, 200),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Gruvbox Dark — morhetz/gruvbox. Warm retro greys with
@@ -354,7 +452,17 @@ impl Theme {
             code_number: Color::Rgb(211, 134, 155),  // purple
             reasoning_bg: Color::Rgb(60, 56, 54),
             reasoning_fg: Color::Rgb(189, 174, 147),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Monokai — TextMate's classic. Hot pink keywords, lime strings,
@@ -382,7 +490,17 @@ impl Theme {
             code_number: Color::Rgb(174, 129, 255),
             reasoning_bg: Color::Rgb(48, 49, 41),
             reasoning_fg: Color::Rgb(207, 207, 194),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Ayu Dark — ayu-theme/ayu. Deep navy with electric cyan and
@@ -410,7 +528,17 @@ impl Theme {
             code_number: Color::Rgb(255, 180, 84),
             reasoning_bg: Color::Rgb(20, 25, 31),
             reasoning_fg: Color::Rgb(150, 158, 170),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Rose Pine — rose-pine/rose-pine. Soft mauve/foam/rose
@@ -438,7 +566,17 @@ impl Theme {
             code_number: Color::Rgb(235, 188, 186), // rose
             reasoning_bg: Color::Rgb(31, 29, 46),
             reasoning_fg: Color::Rgb(180, 175, 210),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// One Dark — Atom's flagship. Slate background with cool blue
@@ -466,7 +604,17 @@ impl Theme {
             code_number: Color::Rgb(209, 154, 102),
             reasoning_bg: Color::Rgb(45, 49, 58),
             reasoning_fg: Color::Rgb(160, 168, 182),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// GitHub Light — primer/github-vscode-theme. Crisp white bg
@@ -495,7 +643,17 @@ impl Theme {
             code_number: Color::Rgb(5, 80, 174),
             reasoning_bg: Color::Rgb(243, 246, 249),
             reasoning_fg: Color::Rgb(80, 88, 100),
+            style_text_secondary: Style::default(),
+            style_text_muted: Style::default(),
+            style_error: Style::default(),
+            style_success: Style::default(),
+            style_accent: Style::default(),
+            style_accent_bold: Style::default(),
+            style_border: Style::default(),
+            style_text_primary: Style::default(),
+            style_text_primary_bold: Style::default(),
         }
+        .with_cached_styles()
     }
 
     /// Look up a theme by name. Returns None for unknown names so

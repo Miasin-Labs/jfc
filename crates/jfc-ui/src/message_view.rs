@@ -138,12 +138,8 @@ impl Widget for MessageView<'_> {
                             && cx < buf.area().right()
                             && cy < buf.area().bottom()
                         {
-                            let phase = (std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or(0)
-                                % 1200) as f32
-                                / 1200.0;
+                            let elapsed_ms = self.app.launched_at.elapsed().as_millis();
+                            let phase = (elapsed_ms % 1200) as f32 / 1200.0;
                             let intensity = if phase < 0.5 {
                                 phase * 2.0
                             } else {
@@ -511,11 +507,7 @@ fn build_render_items<'a>(app: &'a App, inner_w: usize) -> Vec<RenderItem<'a>> {
             Role::Assistant => {
                 let mut spans = Vec::new();
                 if is_streaming_placeholder && !crate::spinner::reduced_motion() {
-                    let phase = (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0)
-                        % 1200) as f32
+                    let phase = (app.launched_at.elapsed().as_millis() % 1200) as f32
                         / 1200.0;
                     let intensity = if phase < 0.5 {
                         phase * 2.0
@@ -827,6 +819,8 @@ fn tool_body_lines_themed(
                     tool.display.is_expanded(),
                     &diag_lines,
                 )
+            } else if looks_like_git_diff_output(s) {
+                produce_git_diff_output_lines(s, "", Some(0), t, tool.display.is_expanded())
             } else if matches!(tool.kind, ToolKind::Task) {
                 produce_markdown_block_lines(s, content_w, t)
             } else {
@@ -843,6 +837,8 @@ fn tool_body_lines_themed(
                         .fg(t.text_muted)
                         .add_modifier(Modifier::ITALIC),
                 ))]
+            } else if looks_like_git_diff_output(&lt.content) {
+                produce_git_diff_output_lines(&lt.content, "", Some(0), t, tool.display.is_expanded())
             } else {
                 produce_text_block_lines(
                     &lt.content,
@@ -901,6 +897,15 @@ fn tool_body_lines_themed(
                     produce_compiler_output_lines(stdout, stderr, *exit_code, t, tool.display.is_expanded())
                 }
                 _ => {
+                    if looks_like_git_diff_output(stdout) {
+                        return produce_git_diff_output_lines(
+                            stdout,
+                            stderr,
+                            *exit_code,
+                            t,
+                            tool.display.is_expanded(),
+                        );
+                    }
                     let lang_hint = infer_lang_from_tool(tool);
                     let lang_lc = lang_hint.as_deref().map(|l| l.to_ascii_lowercase());
                     let is_markdown_lang = lang_lc
@@ -946,6 +951,9 @@ fn tool_body_lines_themed(
         ToolOutput::FileContent {
             content, language, ..
         } => {
+            if looks_like_git_diff_output(content) {
+                return produce_git_diff_output_lines(content, "", Some(0), t, tool.display.is_expanded());
+            }
             let hl_lang = if language.is_empty() {
                 "rs"
             } else {
@@ -974,7 +982,12 @@ fn render_tool_block(
             // Collapsed-tool header: no gutter glyph (matching the
             // expanded path). The header itself includes the status
             // icon and kind-colored title which carry the same info.
-            let header = build_collapsed_header(tool, &t, area.width as usize);
+            let header = build_collapsed_header(
+                tool,
+                &t,
+                area.width as usize,
+                app.launched_at.elapsed().as_millis(),
+            );
             Paragraph::new(header)
                 .style(Style::default().bg(t.bg))
                 .render(
@@ -990,10 +1003,7 @@ fn render_tool_block(
         return;
     }
 
-    let frame_idx = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.as_millis() / 80) as usize)
-        .unwrap_or(0);
+    let frame_idx = (app.launched_at.elapsed().as_millis() / 80) as usize;
     let (status_icon, status_style) = tool_status_icon_animated(tool, &t, frame_idx);
 
     let full_h = tool_block_height(tool, area.width as usize) as u16;
@@ -1078,16 +1088,13 @@ fn render_tool_block(
     }
 }
 
-fn build_collapsed_header<'a>(tool: &'a ToolCall, t: &Theme, width: usize) -> Line<'a> {
-    // Match the expanded-header path: derive the spinner frame from
-    // wall-clock time so a Pending or Running tool keeps animating
-    // even when it's collapsed (the more common case while a batch
-    // is in flight). Without this the bullet froze at `○`/`◌` and the
-    // user couldn't tell "queued and alive" apart from "stuck".
-    let frame_idx = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.as_millis() / 80) as usize)
-        .unwrap_or(0);
+fn build_collapsed_header<'a>(
+    tool: &'a ToolCall,
+    t: &Theme,
+    width: usize,
+    elapsed_ms: u128,
+) -> Line<'a> {
+    let frame_idx = (elapsed_ms / 80) as usize;
     let (status_icon, status_style) = tool_status_icon_animated(tool, t, frame_idx);
     // Collapsed-tool header: status icon + title. The chevron `▶`
     // that used to mark "expandable" was redundant — a collapsed
@@ -1645,7 +1652,8 @@ fn produce_text_block_lines(
     let mut count = 0usize;
 
     'outer: for raw in text.lines() {
-        let wrapped = markdown::hard_wrap_str(raw, width.max(1));
+        let clean_raw = sanitize_terminal_text(raw);
+        let wrapped = markdown::hard_wrap_str(&clean_raw, width.max(1));
         for chunk in wrapped {
             if count >= max_lines {
                 let total = text.lines().count();
@@ -1660,7 +1668,7 @@ fn produce_text_block_lines(
                 )));
                 break 'outer;
             }
-            let clean = sanitize_terminal_text(&chunk);
+            let clean = chunk;
             // Try the git colorizers in order: diffstat first (most
             // specific), then full diff hunks (broader). Falls back
             // to plain styling for any line that doesn't match.
@@ -1688,6 +1696,28 @@ fn produce_text_block_lines(
         }
     }
     lines
+}
+
+fn looks_like_git_diff_output(text: &str) -> bool {
+    let mut saw_diff_header = false;
+    let mut saw_hunk_header = false;
+    let mut saw_file_marker = false;
+    let mut saw_diffstat = false;
+
+    for raw in text.lines().take(80) {
+        let line = sanitize_terminal_text(raw);
+        if line.starts_with("diff --git ") || line.starts_with("index ") {
+            saw_diff_header = true;
+        } else if line.starts_with("@@") {
+            saw_hunk_header = true;
+        } else if line.starts_with("--- ") || line.starts_with("+++ ") {
+            saw_file_marker = true;
+        } else if colorize_diffstat_line(&line, Color::Reset, Theme::dark()).is_some() {
+            saw_diffstat = true;
+        }
+    }
+
+    saw_diff_header || (saw_hunk_header && saw_file_marker) || saw_diffstat
 }
 
 /// Detect git-diffstat-style lines (` path | NN +++---`) and return
@@ -3066,8 +3096,9 @@ fn produce_grep_output_lines(
         if lines.len() >= max_lines {
             continue;
         }
-        // Group separator from grep `-A`/`-B`/`-C`: literal `--`.
-        if raw == "--" {
+        let clean = sanitize_terminal_text(raw);
+
+        if clean == "--" {
             lines.push(Line::from(Span::styled(
                 "──".to_string(),
                 Style::default().fg(t.text_muted),
@@ -3075,12 +3106,7 @@ fn produce_grep_output_lines(
             continue;
         }
 
-        // Try to peel off `path<sep1><lineno><sep2>[<col><sep3>]<body>`
-        // where `sep1` and `sep2` are both `:` for matches, both `-`
-        // for context lines (per GNU grep's `print_sep` and rg's
-        // `write_prelude`). Mixing `:` and `-` doesn't happen — each
-        // line is either fully match or fully context.
-        let parsed = parse_grep_line(raw);
+        let parsed = parse_grep_line(&clean);
         match parsed {
             Some(GrepLine::Match {
                 path,
@@ -3089,11 +3115,7 @@ fn produce_grep_output_lines(
                 body,
                 is_context,
             }) => {
-                let sep_color = if is_context {
-                    t.text_muted
-                } else {
-                    t.text_muted
-                };
+                let sep_color = t.text_muted;
                 let body_color = if is_context {
                     t.text_muted
                 } else {
@@ -3102,10 +3124,6 @@ fn produce_grep_output_lines(
                 let lineno_color = if is_context { t.text_muted } else { t.warning };
                 let sep_str = if is_context { "-" } else { ":" };
                 let mut spans: Vec<Span<'static>> = Vec::new();
-                // Skip the path span when grep was invoked against a
-                // single file and didn't repeat the filename on each
-                // line — `parse_grep_line` returns `path = ""` for
-                // that form.
                 if !path.is_empty() {
                     spans.push(Span::styled(
                         path.to_owned(),
@@ -3145,7 +3163,6 @@ fn produce_grep_output_lines(
                 lines.push(Line::from(spans));
             }
             Some(GrepLine::HeadingPath(path)) => {
-                // `--heading` mode: bare path on its own line.
                 lines.push(Line::from(Span::styled(
                     path.to_owned(),
                     Style::default()
@@ -3155,7 +3172,7 @@ fn produce_grep_output_lines(
             }
             None => {
                 lines.push(Line::from(Span::styled(
-                    raw.to_owned(),
+                    clean,
                     Style::default().fg(t.text_secondary),
                 )));
             }
@@ -3173,10 +3190,12 @@ fn produce_grep_output_lines(
         )));
     }
     if !stderr.is_empty() {
-        lines.push(Line::from(""));
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
         for sl in stderr.lines() {
             lines.push(Line::from(Span::styled(
-                sl.to_owned(),
+                sanitize_terminal_text(sl),
                 Style::default().fg(t.error),
             )));
         }
@@ -3278,20 +3297,50 @@ fn produce_path_list_output_lines(
         )));
     }
     if !stderr.is_empty() {
-        lines.push(Line::from(""));
-        for sl in stderr.lines() {
-            lines.push(Line::from(Span::styled(
-                sl.to_owned(),
-                Style::default().fg(t.error),
-            )));
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            for sl in stderr.lines() {
+                lines.push(Line::from(Span::styled(
+                    sanitize_terminal_text(sl),
+                    Style::default().fg(t.error),
+                )));
+            }
         }
-    }
     lines
 }
 
 /// Produce `git diff` / `git show` output as colored unified diff
 /// lines. Each line gets a per-prefix color: `+` green, `-` red, `@@`
 /// cyan, file headers bold, index/`diff --git` lines muted.
+/// Parse the substring after `diff --git ` into `(a_path, b_path)`.
+/// Handles quoted paths (Git emits these when `core.quotePath` triggers
+/// on non-ASCII or whitespace) but skips C-string unescaping — only the
+/// extension is needed downstream for syntect.
+fn parse_diff_git_paths(rest: &str) -> Option<(String, String)> {
+    let trimmed = rest.trim();
+    let (a_quoted, after_a) = if let Some(stripped) = trimmed.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        (&stripped[..end], stripped[end + 1..].trim_start())
+    } else {
+        let end = trimmed.find(' ')?;
+        (&trimmed[..end], trimmed[end + 1..].trim_start())
+    };
+    let b_quoted = if let Some(stripped) = after_a.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        &stripped[..end]
+    } else {
+        after_a.split_whitespace().next()?
+    };
+    let strip_prefix = |p: &str| -> String {
+        p.strip_prefix("a/")
+            .or_else(|| p.strip_prefix("b/"))
+            .unwrap_or(p)
+            .to_owned()
+    };
+    Some((strip_prefix(a_quoted), strip_prefix(b_quoted)))
+}
+
 fn produce_git_diff_output_lines(
     stdout: &str,
     stderr: &str,
@@ -3311,29 +3360,153 @@ fn produce_git_diff_output_lines(
             )));
         }
     }
-    let mut total = 0usize;
-    for raw in stdout.lines() {
-        total += 1;
-        if lines.len() >= max_lines {
+
+    // Pre-pass: strip ANSI from every line so prefix matching, hunk
+    // batching, and syntect highlighting all see the original source
+    // text. `git diff --color=always` (and `git -c color.ui=always`)
+    // wraps every line in SGR escapes (`\u{1b}[1m…\u{1b}[m`); without
+    // this strip the prefix checks below never fire and the raw
+    // escapes leak into the rendered Paragraph.
+    let cleaned: Vec<String> = stdout.lines().map(sanitize_terminal_text).collect();
+    let total = cleaned.len();
+
+    let mut current_lang: Option<String> = None;
+    let mut hunk: Vec<(DiffLineKind, String)> = Vec::new();
+
+    let flush = |hunk: &mut Vec<(DiffLineKind, String)>,
+                 lang: &Option<String>,
+                 lines: &mut Vec<Line<'static>>,
+                 max_lines: usize,
+                 t: Theme| {
+        if hunk.is_empty() {
+            return;
+        }
+        let body: String = hunk
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let highlighted = lang.as_deref().and_then(|l| {
+            // `wrap_w=0` → 1:1 line mapping from `highlight_code_raw`
+            // (no wrapping inside syntect). The `hl.len() == hunk.len()`
+            // invariant below relies on this contract.
+            let hl = markdown::highlight_code_raw(l, &body, 0, &t);
+            (hl.len() == hunk.len()).then_some(hl)
+        });
+        for (idx, (kind, content)) in hunk.drain(..).enumerate() {
+            if lines.len() >= max_lines {
+                break;
+            }
+            let (bg_color, fg_color, sigil) = match kind {
+                DiffLineKind::Added => (t.code_bg, t.success, '+'),
+                DiffLineKind::Removed => (t.code_bg, t.error, '-'),
+                DiffLineKind::Context => (t.bg, t.text_secondary, ' '),
+            };
+            let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                format!("{sigil} "),
+                Style::default().fg(fg_color).bg(bg_color),
+            )];
+            match highlighted.as_ref().and_then(|h| h.get(idx)) {
+                Some(hl) => {
+                    let extra_mod =
+                        matches!(kind, DiffLineKind::Removed).then_some(Modifier::DIM);
+                    for sp in &hl.spans {
+                        let mut style = sp.style;
+                        style.bg = Some(bg_color);
+                        if let Some(m) = extra_mod {
+                            style = style.add_modifier(m);
+                        }
+                        spans.push(Span::styled(sp.content.clone().into_owned(), style));
+                    }
+                }
+                None => {
+                    spans.push(Span::styled(
+                        content,
+                        Style::default().fg(fg_color).bg(bg_color),
+                    ));
+                }
+            }
+            lines.push(Line::from(spans).style(Style::default().bg(bg_color)));
+        }
+    };
+
+    for clean in &cleaned {
+        if lines.len() >= max_lines && hunk.is_empty() {
             continue;
         }
-        let style = if raw.starts_with("diff --git ") || raw.starts_with("index ") {
-            Style::default().fg(t.text_muted)
-        } else if raw.starts_with("--- ") || raw.starts_with("+++ ") {
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD)
-        } else if raw.starts_with("@@") {
-            Style::default().fg(t.accent)
-        } else if raw.starts_with('+') {
-            Style::default().fg(t.success)
-        } else if raw.starts_with('-') {
-            Style::default().fg(t.error)
+        // Pull language from the b-side (post-edit) path so renames
+        // pick up the destination's extension, not the source's.
+        if let Some(rest) = clean.strip_prefix("diff --git ") {
+            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
+            current_lang = parse_diff_git_paths(rest)
+                .and_then(|(_, b)| lang_from_path(&b));
+            if lines.len() < max_lines {
+                lines.push(Line::from(Span::styled(
+                    clean.clone(),
+                    Style::default().fg(t.text_muted),
+                )));
+            }
+            continue;
+        }
+        if clean.starts_with("index ")
+            || clean.starts_with("new file mode ")
+            || clean.starts_with("deleted file mode ")
+            || clean.starts_with("old mode ")
+            || clean.starts_with("new mode ")
+            || clean.starts_with("similarity index ")
+            || clean.starts_with("rename from ")
+            || clean.starts_with("rename to ")
+            || clean.starts_with("copy from ")
+            || clean.starts_with("copy to ")
+        {
+            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
+            if lines.len() < max_lines {
+                lines.push(Line::from(Span::styled(
+                    clean.clone(),
+                    Style::default().fg(t.text_muted),
+                )));
+            }
+            continue;
+        }
+        if clean.starts_with("--- ") || clean.starts_with("+++ ") {
+            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
+            if lines.len() < max_lines {
+                lines.push(Line::from(Span::styled(
+                    clean.clone(),
+                    Style::default()
+                        .fg(t.text_primary)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            continue;
+        }
+        if clean.starts_with("@@") {
+            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
+            if lines.len() < max_lines {
+                lines.push(Line::from(Span::styled(
+                    clean.clone(),
+                    Style::default().fg(t.accent),
+                )));
+            }
+            continue;
+        }
+        if let Some(content) = clean.strip_prefix('+') {
+            hunk.push((DiffLineKind::Added, content.to_owned()));
+        } else if let Some(content) = clean.strip_prefix('-') {
+            hunk.push((DiffLineKind::Removed, content.to_owned()));
+        } else if let Some(content) = clean.strip_prefix(' ') {
+            hunk.push((DiffLineKind::Context, content.to_owned()));
         } else {
-            Style::default().fg(t.text_secondary)
-        };
-        lines.push(Line::from(Span::styled(raw.to_owned(), style)));
+            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
+            if lines.len() < max_lines {
+                lines.push(Line::from(Span::styled(
+                    clean.clone(),
+                    Style::default().fg(t.text_muted),
+                )));
+            }
+        }
     }
+    flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
     if total > max_lines {
         lines.push(Line::from(Span::styled(
             format!(
@@ -3346,14 +3519,16 @@ fn produce_git_diff_output_lines(
         )));
     }
     if !stderr.is_empty() {
-        lines.push(Line::from(""));
-        for sl in stderr.lines() {
-            lines.push(Line::from(Span::styled(
-                sl.to_owned(),
-                Style::default().fg(t.error),
-            )));
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            for sl in stderr.lines() {
+                lines.push(Line::from(Span::styled(
+                    sanitize_terminal_text(sl),
+                    Style::default().fg(t.error),
+                )));
+            }
         }
-    }
     lines
 }
 
@@ -3456,14 +3631,16 @@ fn produce_git_log_output_lines(
         )));
     }
     if !stderr.is_empty() {
-        lines.push(Line::from(""));
-        for sl in stderr.lines() {
-            lines.push(Line::from(Span::styled(
-                sl.to_owned(),
-                Style::default().fg(t.error),
-            )));
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            for sl in stderr.lines() {
+                lines.push(Line::from(Span::styled(
+                    sanitize_terminal_text(sl),
+                    Style::default().fg(t.error),
+                )));
+            }
         }
-    }
     lines
 }
 
@@ -3511,14 +3688,16 @@ fn produce_cat_markdown_output_lines(
     }
 
     if !stderr.is_empty() {
-        lines.push(Line::from(""));
-        for sl in stderr.lines() {
-            lines.push(Line::from(Span::styled(
-                sl.to_owned(),
-                Style::default().fg(t.error),
-            )));
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            for sl in stderr.lines() {
+                lines.push(Line::from(Span::styled(
+                    sanitize_terminal_text(sl),
+                    Style::default().fg(t.error),
+                )));
+            }
         }
-    }
 
     lines
 }
@@ -3612,14 +3791,16 @@ fn produce_hex_dump_output_lines(
         )));
     }
     if !stderr.is_empty() {
-        lines.push(Line::from(""));
-        for sl in stderr.lines() {
-            lines.push(Line::from(Span::styled(
-                sl.to_owned(),
-                Style::default().fg(t.error),
-            )));
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            for sl in stderr.lines() {
+                lines.push(Line::from(Span::styled(
+                    sanitize_terminal_text(sl),
+                    Style::default().fg(t.error),
+                )));
+            }
         }
-    }
     lines
 }
 
@@ -3692,14 +3873,16 @@ fn produce_tabular_list_output_lines(
         )));
     }
     if !stderr.is_empty() {
-        lines.push(Line::from(""));
-        for sl in stderr.lines() {
-            lines.push(Line::from(Span::styled(
-                sl.to_owned(),
-                Style::default().fg(t.error),
-            )));
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            for sl in stderr.lines() {
+                lines.push(Line::from(Span::styled(
+                    sanitize_terminal_text(sl),
+                    Style::default().fg(t.error),
+                )));
+            }
         }
-    }
     lines
 }
 
@@ -4227,12 +4410,8 @@ fn render_diff_skip(
                         height: 1,
                     };
                     let (bg_color, fg_color, sigil) = match dl.kind {
-                        DiffLineKind::Added => {
-                            (Color::Rgb(0, 40, 20), Color::Rgb(0, 220, 120), "+")
-                        }
-                        DiffLineKind::Removed => {
-                            (Color::Rgb(50, 0, 0), Color::Rgb(255, 100, 100), "-")
-                        }
+                        DiffLineKind::Added => (t.code_bg, t.success, "+"),
+                        DiffLineKind::Removed => (t.code_bg, t.error, "-"),
                         DiffLineKind::Context => (t.bg, t.text_secondary, " "),
                     };
                     // Line-number column matches v126's diff style — show
@@ -6397,7 +6576,7 @@ mod helper_tests {
             ToolOutput::Empty,
             ToolKind::Bash,
         );
-        let line = build_collapsed_header(&tool, &t, 80);
+        let line = build_collapsed_header(&tool, &t, 80, 0);
         // First span is the status icon, second is " ".
         assert_eq!(line.spans[1].content, " ");
         assert!(!line.spans.is_empty());
@@ -6566,6 +6745,332 @@ mod helper_tests {
     #[test]
     fn parse_grep_no_path_empty_robust() {
         assert!(parse_grep_no_path("", ':', false).is_none());
+    }
+
+    #[test]
+    fn looks_like_git_diff_output_accepts_ansi_unified_diff() {
+        let diff = "\u{1b}[1mdiff --git a/src/lib.rs b/src/lib.rs\u{1b}[m\n\
+                    \u{1b}[36m@@ -1 +1 @@\u{1b}[m\n\
+                    \u{1b}[31m-old\u{1b}[m\n\
+                    \u{1b}[32m+new\u{1b}[m\n";
+        assert!(looks_like_git_diff_output(diff));
+    }
+
+    #[test]
+    fn produce_text_block_lines_strips_ansi_before_wrapping() {
+        let t = Theme::dark();
+        let lines = produce_text_block_lines(
+            "\u{1b}[31m+added line\u{1b}[m",
+            80,
+            t.text_secondary,
+            t,
+            true,
+        );
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "+added line");
+        assert!(!rendered.contains('\u{1b}'));
+    }
+
+    // --- Git-diff rendering regressions ------------------------------
+    //
+    // The screenshot bug: `git diff <file>` output was being routed
+    // through the chunked file-content renderer (showing
+    // `--- 1/N --- Rust` headers) and ANSI escapes from
+    // `git diff --color=always` were sliced inside `hard_wrap_str`,
+    // leaving raw `\u{1b}[...` bytes in the rendered text. These tests
+    // construct realistic ANSI git-diff stdout, render via the same
+    // `tool_body_lines` path the UI uses, dump the rendered Lines on
+    // failure, and assert the broken behavior never returns.
+
+    /// Concatenate every span across every rendered Line into a single
+    /// String. We use `\n` between Lines so failures print readably.
+    fn lines_to_plain(lines: &[ratatui::text::Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Realistic stdout produced by `git diff --color=always`: bold
+    /// "diff --git" header, cyan hunk header, red `-`, green `+`,
+    /// trailing reset. Reproduces the bytes that landed in the chunked
+    /// renderer in the bug screenshots.
+    const ANSI_GIT_DIFF: &str = concat!(
+        "\u{1b}[1mdiff --git a/crates/jfc-ui/src/render.rs b/crates/jfc-ui/src/render.rs\u{1b}[m\n",
+        "\u{1b}[1mindex 1111111..2222222 100644\u{1b}[m\n",
+        "\u{1b}[1m--- a/crates/jfc-ui/src/render.rs\u{1b}[m\n",
+        "\u{1b}[1m+++ b/crates/jfc-ui/src/render.rs\u{1b}[m\n",
+        "\u{1b}[36m@@ -4624,4 +4624,4 @@\u{1b}[m fn render_choice_list(\n",
+        "\u{1b}[31m-    let theme = Theme::dark();\u{1b}[m\n",
+        "\u{1b}[31m-    let t = &theme;\u{1b}[m\n",
+        "\u{1b}[32m+    t: &Theme,\u{1b}[m\n",
+        "\u{1b}[32m+) {\u{1b}[m\n",
+        "     match &tool.input {\n",
+        "         ToolInput::Edit {\n",
+        "             file_path,\n",
+    );
+
+    fn render_bash_git_diff(stdout: &str, expanded: bool) -> Vec<ratatui::text::Line<'static>> {
+        let mut tool = dummy_tool(
+            ToolInput::Bash {
+                command: "git diff crates/jfc-ui/src/render.rs".into(),
+                timeout: None,
+                workdir: None,
+            },
+            ToolOutput::Command {
+                stdout: stdout.into(),
+                stderr: String::new(),
+                exit_code: Some(0),
+            },
+            ToolKind::Bash,
+        );
+        tool.display = if expanded {
+            crate::types::ToolDisplayState::Expanded { pinned: false }
+        } else {
+            crate::types::ToolDisplayState::DEFAULT
+        };
+        tool_body_lines_themed(&tool, 100, Theme::dark(), None)
+    }
+
+    #[test]
+    fn ansi_git_diff_through_bash_renders_no_raw_escapes() {
+        let lines = render_bash_git_diff(ANSI_GIT_DIFF, true);
+        let rendered = lines_to_plain(&lines);
+
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "raw ANSI escape leaked into rendered output:\n--- rendered ---\n{rendered}\n--- raw stdout ---\n{ANSI_GIT_DIFF}",
+        );
+    }
+
+    #[test]
+    fn ansi_git_diff_is_not_chunked_as_file_content() {
+        let lines = render_bash_git_diff(ANSI_GIT_DIFF, true);
+        let rendered = lines_to_plain(&lines);
+
+        let bad_chunk_markers = [
+            "--- 1/",
+            "--- 2/",
+            "--- 3/",
+            "--- 4/",
+            "--- Rust",
+            " --- Rust",
+        ];
+        for marker in bad_chunk_markers {
+            assert!(
+                !rendered.contains(marker),
+                "git diff output went through the FileContent chunked renderer (`{marker}` header):\n{rendered}",
+            );
+        }
+    }
+
+    #[test]
+    fn ansi_git_diff_keeps_unified_diff_structure() {
+        let lines = render_bash_git_diff(ANSI_GIT_DIFF, true);
+        let rendered = lines_to_plain(&lines);
+
+        for must_have in [
+            "diff --git a/crates/jfc-ui/src/render.rs",
+            "@@ -4624,4 +4624,4 @@",
+        ] {
+            assert!(
+                rendered.contains(must_have),
+                "expected unified-diff line `{must_have}` in rendered output:\n{rendered}",
+            );
+        }
+
+        // The `+`/`-` sigils must appear at line starts at least once
+        // each — confirms the diff renderer recognized add/remove rows.
+        let mut saw_add = false;
+        let mut saw_del = false;
+        for line in &lines {
+            let plain: String = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            if plain.starts_with('+') && !plain.starts_with("+++") {
+                saw_add = true;
+            }
+            if plain.starts_with('-') && !plain.starts_with("---") {
+                saw_del = true;
+            }
+        }
+        assert!(saw_add, "no `+` add line in rendered output:\n{rendered}");
+        assert!(saw_del, "no `-` remove line in rendered output:\n{rendered}");
+    }
+
+    #[test]
+    fn ansi_git_diff_add_and_remove_lines_get_distinct_styles() {
+        let lines = render_bash_git_diff(ANSI_GIT_DIFF, true);
+        let theme = Theme::dark();
+
+        let mut add_fg: Option<ratatui::style::Color> = None;
+        let mut del_fg: Option<ratatui::style::Color> = None;
+        for line in &lines {
+            let plain: String = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            let first_fg = line
+                .spans
+                .iter()
+                .find_map(|s| s.style.fg);
+            if plain.starts_with('+') && !plain.starts_with("+++") && add_fg.is_none() {
+                add_fg = first_fg;
+            }
+            if plain.starts_with('-') && !plain.starts_with("---") && del_fg.is_none() {
+                del_fg = first_fg;
+            }
+        }
+
+        let add = add_fg.expect("expected at least one `+` line with foreground style");
+        let del = del_fg.expect("expected at least one `-` line with foreground style");
+        assert_ne!(
+            add, del,
+            "`+` and `-` lines rendered with the same fg color (add={add:?}, del={del:?})",
+        );
+        assert_eq!(
+            add, theme.success,
+            "`+` add line should use Theme.success, got {add:?} (theme.success = {:?})",
+            theme.success,
+        );
+        assert_eq!(
+            del, theme.error,
+            "`-` remove line should use Theme.error, got {del:?} (theme.error = {:?})",
+            theme.error,
+        );
+    }
+
+    #[test]
+    fn ansi_git_diff_through_filecontent_does_not_chunk() {
+        // Reproduces the screenshot bug: the same diff text but routed
+        // through ToolOutput::FileContent (which the screenshot showed
+        // splitting the diff into "--- 1/4 --- Rust" chunks). After the
+        // fix the FileContent path detects diff text and falls into the
+        // diff renderer instead.
+        let plain_diff = "diff --git a/x b/x\n\
+                          --- a/x\n\
+                          +++ b/x\n\
+                          @@ -1 +1 @@\n\
+                          -old\n\
+                          +new\n";
+        let tool = dummy_tool(
+            ToolInput::Read {
+                file_path: "x".into(),
+                offset: None,
+                limit: None,
+            },
+            ToolOutput::FileContent {
+                path: "x".into(),
+                content: plain_diff.into(),
+                language: "diff".into(),
+            },
+            ToolKind::Read,
+        );
+        let lines = tool_body_lines_themed(&tool, 80, Theme::dark(), None);
+        let rendered = lines_to_plain(&lines);
+
+        for marker in ["--- 1/", "--- 2/", "--- Rust", " --- Diff"] {
+            assert!(
+                !rendered.contains(marker),
+                "FileContent diff went through chunked renderer (`{marker}`):\n{rendered}",
+            );
+        }
+        assert!(
+            rendered.contains("@@ -1 +1 @@"),
+            "expected hunk header in rendered output:\n{rendered}",
+        );
+    }
+
+    #[test]
+    fn ansi_git_diff_applies_syntect_per_token_highlighting() {
+        // Catches the "swapped (lang, code) arguments" failure mode:
+        // if `highlight_code_raw` ever falls into its fallback branch
+        // (unknown syntax), every diff line collapses to a single span
+        // with the diff fg color. Real per-token highlighting produces
+        // multiple spans per line, with at least one keyword token
+        // (e.g. `let`, `match`) in a different color than identifiers.
+        let lines = render_bash_git_diff(ANSI_GIT_DIFF, true);
+
+        let mut hunk_lines: Vec<&ratatui::text::Line<'static>> = Vec::new();
+        for line in &lines {
+            let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            if plain.starts_with('-') && !plain.starts_with("---")
+                || plain.starts_with('+') && !plain.starts_with("+++")
+                || plain.starts_with(' ') && plain.contains("match")
+            {
+                hunk_lines.push(line);
+            }
+        }
+        assert!(!hunk_lines.is_empty(), "no hunk content lines found");
+
+        let multi_span_count = hunk_lines.iter().filter(|l| l.spans.len() > 2).count();
+        assert!(
+            multi_span_count >= 2,
+            "expected ≥2 hunk lines with per-token spans (sigil + multiple syntect tokens), \
+             got {multi_span_count} multi-span lines out of {}: {:#?}",
+            hunk_lines.len(),
+            hunk_lines
+                .iter()
+                .map(|l| (
+                    l.spans.len(),
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                ))
+                .collect::<Vec<_>>(),
+        );
+
+        let mut distinct_token_colors = std::collections::HashSet::new();
+        for line in &hunk_lines {
+            for span in line.spans.iter().skip(1) {
+                if !span.content.trim().is_empty() {
+                    distinct_token_colors.insert(span.style.fg);
+                }
+            }
+        }
+        assert!(
+            distinct_token_colors.len() >= 2,
+            "expected ≥2 distinct token colors (keywords vs idents), \
+             got {} colors: {:?}",
+            distinct_token_colors.len(),
+            distinct_token_colors,
+        );
+    }
+
+    /// Snapshot-style debug helper: prints exactly what the UI shows
+    /// for an ANSI git diff so a human reviewer can eyeball the styling
+    /// after a refactor. Always passes; useful with `--nocapture`.
+    #[test]
+    fn debug_dump_ansi_git_diff_render() {
+        let lines = render_bash_git_diff(ANSI_GIT_DIFF, true);
+        eprintln!("--- raw ANSI stdout ({} bytes) ---", ANSI_GIT_DIFF.len());
+        eprintln!("{ANSI_GIT_DIFF}");
+        eprintln!("--- rendered ({} lines) ---", lines.len());
+        for (idx, line) in lines.iter().enumerate() {
+            for span in &line.spans {
+                eprintln!(
+                    "  [{idx:>3}] fg={:?} bg={:?} mod={:?} {:?}",
+                    span.style.fg,
+                    span.style.bg,
+                    span.style.add_modifier,
+                    span.content.as_ref(),
+                );
+            }
+        }
     }
 
     // --- message_view_total_lines ------------------------------------

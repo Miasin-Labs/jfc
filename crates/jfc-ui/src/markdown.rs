@@ -3,17 +3,43 @@
 use itertools::{Itertools, Position};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options as ParseOptions, Parser, Tag, TagEnd};
 use ratatui::{
-    style::{Modifier, Style, Stylize},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
 };
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{LazyLock, Mutex};
 
-use ansi_to_tui::IntoText;
 use syntect::{
     easy::HighlightLines,
-    highlighting::ThemeSet,
+    highlighting::{FontStyle, Style as SyntectStyle, ThemeSet},
     parsing::SyntaxSet,
-    util::{LinesWithEndings, as_24_bit_terminal_escaped},
+    util::LinesWithEndings,
 };
+
+/// Convert one syntect `(Style, &str)` range into a ratatui `Span`.
+/// Replaces the previous `as_24_bit_terminal_escaped` → `IntoText`
+/// round-trip, which was the dominant cost in markdown rendering
+/// (~10ms per visible message). syntect's `Style` already gives us
+/// fg color + font flags; mapping straight to `ratatui::Style` skips
+/// ANSI serialization and re-parsing entirely.
+fn syntect_span_to_ratatui(style: SyntectStyle, text: &str) -> Span<'static> {
+    let mut s = Style::default().fg(ratatui::style::Color::Rgb(
+        style.foreground.r,
+        style.foreground.g,
+        style.foreground.b,
+    ));
+    if style.font_style.contains(FontStyle::BOLD) {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        s = s.add_modifier(Modifier::ITALIC);
+    }
+    if style.font_style.contains(FontStyle::UNDERLINE) {
+        s = s.add_modifier(Modifier::UNDERLINED);
+    }
+    Span::styled(text.to_owned(), s)
+}
 
 use crate::theme::Theme;
 
@@ -94,6 +120,90 @@ pub fn highlight_code_raw(
     highlight_code_inner(lang, code, inner_width, theme, false)
 }
 
+/// Bounded memo of `highlight_code_inner` results.
+///
+/// Why: `tool_body_lines_themed` is invoked per-frame from `RenderItem::height`
+/// (for scroll math) AND again to actually paint, so every visible code block
+/// in tool output ran the full syntect/onig regex pipeline twice per frame.
+/// With a busy conversation that pinned the main thread on `match_at` /
+/// `onig_search_with_param` even while the UI was idle (observed at 190% CPU
+/// via gdb stack sampling). This cache turns repeat calls into a hash lookup.
+///
+/// Key components:
+/// - `lang_lower`: grammar selection input (already lowercased once at the call site).
+/// - `code_hash`: DefaultHasher of the input text — same inputs collide, different
+///   inputs miss naturally as files grow during streaming.
+/// - `wrap_w`: hard-wrap column; different widths must produce different cached vecs.
+/// - `with_gutter`: gates the leading `│ ` span (only the markdown code-fence path
+///   uses it; tool bodies pass false).
+/// - `border` + `text_secondary`: the only theme-dependent colors used inside
+///   `highlight_code_inner`. The actual syntect highlighting theme is hardcoded
+///   to `base16-ocean.dark`, so we only key on what the user's `Theme` actually
+///   contributes.
+struct HighlightCacheKey {
+    lang_lower: String,
+    code_hash: u64,
+    wrap_w: usize,
+    with_gutter: bool,
+    border: Color,
+    text_secondary: Color,
+}
+
+impl PartialEq for HighlightCacheKey {
+    fn eq(&self, o: &Self) -> bool {
+        self.code_hash == o.code_hash
+            && self.wrap_w == o.wrap_w
+            && self.with_gutter == o.with_gutter
+            && self.border == o.border
+            && self.text_secondary == o.text_secondary
+            && self.lang_lower == o.lang_lower
+    }
+}
+impl Eq for HighlightCacheKey {}
+impl Hash for HighlightCacheKey {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.code_hash.hash(h);
+        self.wrap_w.hash(h);
+        self.with_gutter.hash(h);
+        self.lang_lower.hash(h);
+    }
+}
+
+struct HighlightCacheEntry {
+    lines: Vec<Line<'static>>,
+    generation: u64,
+}
+
+struct HighlightCache {
+    map: HashMap<HighlightCacheKey, HighlightCacheEntry>,
+    generation: u64,
+}
+
+const HIGHLIGHT_CACHE_MAX: usize = 512;
+
+static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCache>> = LazyLock::new(|| {
+    Mutex::new(HighlightCache {
+        map: HashMap::with_capacity(128),
+        generation: 0,
+    })
+});
+
+/// Drop every memoized highlight result. Call when something changes that the
+/// cache key cannot encode — e.g. a fresh syntax set is loaded. Theme/width
+/// switches are already covered by the key, but `RenderCache::clear()` callers
+/// invoke this too for symmetry so neither cache outlives the other.
+pub fn clear_highlight_cache() {
+    let mut c = HIGHLIGHT_CACHE.lock().expect("highlight cache poisoned");
+    c.map.clear();
+    c.generation = 0;
+}
+
+fn hash_code(code: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    code.hash(&mut h);
+    h.finish()
+}
+
 fn highlight_code_inner(
     lang: &str,
     code: &str,
@@ -118,6 +228,24 @@ fn highlight_code_inner(
     };
 
     let lower = lang.to_lowercase();
+    let cache_key = HighlightCacheKey {
+        lang_lower: lower.clone(),
+        code_hash: hash_code(code),
+        wrap_w,
+        with_gutter,
+        border: theme.border,
+        text_secondary: theme.text_secondary,
+    };
+    {
+        let mut cache = HIGHLIGHT_CACHE.lock().expect("highlight cache poisoned");
+        cache.generation = cache.generation.wrapping_add(1);
+        let gen_now = cache.generation;
+        if let Some(entry) = cache.map.get_mut(&cache_key) {
+            entry.generation = gen_now;
+            return entry.lines.clone();
+        }
+    }
+
     let (syntax, active_set) =
         find_syntax_in_sets(lang, &lower, &SYNTAX_SET, EXTRA_SYNTAX_SET.as_ref());
 
@@ -146,14 +274,14 @@ fn highlight_code_inner(
                 }
             })
             .collect();
-        let ansi_line = match highlighter.highlight_line(&sanitized, active_set) {
-            Ok(ranges) => as_24_bit_terminal_escaped(&ranges, false),
+        let ranges = match highlighter.highlight_line(&sanitized, active_set) {
+            Ok(ranges) => ranges,
             Err(_) => {
                 let clean = sanitized.trim_end_matches('\n');
                 for chunk in hard_wrap_str(clean, wrap_w) {
                     let mut spans = Vec::new();
                     if with_gutter {
-                        spans.push(Span::styled("│ ".to_owned(), gutter_style));
+                        spans.push(Span::styled("│ ", gutter_style));
                     }
                     spans.push(Span::styled(chunk, fallback_style));
                     out.push(Line::from(spans));
@@ -162,31 +290,44 @@ fn highlight_code_inner(
             }
         };
 
-        match ansi_line.into_text() {
-            Ok(text) => {
-                for line in text.lines {
-                    for chunk in hard_wrap_line(line, wrap_w) {
-                        let mut spans = Vec::new();
-                        if with_gutter {
-                            spans.push(Span::styled("│ ".to_owned(), gutter_style));
-                        }
-                        spans.extend(chunk.spans);
-                        out.push(Line::from(spans));
-                    }
-                }
+        let mut line_spans: Vec<Span<'static>> = Vec::with_capacity(ranges.len());
+        for (style, text) in &ranges {
+            let trimmed = text.trim_end_matches('\n');
+            if trimmed.is_empty() {
+                continue;
             }
-            Err(_) => {
-                let mut spans = Vec::new();
-                if with_gutter {
-                    spans.push(Span::styled("│ ".to_owned(), gutter_style));
-                }
-                spans.push(Span::styled(
-                    sanitized.trim_end_matches('\n').to_string(),
-                    fallback_style,
-                ));
-                out.push(Line::from(spans));
-            }
+            line_spans.push(syntect_span_to_ratatui(*style, trimmed));
         }
+        let line = Line::from(line_spans);
+
+        for chunk in hard_wrap_line(line, wrap_w) {
+            let mut spans = Vec::new();
+            if with_gutter {
+                spans.push(Span::styled("│ ", gutter_style));
+            }
+            spans.extend(chunk.spans);
+            out.push(Line::from(spans));
+        }
+    }
+
+    {
+        let mut cache = HIGHLIGHT_CACHE.lock().expect("highlight cache poisoned");
+        if cache.map.len() >= HIGHLIGHT_CACHE_MAX {
+            let target = HIGHLIGHT_CACHE_MAX * 3 / 4;
+            let mut gens: Vec<u64> = cache.map.values().map(|e| e.generation).collect();
+            gens.sort_unstable();
+            let cutoff_idx = cache.map.len().saturating_sub(target);
+            let cutoff = gens.get(cutoff_idx).copied().unwrap_or(u64::MAX);
+            cache.map.retain(|_, e| e.generation > cutoff);
+        }
+        let gen_now = cache.generation;
+        cache.map.insert(
+            cache_key,
+            HighlightCacheEntry {
+                lines: out.clone(),
+                generation: gen_now,
+            },
+        );
     }
 
     out
@@ -591,7 +732,7 @@ fn render_row(
 
     let mut out: Vec<Line<'static>> = Vec::with_capacity(row_height);
     for line_idx in 0..row_height {
-        let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ".to_owned(), border_style)];
+        let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ", border_style)];
         for (i, col_lines) in wrapped.iter().enumerate() {
             let w = widths[i];
             let chunk = col_lines.get(line_idx).cloned().unwrap_or_default();
@@ -678,7 +819,7 @@ where
                 }
                 self.push_line(Line::styled(
                     "---",
-                    Style::default().fg(self.theme.text_muted),
+                    self.theme.style_text_muted,
                 ));
                 self.needs_newline = true;
             }
@@ -731,10 +872,10 @@ where
                 }
                 self.line_prefixes.push(Span::styled(
                     "> ",
-                    Style::default().fg(self.theme.text_muted),
+                    self.theme.style_text_muted,
                 ));
                 self.line_styles
-                    .push(Style::default().fg(self.theme.text_secondary).italic());
+                    .push(self.theme.style_text_secondary.italic());
             }
             Tag::CodeBlock(kind) => {
                 if !self.text.lines.is_empty() {
@@ -763,8 +904,7 @@ where
                 } else {
                     lang.to_owned()
                 };
-                let header_style = Style::default()
-                    .fg(self.theme.accent)
+                let header_style = self.theme.style_accent
                     .add_modifier(Modifier::BOLD);
                 // Emphasize the language tag a bit more — the previous
                 // bare accent color blended into prose. Bold + the
@@ -800,7 +940,7 @@ where
                     };
                     self.push_span(Span::styled(
                         prefix,
-                        Style::default().fg(self.theme.text_muted),
+                        self.theme.style_text_muted,
                     ));
                 }
                 self.needs_newline = false;
@@ -810,7 +950,7 @@ where
             Tag::Strikethrough => self.push_inline_style(Style::new().crossed_out()),
             Tag::Link { dest_url, .. } => {
                 self.link = Some(dest_url);
-                self.push_inline_style(Style::default().fg(self.theme.accent));
+                self.push_inline_style(self.theme.style_accent);
             }
             Tag::Table(alignments) => {
                 if self.needs_newline {
@@ -853,7 +993,7 @@ where
             TagEnd::CodeBlock => {
                 self.push_line(Line::from(Span::styled(
                     "└─".to_string(),
-                    Style::default().fg(self.theme.border),
+                    self.theme.style_border,
                 )));
                 self.needs_newline = true;
                 self.code_highlighter = None;
@@ -884,7 +1024,7 @@ where
                     // just emit the inert hint.
                     self.push_span(Span::styled(
                         format!(" ({url})"),
-                        Style::default().fg(self.theme.text_muted),
+                        self.theme.style_text_muted,
                     ));
                 }
             }
@@ -931,7 +1071,7 @@ where
             let style = self.inline_styles.last().copied().unwrap_or_default();
             table
                 .current_cell
-                .push(Span::styled(text.to_string(), style));
+                .push(Span::styled(text.into_string(), style));
             return;
         }
 
@@ -941,16 +1081,22 @@ where
             // word-wrap doesn't mangle ASCII trees. Then prefix each line
             // with the gutter span, matching the tool-call visual frame.
             let inner_width = self.code_wrap_width.saturating_sub(2).max(20);
-            let highlighted: Text = LinesWithEndings::from(text.as_ref())
-                .filter_map(|line| highlighter.highlight_line(line, &SYNTAX_SET).ok())
-                .filter_map(|part| as_24_bit_terminal_escaped(&part, false).into_text().ok())
-                .flatten()
-                .collect();
-
-            let gutter_style = Style::default().fg(self.theme.border);
-            for line in highlighted.lines {
+            let gutter_style = self.theme.style_border;
+            for raw_line in LinesWithEndings::from(text.as_ref()) {
+                let Ok(ranges) = highlighter.highlight_line(raw_line, &SYNTAX_SET) else {
+                    continue;
+                };
+                let mut line_spans: Vec<Span<'static>> = Vec::with_capacity(ranges.len());
+                for (style, slice) in &ranges {
+                    let trimmed = slice.trim_end_matches('\n');
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    line_spans.push(syntect_span_to_ratatui(*style, trimmed));
+                }
+                let line = Line::from(line_spans);
                 for chunk in hard_wrap_line(line, inner_width) {
-                    let mut spans = vec![Span::styled("│ ".to_string(), gutter_style)];
+                    let mut spans = vec![Span::styled("│ ", gutter_style)];
                     spans.extend(chunk.spans);
                     self.text.push_line(Line::from(spans));
                 }
@@ -962,12 +1108,12 @@ where
             // Code block with no syntax highlighter (unknown language) — still
             // gutter-prefix and hard-wrap so it doesn't word-wrap to oblivion.
             let inner_width = self.code_wrap_width.saturating_sub(2).max(20);
-            let gutter_style = Style::default().fg(self.theme.border);
+            let gutter_style = self.theme.style_border;
             for line in text.lines() {
-                let style = Style::default().fg(self.theme.text_secondary);
+                let style = self.theme.style_text_secondary;
                 for chunk in hard_wrap_str(line, inner_width) {
                     self.push_line(Line::from(vec![
-                        Span::styled("│ ".to_string(), gutter_style),
+                        Span::styled("│ ", gutter_style),
                         Span::styled(chunk, style),
                     ]));
                 }
@@ -988,7 +1134,7 @@ where
                 .inline_styles
                 .last()
                 .copied()
-                .unwrap_or(Style::default().fg(self.theme.text_primary));
+                .unwrap_or(self.theme.style_text_primary);
             self.push_span(Span::styled(line.to_string(), style));
         }
         self.needs_newline = false;
@@ -998,22 +1144,19 @@ where
         if let Some(ref mut table) = self.table {
             table
                 .current_cell
-                .push(Span::styled(code.to_string(), self.theme.inline_code()));
+                .push(Span::styled(code.into_string(), self.theme.inline_code()));
             return;
         }
-        self.push_span(Span::styled(code.to_string(), self.theme.inline_code()));
+        self.push_span(Span::styled(code.into_string(), self.theme.inline_code()));
     }
 
     fn heading_style(&self, level: usize) -> Style {
         match level {
-            1 => Style::default()
-                .fg(self.theme.text_primary)
+            1 => self.theme.style_text_primary
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            2 => Style::default()
-                .fg(self.theme.text_primary)
+            2 => self.theme.style_text_primary
                 .add_modifier(Modifier::BOLD),
-            _ => Style::default()
-                .fg(self.theme.text_secondary)
+            _ => self.theme.style_text_secondary
                 .add_modifier(Modifier::BOLD),
         }
     }
