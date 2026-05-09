@@ -58,6 +58,25 @@ impl NodeId {
 
 /// Full node data stored in the graph.
 ///
+/// ## Well-known metadata keys
+///
+/// The `metadata` map is free-form, but the following keys have defined
+/// semantics and are populated by specific passes:
+///
+/// | Key | Populated by | Type | Description |
+/// |-----|-------------|------|-------------|
+/// | `fields` | `RustAdapter` | JSON array | Struct field names |
+/// | `variants` | `RustAdapter` | JSON array | Enum variant names |
+/// | `async` | `RustAdapter` | `"true"/"false"` | Whether function is async |
+/// | `accessed_fields` | `RustAdapter` | JSON array | Fields accessed in fn body |
+/// | `coverage_count` | [`CoveragePass`] | numeric string | Total LCOV hit count across fn span |
+/// | `coverage_tested` | [`CoveragePass`] | `"true"/"false"` | Whether coverage_count > 0 |
+/// | `possible_input_types` | [`PossibleTypesPass`] | JSON string array | Types that can flow into fn |
+/// | `possible_return_types` | [`PossibleTypesPass`] | JSON string array | Types fn can produce |
+///
+/// [`CoveragePass`]: crate::coverage::CoveragePass
+/// [`PossibleTypesPass`]: crate::possible_types::PossibleTypesPass
+///
 /// ## Revision tracking
 ///
 /// `birth_revision` and `last_modified_revision` give every node a coarse
@@ -164,7 +183,7 @@ mod tests {
     #[test]
     fn legacy_node_data_deserializes_with_default_revisions_robust() {
         let legacy_json = r#"{
-            "id": [123],
+            "id": 123,
             "kind": "Function",
             "name": "legacy",
             "qualified_name": "crate::legacy",

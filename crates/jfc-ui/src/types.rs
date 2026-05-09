@@ -725,6 +725,8 @@ pub enum ToolKind {
     RunBounty,
     MarketStatus,
     GraphQuery,
+    /// Run coverage collection and annotate the graph.
+    RunCoverage,
     /// Edit code by symbol handle (semantic editing).
     SymbolEdit,
     /// v132 parity: invoked by the model to surface a finalized plan.
@@ -910,6 +912,15 @@ pub enum ToolInput {
         bounty_id: String,
         #[serde(default)]
         max_solvers: Option<u8>,
+    },
+    RunCoverage {
+        /// Optional path to an existing lcov.info file. If omitted, the tool
+        /// runs `cargo llvm-cov --lcov` to generate one.
+        #[serde(default)]
+        lcov_path: Option<String>,
+        /// Whether to include a list of untested functions in the output.
+        #[serde(default = "default_true")]
+        include_untested_list: bool,
     },
     SymbolEdit {
         handle: String,
@@ -1343,6 +1354,10 @@ pub enum TurnInvariantError {
 ///   was also User."
 /// - Tool ID uniqueness: provider IDs occasionally collide on retry;
 ///   that's a separate pathology owned by `tools::dedupe`.
+fn default_true() -> bool {
+    true
+}
+
 pub fn validate_turn_invariants(
     messages: &[ChatMessage],
 ) -> Result<(), TurnInvariantError> {
@@ -1494,8 +1509,9 @@ impl ToolKind {
             "teamdelete" => Self::TeamDelete,
             "sendmessage" => Self::SendMessage,
             "teammembermode" => Self::TeamMemberMode,
-            "graphquery" => Self::GraphQuery,
-            "symboledit" => Self::SymbolEdit,
+            "graphquery" | "graph_query" => Self::GraphQuery,
+            "runcoverage" | "run_coverage" => Self::RunCoverage,
+            "symboledit" | "symbol_edit" => Self::SymbolEdit,
             "exitplanmode" => Self::ExitPlanMode,
             "multiedit" => Self::MultiEdit,
             "askuserquestion" => Self::AskUserQuestion,
@@ -1559,6 +1575,7 @@ impl ToolKind {
             Self::SendMessage => "SendMessage",
             Self::TeamMemberMode => "TeamMemberMode",
             Self::GraphQuery => "GraphQuery",
+            Self::RunCoverage => "RunCoverage",
             Self::SymbolEdit => "SymbolEdit",
             Self::ExitPlanMode => "ExitPlanMode",
             Self::MultiEdit => "MultiEdit",
@@ -1614,6 +1631,7 @@ impl ToolKind {
             Self::SendMessage => "SendMessage",
             Self::TeamMemberMode => "TeamMemberMode",
             Self::GraphQuery => "graph_query",
+            Self::RunCoverage => "run_coverage",
             Self::SymbolEdit => "symbol_edit",
             Self::ExitPlanMode => "ExitPlanMode",
             Self::MultiEdit => "MultiEdit",
@@ -1728,6 +1746,9 @@ impl ToolInput {
                 format!("set {member_name} → {mode}")
             }
             Self::GraphQuery { query, .. } => query.clone(),
+            Self::RunCoverage { lcov_path, .. } => {
+                format!("coverage({})", lcov_path.as_deref().unwrap_or("auto"))
+            }
             Self::SymbolEdit { handle, .. } => format!("edit: {handle}"),
             Self::PostBounty {
                 description,
@@ -2022,6 +2043,13 @@ impl ToolInput {
                 include_handles: obj
                     .and_then(|m| m.get("include_handles"))
                     .and_then(|v| v.as_bool()),
+            },
+            ToolKind::RunCoverage => Self::RunCoverage {
+                lcov_path: opt_str_field("lcov_path"),
+                include_untested_list: obj
+                    .and_then(|m| m.get("include_untested_list"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
             },
             ToolKind::SymbolEdit => Self::SymbolEdit {
                 handle: req_str("handle")?,
@@ -2355,6 +2383,19 @@ impl ToolInput {
                 }
                 if let Some(ih) = include_handles {
                     v["include_handles"] = json!(ih);
+                }
+                v
+            }
+            Self::RunCoverage {
+                lcov_path,
+                include_untested_list,
+            } => {
+                let mut v = json!({});
+                if let Some(p) = lcov_path {
+                    v["lcov_path"] = json!(p);
+                }
+                if !include_untested_list {
+                    v["include_untested_list"] = json!(false);
                 }
                 v
             }

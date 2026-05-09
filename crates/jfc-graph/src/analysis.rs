@@ -249,6 +249,10 @@ fn cascade_walk(graph: &CodeGraph, target: &NodeId, relation: CallRelation) -> V
         }
     }
 
+    // The target itself is never a "caller of itself" / "callee of itself"
+    // even if it participates in a cycle — remove it from the reachable set.
+    reachable.remove(&target_idx);
+
     // Try to toposort just the reachable subgraph — return in order.
     // If cyclic, fall back to insertion order.
     let mut result: Vec<NodeId> = Vec::new();
@@ -2235,11 +2239,25 @@ mod tests {
     #[test]
     fn test_call_only_edges() {
         let mut g = CodeGraph::new();
+        // Use a Module as source for the Contains edge — Contains requires
+        // source = Module|Struct|Enum|Trait per EdgeKind::valid_for.
+        let m = g.add_node(NodeData {
+            id: NodeId::new("test.rs", "crate::m", NodeKind::Module),
+            kind: NodeKind::Module,
+            name: "m".to_string(),
+            qualified_name: "crate::m".to_string(),
+            file_path: PathBuf::from("test.rs"),
+            span: span(),
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            birth_revision: 0,
+            last_modified_revision: 0,
+        });
         let a = g.add_node(node("a"));
         let b = g.add_node(node("b"));
-        g.add_edge(&a, &b, edge()).unwrap();
+        g.add_edge(&a, &b, edge()).unwrap(); // Calls edge
         g.add_edge(
-            &a,
+            &m,
             &b,
             EdgeData {
                 kind: EdgeKind::Contains,
@@ -2382,27 +2400,19 @@ mod tests {
         let b = g.add_node(node("b"));
         let c = g.add_node(node("c"));
         let d = g.add_node(node("d"));
-        // a ⇄ b cycle, then a → c → d chain, plus c → b (re-entering the cycle)
+        // a ⇄ b cycle, then a → c → d chain, plus c → b (re-entering the cycle).
+        // The c → b edge creates a path c → b → a → c, so {a, b, c} collapse
+        // into a single SCC. Only {d} remains as a separate component.
         g.add_edge(&a, &b, edge()).unwrap();
         g.add_edge(&b, &a, edge()).unwrap();
         g.add_edge(&a, &c, edge()).unwrap();
         g.add_edge(&c, &d, edge()).unwrap();
-        // c → b takes us back into the {a,b} SCC; the edge becomes a single
-        // cross-SCC arc in the condensation.
         g.add_edge(&c, &b, edge()).unwrap();
 
         let cond = g.condensation();
         assert!(!petgraph::algo::is_cyclic_directed(&cond));
-        // Nodes: {a,b}, {c}, {d}  → 3 SCCs.
-        assert_eq!(cond.node_count(), 3);
-        // Edges: {a,b} → {c}, {c} → {a,b}? — wait, c→b would create a
-        // cross-SCC edge from {c} to {a,b}. That plus {a,b}→{c} would imply
-        // {a,b} and {c} are in the same SCC, contradiction. So there must be
-        // NO {a,b}→{c} edge. The edge a→c collapses into {a,b}→{c} which
-        // combined with {c}→{a,b} would form a cycle in the condensation,
-        // also a contradiction. The condensation property is what's load-
-        // bearing; we don't pin the precise edge count.
-        // Just assert acyclicity, which is the defining property.
+        // SCCs: {a,b,c} and {d} → 2 condensation nodes.
+        assert_eq!(cond.node_count(), 2);
     }
 
     // ─── Centrality metrics ────────────────────────────────────────────────

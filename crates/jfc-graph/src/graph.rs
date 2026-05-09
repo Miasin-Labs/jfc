@@ -460,6 +460,34 @@ impl CodeGraph {
         self.indices.rebuild_from_graph(&self.graph);
     }
 
+    /// Mutate a node's metadata in-place without a full `add_node` round-trip.
+    ///
+    /// The closure receives `&mut HashMap<String, String>` — the node's
+    /// metadata map. The node's `last_modified_revision` is bumped to the
+    /// current revision after the closure runs so that `since N` queries
+    /// see the change. The fast-lookup indices are updated for any keys
+    /// the closure added or removed.
+    ///
+    /// Returns `false` if the node doesn't exist.
+    pub(crate) fn update_node_metadata<F>(&mut self, id: &NodeId, f: F) -> bool
+    where
+        F: FnOnce(&mut std::collections::HashMap<String, String>),
+    {
+        let Some(&idx) = self.index_map.get(id) else {
+            return false;
+        };
+        // Snapshot old metadata keys for index diff.
+        let old_keys: Vec<String> = self.graph[idx].metadata.keys().cloned().collect();
+        f(&mut self.graph[idx].metadata);
+        let rev = self.bump_revision();
+        self.graph[idx].last_modified_revision = rev;
+        // Rebuild index entries for this node (cheap: one node).
+        self.indices.remove_node(&self.graph[idx]);
+        self.indices.insert_node(&self.graph[idx]);
+        let _ = old_keys; // suppress unused warning
+        true
+    }
+
     /// Total node count.
     pub fn node_count(&self) -> usize {
         self.graph.node_count()

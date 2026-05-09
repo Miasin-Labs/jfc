@@ -57,6 +57,13 @@ pub enum GraphFlag {
     TypesInferred,
     /// CFG-style call graph is reachable from at least one entry point.
     CallGraphReachable,
+    /// Coverage data (lcov) has been parsed and annotated onto Function nodes
+    /// as `metadata["coverage_count"]` and `metadata["coverage_tested"]`.
+    CoverageAnnotated,
+    /// Possible-input-type sets have been propagated through the call graph
+    /// via UsesType / Implements / Calls edges. Function nodes carry
+    /// `metadata["possible_input_types"]` and `metadata["possible_return_types"]`.
+    PossibleTypesInferred,
 }
 
 /// Set of flags currently true on the graph.

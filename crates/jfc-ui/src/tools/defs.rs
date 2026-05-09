@@ -472,6 +472,30 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "run_coverage".into(),
+            description: "Run cargo llvm-cov (or parse an existing lcov.info), annotate every \
+                Function node in the code graph with hit counts, and return a summary of \
+                tested vs untested functions. After this tool runs, use graph_query with the \
+                `untested` operator to find uncovered code (e.g. `entrypoints kind=PublicApi | untested`). \
+                Also enables the `possible_types` operator which propagates subtype sets through \
+                the call graph — use `fn(\"handler\") | possible_types` to see which concrete \
+                types can flow into a function.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "lcov_path": {
+                        "type": "string",
+                        "description": "Optional path to an existing lcov.info file. If omitted, runs `cargo llvm-cov --lcov` to generate one."
+                    },
+                    "include_untested_list": {
+                        "type": "boolean",
+                        "description": "Whether to include a list of untested function names in the output. Default true."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
             name: "symbol_edit".into(),
             description: "Edit a function/struct/etc. by *symbol handle* instead of \
                 file:line. Handles look like `fn:module::name` or `struct:Name` and \
