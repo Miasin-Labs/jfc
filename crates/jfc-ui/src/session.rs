@@ -1180,6 +1180,12 @@ fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
                 query
             ),
         },
+        ToolInput::RunCoverage { lcov_path, .. } => SerializedToolInput::Generic {
+            summary: format!(
+                "RunCoverage({})",
+                lcov_path.as_deref().unwrap_or("auto")
+            ),
+        },
         ToolInput::SymbolEdit { handle, .. } => SerializedToolInput::Generic {
             summary: format!("SymbolEdit: {handle}"),
         },

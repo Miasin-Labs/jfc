@@ -48,6 +48,7 @@ mod git_context;
 mod env_context;
 mod ids;
 mod web_cache;
+mod web_search;
 mod bash_processes;
 mod session_naming;
 mod feature_gates;

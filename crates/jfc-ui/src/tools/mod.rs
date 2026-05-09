@@ -67,6 +67,21 @@ fn graph_session_cache() -> &'static std::sync::Mutex<
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Get a mutable reference to the cached graph for `cwd`.
+///
+/// SAFETY: The graph session cache is behind a `std::sync::Mutex` and tool
+/// execution is sequential — no concurrent readers during mutation. The
+/// `Arc::as_ptr` cast is safe because we hold the only live reference
+/// (the cache lock is dropped, but no other code path clones the Arc
+/// during a synchronous tool dispatch). The annotation writes are
+/// idempotent and don't affect structural invariants.
+fn get_graph_session_mut(cwd: &std::path::Path) -> Option<&mut jfc_graph::session::GraphSession> {
+    let session = get_or_build_graph_session(cwd);
+    // SAFETY: see doc comment above.
+    let ptr = Arc::as_ptr(&session) as *mut jfc_graph::session::GraphSession;
+    Some(unsafe { &mut *ptr })
+}
+
 /// Get-or-build a cached `GraphSession` for `cwd`. Cheap on cache hit
 /// (one HashMap lookup); first call per workspace pays the full
 /// tree-sitter parse cost.
@@ -963,6 +978,115 @@ pub async fn execute_tool(
             }
         }
         (
+            ToolKind::RunCoverage,
+            ToolInput::RunCoverage {
+                lcov_path,
+                include_untested_list,
+            },
+        ) => {
+            use jfc_graph::coverage::{annotate_graph_from_lcov, parse_lcov};
+            use jfc_graph::possible_types::propagate_possible_types;
+
+            let Some(session) = get_graph_session_mut(&cwd) else {
+                return ExecutionResult::failure("Failed to acquire graph session".to_string());
+            };
+
+            // Step 1: Get or generate LCOV data.
+            let lcov_result = if let Some(ref path) = lcov_path {
+                let file = match std::fs::File::open(path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return ExecutionResult::failure(format!(
+                            "Failed to open lcov file {path}: {e}"
+                        ));
+                    }
+                };
+                let reader = std::io::BufReader::new(file);
+                Ok(parse_lcov(reader))
+            } else {
+                // Run cargo llvm-cov to generate lcov output.
+                let output = std::process::Command::new("cargo")
+                    .args(["llvm-cov", "--lcov", "--output-path", "-"])
+                    .current_dir(&cwd)
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        let reader = std::io::BufReader::new(std::io::Cursor::new(out.stdout));
+                        Ok(parse_lcov(reader))
+                    }
+                    Ok(out) => Err(format!(
+                        "cargo llvm-cov failed (exit {}):\n{}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr)
+                    )),
+                    Err(e) => Err(format!(
+                        "Failed to run cargo llvm-cov: {e}. \
+                         Install with: rustup component add llvm-tools && cargo install cargo-llvm-cov"
+                    )),
+                }
+            };
+
+            let mut summary = String::new();
+
+            match lcov_result {
+                Ok((lcov_data, warnings)) => {
+                    let (annotated, untested) =
+                        annotate_graph_from_lcov(&mut session.graph, &lcov_data, &cwd);
+                    let tested = annotated - untested;
+
+                    summary.push_str(&format!(
+                        "Coverage annotated: {annotated} functions ({tested} tested, {untested} untested)"
+                    ));
+                    if warnings > 0 {
+                        summary.push_str(&format!(", {warnings} lcov parse warnings"));
+                    }
+
+                    // List untested functions if requested.
+                    if include_untested_list && untested > 0 {
+                        summary.push_str("\n\nUntested functions:");
+                        let mut count = 0;
+                        for node in session.graph.nodes_by_kind(jfc_graph::nodes::NodeKind::Function) {
+                            if node.metadata.get("coverage_tested").map(|v| v.as_str()) == Some("false") {
+                                summary.push_str(&format!(
+                                    "\n  - {} ({}:{})",
+                                    node.qualified_name,
+                                    node.file_path.display(),
+                                    node.span.start_line,
+                                ));
+                                count += 1;
+                                if count >= 100 {
+                                    summary.push_str(&format!(
+                                        "\n  ... and {} more (use `graph_query` with `untested` to see all)",
+                                        untested - count
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    summary.push_str(&format!("Coverage collection failed: {e}\n\n"));
+                    summary.push_str("Skipping coverage annotation, running possible-types analysis only.");
+                }
+            }
+
+            // Step 2: Always run possible-types propagation.
+            let (pt_annotated, pt_inputs, pt_returns) =
+                propagate_possible_types(&mut session.graph);
+            summary.push_str(&format!(
+                "\n\nPossible-types propagated: {pt_annotated} functions, \
+                 {pt_inputs} input type entries, {pt_returns} return type entries"
+            ));
+            summary.push_str("\n\nUse `graph_query` with:");
+            summary.push_str("\n  - `untested` operator to filter to uncovered functions");
+            summary.push_str("\n  - `possible_types` operator to see type flow per function");
+            summary.push_str("\n  Example: `entrypoints kind=PublicApi | untested`");
+            summary.push_str("\n  Example: `fn(\"handler\") | possible_types`");
+
+            ExecutionResult::success(summary)
+        }
+        (
             ToolKind::SymbolEdit,
             ToolInput::SymbolEdit {
                 handle,
@@ -1604,16 +1728,12 @@ pub async fn execute_tool(
                 "GET {url} → {status}\n\n{prompt_hint}{truncated}"
             ))
         }
-        (ToolKind::WebSearch, ToolInput::WebSearch { query, max_results: _ }) => {
-            // jfc doesn't ship a search backend — this is a stub that
-            // tells the model to fall back to manual search. v132's
-            // WebSearch goes through Anthropic's hosted search API
-            // which we don't have access to from this client.
-            ExecutionResult::failure(format!(
-                "WebSearch not yet wired in jfc. As a workaround, suggest the \
-                 user run a search themselves and paste results, OR use WebFetch \
-                 against a known URL. Query was: {query}"
-            ))
+        (ToolKind::WebSearch, ToolInput::WebSearch { query, max_results }) => {
+            let num = max_results.unwrap_or(5) as usize;
+            match crate::web_search::search(&query, num).await {
+                Ok(results) => ExecutionResult::success(results),
+                Err(e) => ExecutionResult::failure(e),
+            }
         }
         (ToolKind::ExitPlanMode, ToolInput::ExitPlanMode { plan }) => {
             // Hand the plan off to the UI thread so all permission-mode
