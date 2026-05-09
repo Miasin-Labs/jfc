@@ -688,7 +688,11 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
             name: "WebSearch".into(),
             description: "Search the web for `query`. Returns a ranked list of \
                 results with title, URL, and snippet. Combine with `WebFetch` \
-                to read promising hits.".into(),
+                to read promising hits. \
+                Prefix the query to select a backend: \
+                `arxiv: <query>` searches arXiv papers (free, no key needed); \
+                `scholar: <query>` searches Semantic Scholar (optional API key); \
+                no prefix uses Google Custom Search Engine.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
