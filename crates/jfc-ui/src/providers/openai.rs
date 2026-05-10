@@ -292,8 +292,29 @@ impl Provider for OpenAIProvider {
     }
 }
 
+/// Returns true if `id` is a known chat-capable model that works with
+/// either `/v1/chat/completions` or `/v1/responses`. Filters out
+/// embeddings, audio, legacy completions-only, and fine-tuned models
+/// that the model picker shouldn't show.
 fn is_chat_model(id: &str) -> bool {
-    id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4")
+    let id = id.to_ascii_lowercase();
+    // Reject known non-chat prefixes/patterns.
+    if id.starts_with("text-embedding")
+        || id.starts_with("whisper")
+        || id.starts_with("tts")
+        || id.starts_with("dall-e")
+        || id.starts_with("davinci")
+        || id.starts_with("babbage")
+        || id.starts_with("curie")
+        || id.starts_with("ada")
+        || id.contains("instruct")
+        || id.starts_with("ft:")
+        || id.starts_with("canary-")
+        || id.starts_with("codex-")
+    {
+        return false;
+    }
+    id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") || id.starts_with("chatgpt")
 }
 
 fn model_uses_responses(id: &str) -> bool {
@@ -392,6 +413,9 @@ fn response_role(role: ProviderRole) -> &'static str {
 }
 
 fn responses_tool(tool: &ToolDef) -> Value {
+    // Responses API uses flat format (NOT the nested `function:{}` wrapper
+    // that chat completions uses). See:
+    // https://platform.openai.com/docs/api-reference/responses/create
     json!({
         "type": "function",
         "name": tool.name,
