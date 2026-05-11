@@ -294,6 +294,9 @@ pub enum StreamEvent {
         cache_read_tokens: u32,
         cache_write_tokens: u32,
     },
+    ResponseMetadata {
+        response_id: String,
+    },
     Error {
         message: String,
     },

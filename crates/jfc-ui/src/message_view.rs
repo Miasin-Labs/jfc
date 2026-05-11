@@ -832,6 +832,8 @@ fn tool_height_fingerprint(tool: &ToolCall, inner_w: usize) -> u64 {
     let mut h = DefaultHasher::new();
     tool.id.as_str().hash(&mut h);
     inner_w.hash(&mut h);
+    tool.kind.label().hash(&mut h);
+    tool.status.label().hash(&mut h);
     // ToolDisplayState is small — hash by discriminant + payload bool so we
     // don't have to add `Hash` to its derive in types.rs.
     match tool.display {
@@ -847,7 +849,66 @@ fn tool_height_fingerprint(tool: &ToolCall, inner_w: usize) -> u64 {
             pinned.hash(&mut h);
         }
     }
+    // Height also depends on immutable terminal content. Tool ids should be
+    // unique in normal transcripts, but tests and imported sessions can reuse
+    // ids; do not let one terminal tool poison the cached height of another.
+    hash_tool_input_height_fields(&tool.input, &mut h);
+    hash_tool_output_height_fields(&tool.output, &mut h);
     h.finish()
+}
+
+fn hash_tool_input_height_fields(input: &ToolInput, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    std::mem::discriminant(input).hash(h);
+    if let ToolInput::Bash { command, .. } = input {
+        command.hash(h);
+    }
+}
+
+fn hash_tool_output_height_fields(output: &ToolOutput, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    std::mem::discriminant(output).hash(h);
+    match output {
+        ToolOutput::Text(text) => text.hash(h),
+        ToolOutput::LargeText(text) => {
+            text.line_count.hash(h);
+            text.byte_count.hash(h);
+            text.content.hash(h);
+        }
+        ToolOutput::Diff(diff) => {
+            diff.file_path.hash(h);
+            diff.additions.hash(h);
+            diff.deletions.hash(h);
+            for hunk in &diff.hunks {
+                hunk.old_start.hash(h);
+                hunk.new_start.hash(h);
+                for line in &hunk.lines {
+                    std::mem::discriminant(&line.kind).hash(h);
+                    line.content.hash(h);
+                }
+            }
+        }
+        ToolOutput::FileContent {
+            path,
+            content,
+            language,
+        } => {
+            path.hash(h);
+            content.hash(h);
+            language.hash(h);
+        }
+        ToolOutput::Command {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
+            stdout.hash(h);
+            stderr.hash(h);
+            exit_code.hash(h);
+        }
+        ToolOutput::FileList(files) => files.hash(h),
+        ToolOutput::Empty => {}
+    }
 }
 
 fn tool_block_height(tool: &ToolCall, inner_w: usize) -> usize {
@@ -1527,6 +1588,7 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         | ToolKind::SendMessage
         | ToolKind::TeamMemberMode => Color::Rgb(255, 150, 130), // coral
         ToolKind::Skill => Color::Rgb(180, 220, 255), // ice
+        ToolKind::ToolSearch | ToolKind::ToolSuggest => Color::Rgb(170, 210, 180),
         ToolKind::GraphQuery | ToolKind::SymbolEdit | ToolKind::RunCoverage => {
             Color::Rgb(130, 200, 180)
         } // sage

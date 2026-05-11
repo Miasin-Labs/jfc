@@ -17,7 +17,10 @@
 //!   `isolation` field is parsed and surfaced for the caller to act on.
 //! - Remote / marketplace skills — only filesystem sources for now.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -182,58 +185,12 @@ impl Default for PermissionMode {
 pub fn load_skills(project_root: &Path) -> Vec<Skill> {
     tracing::info!(target: "jfc::agents", project_root = %project_root.display(), "loading skills");
     let mut out: Vec<Skill> = Vec::new();
-    let user_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".claude/skills");
-    let project_dir = project_root.join(".claude/skills");
-    for dir in [user_dir, project_dir] {
-        if !dir.exists() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Claude Code's skill convention has two shapes:
-            //   1. Flat: `~/.claude/skills/<name>.md`
-            //   2. Directory: `~/.claude/skills/<name>/SKILL.md` —
-            //      lets a skill ship its own assets alongside the body.
-            // The loader used to only handle (1) and silently skipped (2),
-            // so a freshly-installed `do-178b/SKILL.md` would not register
-            // and `Skill { name: "do-178b" }` returned `Unknown skill`.
-            // Now we resolve directory entries by reading their inner
-            // `SKILL.md` (or `Skill.md` / `skill.md`) and treat the
-            // *directory* name as the skill name regardless of what the
-            // SKILL file's stem is, so the user's invocation matches.
-            let resolved: Option<(PathBuf, String)> = if path.is_dir() {
-                let dir_name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                if dir_name.is_empty() {
-                    None
-                } else {
-                    ["SKILL.md", "Skill.md", "skill.md"]
-                        .iter()
-                        .map(|n| path.join(n))
-                        .find(|p| p.is_file())
-                        .map(|p| (p, dir_name))
-                }
-            } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unnamed")
-                    .to_owned();
-                Some((path.clone(), stem))
-            } else {
-                None
-            };
-            let Some((md_path, fallback_name)) = resolved else {
-                continue;
-            };
+    for root in skill_roots(project_root) {
+        for candidate in skill_candidates(&root.path) {
+            let SkillCandidate {
+                md_path,
+                fallback_name,
+            } = candidate;
             let Ok(raw) = std::fs::read_to_string(&md_path) else {
                 continue;
             };
@@ -254,6 +211,11 @@ pub fn load_skills(project_root: &Path) -> Vec<Skill> {
             if !frontmatter_set_name {
                 skill.name = fallback_name;
             }
+            if let Some(namespace) = &root.namespace
+                && !skill.name.contains(':')
+            {
+                skill.name = format!("{namespace}:{}", skill.name);
+            }
             // Project entries arrive after user, so retain wins overrides
             // by removing the prior entry with the same name first.
             out.retain(|s| s.name != skill.name);
@@ -267,6 +229,137 @@ pub fn load_skills(project_root: &Path) -> Vec<Skill> {
         names = ?out.iter().map(|s| &s.name).collect::<Vec<_>>(),
         "skills loaded"
     );
+    out
+}
+
+#[derive(Debug)]
+struct SkillRoot {
+    path: PathBuf,
+    namespace: Option<String>,
+}
+
+#[derive(Debug)]
+struct SkillCandidate {
+    md_path: PathBuf,
+    fallback_name: String,
+}
+
+fn skill_roots(project_root: &Path) -> Vec<SkillRoot> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_root = |path: PathBuf, namespace: Option<String>| {
+        if seen.insert((path.clone(), namespace.clone())) {
+            roots.push(SkillRoot { path, namespace });
+        }
+    };
+
+    if let Some(home) = dirs::home_dir() {
+        push_root(home.join(".claude/skills"), None);
+        push_root(home.join(".codex/skills"), None);
+        push_root(home.join(".agents/skills"), None);
+    }
+
+    push_root(project_root.join(".claude/skills"), None);
+    push_root(project_root.join(".codex/skills"), None);
+    push_root(project_root.join(".agents/skills"), None);
+    push_plugin_skill_roots(project_root, ".agents", &mut push_root);
+    push_plugin_skill_roots(project_root, ".codex", &mut push_root);
+
+    roots
+}
+
+fn push_plugin_skill_roots(
+    project_root: &Path,
+    config_dir: &str,
+    push_root: &mut impl FnMut(PathBuf, Option<String>),
+) {
+    let plugins_dir = project_root.join(config_dir).join("plugins");
+    let Ok(entries) = std::fs::read_dir(plugins_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(plugin) = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.starts_with('.'))
+        else {
+            continue;
+        };
+        push_root(path.join("skills"), Some(plugin.to_owned()));
+    }
+}
+
+fn skill_candidates(root: &Path) -> Vec<SkillCandidate> {
+    const MAX_SCAN_DEPTH: usize = 8;
+    const MAX_DIRS: usize = 512;
+
+    if !root.is_dir() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut seen_dirs = HashSet::new();
+    if let Ok(canon) = root.canonicalize() {
+        seen_dirs.insert(canon);
+    }
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if file_name.starts_with('.') {
+                continue;
+            }
+
+            if path.is_dir() {
+                if depth >= MAX_SCAN_DEPTH || seen_dirs.len() >= MAX_DIRS {
+                    continue;
+                }
+                if let Ok(canon) = path.canonicalize()
+                    && seen_dirs.insert(canon)
+                {
+                    queue.push_back((path, depth + 1));
+                }
+                continue;
+            }
+
+            if !path.is_file() {
+                continue;
+            }
+
+            if file_name.eq_ignore_ascii_case("SKILL.md") {
+                let fallback_name = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unnamed")
+                    .to_owned();
+                out.push(SkillCandidate {
+                    md_path: path,
+                    fallback_name,
+                });
+            } else if depth == 0 && path.extension().and_then(|s| s.to_str()) == Some("md") {
+                let fallback_name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unnamed")
+                    .to_owned();
+                out.push(SkillCandidate {
+                    md_path: path,
+                    fallback_name,
+                });
+            }
+        }
+    }
+
     out
 }
 
@@ -1448,6 +1541,59 @@ mod tests {
             .find(|s| s.name == "alpha")
             .expect("project skill should be loaded");
         assert_eq!(alpha.description.as_deref(), Some("project alpha"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_skills_finds_codex_and_agents_roots_normal() {
+        let tmp = std::env::temp_dir().join(format!(
+            "jfc_skills_codex_agents_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let codex_skill = tmp.join(".codex/skills/codex-skill");
+        let agents_skill = tmp.join(".agents/skills/agents-skill");
+        std::fs::create_dir_all(&codex_skill).unwrap();
+        std::fs::create_dir_all(&agents_skill).unwrap();
+        std::fs::write(
+            codex_skill.join("SKILL.md"),
+            "---\ndescription: codex root\n---\ncodex body",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_skill.join("SKILL.md"),
+            "---\ndescription: agents root\n---\nagents body",
+        )
+        .unwrap();
+
+        let skills = load_skills(&tmp);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"codex-skill"), "names: {names:?}");
+        assert!(names.contains(&"agents-skill"), "names: {names:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_skills_namespaces_plugin_skills_normal() {
+        let tmp = std::env::temp_dir().join(format!(
+            "jfc_skills_plugin_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let skill_dir = tmp.join(".agents/plugins/github/skills/review-pr");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\n---\nreview body").unwrap();
+
+        let skills = load_skills(&tmp);
+        assert!(
+            skills.iter().any(|s| s.name == "github:review-pr"),
+            "skills: {:?}",
+            skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
