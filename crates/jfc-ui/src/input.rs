@@ -3395,17 +3395,24 @@ async fn handle_slash_command(app: &mut App, text: &str, tx: Option<&mpsc::Sende
             }
             match std::fs::write(&path, &body) {
                 Ok(()) => {
-                    app.messages.push(ChatMessage::assistant(format!(
+                    let message = format!(
                         "Wrote transcript ({} bytes) to `{}`.",
                         body.len(),
-                        path.display(),
-                    )));
+                        path.display()
+                    );
+                    app.messages.push(ChatMessage::assistant(message.clone()));
+                    crate::toast::push_with_cap(
+                        &mut app.toasts,
+                        crate::toast::Toast::new(crate::toast::ToastKind::Success, message),
+                    );
                 }
                 Err(e) => {
-                    app.messages.push(ChatMessage::assistant(format!(
-                        "Failed to write `{}`: {e}",
-                        path.display(),
-                    )));
+                    let message = format!("Failed to write `{}`: {e}", path.display());
+                    app.messages.push(ChatMessage::assistant(message.clone()));
+                    crate::toast::push_with_cap(
+                        &mut app.toasts,
+                        crate::toast::Toast::new(crate::toast::ToastKind::Error, message),
+                    );
                 }
             }
         }

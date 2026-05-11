@@ -3099,6 +3099,7 @@ pub(crate) async fn run(
                     cache_write_tokens,
                     output_tokens,
                 } => {
+                    let mut usage_update: Option<(String, u32, u32, u32, u32)> = None;
                     if let Some(bt) = app.background_tasks.get_mut(task_id.as_str()) {
                         if let Some(ref tool) = last_tool {
                             // Append a one-line activity entry to the task's
@@ -3130,6 +3131,29 @@ pub(crate) async fn run(
                             bt.cumulative_output_tokens =
                                 bt.cumulative_output_tokens.saturating_add(n);
                         }
+                        if let Some(model) = bt.model_used.clone() {
+                            let input = input_tokens.unwrap_or_default();
+                            let output = output_tokens.unwrap_or_default();
+                            let cache_read = cache_read_tokens.unwrap_or_default();
+                            let cache_write = cache_write_tokens.unwrap_or_default();
+                            if input > 0 || output > 0 || cache_read > 0 || cache_write > 0 {
+                                usage_update = Some((
+                                    model,
+                                    input.min(u32::MAX as u64) as u32,
+                                    output.min(u32::MAX as u64) as u32,
+                                    cache_read.min(u32::MAX as u64) as u32,
+                                    cache_write.min(u32::MAX as u64) as u32,
+                                ));
+                            }
+                        }
+                    }
+                    if let Some((model, input, output, cache_read, cache_write)) = usage_update {
+                        app.usage_by_model.entry(model).or_default().add_delta(
+                            input,
+                            output,
+                            cache_read,
+                            cache_write,
+                        );
                     }
                     for msg in &mut app.messages {
                         for part in &mut msg.parts {

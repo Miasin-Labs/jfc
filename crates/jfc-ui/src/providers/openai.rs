@@ -357,6 +357,7 @@ fn build_responses_body(
 
     if let Some(ref effort) = options.reasoning_effort {
         body["reasoning"] = json!({ "effort": effort });
+        body["include"] = json!(["reasoning.encrypted_content"]);
     }
     if let Some(temp) = options.temperature {
         body["temperature"] = Value::from(temp);
@@ -474,6 +475,16 @@ fn responses_events_from_sse(data: &str) -> Vec<anyhow::Result<StreamEvent>> {
         .and_then(Value::as_str)
         .unwrap_or_default()
     {
+        "response.created" | "response.in_progress" => value
+            .get("response")
+            .and_then(|response| response.get("id"))
+            .and_then(Value::as_str)
+            .map(|id| {
+                vec![Ok(StreamEvent::ResponseMetadata {
+                    response_id: id.to_owned(),
+                })]
+            })
+            .unwrap_or_default(),
         "response.output_text.delta" => value
             .get("delta")
             .and_then(Value::as_str)
@@ -547,6 +558,15 @@ fn responses_events_from_sse(data: &str) -> Vec<anyhow::Result<StreamEvent>> {
                     })]
                 })
                 .unwrap_or_default();
+            if let Some(response_id) = value
+                .get("response")
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+            {
+                events.push(Ok(StreamEvent::ResponseMetadata {
+                    response_id: response_id.to_owned(),
+                }));
+            }
             events.push(Ok(StreamEvent::Done {
                 stop_reason: StopReason::EndTurn,
             }));
@@ -795,6 +815,7 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["temperature"], 0.2);
         assert_eq!(body["top_p"], 0.9);
         assert_eq!(body["metadata"]["source"], "test");

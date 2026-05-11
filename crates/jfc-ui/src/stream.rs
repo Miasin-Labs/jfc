@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+    time::Duration,
+};
 
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc};
@@ -12,6 +16,34 @@ use crate::provider::{
 use crate::scheduler;
 use crate::tools;
 use crate::types::*;
+
+static OPENAI_PREVIOUS_RESPONSE_ID: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+
+fn openai_previous_response_id() -> Option<String> {
+    OPENAI_PREVIOUS_RESPONSE_ID
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+fn set_openai_previous_response_id(response_id: String) {
+    if let Ok(mut guard) = OPENAI_PREVIOUS_RESPONSE_ID
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+    {
+        *guard = Some(response_id);
+    }
+}
+
+fn clear_openai_previous_response_id() {
+    if let Ok(mut guard) = OPENAI_PREVIOUS_RESPONSE_ID
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+    {
+        *guard = None;
+    }
+}
 
 /// Reuse the same cap that `ToolOutput::approx_text_len` enforces — the wire
 /// truncation here and the local token estimate must agree to a byte, or
@@ -1425,7 +1457,7 @@ Do not use a colon before tool calls.";
         }
         let _ = before;
     }
-    let opts = {
+    let mut opts = {
         let mut base = StreamOptions::new(model.clone())
             .system(system_prompt)
             .tools(advertised_tools)
@@ -1448,6 +1480,13 @@ Do not use a colon before tool calls.";
             base
         }
     };
+    if provider.name() == "openai"
+        && let Some(previous_response_id) = openai_previous_response_id()
+    {
+        opts.provider_options
+            .entry("previous_response_id".to_owned())
+            .or_insert(serde_json::json!(previous_response_id));
+    }
 
     // v132 BeforeStream hook fires after the prompt is fully assembled
     // but before the network call. Handlers that want to inject system
@@ -1731,6 +1770,11 @@ Do not use a colon before tool calls.";
                     stop_reason = r;
                 }
             }
+            StreamEvent::ResponseMetadata { response_id } => {
+                if provider.name() == "openai" {
+                    set_openai_previous_response_id(response_id);
+                }
+            }
             StreamEvent::TextDone { .. } | StreamEvent::ThinkingDone { .. } => {}
             StreamEvent::Usage {
                 input_tokens,
@@ -1770,6 +1814,9 @@ Do not use a colon before tool calls.";
         ?stop_reason,
         "stream finished — sending StreamDone"
     );
+    if provider.name() == "openai" && stop_reason != StopReason::ToolUse {
+        clear_openai_previous_response_id();
+    }
 
     // v132 AfterStream hook — fires after the model finished streaming
     // but before the StreamDone AppEvent is sent. Handlers that want

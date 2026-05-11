@@ -280,6 +280,8 @@ impl PermissionMode {
                 | ToolKind::TaskUpdate
                 | ToolKind::TaskList
                 | ToolKind::TaskDone
+                | ToolKind::ToolSearch
+                | ToolKind::ToolSuggest
                 | ToolKind::TeamCreate
                 | ToolKind::TeamDelete
                 | ToolKind::SendMessage
@@ -309,6 +311,8 @@ impl PermissionMode {
                 | ToolKind::TaskUpdate
                 | ToolKind::TaskList
                 | ToolKind::TaskDone
+                | ToolKind::ToolSearch
+                | ToolKind::ToolSuggest
                 | ToolKind::TeamCreate
                 | ToolKind::TeamDelete
                 | ToolKind::SendMessage => PermissionDecision::Approved,

@@ -69,11 +69,12 @@ pub(super) fn filter_tools_for_agent(
     all: Vec<ToolDef>,
     allowed: &[String],
     disallowed: &[String],
+    allow_nested_task: bool,
 ) -> Vec<ToolDef> {
     let allow_all = allowed.is_empty();
     all.into_iter()
         .filter(|t| {
-            if t.name.eq_ignore_ascii_case("Task") {
+            if !allow_nested_task && t.name.eq_ignore_ascii_case("Task") {
                 return false;
             }
             if !allow_all && !allowed.iter().any(|a| a.eq_ignore_ascii_case(&t.name)) {
@@ -251,6 +252,30 @@ pub async fn execute_task(
     agent_def: Option<&crate::agents::AgentDef>,
     cwd_override: Option<PathBuf>,
 ) -> ExecutionResult {
+    execute_task_inner(
+        task_input,
+        provider,
+        model_id,
+        tx,
+        task_id,
+        agent_def,
+        cwd_override,
+        0,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_task_inner(
+    task_input: &crate::types::TaskInput,
+    provider: &dyn crate::provider::Provider,
+    model_id: crate::provider::ModelId,
+    tx: Option<&tokio::sync::mpsc::Sender<crate::app::AppEvent>>,
+    task_id: Option<&str>,
+    agent_def: Option<&crate::agents::AgentDef>,
+    cwd_override: Option<PathBuf>,
+    depth: u8,
+) -> ExecutionResult {
     use crate::provider::{
         ProviderContent, ProviderMessage, ProviderRole, StopReason, StreamEvent, StreamOptions,
     };
@@ -297,7 +322,8 @@ pub async fn execute_task(
         Some(a) => (&a.allowed_tools, &a.disallowed_tools),
         None => (&[], &[]),
     };
-    let tools = filter_tools_for_agent(all_tool_defs(), allowed, disallowed);
+    let allow_nested_task = depth < 2;
+    let tools = filter_tools_for_agent(all_tool_defs(), allowed, disallowed, allow_nested_task);
 
     let max_turns: Option<u32> = agent_def
         .and_then(|a| a.max_turns)
@@ -417,6 +443,7 @@ pub async fn execute_task(
         let mut tool_uses: Vec<(String, String, String)> = Vec::new(); // (id, name, input_json)
         let mut stop_reason: Option<StopReason> = None;
         let mut usage_baseline = (0u32, 0u32, 0u32, 0u32);
+        let mut reported_input_for_turn = false;
 
         while let Some(event) = stream.next().await {
             match event {
@@ -460,17 +487,27 @@ pub async fn execute_task(
                         cache_write_tokens,
                     );
                     // Surface this turn's input + output tokens to the
-                    // parent fan UI. `latest_input_tokens` is overwritten
-                    // (the live request size); `output_tokens` is folded
-                    // into `cumulative_output_tokens` by the handler.
+                    // parent fan UI. Input/cache are sent once per API
+                    // round-trip so the session cost ledger can add the
+                    // request once; output remains a streaming delta.
+                    let input_update = if reported_input_for_turn {
+                        None
+                    } else {
+                        reported_input_for_turn = true;
+                        Some((
+                            input_tokens as u64,
+                            cache_read_tokens as u64,
+                            cache_write_tokens as u64,
+                        ))
+                    };
                     emit_progress(
                         tx,
                         task_id,
                         None,
                         None,
-                        Some(input_tokens as u64),
-                        Some(cache_read_tokens as u64),
-                        Some(cache_write_tokens as u64),
+                        input_update.map(|(input, _, _)| input),
+                        input_update.map(|(_, cache_read, _)| cache_read),
+                        input_update.map(|(_, _, cache_write)| cache_write),
                         Some(output_delta as u64),
                     );
                 }
@@ -576,7 +613,32 @@ pub async fn execute_task(
                     continue;
                 }
             };
-            let result = execute_tool(kind, input, cwd.clone(), None, None, None).await;
+            let result = if let ToolInput::Task(nested_task) = &input {
+                if depth >= 2 {
+                    ExecutionResult::failure(
+                        "Nested Task depth limit reached. Summarize current work instead of spawning another subagent.",
+                    )
+                } else {
+                    let agents = crate::agents::load_agents(&cwd);
+                    let nested_agent = nested_task
+                        .subagent_type
+                        .as_deref()
+                        .and_then(|t| agents.iter().find(|a| a.name.eq_ignore_ascii_case(t)));
+                    Box::pin(execute_task_inner(
+                        nested_task,
+                        provider,
+                        model.clone(),
+                        None,
+                        None,
+                        nested_agent,
+                        Some(cwd.clone()),
+                        depth + 1,
+                    ))
+                    .await
+                }
+            } else {
+                execute_tool(kind, input, cwd.clone(), None, None, None).await
+            };
             let is_error = result.is_error();
             // Cap each tool result so a single Read on a multi-MB file
             // can't push the running conversation past Bedrock's 1M

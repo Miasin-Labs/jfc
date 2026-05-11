@@ -47,6 +47,8 @@ pub fn is_concurrency_safe(kind: &ToolKind) -> bool {
             | ToolKind::TaskList
             | ToolKind::TaskDone
             | ToolKind::Skill
+            | ToolKind::ToolSearch
+            | ToolKind::ToolSuggest
             | ToolKind::TeamCreate
             | ToolKind::TeamDelete
             | ToolKind::SendMessage
@@ -347,6 +349,8 @@ mod tests {
             ToolKind::TaskList,
             ToolKind::TaskDone,
             ToolKind::Skill,
+            ToolKind::ToolSearch,
+            ToolKind::ToolSuggest,
             ToolKind::TeamCreate,
             ToolKind::TeamDelete,
             ToolKind::SendMessage,

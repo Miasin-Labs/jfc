@@ -1216,12 +1216,19 @@ fn make_tool_def(name: &str) -> ToolDef {
 }
 
 #[test]
-fn filter_tools_drops_task_unconditionally_robust() {
-    // Recursive subagent spawning is intentionally blocked.
+fn filter_tools_drops_task_when_nested_tasks_disabled_robust() {
     let all = vec![make_tool_def("Bash"), make_tool_def("Task")];
-    let filtered = filter_tools_for_agent(all, &[], &[]);
+    let filtered = filter_tools_for_agent(all, &[], &[], false);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].name, "Bash");
+}
+
+#[test]
+fn filter_tools_keeps_task_when_nested_tasks_enabled_normal() {
+    let all = vec![make_tool_def("Bash"), make_tool_def("Task")];
+    let filtered = filter_tools_for_agent(all, &[], &[], true);
+    assert_eq!(filtered.len(), 2);
+    assert!(filtered.iter().any(|t| t.name == "Task"));
 }
 
 #[test]
@@ -1231,7 +1238,7 @@ fn filter_tools_empty_allowed_means_all_normal() {
         make_tool_def("Read"),
         make_tool_def("Write"),
     ];
-    let filtered = filter_tools_for_agent(all, &[], &[]);
+    let filtered = filter_tools_for_agent(all, &[], &[], false);
     assert_eq!(filtered.len(), 3);
 }
 
@@ -1242,7 +1249,7 @@ fn filter_tools_allowed_is_exact_membership_normal() {
         make_tool_def("Read"),
         make_tool_def("Write"),
     ];
-    let filtered = filter_tools_for_agent(all, &["Read".into(), "Write".into()], &[]);
+    let filtered = filter_tools_for_agent(all, &["Read".into(), "Write".into()], &[], false);
     assert_eq!(filtered.len(), 2);
     assert!(filtered.iter().any(|t| t.name == "Read"));
     assert!(filtered.iter().any(|t| t.name == "Write"));
@@ -1255,7 +1262,7 @@ fn filter_tools_disallowed_subtracts_from_allowed_normal() {
         make_tool_def("Read"),
         make_tool_def("Write"),
     ];
-    let filtered = filter_tools_for_agent(all, &[], &["Bash".into()]);
+    let filtered = filter_tools_for_agent(all, &[], &["Bash".into()], false);
     assert_eq!(filtered.len(), 2);
     assert!(filtered.iter().all(|t| t.name != "Bash"));
 }
@@ -1265,7 +1272,7 @@ fn filter_tools_case_insensitive_robust() {
     // Allow/disallow lists in agent definitions are user-edited; case
     // variation must not silently drop or skip tools.
     let all = vec![make_tool_def("Bash"), make_tool_def("Read")];
-    let filtered = filter_tools_for_agent(all, &["BASH".into()], &[]);
+    let filtered = filter_tools_for_agent(all, &["BASH".into()], &[], false);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].name, "Bash");
 }
@@ -1274,7 +1281,7 @@ fn filter_tools_case_insensitive_robust() {
 fn filter_tools_disallow_overrides_allow_robust() {
     let all = vec![make_tool_def("Bash"), make_tool_def("Read")];
     // Same tool both allow- and disallow-listed: disallow wins.
-    let filtered = filter_tools_for_agent(all, &["Bash".into()], &["Bash".into()]);
+    let filtered = filter_tools_for_agent(all, &["Bash".into()], &["Bash".into()], false);
     assert_eq!(filtered.len(), 0);
 }
 

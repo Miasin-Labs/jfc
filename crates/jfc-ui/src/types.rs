@@ -705,6 +705,8 @@ pub enum ToolKind {
     TaskGet,
     Task,
     Skill,
+    ToolSearch,
+    ToolSuggest,
     MemoryCreate,
     MemoryDelete,
     TeamCreate,
@@ -846,6 +848,14 @@ pub enum ToolInput {
     Skill {
         name: String,
         args: Option<String>,
+    },
+    ToolSearch {
+        query: String,
+        limit: Option<u64>,
+    },
+    ToolSuggest {
+        intent: String,
+        limit: Option<u64>,
     },
     MemoryCreate {
         level: String,
@@ -1489,6 +1499,8 @@ impl ToolKind {
             "taskget" => Self::TaskGet,
             "task" => Self::Task,
             "skill" => Self::Skill,
+            "toolsearch" | "toolsearchtool" => Self::ToolSearch,
+            "toolsuggest" | "toolsuggesttool" => Self::ToolSuggest,
             "memorycreate" => Self::MemoryCreate,
             "memorydelete" => Self::MemoryDelete,
             "teamcreate" => Self::TeamCreate,
@@ -1554,6 +1566,8 @@ impl ToolKind {
             Self::TaskGet => "TaskGet",
             Self::Task => "Task",
             Self::Skill => "Skill",
+            Self::ToolSearch => "ToolSearch",
+            Self::ToolSuggest => "ToolSuggest",
             Self::MemoryCreate => "MemoryCreate",
             Self::MemoryDelete => "MemoryDelete",
             Self::TeamCreate => "TeamCreate",
@@ -1610,6 +1624,8 @@ impl ToolKind {
             Self::TaskGet => "TaskGet",
             Self::Task => "Task",
             Self::Skill => "Skill",
+            Self::ToolSearch => "ToolSearch",
+            Self::ToolSuggest => "ToolSuggest",
             Self::MemoryCreate => "MemoryCreate",
             Self::MemoryDelete => "MemoryDelete",
             Self::TeamCreate => "TeamCreate",
@@ -1712,6 +1728,8 @@ impl ToolInput {
                 Some(a) => format!("{name}: {a}"),
                 None => name.clone(),
             },
+            Self::ToolSearch { query, .. } => format!("tool search: {query}"),
+            Self::ToolSuggest { intent, .. } => format!("tool suggest: {intent}"),
             Self::MemoryCreate { body, level, .. } => {
                 let preview: String = body.chars().take(50).collect();
                 format!("remember ({level}): {preview}")
@@ -1999,6 +2017,14 @@ impl ToolInput {
             ToolKind::Skill => Self::Skill {
                 name: req_str("name")?,
                 args: opt_str_field("args"),
+            },
+            ToolKind::ToolSearch => Self::ToolSearch {
+                query: req_str("query")?,
+                limit: opt_u64_field("limit"),
+            },
+            ToolKind::ToolSuggest => Self::ToolSuggest {
+                intent: req_str("intent")?,
+                limit: opt_u64_field("limit"),
             },
             ToolKind::MemoryCreate => Self::MemoryCreate {
                 level: req_str("level")?,
@@ -2341,6 +2367,20 @@ impl ToolInput {
                 let mut v = json!({ "name": name });
                 if let Some(a) = args {
                     v["args"] = json!(a);
+                }
+                v
+            }
+            Self::ToolSearch { query, limit } => {
+                let mut v = json!({ "query": query });
+                if let Some(limit) = limit {
+                    v["limit"] = json!(limit);
+                }
+                v
+            }
+            Self::ToolSuggest { intent, limit } => {
+                let mut v = json!({ "intent": intent });
+                if let Some(limit) = limit {
+                    v["limit"] = json!(limit);
                 }
                 v
             }
@@ -2967,6 +3007,14 @@ mod tests {
         assert!(matches!(
             ToolKind::from_name("applypatch"),
             ToolKind::ApplyPatch
+        ));
+        assert!(matches!(
+            ToolKind::from_name("toolsearch"),
+            ToolKind::ToolSearch
+        ));
+        assert!(matches!(
+            ToolKind::from_name("toolsuggest"),
+            ToolKind::ToolSuggest
         ));
     }
 
@@ -3924,6 +3972,40 @@ mod tests {
                 assert_eq!(description, "Inspect tool path");
             }
             _ => panic!("expected TaskCreate"),
+        }
+    }
+
+    #[test]
+    fn tool_input_from_value_tool_discovery_payloads_normal() {
+        let search = ToolInput::from_value(
+            "toolsearch",
+            serde_json::json!({
+                "query": "skill github",
+                "limit": 5,
+            }),
+        )
+        .expect("valid ToolSearch input");
+        match search {
+            ToolInput::ToolSearch { query, limit } => {
+                assert_eq!(query, "skill github");
+                assert_eq!(limit, Some(5));
+            }
+            _ => panic!("expected ToolSearch"),
+        }
+
+        let suggest = ToolInput::from_value(
+            "ToolSuggest",
+            serde_json::json!({
+                "intent": "find the right repo inspection tool",
+            }),
+        )
+        .expect("valid ToolSuggest input");
+        match suggest {
+            ToolInput::ToolSuggest { intent, limit } => {
+                assert_eq!(intent, "find the right repo inspection tool");
+                assert_eq!(limit, None);
+            }
+            _ => panic!("expected ToolSuggest"),
         }
     }
 

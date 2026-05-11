@@ -1132,6 +1132,20 @@ fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
             name: name.clone(),
             args: args.clone(),
         },
+        ToolInput::ToolSearch { query, limit } => SerializedToolInput::Generic {
+            summary: serde_json::json!({
+                "query": query,
+                "limit": limit,
+            })
+            .to_string(),
+        },
+        ToolInput::ToolSuggest { intent, limit } => SerializedToolInput::Generic {
+            summary: serde_json::json!({
+                "intent": intent,
+                "limit": limit,
+            })
+            .to_string(),
+        },
         ToolInput::MemoryCreate {
             level,
             memory_type,
