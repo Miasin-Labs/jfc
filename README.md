@@ -398,7 +398,6 @@ Useful environment knobs:
 | `JFC_LITELLM_API_KEY` | LiteLLM proxy API key (alternative to `jfc auth litellm login`). |
 | `JFC_LITELLM_API` | LiteLLM proxy base URL (e.g. `https://api.example.com/v1`). |
 | `JFC_LITELLM_MODEL` | Default model to use from the LiteLLM instance. |
-| `CLAUDE_CODE_SUBAGENT_MODEL` | Global model override for all subagents. |
 | `JFC_DISABLE_BELL=1` | Silence terminal bell on tool completion. |
 | `JFC_DISABLE_AUTO_COMPACT=1` | Disable auto-compaction. |
 | `JFC_DISABLE_CARGO_CHECK=1` | Skip startup cargo-check diagnostics. |
