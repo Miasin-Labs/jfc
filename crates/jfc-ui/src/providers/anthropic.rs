@@ -150,6 +150,9 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
             body["output_config"] = serde_json::Value::Object(oc);
         }
     }
+    for (key, value) in &opts.provider_options {
+        body[key] = value.clone();
+    }
 
     body
 }
@@ -502,6 +505,23 @@ mod tests {
             }]),
         );
         assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    }
+
+    // Normal: provider_options are caller-supplied transport controls. The
+    // stream request layer uses this path for Anthropic `tool_choice`, so the
+    // native body builder must not silently drop the map.
+    #[test]
+    fn build_body_merges_provider_options_normal() {
+        let mut opts = opts("m").tools(vec![ToolDef {
+            name: "Bash".into(),
+            description: "run".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]);
+        opts.provider_options
+            .insert("tool_choice".into(), serde_json::json!({"type": "any"}));
+
+        let body = build_body(vec![make_user_msg("hi")], &opts);
+        assert_eq!(body["tool_choice"]["type"], "any");
     }
 
     // Robust: empty tools list omits the field entirely so proxies that reject

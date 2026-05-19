@@ -12,12 +12,13 @@ use tokio::sync::mpsc;
 use crate::app::{self, ANIM_TICK_MS, App, IDLE_TICK_MS, NetworkRecoveryProvider, PendingApproval};
 use crate::runtime::{
     APP_EVENT_BUFFER, AppEvent, CompactionEvent, EventReceiver, EventSender, GoalEvent,
-    ProviderEvent, StreamEvent, TaskEvent, TeamEvent, ToolEvent, UiEvent,
-    dispatch_goal_evaluator_if_active, drain_queued_prompts, draw_synchronized,
+    ProviderEvent, StreamEvent, StreamRequestOverrides, StreamToolChoice, TaskEvent, TeamEvent,
+    ToolEvent, UiEvent, dispatch_goal_evaluator_if_active, drain_queued_prompts, draw_synchronized,
     factory_mode_enabled, handle_goal_verdict, maybe_continue_task_factory,
     read_git_branch_from_root, record_network_recovery, restart_stream_in_place,
-    restore_persistent_background_agents, set_terminal_title,
-    sync_detached_background_tasks_from_daemon, update_task_activities, yank_last_assistant,
+    restart_stream_in_place_with_overrides, restore_persistent_background_agents,
+    set_terminal_title, sync_detached_background_tasks_from_daemon, update_task_activities,
+    yank_last_assistant,
 };
 use crate::types::*;
 use crate::{
@@ -25,6 +26,10 @@ use crate::{
     slate, stream, toast, types,
 };
 use jfc_provider::{ModelId, Provider, ProviderId};
+
+const CONFIG_RELOAD_REMINDER: &str = "CLAUDE.md / agent / settings file changed since last \
+     turn. The reloaded content will be reflected in the \
+     next system prompt.";
 
 /// Borrow the message currently slated as the streaming-assistant target —
 /// only if it is still an assistant. Returns `None` when:
@@ -57,6 +62,140 @@ fn streaming_assistant_mut(app: &mut App) -> Option<&mut ChatMessage> {
         return None;
     }
     Some(msg)
+}
+
+fn assistant_count_since_last_user(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .rev()
+        .take_while(|m| m.role != Role::User)
+        .filter(|m| m.role == Role::Assistant)
+        .count()
+}
+
+fn has_tool_since_last_user(messages: &[ChatMessage]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .take_while(|m| m.role != Role::User)
+        .any(|m| {
+            m.role == Role::Assistant && m.parts.iter().any(|p| matches!(p, MessagePart::Tool(_)))
+        })
+}
+
+fn assistant_text_stats_since_last_user(messages: &[ChatMessage]) -> (usize, bool) {
+    let mut bytes = 0usize;
+    let mut last_text = None;
+    for msg in messages.iter().rev().take_while(|m| m.role != Role::User) {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        for part in &msg.parts {
+            if let MessagePart::Text(text) = part {
+                bytes = bytes.saturating_add(text.len());
+                if !text.trim().is_empty() {
+                    last_text = Some(text.as_str());
+                }
+            }
+        }
+    }
+    (
+        bytes,
+        last_text
+            .map(|text| text.trim_end().ends_with(':'))
+            .unwrap_or(false),
+    )
+}
+
+fn last_user_contains_text(messages: &[ChatMessage], needle: &str) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|msg| msg.role == Role::User)
+        .map(|msg| {
+            msg.parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Text(text) if text.contains(needle)))
+        })
+        .unwrap_or(false)
+}
+
+fn should_retry_narration_only_end_turn(app: &App, stop_reason: &jfc_provider::StopReason) -> bool {
+    if *stop_reason != jfc_provider::StopReason::EndTurn
+        || app.pending_approval.is_some()
+        || !app.approval_queue.is_empty()
+        || !app.pending_tool_calls.is_empty()
+    {
+        return false;
+    }
+
+    let (assistant_text_bytes, assistant_text_ends_colon) =
+        assistant_text_stats_since_last_user(&app.messages);
+    let substantial_narration = app.last_usage_output >= 100
+        || assistant_text_bytes >= 400
+        || (assistant_text_bytes >= 80 && assistant_text_ends_colon);
+    if !substantial_narration {
+        return false;
+    }
+
+    let Some(meta) = app.current_stream_request.as_ref() else {
+        return false;
+    };
+    meta.advertised_tool_count > 0
+        && meta.action_expected
+        && meta.tool_choice == StreamToolChoice::Auto
+        && !meta.narration_retry
+        && assistant_count_since_last_user(&app.messages) == 1
+        && !has_tool_since_last_user(&app.messages)
+}
+
+fn retry_narration_only_end_turn(
+    app: &mut App,
+    tx: &EventSender,
+    stop_reason: &jfc_provider::StopReason,
+) -> bool {
+    if !should_retry_narration_only_end_turn(app, stop_reason) {
+        return false;
+    }
+    let Some(assistant_idx) = app.streaming_assistant_idx else {
+        return false;
+    };
+    let Some(meta) = app.current_stream_request.clone() else {
+        return false;
+    };
+
+    tracing::warn!(
+        target: "jfc::stream::guard",
+        advertised_tool_count = meta.advertised_tool_count,
+        output_tokens = app.last_usage_output,
+        assistant_text_bytes = assistant_text_stats_since_last_user(&app.messages).0,
+        "narration-only end_turn detected — retrying once with required tool use"
+    );
+    crate::toast::push_with_cap(
+        &mut app.toasts,
+        crate::toast::Toast::new(
+            crate::toast::ToastKind::Warning,
+            "Model narrated instead of using tools; retrying with tool use required.",
+        ),
+    );
+    crate::system_reminder::append_to_last_user(
+        &mut app.messages,
+        "Your previous response described the work but did not call any tools. \
+         Retry this turn now. Call at least one appropriate tool before giving \
+         the user a prose answer.",
+    );
+    let turn_started_at = app.turn_started_at;
+    restart_stream_in_place_with_overrides(
+        app,
+        tx,
+        assistant_idx,
+        turn_started_at,
+        StreamRequestOverrides {
+            tool_choice: StreamToolChoice::Any,
+            narration_retry: true,
+        },
+    );
+    true
 }
 
 pub(crate) async fn run(
@@ -492,7 +631,17 @@ pub(crate) async fn run(
         let cancel = app.cancel_token.clone();
         let prev_msg_id = app.last_response_id.take();
         tokio::spawn(async move {
-            stream::stream_response(provider, messages, model, tx_clone, interrupt, cancel, prev_msg_id).await;
+            stream::stream_response(
+                provider,
+                messages,
+                model,
+                tx_clone,
+                interrupt,
+                cancel,
+                prev_msg_id,
+                StreamRequestOverrides::default(),
+            )
+            .await;
         });
     }
 
@@ -1253,19 +1402,25 @@ pub(crate) async fn run(
                     let cur_fw = crate::file_watcher::change_counter();
                     if cur_fw > app.last_file_watcher_seen {
                         app.last_file_watcher_seen = cur_fw;
-                        toast::push_with_cap(
-                            &mut app.toasts,
-                            toast::Toast::new(
-                                toast::ToastKind::Info,
-                                "Config file changed — reloaded for next turn",
-                            ),
-                        );
-                        crate::system_reminder::append_to_last_user(
-                            &mut app.messages,
-                            "CLAUDE.md / agent / settings file changed since last \
-                             turn. The reloaded content will be reflected in the \
-                             next system prompt.",
-                        );
+                        if last_user_contains_text(&app.messages, CONFIG_RELOAD_REMINDER) {
+                            tracing::debug!(
+                                target: "jfc::file_watcher",
+                                counter = cur_fw,
+                                "config reload reminder already attached to current user turn"
+                            );
+                        } else {
+                            toast::push_with_cap(
+                                &mut app.toasts,
+                                toast::Toast::new(
+                                    toast::ToastKind::Info,
+                                    "Config file changed — reloaded for next turn",
+                                ),
+                            );
+                            crate::system_reminder::append_to_last_user(
+                                &mut app.messages,
+                                CONFIG_RELOAD_REMINDER,
+                            );
+                        }
                     }
 
                     // Hot-reload keybindings when keybindings.toml changes.
@@ -1902,6 +2057,9 @@ pub(crate) async fn run(
                             );
                         }
                     }
+                    if retry_narration_only_end_turn(&mut app, &tx, &stop_reason) {
+                        continue;
+                    }
                     // v126's "Cooked for Nm Ns" post-turn footer: stamp the
                     // assistant message with a randomized past-tense verb +
                     // formatted duration the moment the stream resolves. The
@@ -2238,6 +2396,7 @@ pub(crate) async fn run(
                             }
                         }
                         app.streaming_assistant_idx = None;
+                        app.current_stream_request = None;
                         app.scroll_to_bottom();
                     } else {
                         // Normal EndTurn with no tools — turn is genuinely
@@ -2246,6 +2405,7 @@ pub(crate) async fn run(
                         // would have taken them. This branch is just the
                         // "model said its piece and stopped" path.
                         app.streaming_assistant_idx = None;
+                        app.current_stream_request = None;
                         app.scroll_to_bottom();
                     }
                 }
@@ -2389,6 +2549,7 @@ pub(crate) async fn run(
                     app.render_cache.borrow_mut().clear_streaming();
                     app.streaming_response_bytes = 0;
                     app.streaming_assistant_idx = None;
+                    app.current_stream_request = None;
                     // Clear the turn clock and any pending tool calls so the
                     // spinner row stops rendering. Without this, the
                     // `show_spinner` condition stays true (it checks
@@ -3448,6 +3609,17 @@ pub(crate) async fn run(
                 }
                 AppEvent::Stream(StreamEvent::SystemPromptLen(len)) => {
                     app.last_system_prompt_len = Some(len);
+                }
+                AppEvent::Stream(StreamEvent::RequestMetadata(meta)) => {
+                    tracing::debug!(
+                        target: "jfc::stream",
+                        advertised_tool_count = meta.advertised_tool_count,
+                        action_expected = meta.action_expected,
+                        tool_choice = ?meta.tool_choice,
+                        narration_retry = meta.narration_retry,
+                        "stream request metadata"
+                    );
+                    app.current_stream_request = Some(meta);
                 }
                 AppEvent::Ui(UiEvent::Toast { kind, text }) => {
                     // Push onto the auto-expiring strip with the kind's

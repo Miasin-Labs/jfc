@@ -11,6 +11,7 @@ use crate::auto_mode::AutoModeConfig;
 use crate::context::{ReadDedupCache, ToolContext};
 use crate::query::QueryCache;
 use crate::render_cache::RenderCache;
+use crate::runtime::StreamRequestMetadata;
 use crate::slate::SlateRouter;
 use crate::theme::Theme;
 use crate::types::*;
@@ -362,6 +363,11 @@ pub struct App {
     pub session_approved: Vec<String>,
     pub follow_bottom: bool,
     pub pending_tool_calls: Vec<ToolCall>,
+    /// Metadata for the provider request currently streaming or most recently
+    /// finished. Set by `StreamEvent::RequestMetadata` before the first byte
+    /// arrives; cleared when the turn truly ends. Used to detect narration-only
+    /// EndTurn responses on prompts that were expected to call tools.
+    pub current_stream_request: Option<StreamRequestMetadata>,
     pub max_context_tokens: usize,
     /// Set by `/compact` slash command. Picked up by the main loop next time
     /// it would otherwise check `compact::should_compact` — forces compaction
@@ -577,6 +583,14 @@ pub struct App {
     /// compares against `file_watcher::keybindings_change_counter()` to
     /// detect `keybindings.toml` edits and hot-reload them.
     pub last_keybindings_watcher_seen: u64,
+    /// Queue of `<system-reminder>` bodies posted by background events
+    /// (file watcher, MCP `tools/list_changed`, …) awaiting consumption
+    /// by the next outbound stream request. The drain happens in
+    /// `prepare_stream_request`, so the reminder lands in the wire
+    /// payload exactly once and `app.messages` is never mutated by an
+    /// FS-rate signal. Dedup-on-push collapses N filesystem events
+    /// between turns into one reminder.
+    pub pending_background_reminders: Vec<String>,
     /// Message indices the user pinned via `/pin <idx>`. Compaction
     /// preserves pinned messages verbatim regardless of token pressure.
     /// Stored as indices into `messages` rather than a flag on
@@ -891,6 +905,7 @@ impl App {
             tool_ctx: ToolContext::new(),
             dedup_cache: Arc::new(Mutex::new(ReadDedupCache::new())),
             pending_tool_calls: Vec::new(),
+            current_stream_request: None,
             force_compact_pending: false,
             pending_pause_turn_resume: false,
             compact_suppressed: false,
@@ -954,6 +969,7 @@ impl App {
             last_mcp_refresh_seen: 0,
             last_file_watcher_seen: 0,
             last_keybindings_watcher_seen: 0,
+            pending_background_reminders: Vec::new(),
             pinned_message_indices: std::collections::HashSet::new(),
             verbose_mode: false,
             fast_mode: false,
@@ -1020,8 +1036,7 @@ impl App {
         // per-session store only when no git root is discoverable.
         let git_root = crate::context::discover_git_root();
         if let Some(ref root) = git_root {
-            app.task_store =
-                jfc_session::TaskStore::open_project(Some(root.as_path()));
+            app.task_store = jfc_session::TaskStore::open_project(Some(root.as_path()));
             app.git_root = Some(Some(root.clone()));
         } else if let Some(ref sid) = app.current_session_id {
             app.task_store = jfc_session::TaskStore::open(sid.as_str());

@@ -1131,6 +1131,9 @@ fn build_body(
             });
         }
     }
+    for (key, value) in &opts.provider_options {
+        body[key] = value.clone();
+    }
     body
 }
 
@@ -1898,6 +1901,20 @@ mod tests {
         }]);
         let body = build_body(vec![make_user_msg("hi")], &o, TEST_BH);
         assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_body_merges_provider_options_normal() {
+        let mut o = opts("m").tools(vec![ToolDef {
+            name: "bash".into(),
+            description: "run bash".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+        }]);
+        o.provider_options
+            .insert("tool_choice".into(), serde_json::json!({"type":"any"}));
+
+        let body = build_body(vec![make_user_msg("hi")], &o, TEST_BH);
+        assert_eq!(body["tool_choice"]["type"], "any");
     }
 
     #[test]

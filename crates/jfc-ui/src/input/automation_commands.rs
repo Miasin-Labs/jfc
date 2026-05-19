@@ -98,8 +98,17 @@ Use the MemoryCreate tool for new memories and MemoryDelete for stale ones.{cron
     app.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = app.cancel_token.clone();
     tokio::spawn(async move {
-        crate::stream::stream_response(provider, messages, model, tx_stream, interrupt, cancel, None)
-            .await;
+        crate::stream::stream_response(
+            provider,
+            messages,
+            model,
+            tx_stream,
+            interrupt,
+            cancel,
+            None,
+            crate::runtime::StreamRequestOverrides::default(),
+        )
+        .await;
     });
 }
 
@@ -250,8 +259,17 @@ Then immediately execute the prompt now (do not wait for the first cron fire)."
     app.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = app.cancel_token.clone();
     tokio::spawn(async move {
-        crate::stream::stream_response(provider, messages, model, tx_stream, interrupt, cancel, None)
-            .await;
+        crate::stream::stream_response(
+            provider,
+            messages,
+            model,
+            tx_stream,
+            interrupt,
+            cancel,
+            None,
+            crate::runtime::StreamRequestOverrides::default(),
+        )
+        .await;
     });
 }
 
@@ -360,7 +378,16 @@ and display the results in a readable table with columns: id, schedule, command,
     app.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = app.cancel_token.clone();
     tokio::spawn(async move {
-        crate::stream::stream_response(provider, messages, model, tx_stream, interrupt, cancel, None)
-            .await;
+        crate::stream::stream_response(
+            provider,
+            messages,
+            model,
+            tx_stream,
+            interrupt,
+            cancel,
+            None,
+            crate::runtime::StreamRequestOverrides::default(),
+        )
+        .await;
     });
 }

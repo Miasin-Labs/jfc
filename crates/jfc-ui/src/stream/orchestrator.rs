@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::runtime::{AppEvent, StreamEvent};
-use jfc_provider::{ModelId, Provider, ProviderMessage, StreamOptions};
+use crate::runtime::{AppEvent, StreamEvent, StreamRequestOverrides};
+use jfc_provider::{ModelId, Provider, ProviderMessage};
 
 use super::{live_events, open_stream_with_bedrock_retries, prepare_stream_request};
 
@@ -41,8 +41,9 @@ pub async fn stream_response(
     // microseconds instead of waiting for the next STREAM_INTERRUPT_POLL.
     cancel: tokio_util::sync::CancellationToken,
     previous_message_id: Option<String>,
+    overrides: StreamRequestOverrides,
 ) {
-    let prepared = prepare_stream_request(provider.clone(), &messages, &model).await;
+    let prepared = prepare_stream_request(provider.clone(), &messages, &model, overrides).await;
     let mut opts = prepared.opts;
     if let Some(id) = previous_message_id {
         opts.previous_message_id = Some(id);
@@ -52,6 +53,15 @@ pub async fn stream_response(
     let _ = tx.try_send(AppEvent::Stream(StreamEvent::SystemPromptLen(
         prepared.system_prompt_tokens,
     )));
+    if tx
+        .send(AppEvent::Stream(StreamEvent::RequestMetadata(
+            prepared.metadata,
+        )))
+        .await
+        .is_err()
+    {
+        return;
+    }
     // (was: inject `previous_response_id` into provider_options for OpenAI.
     // Removed — incompatible with `store: false` and redundant with
     // full-history `input`. See note at the top of this file.)
@@ -93,11 +103,10 @@ pub async fn stream_response(
                     error = %e,
                     "stream rejected thinking parameter — retrying without thinking"
                 );
-                // Reuse opts fields by ref — avoid cloning system prompt + tool defs.
-                let fallback_opts = StreamOptions::new(opts.model.clone())
-                    .system(opts.system.as_deref().unwrap_or_default().to_owned())
-                    .tools(opts.tools.clone())
-                    .max_tokens(opts.max_tokens);
+                let mut fallback_opts = opts.clone();
+                fallback_opts.adaptive_thinking = false;
+                fallback_opts.thinking_budget = None;
+                fallback_opts.thinking_display = None;
                 match open_stream_with_bedrock_retries(
                     provider.as_ref(),
                     Arc::clone(&messages),

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::runtime::{StreamRequestMetadata, StreamRequestOverrides, StreamToolChoice};
 use crate::tools;
 use jfc_provider::{
-    ModelId, Provider, ProviderContent, ProviderMessage, ProviderRole, StreamOptions,
+    ModelId, Provider, ProviderContent, ProviderMessage, ProviderRole, StreamConvention,
+    StreamOptions,
 };
 
 use super::model_policy::{max_output_tokens_for, thinking_mode_for};
@@ -10,6 +12,7 @@ use super::model_policy::{max_output_tokens_for, thinking_mode_for};
 pub(super) struct PreparedStreamRequest {
     pub(super) opts: StreamOptions,
     pub(super) system_prompt_tokens: usize,
+    pub(super) metadata: StreamRequestMetadata,
 }
 
 /// Pull the most recent user-role text out of a provider message vec. Used by
@@ -38,10 +41,105 @@ fn last_user_text(messages: &[ProviderMessage]) -> Option<String> {
     None
 }
 
+fn user_text_requests_action(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let normalized = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return false;
+    }
+
+    let strong_action_terms = [
+        "add",
+        "apply",
+        "build",
+        "change",
+        "check",
+        "commit",
+        "continue",
+        "create",
+        "debug",
+        "delete",
+        "do",
+        "edit",
+        "find",
+        "fix",
+        "grep",
+        "implement",
+        "inspect",
+        "investigate",
+        "look",
+        "open",
+        "patch",
+        "proceed",
+        "push",
+        "read",
+        "remove",
+        "run",
+        "search",
+        "test",
+        "trace",
+        "update",
+        "write",
+    ];
+    let has_action_term = trimmed
+        .split(' ')
+        .any(|word| strong_action_terms.contains(&word));
+    if !has_action_term {
+        return false;
+    }
+
+    let informational_prefixes = [
+        "what ",
+        "why ",
+        "how ",
+        "explain",
+        "tell me",
+        "describe",
+        "summarize",
+    ];
+    let starts_informational = informational_prefixes
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix));
+    if starts_informational {
+        let explicit_repo_action_terms = [
+            "read",
+            "run",
+            "trace",
+            "debug",
+            "investigate",
+            "inspect",
+            "grep",
+            "search",
+            "open",
+            "fix",
+            "implement",
+            "edit",
+            "change",
+            "update",
+            "build",
+            "test",
+        ];
+        return trimmed
+            .split(' ')
+            .any(|word| explicit_repo_action_terms.contains(&word));
+    }
+
+    true
+}
+
+fn anthropic_tool_choice_value(choice: StreamToolChoice) -> serde_json::Value {
+    match choice {
+        StreamToolChoice::Auto => serde_json::json!({ "type": "auto" }),
+        StreamToolChoice::Any => serde_json::json!({ "type": "any" }),
+    }
+}
+
 pub(super) async fn prepare_stream_request(
     provider: Arc<dyn Provider>,
     messages: &[ProviderMessage],
     model: &ModelId,
+    overrides: StreamRequestOverrides,
 ) -> PreparedStreamRequest {
     let cwd = std::env::current_dir()
         .ok()
@@ -338,10 +436,26 @@ Do not use a colon before tool calls.";
         let _ = before;
     }
 
+    let action_expected = last_user_text(messages)
+        .as_deref()
+        .map(user_text_requests_action)
+        .unwrap_or(false);
+    let advertised_tool_count = advertised_tools.len();
+
     let mut base = StreamOptions::new(model.clone())
         .system(system_prompt)
         .tools(advertised_tools)
         .max_tokens(max_out);
+    if matches!(
+        provider.stream_convention(),
+        StreamConvention::AnthropicNative
+    ) && !base.tools.is_empty()
+    {
+        base.provider_options.insert(
+            "tool_choice".to_owned(),
+            anthropic_tool_choice_value(overrides.tool_choice),
+        );
+    }
     if let Some(effort) = crate::effort::active_global() {
         base = base.reasoning_effort(effort);
     }
@@ -352,5 +466,33 @@ Do not use a colon before tool calls.";
     PreparedStreamRequest {
         opts: thinking_mode.apply_to(base),
         system_prompt_tokens,
+        metadata: StreamRequestMetadata {
+            advertised_tool_count,
+            action_expected,
+            tool_choice: overrides.tool_choice,
+            narration_retry: overrides.narration_retry,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::user_text_requests_action;
+
+    #[test]
+    fn action_intent_detects_toolish_prompts_normal() {
+        assert!(user_text_requests_action("read the file and trace the bug"));
+        assert!(user_text_requests_action("continue please thank you"));
+        assert!(user_text_requests_action("do all of the fixes please"));
+        assert!(user_text_requests_action(
+            "why is this bug happening read this session"
+        ));
+    }
+
+    #[test]
+    fn action_intent_leaves_plain_questions_alone_robust() {
+        assert!(!user_text_requests_action("what is ownership in rust?"));
+        assert!(!user_text_requests_action("explain how borrowing works"));
+        assert!(!user_text_requests_action("/help"));
     }
 }

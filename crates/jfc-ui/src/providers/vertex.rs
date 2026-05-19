@@ -292,6 +292,9 @@ impl Provider for VertexProvider {
         } else if let Some(budget) = options.thinking_budget {
             body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
         }
+        for (key, value) in &options.provider_options {
+            body[key] = value.clone();
+        }
 
         tracing::debug!(
             target: "jfc::provider::vertex",

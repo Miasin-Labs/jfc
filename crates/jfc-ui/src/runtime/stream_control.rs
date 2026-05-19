@@ -1,6 +1,6 @@
 use crate::{
     app::App,
-    runtime::{AppEvent, EventSender, StreamEvent},
+    runtime::{AppEvent, EventSender, StreamEvent, StreamRequestOverrides},
     stream,
     types::{MessagePart, Role},
 };
@@ -10,6 +10,22 @@ pub(crate) fn restart_stream_in_place(
     tx: &EventSender,
     assistant_idx: usize,
     turn_started_at: Option<std::time::Instant>,
+) {
+    restart_stream_in_place_with_overrides(
+        app,
+        tx,
+        assistant_idx,
+        turn_started_at,
+        StreamRequestOverrides::default(),
+    );
+}
+
+pub(crate) fn restart_stream_in_place_with_overrides(
+    app: &mut App,
+    tx: &EventSender,
+    assistant_idx: usize,
+    turn_started_at: Option<std::time::Instant>,
+    overrides: StreamRequestOverrides,
 ) {
     let Some(msg) = app.messages.get_mut(assistant_idx) else {
         return;
@@ -38,6 +54,7 @@ pub(crate) fn restart_stream_in_place(
     app.thinking_ended_at = None;
     app.last_usage_output = 0;
     app.usage_apply_baseline = (0, 0, 0, 0);
+    app.current_stream_request = None;
     app.scroll_to_bottom();
 
     let provider = app.provider.clone();
@@ -52,7 +69,17 @@ pub(crate) fn restart_stream_in_place(
     let tx_guard = tx.clone();
     tokio::spawn(async move {
         let result = tokio::spawn(async move {
-            stream::stream_response(provider, messages, model, tx_spawn, interrupt, cancel, prev_msg_id).await;
+            stream::stream_response(
+                provider,
+                messages,
+                model,
+                tx_spawn,
+                interrupt,
+                cancel,
+                prev_msg_id,
+                overrides,
+            )
+            .await;
         })
         .await;
         if let Err(join_err) = result {

@@ -24,6 +24,37 @@ pub enum AppEvent {
     Goal(GoalEvent),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamToolChoice {
+    Auto,
+    Any,
+}
+
+impl Default for StreamToolChoice {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StreamRequestOverrides {
+    pub tool_choice: StreamToolChoice,
+    pub narration_retry: bool,
+    /// System reminders queued by background events (file watcher,
+    /// MCP refresh, …) and drained into `prepare_stream_request` so
+    /// they land in the next outbound request's system prompt exactly
+    /// once, without mutating `app.messages` per FS event.
+    pub background_reminders: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamRequestMetadata {
+    pub advertised_tool_count: usize,
+    pub action_expected: bool,
+    pub tool_choice: StreamToolChoice,
+    pub narration_retry: bool,
+}
+
 impl AppEvent {
     pub fn is_tick(&self) -> bool {
         matches!(self, Self::Ui(UiEvent::Tick))
@@ -61,7 +92,7 @@ pub enum UiEvent {
     LoadSession(crate::ids::SessionId),
 }
 
- pub enum StreamEvent {
+pub enum StreamEvent {
     Chunk {
         text: Option<String>,
         reasoning: Option<String>,
@@ -100,6 +131,10 @@ pub enum UiEvent {
     /// Used by the CompactionDone handler to add overhead to the post-
     /// compact approx_tokens gauge.
     SystemPromptLen(usize),
+    /// Per-request control metadata captured after tools and permission
+    /// filtering are known. The event loop uses this to tell a valid prose
+    /// answer from a narration-only failure on agentic prompts.
+    RequestMetadata(StreamRequestMetadata),
 }
 
 pub enum ToolEvent {

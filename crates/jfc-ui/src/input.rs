@@ -2127,7 +2127,17 @@ async fn handle_submit(
     // wg-async: stream_response holds the SSE connection + tx sender —
     // cancel has to thread through so ESC×2 can drop them coherently.
     tokio::spawn(async move {
-        crate::stream::stream_response(provider, messages, model, tx, interrupt, cancel, None).await;
+        crate::stream::stream_response(
+            provider,
+            messages,
+            model,
+            tx,
+            interrupt,
+            cancel,
+            None,
+            crate::runtime::StreamRequestOverrides::default(),
+        )
+        .await;
     });
 
     Ok(())
@@ -4592,7 +4602,14 @@ async fn handle_slash_command(app: &mut App, text: &str, tx: Option<&mpsc::Sende
                 // racially interrupt the retry.
                 tokio::spawn(async move {
                     crate::stream::stream_response(
-                        provider, messages, model, tx_stream, interrupt, cancel, None,
+                        provider,
+                        messages,
+                        model,
+                        tx_stream,
+                        interrupt,
+                        cancel,
+                        None,
+                        crate::runtime::StreamRequestOverrides::default(),
                     )
                     .await;
                 });

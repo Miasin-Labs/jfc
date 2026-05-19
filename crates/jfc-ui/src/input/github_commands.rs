@@ -240,8 +240,17 @@ pub(super) async fn handle_pr_autofix(
     app.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = app.cancel_token.clone();
     tokio::spawn(async move {
-        crate::stream::stream_response(provider, messages, model, tx_stream, interrupt, cancel, None)
-            .await;
+        crate::stream::stream_response(
+            provider,
+            messages,
+            model,
+            tx_stream,
+            interrupt,
+            cancel,
+            None,
+            crate::runtime::StreamRequestOverrides::default(),
+        )
+        .await;
     });
 }
 

@@ -1,7 +1,7 @@
 use crate::{
     app::{App, QueuedPrompt},
     input,
-    runtime::{AppEvent, EventSender, StreamEvent},
+    runtime::{AppEvent, EventSender, StreamEvent, StreamRequestOverrides},
     stream,
     types::{ChatMessage, MessagePart, Role},
 };
@@ -149,7 +149,17 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
     let tx_guard = tx.clone();
     tokio::spawn(async move {
         let result = tokio::spawn(async move {
-            stream::stream_response(provider, messages, model, tx_spawn, interrupt, cancel, None).await;
+            stream::stream_response(
+                provider,
+                messages,
+                model,
+                tx_spawn,
+                interrupt,
+                cancel,
+                None,
+                StreamRequestOverrides::default(),
+            )
+            .await;
         })
         .await;
         if let Err(join_err) = result {
