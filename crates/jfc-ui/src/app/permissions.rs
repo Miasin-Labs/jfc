@@ -236,6 +236,7 @@ fn first_dangerous_reason(cmd: &str) -> Option<&'static str> {
     }
     if cmd.contains("${IFS")
         || cmd.contains("${!")
+        || cmd.contains(":=")
         || cmd.contains("@P}")
         || cmd.contains("@E}")
         || cmd.contains("@A}")
@@ -262,6 +263,7 @@ fn first_dangerous_reason(cmd: &str) -> Option<&'static str> {
         "BASH_ENV=", "ENV=", "PROMPT_COMMAND=",
         "GIT_EXTERNAL_DIFF=", "GIT_PAGER=", "GIT_SSH_COMMAND=",
         "PAGER=", "MANPAGER=", "LESS=",
+        "PATH=", "IFS=", "SHELL=",
     ] {
         if cmd.contains(needle) {
             return Some(REASON_ENV_MUTATE);
@@ -455,10 +457,13 @@ fn classify_readonly_segment(segment: &str) -> Result<(), &'static str> {
     // approach: shell wrappers are denied by default but the
     // syntax-only subset is whitelisted.
     if command.as_str() == "bash" || command.as_str() == "sh" {
-        let only_inspection_flags = args.iter().all(|a| {
+        let has_inspection_flag = args.iter().any(|a| {
             matches!(a.as_str(), "-n" | "--noexec" | "-V" | "--version" | "-h" | "--help")
         });
-        if !args.is_empty() && only_inspection_flags {
+        let no_exec_flag = !args.iter().any(|a| {
+            matches!(a.as_str(), "-c" | "-i" | "-l" | "--login" | "-s")
+        });
+        if !args.is_empty() && has_inspection_flag && no_exec_flag {
             return Ok(());
         }
     }

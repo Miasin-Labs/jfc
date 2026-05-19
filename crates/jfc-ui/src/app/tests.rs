@@ -736,7 +736,9 @@ fn is_readonly_bash_recognises_examples_robust() {
         "bash --noexec /tmp/script.sh",
         "bash --version",
         "sh -n script.sh",
+    ] {
         assert!(is_readonly_bash(cmd), "expected read-only: {cmd}");
+    }
     for cmd in [
         "rm -rf /",
         "git push",
