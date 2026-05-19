@@ -47,7 +47,9 @@ const REFRESH_SCOPES: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,context-1m-2025-08-07,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,mid-conversation-system-2026-04-07,redact-thinking-2026-02-12,afk-mode-2026-01-31,advisor-tool-2026-03-01,files-api-2025-04-14,cache-diagnosis-2026-04-07,context-hint-2026-04-09,mcp-servers-2025-12-04,effort-2025-11-24,environments-2025-11-01,ccr-byoc-2025-07-29";
+const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,context-1m-2025-08-07,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,mid-conversation-system-2026-04-07,redact-thinking-2026-02-12,afk-mode-2026-01-31,advisor-tool-2026-03-01,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
+// Rejected by API as of 2026-05-19 — re-enable when Anthropic activates them:
+// ,context-hint-2026-04-09,mcp-servers-2025-12-04,ccr-byoc-2025-07-29
 
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
