@@ -3233,6 +3233,8 @@ pub(crate) async fn run(
                     pre_tokens,
                     post_tokens,
                 }) => {
+                    // Reset post-compact read tracker so we can detect re-reads.
+                    app.post_compact_reads.clear();
                     let saved = pre_tokens.saturating_sub(post_tokens);
                     tracing::info!(
                         target: "jfc::compact",

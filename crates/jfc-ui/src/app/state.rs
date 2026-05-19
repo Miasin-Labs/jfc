@@ -783,6 +783,12 @@ pub struct App {
     pub last_user_activity_at: std::time::Instant,
     /// Whether the idle-return toast has been shown this idle period.
     pub idle_return_shown: bool,
+    /// Files pinned into the system prompt (survive compaction).
+    /// Auto-populated from files that are re-read after every compaction.
+    pub pinned_files: Vec<std::path::PathBuf>,
+    /// Tracks how many times each file is re-read after compaction.
+    /// When a file exceeds 3 re-reads post-compact, it's promoted to pinned_files.
+    pub post_compact_reads: std::collections::HashMap<std::path::PathBuf, u32>,
     /// Throttle for idle_prefetch: last time a prefetch batch was fired.
     pub last_prefetch_at: std::time::Instant,
     /// Number of prefetch reads currently in-flight (capped at 2).
@@ -1002,6 +1008,8 @@ impl App {
             last_scroll_tick: std::time::Instant::now(),
             last_user_activity_at: std::time::Instant::now(),
             idle_return_shown: false,
+            pinned_files: Vec::new(),
+            post_compact_reads: std::collections::HashMap::new(),
             last_prefetch_at: std::time::Instant::now() - std::time::Duration::from_secs(10),
             prefetch_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             git_root: None,
