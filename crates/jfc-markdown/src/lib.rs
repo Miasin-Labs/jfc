@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+
 
 use itertools::{Itertools, Position};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options as ParseOptions, Parser, Tag, TagEnd};
@@ -41,7 +41,7 @@ fn syntect_span_to_ratatui(style: SyntectStyle, text: &str) -> Span<'static> {
     Span::styled(text.to_owned(), s)
 }
 
-use crate::theme::Theme;
+use jfc_theme::Theme;
 
 // ── Inline color swatch detection ────────────────────────────────────────────
 //
@@ -245,7 +245,7 @@ pub fn highlight_code(
     lang: &str,
     code: &str,
     inner_width: usize,
-    theme: &crate::theme::Theme,
+    theme: &jfc_theme::Theme,
 ) -> Vec<Line<'static>> {
     highlight_code_inner(lang, code, inner_width, theme, true)
 }
@@ -254,7 +254,7 @@ pub fn highlight_code_raw(
     lang: &str,
     code: &str,
     inner_width: usize,
-    theme: &crate::theme::Theme,
+    theme: &jfc_theme::Theme,
 ) -> Vec<Line<'static>> {
     highlight_code_inner(lang, code, inner_width, theme, false)
 }
@@ -347,7 +347,7 @@ fn highlight_code_inner(
     lang: &str,
     code: &str,
     inner_width: usize,
-    theme: &crate::theme::Theme,
+    theme: &jfc_theme::Theme,
     with_gutter: bool,
 ) -> Vec<Line<'static>> {
     use syntect::easy::HighlightLines;
@@ -1424,7 +1424,7 @@ fn to_roman(n: u64) -> String {
 /// Hard-wrap a single styled `Line` to `width` columns. When `width == 0` the
 /// line passes through unchanged (the renderer didn't supply a budget). Splits
 /// at character boundaries — terminal columns are approximated by `chars()`.
-pub(crate) fn hard_wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+pub fn hard_wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![line];
     }
@@ -1471,7 +1471,7 @@ pub(crate) fn hard_wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'sta
 /// 1-cell-wide window) is emitted on its own line; the next chunk
 /// starts after it. Better than infinite-looping on undivisible
 /// content.
-pub(crate) fn hard_wrap_str(s: &str, width: usize) -> Vec<String> {
+pub fn hard_wrap_str(s: &str, width: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthChar;
     if width == 0 {
         return vec![s.to_owned()];
@@ -1522,7 +1522,7 @@ mod tests {
     //!   word-wrapped; we hard-wrap them column-aligned instead.
 
     use super::*;
-    use crate::theme::Theme;
+    use jfc_theme::Theme;
 
     fn render(input: &str) -> Vec<Line<'static>> {
         to_lines(input, &Theme::dark(), 80)
@@ -2312,7 +2312,7 @@ mod hard_wrap_cell_width_tests {
 #[cfg(test)]
 mod table_reflow_tests {
     use super::*;
-    use crate::theme::Theme;
+    use jfc_theme::Theme;
 
     fn t() -> Theme {
         Theme::dark()
@@ -2579,7 +2579,7 @@ mod color_swatch_tests {
     fn inline_code_backtick_gets_swatch_via_to_lines_normal() {
         // When markdown contains `#ff7ab2` (backtick-wrapped), the rendered
         // output should include a swatch span with the color's fg.
-        let theme = crate::theme::Theme::dark();
+        let theme = jfc_theme::Theme::dark();
         let md = "The color is `#ff7ab2` in the theme.";
         let lines = super::to_lines(md, &theme, 120);
         // Flatten all spans
@@ -2596,7 +2596,7 @@ mod color_swatch_tests {
 
     #[test]
     fn inline_code_rgb_gets_swatch_via_to_lines_normal() {
-        let theme = crate::theme::Theme::dark();
+        let theme = jfc_theme::Theme::dark();
         let md = "Use `rgb(55, 212, 167)` for green.";
         let lines = super::to_lines(md, &theme, 120);
         let all_spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();

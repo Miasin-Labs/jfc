@@ -31,7 +31,7 @@ mod keybindings;
 mod lsp_client;
 mod lsp_rpc;
 mod managed_session;
-mod markdown;
+use jfc_markdown as markdown;
 mod mcp;
 mod memory;
 mod memory_recall;

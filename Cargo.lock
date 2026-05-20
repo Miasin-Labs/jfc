@@ -2100,6 +2100,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "jfc-markdown"
+version = "0.1.0"
+dependencies = [
+ "itertools 0.14.0",
+ "jfc-theme",
+ "pulldown-cmark",
+ "ratatui",
+ "regex",
+ "syntect",
+ "two-face",
+ "unicode-width",
+]
+
+[[package]]
 name = "jfc-mcp"
 version = "0.1.0"
 dependencies = [
@@ -2215,6 +2229,7 @@ dependencies = [
  "jfc-daemon",
  "jfc-economy",
  "jfc-graph",
+ "jfc-markdown",
  "jfc-mcp",
  "jfc-provider",
  "jfc-providers",
