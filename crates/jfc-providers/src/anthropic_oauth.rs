@@ -44,7 +44,102 @@ const REFRESH_SCOPES: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,context-1m-2025-08-07,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,mid-conversation-system-2026-04-07,redact-thinking-2026-02-12,afk-mode-2026-01-31,advisor-tool-2026-03-01,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
+/// Always-on betas: every OAuth account gets these. Subscription-gated betas
+/// (`context-1m`, `afk-mode`, `fast-mode`, `task-budgets`) are appended
+/// conditionally in `build_beta_header` based on per-account capabilities so
+/// we don't 400 accounts that lack a given feature.
+const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,mid-conversation-system-2026-04-07,redact-thinking-2026-02-12,advisor-tool-2026-03-01,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
+
+/// Subscription-gated beta tokens, paired with the capability flag that
+/// gates them. A capability of `Some(false)` (confirmed unsupported) strips
+/// the token; `None` (untested) or `Some(true)` includes it. Mirrors opencode-
+/// anthropic-auth's GATED_BETAS / BLOCKED_BETAS handling at index.ts:678-728.
+const GATED_BETAS: &[(&str, GatedCapability)] = &[
+    ("context-1m-2025-08-07", GatedCapability::Context1m),
+    ("afk-mode-2026-01-31", GatedCapability::AfkMode),
+];
+
+#[derive(Debug, Clone, Copy)]
+enum GatedCapability {
+    Context1m,
+    AfkMode,
+}
+
+impl GatedCapability {
+    fn is_disabled(self, caps: &super::anthropic_accounts::AccountCapabilities) -> bool {
+        match self {
+            Self::Context1m => caps.context1m == Some(false),
+            Self::AfkMode => caps.afk_mode == Some(false),
+        }
+    }
+}
+
+/// Build the per-request `anthropic-beta` header. Starts from `ANTHROPIC_BETA`,
+/// appends gated betas the account hasn't been confirmed-unsupported for,
+/// then layers per-request betas (`fast-mode`, `task-budgets`) when the
+/// caller asked for the feature *and* the account hasn't been marked
+/// `Some(false)` on the corresponding capability.
+fn build_beta_header(
+    caps: &super::anthropic_accounts::AccountCapabilities,
+    fast_mode: bool,
+    task_budget: bool,
+) -> String {
+    let mut header = ANTHROPIC_BETA.to_owned();
+    for (token, cap) in GATED_BETAS {
+        if !cap.is_disabled(caps) {
+            header.push(',');
+            header.push_str(token);
+        }
+    }
+    if fast_mode && caps.fast_mode != Some(false) {
+        header.push_str(",fast-mode-2026-02-01");
+    }
+    if task_budget && caps.task_budgets != Some(false) {
+        header.push_str(",task-budgets-2026-03-13");
+    }
+    header
+}
+
+/// Classify a 400 body for capability-strip-and-retry. Returns the capability
+/// update that should be persisted, if any. Mirrors opencode-anthropic-auth's
+/// `classifyRequestErrorBody` in `plugin/routing.ts`.
+fn classify_beta_400(
+    body: &str,
+) -> Option<super::anthropic_accounts::AccountCapabilities> {
+    let lower = body.to_lowercase();
+    let is_beta_error = lower.contains("anthropic-beta")
+        || lower.contains("not yet available for this subscription");
+    if !is_beta_error {
+        return None;
+    }
+    let mut update = super::anthropic_accounts::AccountCapabilities::default();
+    let availability_phrase = lower.contains("not yet available")
+        || lower.contains("not available")
+        || lower.contains("not supported")
+        || lower.contains("not eligible")
+        || lower.contains("invalid beta")
+        || lower.contains("unknown beta")
+        || lower.contains("unexpected value");
+    if availability_phrase
+        && (lower.contains("context-1m") || lower.contains("long context beta"))
+    {
+        update.context1m = Some(false);
+    }
+    if lower.contains("afk-mode") {
+        update.afk_mode = Some(false);
+    }
+    if lower.contains("fast-mode") {
+        update.fast_mode = Some(false);
+    }
+    if lower.contains("task-budgets") || lower.contains("task_budget") {
+        update.task_budgets = Some(false);
+    }
+    if update == super::anthropic_accounts::AccountCapabilities::default() {
+        None
+    } else {
+        Some(update)
+    }
+}
 // Rejected by API as of 2026-05-19 — re-enable when Anthropic activates them:
 // ,context-hint-2026-04-09,mcp-servers-2025-12-04,ccr-byoc-2025-07-29
 
@@ -1227,15 +1322,12 @@ impl Provider for AnthropicOAuthProvider {
             }
         };
 
-        // Build beta header: append fast-mode and/or task-budgets betas as needed.
-        let mut betas_stream = ANTHROPIC_BETA.to_owned();
-        if options.fast_mode {
-            betas_stream.push_str(",fast-mode-2026-02-01");
-        }
-        if options.task_budget_tokens.is_some() {
-            betas_stream.push_str(",task-budgets-2026-03-13");
-        }
-        let beta_header = betas_stream;
+        // Per-account `anthropic-beta` header is built inside the rotation
+        // loop because subscription-gated betas (`context-1m`, `afk-mode`,
+        // `fast-mode`, `task-budgets`) are stripped per-account based on the
+        // capability flags persisted to disk.
+        let fast_mode = options.fast_mode;
+        let want_task_budget = options.task_budget_tokens.is_some();
 
         // Two nested loops:
         //   - Outer: when every account ends up in cooldown mid-rotation, sleep
@@ -1288,6 +1380,8 @@ impl Provider for AnthropicOAuthProvider {
 
                 let send_started = std::time::Instant::now();
                 let request_id = uuid::Uuid::new_v4().to_string();
+                let caps = mgr.capabilities_for(&account.name).await.unwrap_or_default();
+                let beta_header = build_beta_header(&caps, fast_mode, want_task_budget);
                 let resp =
                     match jfc_provider::http::send_with_retry("anthropic_oauth.stream", || {
                         self.client
@@ -1463,8 +1557,38 @@ impl Provider for AnthropicOAuthProvider {
                             target: "jfc::provider::anthropic_oauth",
                             status = %status,
                             body_preview = %&body[..body.len().min(200)],
-                            "permanent API error — not rotating"
+                            "permanent API error — checking for capability strip"
                         );
+                        if status.as_u16() == 400
+                            && let Some(update) = classify_beta_400(&body)
+                        {
+                            tracing::warn!(
+                                target: "jfc::provider::anthropic_oauth::rotation",
+                                account = %account.name,
+                                update = ?update,
+                                "marking gated capability unsupported — will retry same account with beta stripped"
+                            );
+                            if let Err(e) = mgr
+                                .atomic_update_capabilities(&account.name, update)
+                                .await
+                            {
+                                tracing::warn!(
+                                    target: "jfc::provider::anthropic_oauth::rotation",
+                                    account = %account.name,
+                                    error = %e,
+                                    "capability persist failed; will rotate instead"
+                                );
+                            }
+                            // Retry the SAME account once with the stripped
+                            // beta header. Don't add it to `tried` so the
+                            // rotation logic still considers it normal.
+                            tried.remove(&account.name);
+                            last_err = Some(anyhow::anyhow!(
+                                "Anthropic API 400 on account '{}' (stripped gated beta, retrying): {body}",
+                                account.name
+                            ));
+                            continue;
+                        }
                         if let Some(model) = parse_model_not_found(&body) {
                             anyhow::bail!(
                                 "{model} is not enabled on your Anthropic account. \
@@ -1577,15 +1701,9 @@ impl Provider for AnthropicOAuthProvider {
                 body_str.clone()
             }
         };
-        // Build beta header: append fast-mode and/or task-budgets betas as needed.
-        let mut betas_complete = ANTHROPIC_BETA.to_owned();
-        if options.fast_mode {
-            betas_complete.push_str(",fast-mode-2026-02-01");
-        }
-        if options.task_budget_tokens.is_some() {
-            betas_complete.push_str(",task-budgets-2026-03-13");
-        }
-        let beta_header_complete = betas_complete;
+        // Built per-account inside the rotation loop (see stream() for why).
+        let fast_mode = options.fast_mode;
+        let want_task_budget = options.task_budget_tokens.is_some();
         let mgr = self.account_manager().await?;
         let total_wait_started = std::time::Instant::now();
         let mut last_err: Option<anyhow::Error> = None;
@@ -1625,6 +1743,8 @@ impl Provider for AnthropicOAuthProvider {
                 };
 
                 let send_started = std::time::Instant::now();
+                let caps = mgr.capabilities_for(&account.name).await.unwrap_or_default();
+                let beta_header_complete = build_beta_header(&caps, fast_mode, want_task_budget);
                 let resp =
                     match jfc_provider::http::send_with_retry("anthropic_oauth.complete", || {
                         self.client
@@ -1774,8 +1894,35 @@ impl Provider for AnthropicOAuthProvider {
                             target: "jfc::provider::anthropic_oauth",
                             status = %status,
                             body_preview = %&text[..text.len().min(200)],
-                            "complete: permanent API request failed"
+                            "complete: permanent API request failed — checking for capability strip"
                         );
+                        if status.as_u16() == 400
+                            && let Some(update) = classify_beta_400(&text)
+                        {
+                            tracing::warn!(
+                                target: "jfc::provider::anthropic_oauth::rotation",
+                                account = %account.name,
+                                update = ?update,
+                                "marking gated capability unsupported — will retry same account with beta stripped"
+                            );
+                            if let Err(e) = mgr
+                                .atomic_update_capabilities(&account.name, update)
+                                .await
+                            {
+                                tracing::warn!(
+                                    target: "jfc::provider::anthropic_oauth::rotation",
+                                    account = %account.name,
+                                    error = %e,
+                                    "capability persist failed; will rotate instead"
+                                );
+                            }
+                            tried.remove(&account.name);
+                            last_err = Some(anyhow::anyhow!(
+                                "Anthropic API 400 on account '{}' (stripped gated beta, retrying): {text}",
+                                account.name
+                            ));
+                            continue;
+                        }
                         if let Some(model) = parse_model_not_found(&text) {
                             anyhow::bail!(
                                 "{model} is not enabled on your Anthropic account. \
@@ -2121,7 +2268,6 @@ mod tests {
             "prompt-caching-scope-2026-01-05",
             "output-128k-2025-02-19",
             "structured-outputs-2025-12-15",
-            "afk-mode-2026-01-31",
             "advisor-tool-2026-03-01",
             "files-api-2025-04-14",
         ] {
@@ -2130,6 +2276,60 @@ mod tests {
                 "ANTHROPIC_BETA missing: {val}"
             );
         }
+    }
+
+    #[test]
+    fn build_beta_header_includes_gated_when_capability_unknown() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities::default();
+        let header = build_beta_header(&caps, false, false);
+        assert!(header.contains("context-1m-2025-08-07"));
+        assert!(header.contains("afk-mode-2026-01-31"));
+        assert!(!header.contains("fast-mode"));
+        assert!(!header.contains("task-budgets"));
+    }
+
+    #[test]
+    fn build_beta_header_strips_gated_when_capability_false() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities {
+            context1m: Some(false),
+            ..Default::default()
+        };
+        let header = build_beta_header(&caps, true, true);
+        assert!(!header.contains("context-1m"));
+        assert!(header.contains("afk-mode-2026-01-31"));
+        assert!(header.contains("fast-mode-2026-02-01"));
+        assert!(header.contains("task-budgets-2026-03-13"));
+    }
+
+    #[test]
+    fn build_beta_header_strips_fast_mode_when_capability_false() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities {
+            fast_mode: Some(false),
+            ..Default::default()
+        };
+        let header = build_beta_header(&caps, true, false);
+        assert!(!header.contains("fast-mode"));
+    }
+
+    #[test]
+    fn classify_beta_400_flags_context_1m() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"The long context beta is not yet available for this subscription."}}"#;
+        let update = classify_beta_400(body).expect("should classify as beta error");
+        assert_eq!(update.context1m, Some(false));
+        assert_eq!(update.afk_mode, None);
+    }
+
+    #[test]
+    fn classify_beta_400_flags_afk_mode() {
+        let body = r#"{"error":{"message":"Unexpected value `afk-mode-2026-01-31` for the `anthropic-beta` header"}}"#;
+        let update = classify_beta_400(body).expect("should classify");
+        assert_eq!(update.afk_mode, Some(false));
+    }
+
+    #[test]
+    fn classify_beta_400_ignores_unrelated_errors() {
+        let body = r#"{"error":{"message":"invalid model"}}"#;
+        assert!(classify_beta_400(body).is_none());
     }
 
     #[test]

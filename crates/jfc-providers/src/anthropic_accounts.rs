@@ -157,6 +157,13 @@ pub struct Account {
     /// (we won't burn a probe request if a real response landed recently).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_usage_refresh_at: Option<u64>,
+    /// Per-account subscription capabilities. `None` on a flag = untested
+    /// (try and see if API accepts). `Some(false)` = confirmed unsupported by
+    /// the subscription, beta must be stripped. `Some(true)` = confirmed
+    /// supported. Mirrors opencode-anthropic-auth's `capabilities` field so a
+    /// shared accounts file's capability cache round-trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<AccountCapabilities>,
     /// Token usage for *today* (rotates at local midnight). Compatible with
     /// opencode's `dailyUsage` schema so a shared accounts file shows the
     /// same daily counts in both tools.
@@ -167,6 +174,32 @@ pub struct Account {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_usage: Option<TotalUsage>,
     /// All other fields opencode (or future jfc) may write — preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Per-account subscription-gated feature flags. Each `None` means "haven't
+/// tested yet — try it"; `Some(false)` means "API rejected, strip the beta on
+/// future calls"; `Some(true)` means "confirmed available". Field names match
+/// opencode-anthropic-auth so a shared accounts file is bidirectionally
+/// compatible.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCapabilities {
+    /// `context-1m-2025-08-07` beta. Returns 400 "The long context beta is not
+    /// yet available for this subscription" on tiers without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context1m: Option<bool>,
+    /// `afk-mode-2026-01-31` beta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub afk_mode: Option<bool>,
+    /// `fast-mode-2026-02-01` beta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
+    /// `task-budgets-2026-03-13` beta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_budgets: Option<bool>,
+    /// Any future capability keys opencode writes — preserved verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -1232,6 +1265,51 @@ impl AccountManager {
         .await
     }
 
+    /// Atomically merge capability updates into an account. Only fields that
+    /// are `Some(_)` in `update` are written; existing values for `None`
+    /// fields are preserved. Mirrors opencode's `atomicUpdateCapabilities`.
+    pub async fn atomic_update_capabilities(
+        &self,
+        name: &str,
+        update: AccountCapabilities,
+    ) -> anyhow::Result<()> {
+        self.atomic_modify(|store| {
+            if let Some(a) = store.accounts.iter_mut().find(|a| a.name == name) {
+                let mut caps = a.capabilities.clone().unwrap_or_default();
+                if let Some(v) = update.context1m {
+                    caps.context1m = Some(v);
+                }
+                if let Some(v) = update.afk_mode {
+                    caps.afk_mode = Some(v);
+                }
+                if let Some(v) = update.fast_mode {
+                    caps.fast_mode = Some(v);
+                }
+                if let Some(v) = update.task_budgets {
+                    caps.task_budgets = Some(v);
+                }
+                for (k, v) in update.extra {
+                    caps.extra.insert(k, v);
+                }
+                a.capabilities = Some(caps);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Read the current capabilities for an account from in-memory state
+    /// (which mirrors disk). Returns `None` if the account doesn't exist.
+    pub async fn capabilities_for(&self, name: &str) -> Option<AccountCapabilities> {
+        let state = self.inner.state.lock().await;
+        state
+            .store
+            .accounts
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.capabilities.clone().unwrap_or_default())
+    }
+
     /// Update a profile-derived field (tier, plan, email). Called after a
     /// successful login or whenever the OAuth profile endpoint is queried.
     pub async fn atomic_update_profile(
@@ -1471,6 +1549,7 @@ mod tests {
             overage_reset_time: None,
             overage_disabled_reason: None,
             is_using_overage: None,
+            capabilities: None,
             utilization_5h: None,
             utilization_5h_reset_at: None,
             utilization_7d: None,
