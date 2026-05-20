@@ -2,6 +2,7 @@ mod bash;
 mod daemon;
 mod defs;
 mod dispatch;
+mod dispatch_heavy;
 mod economy;
 mod filesystem;
 mod lsp;
