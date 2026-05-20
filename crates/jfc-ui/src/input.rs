@@ -18,6 +18,8 @@ mod navigation;
 mod palette;
 mod session_picker;
 mod slash_commands;
+mod slash_commands_ext;
+mod slash_commands_ext2;
 mod submit;
 mod theme_picker;
 mod worktree_commands;
