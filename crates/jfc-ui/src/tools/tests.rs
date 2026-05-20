@@ -18,6 +18,12 @@ use super::tasks::{
     execute_task_create, execute_task_done, execute_task_list, execute_task_update,
 };
 use super::worktree::{execute_enter_plan_mode, execute_enter_worktree, execute_exit_worktree};
+use super::safe_tools::{configure_tool_command, non_interactive_shell_command, terminal_safe_text};
+use super::registry::{
+    active_event_sender_handle, auto_context_queue, get_or_build_graph_session,
+    graph_history, graph_session_cache, market_orchestrator,
+    record_graph_query, with_graph_session_mut,
+};
 use super::*;
 
 use crate::runtime::{DiagnosticLevel, ToolOutcome};

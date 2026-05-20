@@ -1,6 +1,6 @@
 use std::process::Stdio;
 
-use super::{collusion_detector, market_orchestrator, snapshot_event_sender};
+use super::registry::{collusion_detector, market_orchestrator, snapshot_event_sender};
 
 /// SwarmProvider impl for jfc-ui — delegates to the existing
 /// `worktrees` module. Each solver gets a worktree named

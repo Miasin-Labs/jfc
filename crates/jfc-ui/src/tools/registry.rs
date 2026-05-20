@@ -245,7 +245,7 @@ pub(crate) fn snapshot_active_provider() -> Option<(
 /// the same `TaskStarted` / `AgentChunk` / `TaskCompleted` events
 /// the regular Task tool's swarm does — without that, the fan UI
 /// and ctrl+X subagent panel show nothing while a cycle is running.
-fn active_event_sender_handle()
+pub(super) fn active_event_sender_handle()
 -> &'static std::sync::RwLock<Option<tokio::sync::mpsc::Sender<crate::runtime::AppEvent>>> {
     static H: OnceLock<
         std::sync::RwLock<Option<tokio::sync::mpsc::Sender<crate::runtime::AppEvent>>>,
@@ -355,7 +355,7 @@ pub fn restore_undo_entry(entry: crate::types::ToolUndoEntry) {
 /// the graph and re-issue any of them via `/graph-history`. The
 /// graph crate provides the underlying ring-buffer; we just keep
 /// one handle per process and route inserts through it.
-fn graph_history() -> &'static std::sync::Mutex<jfc_graph::history::GraphHistory> {
+pub(super) fn graph_history() -> &'static std::sync::Mutex<jfc_graph::history::GraphHistory> {
     static HISTORY: OnceLock<std::sync::Mutex<jfc_graph::history::GraphHistory>> =
         OnceLock::new();
     HISTORY.get_or_init(|| std::sync::Mutex::new(jfc_graph::history::GraphHistory::new(50)))
@@ -389,7 +389,7 @@ pub(super) fn record_graph_query(query: &str, result: &jfc_graph::dsl::QueryResu
 /// runs `fn(name) | callers | depth 1` against the cached graph for
 /// each modified file's functions and returns a single block to
 /// splice into the next system prompt.
-fn auto_context_queue() -> &'static std::sync::Mutex<Vec<std::path::PathBuf>> {
+pub(super) fn auto_context_queue() -> &'static std::sync::Mutex<Vec<std::path::PathBuf>> {
     static QUEUE: OnceLock<std::sync::Mutex<Vec<std::path::PathBuf>>> = OnceLock::new();
     QUEUE.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }

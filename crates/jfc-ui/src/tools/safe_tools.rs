@@ -272,7 +272,7 @@ fn code_index_metadata_summary(node: &NodeData) -> Vec<String> {
 // Tool search / suggest
 // ---------------------------------------------------------------------------
 
-pub(super) async fn all_tool_defs_with_mcp() -> Vec<jfc_provider::ToolDef> {
+pub async fn all_tool_defs_with_mcp() -> Vec<jfc_provider::ToolDef> {
     let mut tools = all_tool_defs();
     if let Some(registry) = snapshot_mcp_registry() {
         tools.extend(registry.all_advertised_tool_defs().await);
@@ -482,7 +482,7 @@ pub(super) fn non_interactive_shell_command(command: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "permission-automation")]
-pub(super) fn tool_permission_path(input: &crate::types::ToolInput) -> Option<&str> {
+pub(crate) fn tool_permission_path(input: &crate::types::ToolInput) -> Option<&str> {
     use crate::types::ToolInput;
     match input {
         ToolInput::Edit { file_path, .. }
