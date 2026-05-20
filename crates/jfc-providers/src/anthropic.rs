@@ -11,7 +11,7 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA: &str = "interleaved-thinking-2025-05-14";
 
-pub(crate) const AUTO_RETRY_SENTINEL: &str = jfc_provider::retry::ANTHROPIC_AUTO_RETRY_SENTINEL;
+pub const AUTO_RETRY_SENTINEL: &str = jfc_provider::retry::ANTHROPIC_AUTO_RETRY_SENTINEL;
 
 pub struct AnthropicProvider {
     client: reqwest::Client,

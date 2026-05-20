@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
+use hmac::Hmac;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -19,7 +19,7 @@ use futures::StreamExt;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub(crate) const AUTO_RETRY_SENTINEL: &str =
+pub const AUTO_RETRY_SENTINEL: &str =
     jfc_provider::retry::ANTHROPIC_OAUTH_AUTO_RETRY_SENTINEL;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -839,12 +839,12 @@ fn wrap_with_usage_recording(
                 drop(baseline);
 
                 if !any_regression && (din | dout | dcr | dcw) != 0 {
-                    let mut um = crate::types::ModelUsage::default();
+                    let mut um = jfc_core::ModelUsage::default();
                     um.input_tokens = din;
                     um.output_tokens = dout;
                     um.cache_read_tokens = dcr;
                     um.cache_write_tokens = dcw;
-                    let cost = crate::cost::cost_for(&model, &um);
+                    let cost = jfc_provider::cost::cost_for(&model, &um);
                     let delta = super::anthropic_accounts::UsageDelta {
                         input_tokens: din,
                         output_tokens: dout,
@@ -1688,7 +1688,7 @@ impl Provider for AnthropicOAuthProvider {
                         let json: Value = resp.json().await?;
                         let response = completion_response_from_json(&json);
                         if response.usage.input_tokens != 0 || response.usage.output_tokens != 0 {
-                            let mut usage = crate::types::ModelUsage::default();
+                            let mut usage = jfc_core::ModelUsage::default();
                             usage.input_tokens = response.usage.input_tokens as u64;
                             usage.output_tokens = response.usage.output_tokens as u64;
                             let delta = super::anthropic_accounts::UsageDelta {
@@ -1697,7 +1697,7 @@ impl Provider for AnthropicOAuthProvider {
                                 cache_read_tokens: 0,
                                 cache_write_tokens: 0,
                                 model: options.model.to_string(),
-                                cost_usd: crate::cost::cost_for(&options.model, &usage),
+                                cost_usd: jfc_provider::cost::cost_for(&options.model, &usage),
                             };
                             if let Err(e) = mgr.record_usage(&account.name, &delta).await {
                                 tracing::debug!(

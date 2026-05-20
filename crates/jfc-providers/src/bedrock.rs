@@ -1,7 +1,7 @@
 //! AWS Bedrock provider for Claude models.
 //!
 //! Mirrors v2.1.132's `tengu_oauth_bedrock_wizard` flow: at startup we read
-//! `~/.config/jfc/bedrock.toml` (produced by [`crate::providers::bedrock_wizard`])
+//! `~/.config/jfc/bedrock.toml` (produced by [`crate::bedrock_wizard`])
 //! plus the standard AWS credential cascade (env vars → `~/.aws/credentials` profile
 //! → `aws sso login`-cached SSO tokens). Streaming itself shells out to
 //! `aws bedrock-runtime invoke-model-with-response-stream`.
@@ -16,7 +16,7 @@
 //! When it isn't, [`BedrockProvider::has_usable_config`] returns `false` and
 //! the provider isn't registered.
 //!
-//! The sibling [`crate::providers::bedrock_wizard`] module drives `/login bedrock`
+//! The sibling [`crate::bedrock_wizard`] module drives `/login bedrock`
 //! to walk the user through credential setup before we hit this path.
 
 #![allow(dead_code)]
@@ -149,7 +149,7 @@ impl BedrockProvider {
     pub fn fallback_models() -> Vec<ModelInfo> {
         // Bedrock model ids use AWS's `anthropic.claude-…-v1:0` convention.
         // The display name mirrors the picker entry from
-        // `crate::providers::anthropic_models`.
+        // `crate::anthropic_models`.
         [
             (
                 "anthropic.claude-opus-4-5-20251101-v1:0",

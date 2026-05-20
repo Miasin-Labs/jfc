@@ -590,7 +590,7 @@ pub fn build_messages(messages: &[ProviderMessage]) -> Value {
                     // source struct — `to_anthropic_content_block`
                     // owns the type-routing rule.
                     ProviderContent::Attachment(att) => {
-                        crate::attachments::to_anthropic_content_block(att)
+                        jfc_provider::content::to_anthropic_content_block(att)
                     }
                     ProviderContent::RedactedThinking { data } => json!({
                         "type": "redacted_thinking",
@@ -1169,7 +1169,7 @@ mod tests {
                 &mut sr,
             );
             assert!(
-                matches!(out, Some(StreamEvent::Error { message }) if message.starts_with(crate::providers::anthropic::AUTO_RETRY_SENTINEL)),
+                matches!(out, Some(StreamEvent::Error { message }) if message.starts_with(crate::anthropic::AUTO_RETRY_SENTINEL)),
                 "{kind}"
             );
         }
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[test]
     fn server_tool_use_from_name_routes_to_server_variant() {
-        use crate::types::ToolKind;
+        use jfc_core::ToolKind;
         assert!(
             matches!(
                 ToolKind::from_name("server_tool_use:web_search"),

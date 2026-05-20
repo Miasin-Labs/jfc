@@ -16,7 +16,7 @@ use jfc_provider::{
     StreamConvention, StreamEvent, StreamOptions,
 };
 
-pub(crate) const AUTO_RETRY_SENTINEL: &str = jfc_provider::retry::OPENWEBUI_AUTO_RETRY_SENTINEL;
+pub const AUTO_RETRY_SENTINEL: &str = jfc_provider::retry::OPENWEBUI_AUTO_RETRY_SENTINEL;
 
 // Re-export the new modular auth types so external callers (CLI, etc.) can
 // reach them through `providers::openwebui::*`.

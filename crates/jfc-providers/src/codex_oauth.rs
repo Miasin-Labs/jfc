@@ -513,12 +513,12 @@ mod tests {
     fn codex_models_are_zero_cost_unknowns() {
         let models = CodexOAuthProvider::codex_models();
         assert!(models.iter().any(|m| m.id.as_str() == "gpt-5.1-codex"));
-        let usage = crate::types::ModelUsage {
+        let usage = jfc_core::ModelUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
         };
-        assert_eq!(crate::cost::cost_for("codex/gpt-5.1-codex", &usage), 0.0);
+        assert_eq!(jfc_provider::cost::cost_for("codex/gpt-5.1-codex", &usage), 0.0);
     }
 }
 
