@@ -1,0 +1,1358 @@
+use super::*;
+use super::visual::*;
+use crate::markdown;
+pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
+    use crate::message_view::MessageView;
+    use ratatui::widgets::Widget;
+
+    // Record area for the mouse handler (drag-scroll target).
+    *app.messages_rect.borrow_mut() = Some(area);
+    let t = app.theme;
+
+    if let Some(ref task_id) = app.viewing_task_id.clone() {
+        messages_task_view(f, app, area, task_id);
+        return;
+    }
+
+    // Reserve the scrollbar's 1-cell column up front so the
+    // total-lines computation uses the SAME width MessageView will
+    // actually render at. Earlier we computed total at full inner
+    // width and then chopped 1 col when the scrollbar showed —
+    // long lines wrapped at the smaller width during render but
+    // weren't counted in the wider-width total, so `follow_bottom`
+    // pinned to a position that still left the true last row
+    // offscreen until the next chunk's recompute caught up.
+    //
+    // Always reserving the column is cheap (1 col) and makes the
+    // scroll math consistent across "needs scrolling vs doesn't"
+    // states. A pure visual cost when no scrollbar is visible:
+    // ~1.5% of a 60-col message column.
+    //
+    // Total horizontal overhead for the message box:
+    //   borders (1 left + 1 right)  = 2
+    //   padding (1 left + 1 right)  = 2
+    //   scrollbar reserve           = 1
+    //                         total  = 5
+    let inner_width = area.width.saturating_sub(5) as usize;
+
+    // Build render items ONCE per frame and share them with `MessageView::render`.
+    // Pre-fix this function called `message_view_total_lines` (one
+    // `build_render_items` walk) and the widget then ran `build_render_items`
+    // again — gdb sampling showed the second walk's `Vec<Line<'static>>::to_vec`
+    // out of `RenderCache` was the dominant remaining hot spot once syntect/onig
+    // and the tool-height path were memoized. Sharing one items vec halves the
+    // per-frame deep-clone work.
+    //
+    // The earlier `app.total_lines` cache that gated `message_view_total_lines`
+    // is no longer needed — items are required for paint anyway, and
+    // `tool_block_height` now memoizes the integer height per terminal-state
+    // tool, so the per-item .sum() is a string of hash lookups.
+    let render_ctx = crate::message_view::RenderCtx::from_app(app);
+    let items = crate::message_view::build_render_items_pub(&render_ctx, inner_width);
+    let total_lines: usize = items.iter().map(|i| i.height(inner_width)).sum();
+
+    let visible = area.height.saturating_sub(2) as usize;
+
+    // Compute the new scroll offset locally — `items` borrows from `app`, so we
+    // can't write `app.scroll_offset` until after `MessageView::render` consumes
+    // them. The new value is also passed into `PrebuiltItems` so the widget
+    // sees it during paint instead of the (still-old) `app.scroll_offset`.
+    let scroll_before = app.scroll_offset;
+    let new_scroll_offset = if app.follow_bottom {
+        total_lines.saturating_sub(visible)
+    } else if app.scroll_offset + visible > total_lines {
+        total_lines.saturating_sub(visible)
+    } else {
+        app.scroll_offset
+    };
+    // Trace the scroll math result. Bug class this catches: when
+    // `total_lines` is undercounted (width mismatch), `scroll_offset`
+    // gets pinned to a value smaller than the true bottom row,
+    // leaving the latest content offscreen. Compare `total_lines`
+    // here against actual rendered height to spot off-by-N errors.
+    tracing::trace!(
+        target: "jfc::render::scroll",
+        inner_width,
+        total_lines,
+        visible,
+        scroll_before,
+        scroll_after = new_scroll_offset,
+        follow_bottom = app.follow_bottom,
+        "messages scroll math"
+    );
+
+    // Mirror `App::is_at_bottom` against the freshly-computed values so the
+    // overflow indicator reflects the post-render state, not last frame's.
+    let at_bottom = new_scroll_offset >= total_lines.saturating_sub(visible.max(1));
+    let title_right = if !at_bottom {
+        let remaining = total_lines.saturating_sub(new_scroll_offset + visible);
+        format!(" ↓ {remaining} more ")
+    } else {
+        String::new()
+    };
+
+    // No left-side title, no breathing animation. The frame is
+    // just a static rounded border with 1-cell horizontal padding
+    // so prose doesn't kiss the border. The right-side overflow
+    // indicator (`↓ N more`) still surfaces when the user has
+    // scrolled up.
+    //
+    // (Earlier this border pulsed `t.border ↔ t.accent` on a 1.5s
+    // loop while streaming. Removed at user request — the spinner
+    // row already signals streaming activity, the breathing
+    // border was decoration on top.)
+    let border_color = t.border;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .padding(Padding::horizontal(1))
+        .title_top(Line::from(Span::styled(title_right, t.style_text_muted)).right_aligned())
+        .style(Style::default().bg(t.bg));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Snapshot the values we'll need to commit back to App after `items` is
+    // dropped. The placeholder branch doesn't consume `items`, so we commit
+    // *after* the if/else with an explicit `drop(items)`.
+    let totals_to_commit = (
+        total_lines,
+        (app.messages.len(), app.streaming_text.len(), inner_width),
+        visible,
+        new_scroll_offset,
+    );
+
+    if app.messages.is_empty() && app.streaming_text.is_empty() {
+        // Boot sweep: for the first ~1.4s after launch, ripple a star
+        // cascade across the placeholder so the empty session has a
+        // moment of life. After the sweep settles, the placeholder
+        // reads as a calm muted prompt. Reduced-motion skips
+        // straight to the settled state.
+        let boot_age = app.launched_at.elapsed();
+        let boot_active =
+            boot_age < std::time::Duration::from_millis(1400) && !crate::spinner::reduced_motion();
+        const HEADLINE: &str = "What can I help you with?";
+        let headline_spans: Vec<Span<'static>> = if boot_active {
+            // Sweep one bright cell across the headline. Cell width
+            // sweeps left-to-right in 1100ms, then a 300ms tail
+            // settles. Lit cell uses accent + bold; the rest stays
+            // text_muted.
+            let sweep_progress = (boot_age.as_millis() as f32 / 1100.0).min(1.0);
+            let cursor = (sweep_progress * HEADLINE.chars().count() as f32) as i32;
+            HEADLINE
+                .chars()
+                .enumerate()
+                .map(|(i, ch)| {
+                    let dist = (i as i32 - cursor).abs();
+                    let style = if dist <= 1 {
+                        t.style_accent_bold
+                    } else {
+                        t.style_text_muted
+                    };
+                    Span::styled(ch.to_string(), style)
+                })
+                .collect()
+        } else {
+            vec![Span::styled(
+                HEADLINE.to_string(),
+                Style::default().fg(t.text_muted),
+            )]
+        };
+        let placeholder = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(headline_spans),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  ?    keybindings",
+                Style::default().fg(t.text_muted),
+            )),
+            Line::from(Span::styled(
+                "  Ctrl+P    palette · Ctrl+M    model picker",
+                Style::default().fg(t.text_muted),
+            )),
+        ])
+        .style(Style::default().bg(t.bg));
+        f.render_widget(placeholder, inner);
+    } else {
+        // Reserve a 1-col gutter on the right for the scrollbar
+        // ALWAYS (not just when scrollbar is visible). The total-
+        // lines computation above uses width-5 (border + padding +
+        // scrollbar) so the rendering must use the same width or the
+        // scroll math gets off-by-N when the gutter goes from
+        // "absent" to "present" mid-stream.
+        let scrollbar_visible = total_lines > visible && visible > 0;
+        let content_inner = Rect {
+            width: inner.width.saturating_sub(1),
+            ..inner
+        };
+        MessageView {
+            app,
+            prebuilt: Some(crate::message_view::PrebuiltItems {
+                items,
+                total_h: total_lines,
+                scroll: new_scroll_offset,
+            }),
+        }
+        .render(content_inner, f.buffer_mut());
+
+        if scrollbar_visible {
+            // ratatui::widgets::Scrollbar drives off ScrollbarState
+            // (content length, position, viewport length). Mapping
+            // jfc's existing `scroll_offset / total_lines` straight
+            // in. The thumb is bound to the body region (excluding
+            // top+bottom borders) by passing `area` (the bordered
+            // block) and using `Vertical-Right` orientation.
+            use ratatui::prelude::StatefulWidget;
+            use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+            let mut state = ScrollbarState::new(total_lines.saturating_sub(visible))
+                .position(new_scroll_offset)
+                .viewport_content_length(visible);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"))
+                .thumb_symbol("█")
+                .track_symbol(Some("│"))
+                .style(t.style_text_muted)
+                .thumb_style(t.style_accent);
+            scrollbar.render(area, f.buffer_mut(), &mut state);
+        }
+
+        // Token rain: a single cell at the bottom-right of the
+        // border that lights up briefly each time a token arrives.
+        // Reads as a tiny pulse counter — the user can see *that
+        // tokens are flowing* without staring at the verb. Renders
+        // only while streaming (idle = dark cell so it doesn't add
+        // visual noise to a settled session). Reduced-motion skips
+        // entirely so the cell stays at the static border glyph.
+        if app.is_streaming
+            && !crate::spinner::reduced_motion()
+            && area.height >= 2
+            && area.width >= 2
+        {
+            if let Some(when) = app.last_token_arrival {
+                let age_ms = when.elapsed().as_millis() as f32;
+                if age_ms < 800.0 {
+                    let intensity = 1.0 - (age_ms / 800.0);
+                    let cx = area.x + area.width.saturating_sub(1);
+                    let cy = area.y + area.height.saturating_sub(2);
+                    if cx < f.buffer_mut().area().right() && cy < f.buffer_mut().area().bottom() {
+                        let cell = &mut f.buffer_mut()[(cx, cy)];
+                        cell.set_symbol("●");
+                        let blended = pulse_color(t.border, t.accent, intensity);
+                        cell.set_style(Style::default().fg(blended));
+                    }
+                }
+            }
+        }
+    }
+
+    // Commit the freshly-computed values back to App. By this point both
+    // branches above have finished rendering and any borrow of `app` via the
+    // items vec is dropped. `App::max_scroll` (used by event-loop key
+    // handlers) reads these — staling them by a frame caused PgDn at end-of-
+    // buffer to silently no-op while still feeling laggy.
+    let (total_lines_v, total_lines_key_v, viewport_h_v, scroll_v) = totals_to_commit;
+    app.total_lines = total_lines_v;
+    app.total_lines_key = total_lines_key_v;
+    app.viewport_height = viewport_h_v;
+    app.scroll_offset = scroll_v;
+}
+
+/// Per-entry collapse threshold for the subagent task view. A single
+/// `BackgroundTask.messages[i]` longer than this (line count) renders as a
+/// 5-line preview + a muted "press o to expand" footer until the user toggles
+/// it via `viewing_task_expanded`. Smaller than `LargeText::COLLAPSE_LINES`
+/// because subagent entries are *individual* turn outputs, not whole tool
+/// results — 80 lines is already a wall in a narrow drilled-in pane.
+pub(crate) const TASK_VIEW_COLLAPSE_LINES: usize = 80;
+/// Per-entry byte threshold for the subagent task view. Mirrors the line
+/// threshold's reasoning at 5 KB — typical 200-line file dumps blow past this
+/// long before they hit `LargeText`'s 30 KB ceiling.
+pub(crate) const TASK_VIEW_COLLAPSE_BYTES: usize = 5 * 1024;
+/// Number of leading lines preserved when an entry collapses. Mirrors v126's
+/// `Read` tool preview length so the user gets enough context to decide
+/// whether to expand.
+const TASK_VIEW_COLLAPSE_PREVIEW_LINES: usize = 5;
+
+/// Render `BackgroundTask.messages` to ratatui `Line`s the same way the main
+/// chat handles assistant text: each raw string flows through
+/// `markdown::to_lines`, which calls `strip_inline_tool_xml` internally so
+/// `<tool_call>…</tool_call>` and `<tool_result>…</tool_result>` markers
+/// don't bleed into the screen as literal angle brackets, and code fences
+/// pick up syntect highlighting.
+///
+/// Long entries (>80 lines or >5 KB raw) collapse to a 5-line preview + a
+/// muted `… N more lines · press o to expand` row unless their index is in
+/// `expanded`. Pure function so tests can assert behavior without standing
+/// up a `Frame`/`Buffer`.
+///
+/// TODO Phase B: when `BackgroundTask.messages` migrates to
+/// `Vec<ChatMessage>`, this helper collapses into the same `MessageView`
+/// pipeline the main chat uses, picking up tool blocks, reasoning collapse,
+/// and diff rendering for free.
+pub(crate) fn task_view_body_lines(
+    messages: &[String],
+    expanded: &std::collections::HashSet<usize>,
+    theme: &Theme,
+    inner_width: usize,
+    task_done: bool,
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for (idx, raw) in messages.iter().enumerate() {
+        let line_count = raw.lines().count();
+        // For finished tasks, never auto-collapse — the whole point
+        // of opening the task view is to see the result. Only running
+        // tasks (whose output is still streaming) get the threshold.
+        let collapsible = !task_done
+            && (line_count > TASK_VIEW_COLLAPSE_LINES || raw.len() > TASK_VIEW_COLLAPSE_BYTES);
+        let is_expanded = expanded.contains(&idx);
+
+        if collapsible && !is_expanded {
+            // Truncate the raw string to the first N lines *before* feeding
+            // it to the markdown renderer — letting `to_lines` produce 80
+            // wrapped lines and then slicing produces visually-broken
+            // output (e.g. half a code fence). Slicing the source keeps
+            // markdown structure intact.
+            let preview: String = raw
+                .lines()
+                .take(TASK_VIEW_COLLAPSE_PREVIEW_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut preview_lines = markdown::to_lines(&preview, theme, inner_width);
+            out.append(&mut preview_lines);
+            let hidden = line_count.saturating_sub(TASK_VIEW_COLLAPSE_PREVIEW_LINES);
+            out.push(Line::from(Span::styled(
+                format!("… {hidden} more lines · press o to expand"),
+                Style::default().fg(theme.text_muted),
+            )));
+        } else {
+            let mut lines = markdown::to_lines(raw, theme, inner_width);
+            out.append(&mut lines);
+        }
+    }
+    out
+}
+
+pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_id: &str) {
+    let t = app.theme;
+    // Reserve same width as the main view: borders(2) + padding(2) + scrollbar(1) = 5
+    let inner_width = area.width.saturating_sub(5) as usize;
+
+    let (title_str, body_lines, use_message_view) = match app.background_tasks.get(task_id) {
+        None => (format!("task {task_id} (not found)"), Vec::new(), false),
+        Some(bt) => {
+            let title = format!(
+                " {} · {} ",
+                &bt.task_id.as_str()[..bt.task_id.as_str().len().min(12)],
+                bt.description
+            );
+            // Use the rich MessageView pipeline when we have structured messages.
+            // Fall back to the markdown string renderer for tasks that have no
+            // chat_messages yet (e.g. daemon-launched detached agents whose events
+            // only arrive as TaskProgress strings).
+            let use_mv = !bt.chat_messages.is_empty();
+            if use_mv {
+                (title, Vec::new(), true)
+            } else {
+                static EMPTY: std::sync::OnceLock<std::collections::HashSet<usize>> =
+                    std::sync::OnceLock::new();
+                let empty = EMPTY.get_or_init(std::collections::HashSet::new);
+                let expanded = app.viewing_task_expanded.get(task_id).unwrap_or(empty);
+                let task_done = matches!(bt.status, crate::types::TaskLifecycle::Completed);
+                let lines =
+                    task_view_body_lines(&bt.messages, expanded, &t, inner_width, task_done);
+                (title, lines, false)
+            }
+        }
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(t.style_accent)
+        .title(Span::styled(title_str, t.style_accent_bold))
+        .style(Style::default().bg(t.bg));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let task_status = app.background_tasks.get(task_id).map(|bt| bt.status);
+    let task_is_running = matches!(task_status, Some(crate::types::TaskLifecycle::Running));
+    let task_is_idle = matches!(task_status, Some(crate::types::TaskLifecycle::Idle));
+
+    // While the task is still running, append a spinner+"Receiving…"
+    // row so the user can tell at a glance that more output is on
+    // the way (vs. a frozen panel). The frame index pulls from the
+    // same wall-clock source as `tool_status_icon_animated` so the
+    // glyph rotates in lockstep with the running-tool bullet.
+    //
+    // For Idle teammates, swap the live spinner for a static "⏸ idle"
+    // hint so the user can tell the difference between "still
+    // streaming" and "agent finished its turn, waiting for next ping"
+    // without staring at the panel for a few seconds.
+    let visible = inner.height as usize;
+
+    if use_message_view {
+        // Rich MessageView path — same pipeline as the main chat.
+        use crate::message_view::{MessageView, PrebuiltItems, RenderCtx, build_render_items_ctx};
+        use ratatui::widgets::Widget;
+
+        let chat_msgs = app
+            .background_tasks
+            .get(task_id)
+            .map(|bt| bt.chat_messages.as_slice())
+            .unwrap_or(&[]);
+
+        // Compute scroll BEFORE borrowing app through items, then assign after.
+        let total_lines_est = {
+            let msgs = app
+                .background_tasks
+                .get(task_id)
+                .map(|bt| bt.chat_messages.as_slice())
+                .unwrap_or(&[]);
+            let ctx = RenderCtx::from_task(msgs, app);
+            let est_items = build_render_items_ctx(&ctx, inner_width);
+            est_items
+                .iter()
+                .map(|i| i.height(inner_width))
+                .sum::<usize>()
+        };
+        let new_scroll = if app.follow_bottom {
+            total_lines_est.saturating_sub(visible)
+        } else if app.scroll_offset + visible > total_lines_est {
+            total_lines_est.saturating_sub(visible)
+        } else {
+            app.scroll_offset
+        };
+        app.scroll_offset = new_scroll;
+        app.total_lines = total_lines_est;
+        app.viewport_height = visible;
+
+        // Now build items for real (same data, but app.scroll_offset is now settled).
+        let ctx = RenderCtx::from_task(chat_msgs, app);
+        let items = build_render_items_ctx(&ctx, inner_width);
+        let mv = MessageView {
+            app,
+            prebuilt: Some(PrebuiltItems {
+                items,
+                total_h: total_lines_est,
+                scroll: new_scroll,
+            }),
+        };
+        mv.render(inner, f.buffer_mut());
+
+        // Spinner / idle hint: paint it below the MessageView content
+        // in whatever space remains (or overlap the last row if full).
+        if task_is_running || task_is_idle {
+            let frame = (app.launched_at.elapsed().as_millis() / 80) as usize;
+            let hint_line = if task_is_running {
+                let spinner_glyph = crate::app::SPINNER[frame % crate::app::SPINNER.len()];
+                Line::from(vec![
+                    Span::styled(
+                        spinner_glyph.to_string(),
+                        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled("Receiving output…", Style::default().fg(t.text_muted)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("⏸  ", Style::default().fg(t.text_muted)),
+                    Span::styled(
+                        "idle — waiting for next message",
+                        Style::default()
+                            .fg(t.text_muted)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ])
+            };
+            // Render the hint in a 1-row strip at the bottom of the inner area.
+            if inner.height >= 1 {
+                let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+                f.render_widget(
+                    Paragraph::new(hint_line).style(Style::default().bg(t.bg)),
+                    hint_area,
+                );
+            }
+        }
+    } else {
+        // Legacy string-log path — used for daemon-launched agents whose
+        // events only arrive as TaskProgress strings with no structured data.
+        let mut body_lines = body_lines;
+        if task_is_running {
+            let frame = (app.launched_at.elapsed().as_millis() / 80) as usize;
+            let spinner_glyph = crate::app::SPINNER[frame % crate::app::SPINNER.len()];
+            if !body_lines.is_empty() {
+                body_lines.push(Line::from(""));
+            }
+            body_lines.push(Line::from(vec![
+                Span::styled(
+                    spinner_glyph.to_string(),
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("Receiving output…", Style::default().fg(t.text_muted)),
+            ]));
+        } else if task_is_idle {
+            if !body_lines.is_empty() {
+                body_lines.push(Line::from(""));
+            }
+            body_lines.push(Line::from(vec![
+                Span::styled("⏸  ", Style::default().fg(t.text_muted)),
+                Span::styled(
+                    "idle — waiting for next message",
+                    Style::default()
+                        .fg(t.text_muted)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+
+        let render_width = inner.width;
+        let total_lines: usize = body_lines
+            .iter()
+            .map(|line| {
+                if line.width() == 0 || render_width == 0 {
+                    1
+                } else {
+                    Paragraph::new(line.clone())
+                        .wrap(ratatui::widgets::Wrap { trim: false })
+                        .line_count(render_width)
+                        .max(1)
+                }
+            })
+            .sum();
+
+        if app.follow_bottom {
+            app.scroll_offset = total_lines.saturating_sub(visible);
+        } else if app.scroll_offset + visible > total_lines {
+            app.scroll_offset = total_lines.saturating_sub(visible);
+        }
+        app.total_lines = total_lines;
+        app.viewport_height = visible;
+
+        if body_lines.is_empty() {
+            let placeholder_text = if task_is_running {
+                "Waiting for first chunk…"
+            } else {
+                "No messages yet for this background task."
+            };
+            let placeholder = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    placeholder_text,
+                    Style::default().fg(t.text_muted),
+                )),
+            ])
+            .style(Style::default().bg(t.bg));
+            f.render_widget(placeholder, inner);
+        } else {
+            let para = Paragraph::new(body_lines)
+                .style(Style::default().bg(t.bg))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .scroll((app.scroll_offset as u16, 0));
+            f.render_widget(para, inner);
+        }
+    }
+}
+
+pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
+    use ratatui::widgets::Tabs;
+    let t = app.theme;
+    // Show one tab per running BackgroundTask. Selected tab tracks
+    // `viewing_task_id`. Hint row sits below the tabs so the user
+    // sees both `← →` cycling and the `↑` exit at a glance — the
+    // previous one-line `[1 of N] ◀ back ▶ next` collapsed both
+    // navigation and identity into a string that scanned poorly with
+    // 5+ tasks.
+    let task_ids: Vec<String> = app.background_tasks.keys().cloned().collect();
+    if task_ids.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "↑ back  · no tasks",
+                Style::default().fg(t.text_muted),
+            )]))
+            .style(Style::default().bg(t.bg)),
+            area,
+        );
+        return;
+    }
+    let selected = app
+        .viewing_task_id
+        .as_ref()
+        .and_then(|id| task_ids.iter().position(|t| t == id))
+        .unwrap_or(0);
+    let titles: Vec<Line> = task_ids
+        .iter()
+        .map(|id| {
+            let bt = app.background_tasks.get(id);
+            let desc = bt.map(|b| b.description.as_str()).unwrap_or(id.as_str());
+            let trimmed = if desc.chars().count() > 24 {
+                let mut s: String = desc.chars().take(23).collect();
+                s.push('…');
+                s
+            } else {
+                desc.to_owned()
+            };
+            // Status glyph: animated for Running, static for Completed/Failed.
+            let glyph = match bt.map(|b| &b.status) {
+                Some(crate::types::TaskLifecycle::Running) => {
+                    let frame = (app.launched_at.elapsed().as_millis() / 240) as usize;
+                    ["✶", "✷", "✸", "✹"][frame % 4]
+                }
+                Some(crate::types::TaskLifecycle::Completed) => "●",
+                _ => "○",
+            };
+            Line::from(vec![Span::raw(glyph), Span::raw(" "), Span::raw(trimmed)])
+        })
+        .collect();
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .style(t.style_text_secondary.bg(t.bg))
+        .highlight_style(
+            t.style_accent
+                .bg(t.surface_raised)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(Span::styled("·", t.style_text_muted))
+        .padding(" ", " ");
+    f.render_widget(tabs, split[0]);
+
+    let hint = Line::from(vec![Span::styled(
+        "↑ back · ←/→ cycle · ↓ jump to latest",
+        Style::default().fg(t.text_muted),
+    )]);
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().bg(t.bg)),
+        split[1],
+    );
+}
+
+/// Pick the next open task to surface under the spinner — first
+/// in-progress task wins, falling back to the first pending task.
+/// Mirrors v126 cli.js:323851 (`m` = next task) which indents
+/// `Next: ${m.subject}` underneath the spinner verb. Returns `None`
+/// when the task list is empty so the renderer can shrink to a 1-row
+/// spinner instead of leaving a blank second line.
+fn next_open_task_subject(app: &App) -> Option<String> {
+    use jfc_session::DeletedFilter;
+    let tasks = app.task_store.list(DeletedFilter::Exclude);
+    pick_next_open_task(&tasks).map(|t| t.subject.clone())
+}
+
+/// Pure priority picker for the "Next: …" sub-status. In-progress wins
+/// over pending so users see *what's running right now* rather than
+/// *what's queued*. Falls back to the first pending when nothing is
+/// active. Returns `None` when nothing is open. Extracted from
+/// `next_open_task_subject` so unit tests can exercise the priority
+/// rules without building an `App` fixture.
+fn pick_next_open_task(tasks: &[jfc_session::Task]) -> Option<&jfc_session::Task> {
+    use jfc_session::TaskStatus;
+    tasks
+        .iter()
+        .find(|t| matches!(t.status, TaskStatus::InProgress))
+        .or_else(|| {
+            tasks
+                .iter()
+                .find(|t| matches!(t.status, TaskStatus::Pending))
+        })
+}
+
+#[cfg(test)]
+mod next_task_tests {
+    use super::*;
+    use jfc_session::{DeletedFilter, TaskStore};
+
+    #[test]
+    fn empty_store_returns_none_normal() {
+        let store = TaskStore::in_memory();
+        let tasks = store.list(DeletedFilter::Exclude);
+        assert!(pick_next_open_task(&tasks).is_none());
+    }
+
+    #[test]
+    fn single_pending_task_picked_normal() {
+        let store = TaskStore::in_memory();
+        store
+            .create(
+                "Wire spinner".into(),
+                String::new(),
+                None,
+                Vec::<String>::new(),
+            )
+            .unwrap();
+        let tasks = store.list(DeletedFilter::Exclude);
+        let picked = pick_next_open_task(&tasks).expect("should pick the pending task");
+        assert_eq!(picked.subject, "Wire spinner");
+    }
+
+    #[test]
+    fn in_progress_wins_over_pending_normal() {
+        // v126's `Next: ${m.subject}` shows the *active* task, not the
+        // queued one — what's running matters more than what's queued.
+        let store = TaskStore::in_memory();
+        let pending = store
+            .create(
+                "First (pending)".into(),
+                String::new(),
+                None,
+                Vec::<String>::new(),
+            )
+            .unwrap();
+        let active = store
+            .create(
+                "Second (will be in-progress)".into(),
+                String::new(),
+                None,
+                Vec::<String>::new(),
+            )
+            .unwrap();
+        store
+            .update(
+                active.id.as_str(),
+                jfc_session::TaskPatch {
+                    status: Some(jfc_session::TaskStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let tasks = store.list(DeletedFilter::Exclude);
+        let picked = pick_next_open_task(&tasks).expect("in-progress should win");
+        assert_eq!(picked.subject, "Second (will be in-progress)");
+        // Sanity: the pending task IS in the list, just not picked.
+        assert!(
+            tasks.iter().any(|t| t.id.as_str() == pending.id.as_str()),
+            "pending task should still be in the list"
+        );
+    }
+
+    #[test]
+    fn only_completed_returns_none_robust() {
+        let store = TaskStore::in_memory();
+        let t = store
+            .create(
+                "Done thing".into(),
+                String::new(),
+                None,
+                Vec::<String>::new(),
+            )
+            .unwrap();
+        store
+            .update(
+                t.id.as_str(),
+                jfc_session::TaskPatch {
+                    status: Some(jfc_session::TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let tasks = store.list(DeletedFilter::Exclude);
+        assert!(
+            pick_next_open_task(&tasks).is_none(),
+            "completed-only store should yield no open task"
+        );
+    }
+
+    #[test]
+    fn skips_completed_when_pending_exists_robust() {
+        let store = TaskStore::in_memory();
+        let done = store
+            .create(
+                "Already done".into(),
+                String::new(),
+                None,
+                Vec::<String>::new(),
+            )
+            .unwrap();
+        store
+            .update(
+                done.id.as_str(),
+                jfc_session::TaskPatch {
+                    status: Some(jfc_session::TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .create(
+                "Still queued".into(),
+                String::new(),
+                None,
+                Vec::<String>::new(),
+            )
+            .unwrap();
+        let tasks = store.list(DeletedFilter::Exclude);
+        let picked = pick_next_open_task(&tasks).expect("pending should be picked");
+        assert_eq!(picked.subject, "Still queued");
+    }
+}
+
+/// Single- or double-row spinner widget rendered between the message
+/// scroll and the input bar (v126 layout, cli.js:323180-323235 + 323851).
+/// Row 0 = verb + elapsed + live-token-count + stall-status, composed in
+/// `crate::spinner`. Row 1 (when present) = `□ Next: <task subject>`,
+/// matching cli.js's `Next: ${m.subject}` line.
+pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let t = app.theme;
+    let now = std::time::Instant::now();
+    // Compaction takes precedence — a compact request runs to completion
+    // before the user's submit ever fires the actual stream, so during
+    // that window the spinner should read `Compacting…`, not a stale
+    // `Fermenting…` from the previous turn.
+    let row1_elapsed: std::time::Duration;
+    // `verb_spans` is the verb portion of the spinner row, with the
+    // shimmer-sweep highlight applied per-character. The renderer
+    // assembles the final line as `glyph + verb_spans + body` so the
+    // shimmer animates only the active verb (mirroring v126's
+    // `<GlimmerMessage>`). For the compact path we keep the old
+    // single-string body since compaction has its own status format.
+    let mut verb_spans: Vec<Span<'static>> = Vec::new();
+    let mut compact_body: Option<String> = None;
+    let mut tail_body: String = String::new();
+    let mut head_glyph: &'static str = "";
+    if let Some(started) = app.compacting_started_at {
+        let elapsed = now.duration_since(started);
+        row1_elapsed = elapsed;
+        // Pass the pre-compact token count so the spinner shows
+        // *what's being compacted*. `tool_ctx.approx_tokens` still
+        // reflects the pre-compact estimate during the compact (it's
+        // only updated to the post-compact value when CompactionDone
+        // fires), so it's the right source.
+        let pre = app.tool_ctx.approx_tokens as u64;
+        compact_body = Some(crate::spinner::format_compact_status(
+            app.spinner_frame,
+            elapsed,
+            pre,
+            app.compacting_output_chars,
+        ));
+    } else if let Some(recovery) = app.network_recovery_status.as_ref() {
+        let elapsed = app
+            .turn_started_at
+            .or(app.streaming_started_at)
+            .map(|t| now.duration_since(t))
+            .unwrap_or_default();
+        row1_elapsed = elapsed;
+        head_glyph = "!";
+        let label = match recovery.status_code {
+            Some(code) => format!("{code} {}", recovery.reason.label()),
+            None => recovery.reason.label().to_owned(),
+        };
+        verb_spans.push(Span::styled(
+            label,
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ));
+        let last_seen = now.duration_since(recovery.updated_at).as_secs();
+        tail_body = format!(
+            " · retrying {} · attempt {} · last {}s",
+            recovery.provider.label(),
+            recovery.attempts,
+            last_seen
+        );
+        if let Some(status) = app.claude_status.as_ref()
+            && let Some(outage) = status.outage_context()
+        {
+            tail_body.push_str(" · status ");
+            tail_body.push_str(&truncate_str(&outage, 72));
+        }
+    } else {
+        // Prefer the user-turn clock so a multi-step agentic loop reads
+        // cumulative time, not just the current sub-stream's age. Fall back
+        // to `streaming_started_at` for the brief first frame after submit
+        // before the agentic gate updates the turn clock.
+        let elapsed = app
+            .turn_started_at
+            .or(app.streaming_started_at)
+            .map(|t| now.duration_since(t))
+            .unwrap_or_default();
+        let stall = app
+            .streaming_last_token_at
+            .map(|t| now.duration_since(t))
+            .unwrap_or_default();
+        let stream_idle = app.last_stream_event_at.map(|t| now.duration_since(t));
+        // Anthropic SSE pushes cumulative `output_tokens` in every
+        // `message_delta` event (sse.rs:212-218 → StreamEvent::Usage →
+        // app.last_usage_output) — wire-truth, no estimation needed. OWUI /
+        // OpenAI providers only emit usage at `message_stop`; for those the
+        // wire value stays 0 mid-stream, so we fall back to chars/4 of the
+        // streamed text + reasoning. The first non-zero wire value beats the
+        // estimate; once the wire stops moving we keep the last known count.
+        let estimate = app.streaming_response_bytes as u64 / 4;
+        let live_tokens = crate::spinner::live_token_count(app.last_usage_output as u64, estimate);
+        // Thinking signal — Some(Live) while reasoning is streaming,
+        // Some(Done(d)) once we got the first text byte after thinking,
+        // None when the model isn't using extended thinking this turn.
+        let thinking = match (app.thinking_started_at, app.thinking_ended_at) {
+            (Some(_), None) => Some(crate::spinner::ThinkingStatus::Live),
+            (Some(start), Some(end)) => Some(crate::spinner::ThinkingStatus::Done(
+                end.duration_since(start),
+            )),
+            _ => None,
+        };
+        row1_elapsed = elapsed;
+        let segs = crate::spinner::status_segments(
+            app.spinner_frame,
+            elapsed,
+            live_tokens,
+            stall,
+            stream_idle,
+            thinking,
+        );
+        head_glyph = segs.glyph;
+        // Use the in-progress task's activeForm as the verb if available,
+        // matching Claude Code's behavior where the spinner shows what the
+        // model is actually doing rather than a random decorative verb.
+        let active_verb: std::borrow::Cow<'_, str> = {
+            let tasks = app.task_store.list(jfc_session::DeletedFilter::Exclude);
+            tasks
+                .iter()
+                .find(|t| t.status == jfc_session::TaskStatus::InProgress)
+                .and_then(|t| t.active_form.as_deref())
+                .map(|s| std::borrow::Cow::Owned(s.to_owned()))
+                .unwrap_or(std::borrow::Cow::Borrowed(segs.verb))
+        };
+        let verb_width = active_verb.chars().count();
+        let reduced = crate::spinner::reduced_motion();
+
+        // Stalled intensity: blends 0 → 1 over 30s..120s of token
+        // silence. Mirrors v126's `stalledIntensity` prop on
+        // <GlimmerMessage>. Drives a base-color fade from
+        // text_secondary toward error so the verb visibly "rusts" as
+        // the wait grows. Capped at 1.0; clamped to 0 below 30s so
+        // routine pauses don't tint the verb.
+        let stall_secs = stall.as_secs_f32();
+        let stalled_intensity = ((stall_secs - 30.0) / 90.0).clamp(0.0, 1.0);
+        let base_color = if stalled_intensity > 0.0 {
+            pulse_color(t.text_secondary, t.error, stalled_intensity)
+        } else {
+            t.text_secondary
+        };
+
+        if reduced {
+            // Reduced-motion: single static span at base color. No
+            // sweep, no per-cell coloring. Still respects the stalled
+            // fade because that's information, not decoration.
+            verb_spans.push(Span::styled(
+                active_verb.to_string(),
+                Style::default().fg(base_color),
+            ));
+        } else {
+            // Multi-cell wave: instead of a hard ±1 cell sweep, use a
+            // 5-cell falloff window so the highlight reads as a soft
+            // pulse rolling through the verb. Each cell's blend
+            // intensity drops by distance-from-index so the center is
+            // brightest and edges fade smoothly into the base color.
+            let g_idx = crate::spinner::glimmer_index(elapsed, verb_width, 50);
+            const HALF: i32 = 2; // ±2 cells = 5-cell wave width
+            for (i, ch) in active_verb.chars().enumerate() {
+                let dist = (i as i32 - g_idx).abs();
+                let intensity = if dist > HALF {
+                    0.0
+                } else {
+                    // Cosine falloff: 1 at center, 0 at HALF + 1.
+                    // Smoother than linear (no edge kink).
+                    let pct = dist as f32 / (HALF as f32 + 0.5);
+                    0.5 + 0.5 * (1.0 - pct).max(0.0)
+                };
+                let mut style = if intensity > 0.05 {
+                    let blended = pulse_color(base_color, t.accent, intensity);
+                    let mut s = Style::default().fg(blended);
+                    if intensity > 0.7 {
+                        s = s.add_modifier(Modifier::BOLD);
+                    }
+                    s
+                } else {
+                    Style::default().fg(base_color)
+                };
+                // When stalled, suppress the bold so the verb reads
+                // as quiet/dim rather than still active. Important
+                // because BOLD on a red-tinted base reads as alarm.
+                if stalled_intensity > 0.5 {
+                    style = style.remove_modifier(Modifier::BOLD);
+                }
+                verb_spans.push(Span::styled(ch.to_string(), style));
+            }
+        }
+
+        // Marching dots: replace the static "…" with a 4-frame
+        // rotation `   ` → `.  ` → `.. ` → `...` so the user reads
+        // motion even on a frozen verb. 250ms per step keeps the
+        // tempo unhurried; reduced-motion collapses to a steady "…".
+        let dots_str = if reduced {
+            "…".to_string()
+        } else {
+            const PATTERNS: &[&str] = &["   ", ".  ", ".. ", "..."];
+            let phase = (elapsed.as_millis() / 250) as usize;
+            PATTERNS[phase % PATTERNS.len()].to_string()
+        };
+        tail_body = format!("{dots_str} {}", segs.body);
+    };
+    // Multi-agent fanout: when one or more background subagents are
+    // running concurrently, append `· N agents…` to the spinner so the
+    // user knows there's parallel work happening. Mirrors v126's
+    // `3 agents…` indicator from cli.js (line 161622, task:background).
+    // Counts Running + Idle so a teammate that finished its turn but
+    // is still alive doesn't disappear from the spinner badge — the
+    // user might still SendMessage to it.
+    let active_agents = app
+        .background_tasks
+        .values()
+        .filter(|bt| bt.status.is_alive())
+        .count();
+    let mut spans: Vec<Span<'static>> = if let Some(body) = compact_body {
+        // Compact path: keep the legacy single-string format. Compaction
+        // has its own status line ("Compacting…", different shape) and
+        // animating the shimmer there would be misleading — the verb
+        // isn't a free-rotating spinner during compact.
+        vec![Span::styled(body, Style::default().fg(t.text_secondary))]
+    } else {
+        // Star glyph color pulses between accent and warning so the
+        // sphincter reads as a *living* element instead of a flat
+        // bullet. Phase derives from elapsed milliseconds (~1Hz cycle)
+        // so the pulse stays smooth even when the spinner_frame ticks
+        // at a different rate than the wallclock — running the pulse
+        // off the spinner_frame would jitter on slow-redraw frames.
+        // Reduced-motion: hold the glyph at full accent color so
+        // there's still a visual focal point but no animation.
+        let glyph_color = if crate::spinner::reduced_motion() {
+            t.accent
+        } else {
+            let phase_ms = (row1_elapsed.as_millis() % 1200) as f32 / 1200.0;
+            // Triangle wave: 0 → 1 → 0 over the cycle. Smoother than
+            // a sawtooth, no need for sine's f32::sin pulled in here.
+            let intensity = if phase_ms < 0.5 {
+                phase_ms * 2.0
+            } else {
+                (1.0 - phase_ms) * 2.0
+            };
+            pulse_color(t.accent, t.warning, intensity)
+        };
+        let mut s = vec![Span::styled(
+            format!("{} ", head_glyph),
+            Style::default()
+                .fg(glyph_color)
+                .add_modifier(Modifier::BOLD),
+        )];
+        s.extend(verb_spans);
+        s.push(Span::styled(tail_body, t.style_text_muted));
+        s
+    };
+    if active_agents > 0 {
+        let plural = if active_agents == 1 {
+            "agent"
+        } else {
+            "agents"
+        };
+        spans.push(Span::styled(
+            format!("  ⏵ {active_agents} {plural}…"),
+            t.style_accent,
+        ));
+    }
+    let line = Line::from(spans);
+    let row0 = Rect { height: 1, ..area };
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(t.bg)), row0);
+
+    // Row 1: "Next: <task subject>" if we have layout for it. Indent two
+    // cells so it aligns under the spinner frame's first character — same
+    // visual hierarchy as v126's nested status. Use dim/muted color so
+    // the verb on row 0 stays the dominant element.
+    if area.height >= 2 {
+        let row1 = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: 1,
+        };
+        // v126 cli.js:323851 picks `Next: m.subject ?? Tip: WH` —
+        // task wins if there is one, else show a rotating tip so the
+        // user has something useful to read while the model thinks.
+        // The "dismiss popups" hint is filtered when nothing's open so
+        // it doesn't read as a misleading instruction (the user looked
+        // for the popup it was talking about and there wasn't one).
+        let any_popup_open = app.show_help
+            || app.show_model_picker
+            || app.show_sidebar
+            || app.transcript_search.is_some()
+            || app.slash_popup_selected.is_some()
+            || app.pending_approval.is_some();
+        let (prefix, body) = if let Some(subj) = next_open_task_subject(app) {
+            ("  □ Next: ".to_string(), subj)
+        } else {
+            (
+                "  □ Tip: ".to_string(),
+                crate::spinner::tip_for_with_state(row1_elapsed, any_popup_open).to_string(),
+            )
+        };
+        let max_body = (area.width as usize).saturating_sub(prefix.chars().count() + 1);
+        let trimmed: String = if body.chars().count() > max_body && max_body > 1 {
+            let mut out: String = body.chars().take(max_body.saturating_sub(1)).collect();
+            out.push('…');
+            out
+        } else {
+            body
+        };
+        let row1_line = Line::from(vec![
+            Span::styled(prefix, Style::default().fg(t.text_muted)),
+            Span::styled(trimmed, Style::default().fg(t.text_muted)),
+        ]);
+        f.render_widget(
+            Paragraph::new(row1_line).style(Style::default().bg(t.bg)),
+            row1,
+        );
+    }
+
+    // The agent fan moved below the input — see `agent_fan_below_input`.
+    // Keeping the spinner row at 2 rows (verb + Next) means the
+    // "thinking" indicator stays glued to the prompt while the parallel
+    // work fan lives on the other side, where peripheral status belongs.
+}
+
+/// Pinned todo list above the input. Mirrors Claude Code's todo widget:
+/// one header row (`Tasks (k/n done)`), then up to the dynamic visible cap
+/// task rows with status glyphs (✓ done, ◐ in-progress, ☐ pending, ◯
+/// blocked-on-open-task) and an optional `… +N more` footer. In-progress
+/// tasks bubble to the top so the row the user is actively driving stays
+/// on screen even with a long pending queue. Per-subagent model badges
+/// deliberately don't render here — they belong in the agent fan tree
+/// where execution lives, not in the todo list where intent lives.
+pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 || area.width < 10 {
+        return;
+    }
+    let t = app.theme;
+    let all = app.task_store.list(jfc_session::DeletedFilter::Exclude);
+    if all.is_empty() {
+        return;
+    }
+    // Defensive parity with the layout-side hide-when-all-done logic:
+    // if the only thing we'd render is `Tasks (n/n done)` (no open
+    // tasks, no recently-completed fade-out tail), skip entirely. The
+    // layout already collapses our chunk height to 0 in that case, but
+    // this lets `tasks_pinned_row` be safely called from elsewhere.
+    let any_live = all.iter().any(|t| {
+        matches!(
+            t.status,
+            jfc_session::TaskStatus::Pending | jfc_session::TaskStatus::InProgress
+        )
+    });
+    let now = std::time::Instant::now();
+    let any_recent = all
+        .iter()
+        .filter(|t| matches!(t.status, jfc_session::TaskStatus::Completed))
+        .any(|t| {
+            app.task_completion_times
+                .get(&t.id)
+                .is_some_and(|ts| now.duration_since(*ts).as_secs() < 30)
+        });
+    if !any_live && !any_recent {
+        return;
+    }
+    let in_progress: Vec<_> = all
+        .iter()
+        .filter(|t| t.status == jfc_session::TaskStatus::InProgress)
+        .collect();
+    let mut pending: Vec<_> = all
+        .iter()
+        .filter(|t| t.status == jfc_session::TaskStatus::Pending)
+        .collect();
+    let completed: Vec<_> = all
+        .iter()
+        .filter(|t| t.status == jfc_session::TaskStatus::Completed)
+        .collect();
+    let completed_ids: std::collections::HashSet<&str> =
+        completed.iter().map(|t| t.id.as_str()).collect();
+
+    // Sort pending: unblocked first, then blocked (sorted by id for stability).
+    pending.sort_by(|a, b| {
+        let a_blocked = a
+            .blocked_by
+            .iter()
+            .any(|id| !completed_ids.contains(id.as_str()));
+        let b_blocked = b
+            .blocked_by
+            .iter()
+            .any(|id| !completed_ids.contains(id.as_str()));
+        a_blocked.cmp(&b_blocked).then_with(|| a.id.cmp(&b.id))
+    });
+
+    let total = in_progress.len() + pending.len() + completed.len();
+    let in_prog_count = in_progress.len();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{} ", total),
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "tasks",
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                " ({} done{}{})",
+                completed.len(),
+                if in_prog_count > 0 {
+                    format!(", {} in progress", in_prog_count)
+                } else {
+                    String::new()
+                },
+                if pending.len() > 0 {
+                    format!(", {} open", pending.len())
+                } else {
+                    String::new()
+                },
+            ),
+            Style::default().fg(t.text_muted),
+        ),
+    ]));
+
+    let render_width = area.width as usize;
+    // Priority order: recently-completed fade tail first (celebration
+    // moment), then in-progress (active work), then pending (unblocked
+    // before blocked). Matches CC 2.1.144's priority ordering.
+    let visible_budget = area.height.saturating_sub(1) as usize;
+    let mut rendered: Vec<Line<'static>> = Vec::new();
+
+    // Recently-completed first — show the "just finished" celebration
+    // at the top so the user sees momentum.
+    let now_sort = std::time::Instant::now();
+    for task in &completed {
+        if rendered.len() >= visible_budget {
+            break;
+        }
+        let recent = app
+            .task_completion_times
+            .get(&task.id)
+            .is_some_and(|t| now_sort.duration_since(*t).as_secs() < 30);
+        if !recent {
+            continue;
+        }
+        let avail = render_width.saturating_sub(3);
+        rendered.push(Line::from(vec![
+            Span::styled("✓ ", Style::default().fg(t.success)),
+            Span::styled(
+                truncate_str(&task.subject, avail),
+                Style::default()
+                    .fg(t.text_muted)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            ),
+        ]));
+    }
+
+    // In-progress tasks with optional activeForm activity line below.
+    for task in &in_progress {
+        if rendered.len() >= visible_budget {
+            break;
+        }
+        let avail = render_width.saturating_sub(3);
+        rendered.push(Line::from(vec![
+            Span::styled(
+                "◐ ",
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_str(&task.subject, avail),
+                Style::default()
+                    .fg(t.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        // Show activeForm as a dim sub-line if it differs from subject
+        if let Some(ref form) = task.active_form {
+            if form != &task.subject && rendered.len() < visible_budget {
+                let sub_avail = render_width.saturating_sub(5);
+                rendered.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        truncate_str(form, sub_avail),
+                        Style::default()
+                            .fg(t.text_muted)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                    Span::styled("…", Style::default().fg(t.text_muted)),
+                ]));
+            }
+        }
+    }
+    for task in &pending {
+        if rendered.len() >= visible_budget {
+            break;
+        }
+        let open_blockers: Vec<&str> = task
+            .blocked_by
+            .iter()
+            .filter(|id| !completed_ids.contains(id.as_str()))
+            .map(|id| id.as_str())
+            .collect();
+        let blocked = !open_blockers.is_empty();
+        let icon = if blocked { "◯" } else { "☐" };
+        let color = if blocked {
+            t.text_muted
+        } else {
+            t.text_secondary
+        };
+        let blockers_suffix = if blocked {
+            format!(" · ⏳ {}", open_blockers.join(", "))
+        } else {
+            String::new()
+        };
+        let avail = render_width.saturating_sub(3 + blockers_suffix.len());
+        rendered.push(Line::from(vec![
+            Span::styled(format!("{icon} "), Style::default().fg(color)),
+            Span::styled(
+                truncate_str(&task.subject, avail),
+                Style::default().fg(color),
+            ),
+            Span::styled(
+                blockers_suffix,
+                Style::default()
+                    .fg(t.text_muted)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+
+    // Overflow footer if we couldn't fit everything.
+    let active_open = in_progress.len() + pending.len();
+    let hidden_open = active_open.saturating_sub(rendered.len());
+    if hidden_open > 0 && rendered.len() < visible_budget {
+        rendered.push(Line::from(Span::styled(
+            format!("  … +{hidden_open} more · open /tasks for the full list"),
+            Style::default()
+                .fg(t.text_muted)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    lines.extend(rendered);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.bg)), area);
+}
+
+/// Render the running-agents tree in its own chunk beneath the input box.
+/// Honors the same team-vs-subagent dispatch as the legacy in-spinner
+/// path. Skips entirely when there's no live data — caller already gates
+/// on `tree_rows > 0`, but defensive return keeps the function safe to
+/// call unconditionally in future call sites.
+pub(super) fn agent_fan_below_input(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    if app.team_context.is_active() {
+        render_teammate_tree(f, app, area);
+    } else {
+        render_subagent_tree(f, app, area);
+    }
+}
+
