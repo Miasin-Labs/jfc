@@ -55,19 +55,22 @@ pub(super) fn with_graph_session_mut<R>(
 ) -> Result<R, String> {
     let key = graph_session_cache_key(cwd);
 
+    // Recover from poisoning rather than failing the mutation — see
+    // `get_or_build_graph_session` for the rationale.
+    let lock_recover = |g: std::sync::LockResult<_>| match g {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
     let session = {
-        let mut cache = graph_session_cache()
-            .lock()
-            .map_err(|_| "graph cache mutex poisoned".to_string())?;
+        let mut cache = lock_recover(graph_session_cache().lock());
         if let Some(session) = cache.remove(&key) {
             session
         } else {
             drop(cache);
 
             let built = build_graph_session_for_key(key.clone());
-            let mut cache = graph_session_cache()
-                .lock()
-                .map_err(|_| "graph cache mutex poisoned".to_string())?;
+            let mut cache = lock_recover(graph_session_cache().lock());
             cache.remove(&key).unwrap_or(built)
         }
     };
@@ -75,18 +78,13 @@ pub(super) fn with_graph_session_mut<R>(
     let mut session = match Arc::try_unwrap(session) {
         Ok(session) => session,
         Err(shared) => {
-            if let Ok(mut cache) = graph_session_cache().lock() {
-                cache.insert(key, shared);
-            }
+            lock_recover(graph_session_cache().lock()).insert(key, shared);
             return Err("graph session is currently in use; retry coverage after the active graph query finishes".to_string());
         }
     };
 
     let output = f(&mut session);
-    graph_session_cache()
-        .lock()
-        .map_err(|_| "graph cache mutex poisoned".to_string())?
-        .insert(key, Arc::new(session));
+    lock_recover(graph_session_cache().lock()).insert(key, Arc::new(session));
     Ok(output)
 }
 
@@ -101,9 +99,16 @@ pub(super) fn get_or_build_graph_session(
     cwd: &std::path::Path,
 ) -> Arc<jfc_graph::session::GraphSession> {
     let key = graph_session_cache_key(cwd);
-    let cache = graph_session_cache()
-        .lock()
-        .expect("graph cache mutex poisoned");
+    // Recover from a poisoned mutex by taking the inner data and
+    // continuing — a panic during graph build would otherwise wedge
+    // every subsequent UI tick that touches this cache (every
+    // `graph_query` tool call and every status-bar redraw that reads
+    // graph state). The cache content is plain `HashMap<PathBuf, Arc<…>>`;
+    // a poisoned inner is at worst a stale entry, which we tolerate.
+    let cache = match graph_session_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     if let Some(existing) = cache.get(&key) {
         return Arc::clone(existing);
     }
@@ -113,9 +118,10 @@ pub(super) fn get_or_build_graph_session(
 
     let session = build_graph_session_for_key(key.clone());
 
-    let mut cache = graph_session_cache()
-        .lock()
-        .expect("graph cache mutex poisoned");
+    let mut cache = match graph_session_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     // Double-check: another thread may have built it while we were building.
     if let Some(existing) = cache.get(&key) {
         return Arc::clone(existing);
@@ -128,9 +134,11 @@ pub(super) fn get_or_build_graph_session(
 /// `None`). Called after writes so the next graph query re-parses the
 /// affected file. Cheap — actual rebuild only happens on the next query.
 pub fn invalidate_graph_session_cache(cwd: Option<&std::path::Path>) {
-    let mut cache = graph_session_cache()
-        .lock()
-        .expect("graph cache mutex poisoned");
+    // Same poisoning rationale as `get_or_build_graph_session`.
+    let mut cache = match graph_session_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     match cwd {
         Some(c) => {
             let key = c.canonicalize().unwrap_or_else(|_| c.to_path_buf());

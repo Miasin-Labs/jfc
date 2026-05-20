@@ -231,7 +231,14 @@ impl EconomyAgentInvoker {
                 crate::runtime::TaskEvent::Started {
                     task_id: crate::ids::TaskId::from(task_id),
                     description: description.to_owned(),
-                    model_used: None,
+                    // Report the solver/validator model so the
+                    // BackgroundTask's `model_used` is populated. Without
+                    // it the per-progress token deltas this invoker emits
+                    // never roll into `app.usage_by_model` (the handler at
+                    // task.rs only credits usage when model_used is Some),
+                    // and the bounty's API spend stays invisible in the
+                    // status bar / cost panel — the billing blind spot.
+                    model_used: Some(self.model.as_str().to_owned()),
                     max_input_tokens: None,
                     // Economy solver/validator agents run in-process via the
                     // same Task tool path as ordinary subagents.

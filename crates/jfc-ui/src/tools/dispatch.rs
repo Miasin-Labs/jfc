@@ -604,7 +604,7 @@ pub async fn execute_tool(
             // intent and can summarize during the next turn.
             let client = match reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
-                .user_agent("jfc/0.1 (https://github.com/anthropics/jfc)")
+                .user_agent("jfc/0.1 (https://github.com/coleleavitt/jfc)")
                 .build()
             {
                 Ok(c) => c,

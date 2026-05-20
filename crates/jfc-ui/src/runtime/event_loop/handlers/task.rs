@@ -107,6 +107,7 @@ pub(crate) fn handle_task_started(
             description: description.clone(),
             status: TaskLifecycle::Running,
             started_at: std::time::Instant::now(),
+            completed_at: None,
             summary: None,
             error: None,
             last_tool: None,
@@ -269,6 +270,7 @@ pub(crate) fn handle_task_completed(
     let mut linked_task_id: Option<String> = None;
     if let Some(bt) = app.background_tasks.get_mut(task_id.as_str()) {
         bt.status = TaskLifecycle::Completed;
+        bt.completed_at = Some(std::time::Instant::now());
         bt.summary = Some(summary.clone());
         let elapsed_s = elapsed_ms / 1000;
         let entry = format!("[{elapsed_s}s] ✓ done — {summary}");
@@ -341,6 +343,7 @@ pub(crate) async fn handle_task_failed(
         } else {
             TaskLifecycle::Failed
         };
+        bt.completed_at = Some(std::time::Instant::now());
         bt.error = Some(error.clone());
         let prefix = if was_cancelled { "cancelled" } else { "failed" };
         let entry = format!("[{prefix}] {error}");

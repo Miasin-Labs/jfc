@@ -65,8 +65,16 @@ pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
             if bt.status.is_alive() {
                 return true;
             }
-            // Recently terminal — keep on the fan until the pin window expires.
-            now.duration_since(bt.started_at) < COMPLETED_PIN_WINDOW || bt.last_tool.is_some() // had at least one tool — surface its summary briefly
+            // Recently terminal — keep on the fan for COMPLETED_PIN_WINDOW
+            // measured from *completion*, not from start. Without this,
+            // a solver that ran longer than the pin window (e.g. a
+            // 7-minute bounty cycle) would vanish the very instant it
+            // completed, denying the user any glimpse of its terminal
+            // status. `completed_at` is None until the terminal
+            // transition writes it; fall back to started_at for
+            // legacy/migrated entries that never received the field.
+            let finished_at = bt.completed_at.unwrap_or(bt.started_at);
+            now.duration_since(finished_at) < COMPLETED_PIN_WINDOW || bt.last_tool.is_some()
         })
         .collect();
     if active.is_empty() {

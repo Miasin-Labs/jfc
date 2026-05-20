@@ -1248,6 +1248,7 @@ mod subagent_counter_tests {
             description: "research".into(),
             status: TaskLifecycle::Running,
             started_at: std::time::Instant::now(),
+            completed_at: None,
             summary: None,
             error: None,
             last_tool: None,

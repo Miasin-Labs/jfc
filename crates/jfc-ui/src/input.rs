@@ -24,6 +24,7 @@ mod session_commands;
 mod session_picker;
 mod slash_commands;
 mod submit;
+mod support;
 mod task_commands;
 mod theme_picker;
 mod worktree_commands;

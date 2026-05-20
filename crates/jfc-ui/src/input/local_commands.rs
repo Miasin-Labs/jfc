@@ -611,35 +611,70 @@ pub(super) fn handle_status_command(app: &mut App) {
         .push(crate::types::ChatMessage::assistant(lines.join("\n")));
 }
 
-/// `/bug` tells the user where to file a bug and includes useful session data.
+/// `/bug` opens a pre-filled GitHub issue with environment + session
+/// context and echoes the same context into the transcript so the user
+/// can copy it if their browser doesn't open. Mirrors `gh issue create
+/// --web` and Claude Code's `/bug`: the title carries the user's short
+/// summary; the body carries the structured environment block.
 pub(super) fn handle_bug_command(app: &mut App, description: String) {
     let session_id = app
         .current_session_id
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("(none)");
+    let trimmed_desc = description.trim();
+    let title = if trimmed_desc.is_empty() {
+        String::new()
+    } else {
+        // GitHub's issue title input caps at ~256 chars; clamp here so
+        // a giant paste doesn't produce a 414 URL-too-long response.
+        trimmed_desc.chars().take(120).collect()
+    };
     let body = format!(
-        "Bug reports go to https://github.com/anthropics/jfc/issues/new\n\n\
-         Include in your report:\n\
-         - **Session ID**: `{session_id}`\n\
-         - **Provider/model**: `{}` / `{}`\n\
-         - **Mode**: {:?}\n\
-         - **Description**: {}\n\n\
-         Tip: run `/dump-context` first to grab the full session for the report.",
+        "**Describe the issue**\n\n\
+         {}\n\n\
+         **Environment**\n\
+         - jfc version: `{}`\n\
+         - Provider/model: `{}` / `{}`\n\
+         - Permission mode: `{:?}`\n\
+         - OS: `{}`\n\
+         - Session ID: `{session_id}`\n\n\
+         Tip: run `/dump-context` first to attach the full session transcript.",
+        if trimmed_desc.is_empty() {
+            "(your description here)"
+        } else {
+            trimmed_desc
+        },
+        env!("CARGO_PKG_VERSION"),
         app.provider.name(),
         app.model.as_str(),
         app.permission_mode,
-        if description.trim().is_empty() {
-            "(your description here)"
-        } else {
-            description.trim()
-        }
+        std::env::consts::OS,
     );
+    let url = super::support::bug_report_url(&title, &body);
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", &url])
+        .spawn();
     app.messages.push(crate::types::ChatMessage::user(
         format!("/bug {description}").trim_end().into(),
     ));
     app.messages
-        .push(crate::types::ChatMessage::assistant(body));
+        .push(crate::types::ChatMessage::assistant(format!(
+            "Opened a pre-filled bug report at {}/issues/new in your browser.\n\
+             If nothing opened, copy the URL above. Context already attached:\n\
+             - **Session ID**: `{session_id}`\n\
+             - **Provider/model**: `{}` / `{}`\n\
+             - **Mode**: {:?}",
+            super::support::repo_url(),
+            app.provider.name(),
+            app.model.as_str(),
+            app.permission_mode,
+        )));
 }
 
 /// `/rewind [N]` drops the last N user/assistant turn pairs from the transcript.

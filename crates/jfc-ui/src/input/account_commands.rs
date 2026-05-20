@@ -215,9 +215,11 @@ pub(super) async fn cmd_release_notes(
             }
         })
         .unwrap_or_else(|| {
-            "Release notes unavailable in this build. Visit \
-                     https://github.com/RustProjects/jfc/releases for the full changelog."
-                .to_owned()
+            format!(
+                "Release notes unavailable in this build. Visit \
+                 {} for the full changelog.",
+                super::support::releases_url()
+            )
         });
     app.messages.push(ChatMessage::assistant(notes));
 }
@@ -229,22 +231,38 @@ pub(super) async fn cmd_feedback(
     _tx: Option<&mpsc::Sender<AppEvent>>,
 ) {
     app.messages.push(ChatMessage::user(text.to_owned()));
-    let url = "https://github.com/RustProjects/jfc/issues/new";
+    let session_id = app
+        .current_session_id
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("(none)");
+    let body = format!(
+        "**Describe the issue**\n\n\
+         (your description here)\n\n\
+         **Environment**\n\
+         - jfc version: `{}`\n\
+         - Provider/model: `{}` / `{}`\n\
+         - OS: `{}`\n\
+         - Session ID: `{session_id}`\n",
+        env!("CARGO_PKG_VERSION"),
+        app.provider.name(),
+        app.model.as_str(),
+        std::env::consts::OS,
+    );
+    let url = super::support::bug_report_url("", &body);
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    let _ = std::process::Command::new("open").arg(&url).spawn();
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", url])
+        .args(["/C", "start", &url])
         .spawn();
     app.messages.push(ChatMessage::assistant(format!(
-                "Opened {url} in your browser. File the issue there — the session id is `{}` if you want to attach it.",
-                app.current_session_id
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("(none)")
-            )));
+        "Opened a pre-filled bug report at {}/issues/new in your browser \
+         (version, model, OS, and session id `{session_id}` are already attached).",
+        super::support::repo_url(),
+    )));
 }
 
 pub(super) async fn cmd_upgrade(
@@ -254,13 +272,14 @@ pub(super) async fn cmd_upgrade(
     _tx: Option<&mpsc::Sender<AppEvent>>,
 ) {
     app.messages.push(ChatMessage::user(text.to_owned()));
-    app.messages.push(ChatMessage::assistant(
-                "To upgrade jfc, run one of:\n\
-                 * `cargo install --git https://github.com/RustProjects/jfc` (HEAD)\n\
-                 * `cargo install jfc` (latest crates.io release)\n\
-                 \n\
-                 If you installed via a package manager (homebrew, nix, AUR), use its update path instead.".to_owned(),
-            ));
+    app.messages.push(ChatMessage::assistant(format!(
+        "To upgrade jfc, run one of:\n\
+         * `cargo install --git {}` (HEAD)\n\
+         * `cargo install jfc` (latest crates.io release)\n\
+         \n\
+         If you installed via a package manager (homebrew, nix, AUR), use its update path instead.",
+        super::support::cargo_install_git_url(),
+    )));
 }
 
 pub(super) async fn cmd_batch(

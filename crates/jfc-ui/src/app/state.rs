@@ -263,6 +263,14 @@ pub struct BackgroundTask {
     pub description: String,
     pub status: crate::types::TaskLifecycle,
     pub started_at: std::time::Instant,
+    /// When the task transitioned into a terminal state (Completed /
+    /// Failed / Aborted). `None` while the task is still alive. Used by
+    /// `render_subagent_tree` to keep the "pinned" hollow-circle row on
+    /// screen for `COMPLETED_PIN_WINDOW` *after completion*, regardless
+    /// of how long the task ran. Without this a solver that took longer
+    /// than 5 minutes would vanish the very instant it finished — the
+    /// "disappearing solver" bug.
+    pub completed_at: Option<std::time::Instant>,
     pub summary: Option<String>,
     pub error: Option<String>,
     pub last_tool: Option<String>,

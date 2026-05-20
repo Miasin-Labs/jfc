@@ -126,6 +126,7 @@ async fn handle_runner(
                     if total > cap {
                         bt.budget_killed = true;
                         bt.status = crate::types::TaskLifecycle::Failed;
+                        bt.completed_at = Some(std::time::Instant::now());
                         bt.error = Some(format!(
                             "killed: token budget {cap} exceeded ({total} used)"
                         ));
@@ -180,6 +181,7 @@ async fn handle_runner(
             tracing::info!("[Swarm] Teammate {agent_id} completed");
             if let Some(bt) = app.background_tasks.get_mut(&task_id) {
                 bt.status = crate::types::TaskLifecycle::Completed;
+                bt.completed_at = Some(std::time::Instant::now());
             }
             // Mark the member inactive on the team file so a
             // later `set_member_active(true)` (e.g. an agent
@@ -211,6 +213,7 @@ async fn handle_runner(
             tracing::warn!("[Swarm] Teammate {agent_id} failed: {error}");
             if let Some(bt) = app.background_tasks.get_mut(&task_id) {
                 bt.status = crate::types::TaskLifecycle::Failed;
+                bt.completed_at = Some(std::time::Instant::now());
                 bt.error = Some(error);
             }
             if let Some(team_name) = app.team_context.team_name.clone() {
@@ -232,6 +235,7 @@ async fn handle_runner(
             tracing::info!("[Swarm] Teammate {agent_id} cancelled");
             if let Some(bt) = app.background_tasks.get_mut(&task_id) {
                 bt.status = crate::types::TaskLifecycle::Cancelled;
+                bt.completed_at = Some(std::time::Instant::now());
             }
             if let Some(team_name) = app.team_context.team_name.clone() {
                 let member_name = agent_id
