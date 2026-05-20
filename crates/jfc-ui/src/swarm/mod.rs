@@ -26,6 +26,8 @@
 //! ```
 
 pub mod constants;
+pub mod coordinator;
+pub mod executor;
 pub mod mailbox;
 pub mod permission_sync;
 pub mod runner;

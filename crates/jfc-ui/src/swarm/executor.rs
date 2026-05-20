@@ -515,6 +515,7 @@ pub(super) async fn run_single_turn(
                         Some(identity.team_name.as_str()),
                     ),
                 );
+            tokio::pin!(tool_future);
 
             let result = tokio::select! {
                 biased;
@@ -522,10 +523,10 @@ pub(super) async fn run_single_turn(
                     if changed.is_err() || *abort_rx.borrow() {
                         return TurnResult::Aborted;
                     }
-                    // Spurious wake — continue waiting on the tool
+                    // Spurious wake — finish waiting on the tool
                     tool_future.await
                 }
-                res = tool_future => res,
+                res = &mut tool_future => res,
             };
 
             tool_results.push(ProviderContent::ToolResult {
