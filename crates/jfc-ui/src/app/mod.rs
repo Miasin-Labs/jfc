@@ -1,6 +1,7 @@
 mod events;
 mod impls;
 mod permissions;
+mod shell_safety;
 mod recent_models;
 mod state;
 

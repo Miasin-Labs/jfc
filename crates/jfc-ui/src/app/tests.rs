@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use super::permissions::is_readonly_bash;
+use super::shell_safety::is_readonly_bash;
 use super::*;
 use crate::app::recent_models::save_recent_models;
 use crate::types::{
