@@ -376,7 +376,17 @@ pub async fn execute_tool(
             },
         ) => dispatch_heavy::execute_run_bounty(bounty_id, max_solvers, &cwd).await,
         (ToolKind::MarketStatus, ToolInput::MarketStatus { bounty_id }) => {
-            let orch = market_orchestrator().lock().await;
+            // Try-lock: a bounty cycle in flight holds this mutex for
+            // minutes. Returning a "busy" message lets the model
+            // continue and retry instead of stalling its turn on the
+            // orchestrator. See `economy::market_report_string` for the
+            // same pattern.
+            let Ok(orch) = market_orchestrator().try_lock() else {
+                return ExecutionResult::success(
+                    "Market is busy executing a bounty cycle. \
+                     Re-run market_status once the cycle completes.",
+                );
+            };
             let detector = match collusion_detector().lock() {
                 Ok(g) => g,
                 Err(e) => {

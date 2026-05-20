@@ -476,7 +476,9 @@ pub(crate) async fn run(
             ..Default::default()
         };
         let tx_guard = tx.clone();
-        tokio::spawn(async move {
+        // Outer JoinHandle parked on App so the watchdog can forcefully
+        // abort a wedged stream task (see App::active_stream_handle).
+        let handle = tokio::spawn(async move {
             let result = tokio::spawn(async move {
                 stream::stream_response(
                     provider,
@@ -502,6 +504,7 @@ pub(crate) async fn run(
                     .await;
             }
         });
+        app.active_stream_handle = Some(handle);
     }
 
     // Track when we last drew to implement frame-rate limiting.

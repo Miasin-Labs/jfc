@@ -247,6 +247,17 @@ pub const STREAM_WATCHDOG_TIMEOUT_SECS: u64 = 660;
 /// while still showing a meaningful trend.
 pub const TOKEN_HISTORY_CAP: usize = 32;
 
+/// Maximum number of pending `<system-reminder>` bodies retained between
+/// user turns. Reminders come from filesystem events, MCP changes, and
+/// watcher notifications — during long idle sessions a stream of unique
+/// log lines would otherwise grow `pending_background_reminders`
+/// unbounded. Once the queue is full, the oldest reminder is dropped
+/// before a new one is pushed; on the next turn the survivors get
+/// flushed via `take_background_reminders`. 20 is enough to never lose
+/// signal in normal use, small enough that the per-turn injection stays
+/// bounded.
+pub const BACKGROUND_REMINDERS_CAP: usize = 20;
+
 pub struct BackgroundTask {
     pub task_id: crate::ids::TaskId,
     pub description: String,
@@ -521,6 +532,15 @@ pub struct App {
     /// pattern: tasks holding state must be explicitly cancellable, not
     /// just dropped via a flag the task may never poll.
     pub cancel_token: tokio_util::sync::CancellationToken,
+    /// JoinHandle for the outer stream-driver task spawned per user turn.
+    /// Watchdog escalation: when `check_stream_watchdog` detects a
+    /// hard-idle stream it cancels the token (cooperative) *and* aborts
+    /// this handle (forceful). Without the forceful abort a stream task
+    /// stuck in a synchronous syscall (DNS resolution, audit-log write)
+    /// would survive the cancel and the next user submission would
+    /// race a second concurrent stream task writing the same conversation
+    /// buffer.
+    pub active_stream_handle: Option<tokio::task::JoinHandle<()>>,
     /// Timestamp of the most recent ESC press in the main shortcut
     /// handler. The next ESC within `INTERRUPT_DOUBLE_TAP_MS` triggers
     /// an interrupt instead of just clearing the input.
@@ -1081,6 +1101,7 @@ impl App {
             last_active_agent_task: None,
             interrupt_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            active_stream_handle: None,
             last_esc_at: None,
             always_approved: Vec::new(),
             session_approved: Vec::new(),
@@ -1240,7 +1261,12 @@ impl App {
 
     /// Push a `<system-reminder>` body onto the background-reminders
     /// queue. Dedupes by exact body — repeated filesystem events
-    /// produce at most one reminder per outgoing turn.
+    /// produce at most one reminder per outgoing turn. The queue is
+    /// capped at [`BACKGROUND_REMINDERS_CAP`]; when full, the oldest
+    /// entry is dropped before pushing. This keeps long idle sessions
+    /// from accumulating an unbounded stream of unique log lines that
+    /// would otherwise leak memory until the next user prompt drains
+    /// the queue.
     pub fn queue_background_reminder(&mut self, body: impl Into<String>) {
         let body = body.into();
         if self
@@ -1249,6 +1275,9 @@ impl App {
             .any(|existing| existing == &body)
         {
             return;
+        }
+        if self.pending_background_reminders.len() >= BACKGROUND_REMINDERS_CAP {
+            self.pending_background_reminders.remove(0);
         }
         self.pending_background_reminders.push(body);
     }

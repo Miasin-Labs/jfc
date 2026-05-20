@@ -953,7 +953,23 @@ pub(crate) fn parse_validator_output(text: &str) -> (Option<String>, f32, Option
 }
 
 pub(crate) async fn market_report_string() -> Result<String, String> {
-    let orch = market_orchestrator().lock().await;
+    // Try-lock instead of blocking: when a bounty cycle is running it
+    // holds the orchestrator mutex for its full multi-minute duration
+    // (solvers + validators round-trip through the LLM under the same
+    // lock). Blocking here would freeze every caller — `/market`, the
+    // model's own `market_status` tool — until the cycle finishes.
+    // Report busy state instead so the user / model can retry.
+    let orch = match market_orchestrator().try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return Ok(
+                "Agent economy is busy executing a bounty cycle. \
+                 Spend, trust, and ledger figures will refresh once the cycle \
+                 completes — re-run /market in a moment."
+                    .to_owned(),
+            );
+        }
+    };
     let detector = collusion_detector()
         .lock()
         .map_err(|e| format!("collusion detector mutex poisoned: {e}"))?;

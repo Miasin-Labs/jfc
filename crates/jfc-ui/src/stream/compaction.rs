@@ -203,6 +203,31 @@ pub(crate) async fn auto_compact_subagent_history(
         return false;
     }
 
+    // Progress gate: a "summary" larger than ~40% of the original
+    // transcript hasn't compressed anything. Without this guard a model
+    // that ignores the summarize instruction (or returns verbose prose
+    // when `<summary>` tags are absent) replaces the transcript with
+    // content of similar or greater size — the very next turn we'd cross
+    // the threshold again, re-compact, and burn tokens in a tight loop.
+    // Returning false lets the caller fall back to its hard byte-budget
+    // eviction instead.
+    const MAX_SUMMARY_RATIO_NUMERATOR: usize = 4;
+    const MAX_SUMMARY_RATIO_DENOMINATOR: usize = 10;
+    let max_summary_bytes = transcript
+        .len()
+        .saturating_mul(MAX_SUMMARY_RATIO_NUMERATOR)
+        / MAX_SUMMARY_RATIO_DENOMINATOR;
+    if summary.len() > max_summary_bytes {
+        tracing::warn!(
+            target: "jfc::stream",
+            transcript_bytes = transcript.len(),
+            summary_bytes = summary.len(),
+            "subagent compaction did not shrink transcript ≥ 60%; \
+             skipping splice to avoid re-compact loop"
+        );
+        return false;
+    }
+
     let summary_msg = ProviderMessage {
         role: ProviderRole::Assistant,
         content: vec![ProviderContent::Text(format!(
@@ -646,6 +671,29 @@ mod auto_compact_tests {
             ProviderContent::Text(t) => assert!(t.contains("the agent did things")),
             _ => panic!("expected summary body"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_compact_progress_gate_rejects_non_shrinking_summary_robust() {
+        // Provider that returns a summary nearly as big as the transcript
+        // — the progress gate must refuse the splice so the caller doesn't
+        // loop into another compaction next turn.
+        let bloated_summary = "y".repeat(200_000);
+        let provider = CannedSummaryProvider::new(&bloated_summary);
+        let big = "x".repeat(200_000);
+        let mut msgs = vec![
+            user_text("PROMPT"),
+            assistant_tool_use("t1", "Read"),
+            user_tool_result("t1", &big),
+            assistant_tool_use("t2", "Read"),
+            user_tool_result("t2", &big),
+            assistant_text("recent"),
+            user_text("ok"),
+        ];
+        let original_len = msgs.len();
+        let did = auto_compact_subagent_history(&mut msgs, &provider, ModelId::new("stub")).await;
+        assert!(!did, "must reject summary that is ~equal in size to transcript");
+        assert_eq!(msgs.len(), original_len);
     }
 
     #[test]

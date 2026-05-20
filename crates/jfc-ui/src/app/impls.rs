@@ -50,6 +50,18 @@ impl App {
             // background, can still modify messages, and can dispatch
             // tools into a stale context — the "half-dead state" bug.
             self.cancel_token.cancel();
+            // Belt-and-suspenders: forcefully abort the spawned driver
+            // task too. The cooperative cancel above only stops the
+            // task if it polls `cancel_token`. A task wedged inside a
+            // blocking syscall (sync DNS lookup, sync audit-log write)
+            // never reaches a `.cancelled()` check, so the next user
+            // submission would race a second concurrent stream task
+            // writing the same conversation buffer — interleaved
+            // assistant prose. `JoinHandle::abort` schedules a forced
+            // unwind at the next await point.
+            if let Some(handle) = self.active_stream_handle.take() {
+                handle.abort();
+            }
             // CRITICAL: replace the token after cancelling so the NEXT
             // user submission gets a fresh, uncancelled token. Without
             // this, every subsequent stream would immediately see

@@ -128,7 +128,9 @@ fn spawn_substream(app: &mut App, messages: Vec<ProviderMessage>, tx: &mpsc::Sen
         ..Default::default()
     };
     let tx_guard = tx.clone();
-    tokio::spawn(async move {
+    // Park the outer handle on App so the watchdog can forcefully
+    // abort a wedged stream task (see App::active_stream_handle).
+    let handle = tokio::spawn(async move {
         let result = tokio::spawn(async move {
             stream_response(
                 provider, messages, model, tx, interrupt, cancel, None, overrides,
@@ -147,6 +149,7 @@ fn spawn_substream(app: &mut App, messages: Vec<ProviderMessage>, tx: &mpsc::Sen
                 .await;
         }
     });
+    app.active_stream_handle = Some(handle);
 }
 
 /// Resume an Anthropic server-side sampling loop after `stop_reason: "pause_turn"`.

@@ -160,7 +160,9 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
         background_reminders: app.take_background_reminders(),
         ..Default::default()
     };
-    tokio::spawn(async move {
+    // Park the outer handle on App so the watchdog can forcefully
+    // abort a wedged stream task (see App::active_stream_handle).
+    let handle = tokio::spawn(async move {
         let result = tokio::spawn(async move {
             stream::stream_response(
                 provider, messages, model, tx_spawn, interrupt, cancel, None, overrides,
@@ -179,4 +181,5 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
                 .await;
         }
     });
+    app.active_stream_handle = Some(handle);
 }

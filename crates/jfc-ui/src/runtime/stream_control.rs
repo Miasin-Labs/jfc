@@ -79,7 +79,9 @@ pub(crate) fn restart_stream_in_place_with_overrides(
     let cancel = app.cancel_token.clone();
     let prev_msg_id = app.last_response_id.take();
     let tx_guard = tx.clone();
-    tokio::spawn(async move {
+    // Track the outer JoinHandle so the watchdog can forcefully abort
+    // it if the inner stream task gets stuck in a blocking syscall.
+    let handle = tokio::spawn(async move {
         let result = tokio::spawn(async move {
             stream::stream_response(
                 provider,
@@ -105,4 +107,5 @@ pub(crate) fn restart_stream_in_place_with_overrides(
                 .await;
         }
     });
+    app.active_stream_handle = Some(handle);
 }

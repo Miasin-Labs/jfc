@@ -13,11 +13,30 @@ use crate::types::ReplacementMode;
 /// in a single tool batch (parallel dispatch), this serializes them so the
 /// second sees the first's output. Without this, parallel edits to the same
 /// file race and one gets "old_string not found".
+///
+/// The map is opportunistically pruned on each acquire: any entry whose
+/// `Arc` has `strong_count == 1` (only the map's own reference) has no
+/// outstanding callers and is safe to drop. Without this prune the map
+/// would grow unbounded over long refactoring sessions — a 2 000-file
+/// repo sweep would leak 2 000 `Arc<Mutex<()>>` entries forever.
 static FILE_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Threshold above which `acquire_file_lock` runs a single pass of GC
+/// before inserting a new entry. Below this the map is small enough that
+/// the linear sweep isn't worth the cycles.
+const FILE_LOCKS_GC_THRESHOLD: usize = 64;
+
 pub(crate) async fn acquire_file_lock(path: &str) -> Arc<Mutex<()>> {
     let mut locks = FILE_LOCKS.lock().await;
+    if locks.len() >= FILE_LOCKS_GC_THRESHOLD {
+        // An entry is reclaimable iff no caller still holds a clone — the
+        // map's stored Arc is the only ref. `Arc::strong_count == 1` is
+        // sound here because we're inside the FILE_LOCKS mutex; no other
+        // task can clone the Arc out of the map between this check and
+        // the remove.
+        locks.retain(|_, m| Arc::strong_count(m) > 1);
+    }
     locks
         .entry(path.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))

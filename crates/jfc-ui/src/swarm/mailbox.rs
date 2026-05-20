@@ -155,7 +155,17 @@ pub async fn read_mailbox(agent_name: &str, team_name: &str) -> Vec<MailboxMessa
         .await
         .ok();
 
-    match fs::read_to_string(&path).await {
+    read_mailbox_unlocked(&path, agent_name).await
+}
+
+/// Internal: read messages from the inbox file **without** acquiring the
+/// advisory lock. Callers that are already holding the lock (write_to_mailbox,
+/// mark_message_read, mark_all_read) must use this path — otherwise the
+/// outer `FileLock::acquire` succeeds, then `read_mailbox` blocks for the
+/// full 1.5s timeout against its own lock before returning empty / stale
+/// data. Same return contract as `read_mailbox`.
+async fn read_mailbox_unlocked(path: &Path, agent_name: &str) -> Vec<MailboxMessage> {
+    match fs::read_to_string(path).await {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
@@ -208,8 +218,10 @@ pub async fn write_to_mailbox(
     // Acquire lock
     let lock = FileLock::acquire(lock_file, Duration::from_secs(10)).await?;
 
-    // Read current messages
-    let mut messages = read_mailbox(recipient, team_name).await;
+    // Read current messages — use the unlocked helper because we already
+    // hold the advisory lock. Calling `read_mailbox` here would block for
+    // its 1.5s lock-acquire timeout before giving up.
+    let mut messages = read_mailbox_unlocked(&path, recipient).await;
 
     // Append new message
     messages.push(message);
@@ -237,7 +249,7 @@ pub async fn mark_message_read(
 
     let lock = FileLock::acquire(lock_file, Duration::from_secs(10)).await?;
 
-    let mut messages = read_mailbox(agent_name, team_name).await;
+    let mut messages = read_mailbox_unlocked(&path, agent_name).await;
     if index < messages.len() {
         messages[index].read = true;
         let json = serde_json::to_string_pretty(&messages)?;
@@ -256,7 +268,7 @@ pub async fn mark_all_read(agent_name: &str, team_name: &str) -> anyhow::Result<
 
     let lock = FileLock::acquire(lock_file, Duration::from_secs(10)).await?;
 
-    let mut messages = read_mailbox(agent_name, team_name).await;
+    let mut messages = read_mailbox_unlocked(&path, agent_name).await;
     for msg in &mut messages {
         msg.read = true;
     }
