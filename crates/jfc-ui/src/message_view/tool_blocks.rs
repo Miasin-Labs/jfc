@@ -2,16 +2,17 @@ use super::assistant_parts::{sanitize_terminal_text, truncate_str};
 use super::bash::{BashCmdKind, classify_bash_cmd};
 use super::core::diagnostics_for_path;
 use super::detection::looks_like_git_diff_output;
+use super::formatters::{
+    produce_cat_markdown_output_lines, produce_cat_output_lines, produce_command_output_lines,
+    produce_compiler_output_lines, produce_file_list_lines, produce_git_diff_output_lines,
+    produce_git_log_output_lines, produce_grep_output_lines, produce_hex_dump_output_lines,
+    produce_path_list_output_lines, produce_tabular_list_output_lines,
+};
 use super::output_style::{
     colorize_diagnostic_prefix, colorize_git_commit_line, colorize_git_diff_line,
     colorize_git_log_line, colorize_git_push_line, colorize_git_status_line,
 };
-use super::outputs::{
-    produce_cat_markdown_output_lines, produce_cat_output_lines, produce_command_output_lines,
-    produce_compiler_output_lines, produce_file_list_lines, produce_git_diff_output_lines,
-    produce_git_log_output_lines, produce_grep_output_lines, produce_hex_dump_output_lines,
-    produce_path_list_output_lines, produce_tabular_list_output_lines, render_diff_skip,
-};
+use super::outputs::render_diff_skip;
 use super::syntax::{
     infer_lang_from_bash, infer_lang_from_tool, looks_like_markdown,
     produce_highlighted_block_lines, produce_highlighted_with_line_numbers_lines,

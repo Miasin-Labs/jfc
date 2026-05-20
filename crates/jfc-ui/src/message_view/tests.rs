@@ -3,11 +3,10 @@ use super::assistant_parts::{find_tool_at, sanitize_terminal_text, truncate_str}
 use super::bash::{BashCmdKind, classify_bash_cmd};
 use super::core::{RenderCtx, build_render_items_ctx, is_groupable, severity_rank};
 use super::detection::{looks_like_difftastic_output, looks_like_git_diff_output};
+use super::formatters::{produce_command_output_lines, produce_git_diff_output_lines};
 use super::output_style::path_color;
-use super::outputs::{
-    GrepLine, grep_target_file, parse_grep_line, parse_grep_no_path, parse_grep_with_sep,
-    produce_command_output_lines, produce_diff_view_lines, produce_git_diff_output_lines,
-};
+use super::outputs::produce_diff_view_lines;
+use super::truncation::{GrepLine, grep_target_file, parse_grep_line, parse_grep_no_path, parse_grep_with_sep};
 use super::syntax::{
     infer_lang_from_bash, infer_lang_from_tool, lang_from_path, looks_like_markdown, redact_quoted,
 };

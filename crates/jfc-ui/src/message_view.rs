@@ -15,6 +15,7 @@ mod assistant_parts;
 mod bash;
 mod core;
 mod detection;
+mod formatters;
 mod output_style;
 mod outputs;
 mod syntax;
@@ -22,6 +23,7 @@ mod terminal_output;
 mod tests;
 mod tool_blocks;
 mod tool_height;
+mod truncation;
 
 #[allow(unused_imports)]
 pub use assistant_parts::find_tool_at;
