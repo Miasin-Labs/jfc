@@ -119,6 +119,9 @@ pub(super) async fn cmd_login(
         crate::providers::login_dispatch::LoginDispatch::CodexOAuth(_) => {
             Some("https://auth.openai.com/codex/device")
         }
+        crate::providers::login_dispatch::LoginDispatch::AntigravityOAuth(_) => {
+            Some("https://accounts.google.com/")
+        }
         _ => None,
     };
     if let Some(url) = url {

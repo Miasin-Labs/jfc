@@ -27,6 +27,9 @@ pub enum LoginDispatch {
     ClaudeAiOAuth(String),
     /// `/login codex` — point at OpenAI Codex / ChatGPT OAuth commands.
     CodexOAuth(String),
+    /// `/login antigravity` — point at Google Antigravity OAuth commands
+    /// (Gemini 3.x + Claude via the Google AI Pro / Antigravity subscription).
+    AntigravityOAuth(String),
     /// `/login bedrock` — kick off [`super::bedrock_wizard::BedrockWizard`].
     StartBedrockWizard,
     /// `/login vertex` — kick off [`super::vertex_wizard::VertexWizard`].
@@ -48,6 +51,7 @@ impl fmt::Display for LoginDispatch {
             | Self::AnthropicApiKey(s)
             | Self::ClaudeAiOAuth(s)
             | Self::CodexOAuth(s)
+            | Self::AntigravityOAuth(s)
             | Self::LiteLlm(s)
             | Self::ConsoleApiKey(s)
             | Self::Unknown(s) => f.write_str(s),
@@ -59,13 +63,14 @@ impl fmt::Display for LoginDispatch {
 
 const CHOOSER_BODY: &str = "\
 Choose an authentication target:
-  /login anthropic   API key (ANTHROPIC_API_KEY)
-  /login claudeai    Claude Code OAuth (Pro / Max / Team)
-  /login codex       OpenAI Codex OAuth (ChatGPT Pro / Plus)
-  /login litellm     LiteLLM proxy (base URL + API key)
-  /login bedrock     AWS Bedrock (requires `aws` CLI)
-  /login vertex      GCP Vertex (requires `gcloud` CLI)
-  /login console     Anthropic Console API key";
+  /login anthropic    API key (ANTHROPIC_API_KEY)
+  /login claudeai     Claude Code OAuth (Pro / Max / Team)
+  /login codex        OpenAI Codex OAuth (ChatGPT Pro / Plus)
+  /login antigravity  Google Antigravity OAuth (Gemini 3.x + Claude via AI Pro)
+  /login litellm      LiteLLM proxy (base URL + API key)
+  /login bedrock      AWS Bedrock (requires `aws` CLI)
+  /login vertex       GCP Vertex (requires `gcloud` CLI)
+  /login console      Anthropic Console API key";
 
 const ANTHROPIC_API_KEY_BODY: &str = "\
 Anthropic API key sign-in:
@@ -110,6 +115,25 @@ LiteLLM proxy sign-in:
   Once configured, models are fetched dynamically from the proxy's
   /v1/models endpoint. Use `litellm/<model>` as the model selector.";
 
+const ANTIGRAVITY_OAUTH_BODY: &str = "\
+Google Antigravity OAuth sign-in:
+  Browser flow:
+    jfc auth antigravity login
+
+  Other commands:
+    jfc auth antigravity status
+    jfc auth antigravity logout
+
+  Antigravity OAuth uses Google's Code Assist API (cloudcode-pa.googleapis.com),
+  the same backend that fronts Gemini 3 Pro/Flash + Claude Opus/Sonnet for
+  Google AI Pro / Antigravity subscribers. Tokens are stored in the same
+  auth.json the other OAuth providers use. Usage cost is treated as $0 since
+  it's covered by the subscription.
+
+  Warning: Google has been known to suspend Antigravity accounts that use
+  third-party clients (this plugin) for sustained heavy usage — see the
+  upstream README before relying on this for production work.";
+
 const CODEX_OAUTH_BODY: &str = "\
 OpenAI Codex OAuth sign-in:
   Browser flow:
@@ -142,12 +166,15 @@ pub fn dispatch(arg: Option<&str>) -> LoginDispatch {
             "codex" | "chatgpt" | "openai-oauth" => {
                 LoginDispatch::CodexOAuth(CODEX_OAUTH_BODY.to_owned())
             }
+            "antigravity" | "google" | "gemini" | "google-oauth" => {
+                LoginDispatch::AntigravityOAuth(ANTIGRAVITY_OAUTH_BODY.to_owned())
+            }
             "litellm" | "lite-llm" | "lite_llm" => LoginDispatch::LiteLlm(LITELLM_BODY.to_owned()),
             "bedrock" | "aws" => LoginDispatch::StartBedrockWizard,
             "vertex" | "gcp" | "gcloud" => LoginDispatch::StartVertexWizard,
             "console" => LoginDispatch::ConsoleApiKey(CONSOLE_API_KEY_BODY.to_owned()),
             other => LoginDispatch::Unknown(format!(
-                "Unknown login target {:?}. Try one of: anthropic, claudeai, codex, litellm, bedrock, vertex, console.",
+                "Unknown login target {:?}. Try one of: anthropic, claudeai, codex, antigravity, litellm, bedrock, vertex, console.",
                 other
             )),
         },
@@ -168,6 +195,7 @@ mod tests {
                 assert!(body.contains("vertex"));
                 assert!(body.contains("claudeai"));
                 assert!(body.contains("codex"));
+                assert!(body.contains("antigravity"));
                 assert!(body.contains("litellm"));
                 assert!(body.contains("console"));
             }
@@ -189,6 +217,10 @@ mod tests {
         assert!(matches!(
             dispatch(Some("codex")),
             LoginDispatch::CodexOAuth(_)
+        ));
+        assert!(matches!(
+            dispatch(Some("antigravity")),
+            LoginDispatch::AntigravityOAuth(_)
         ));
         assert!(matches!(
             dispatch(Some("litellm")),
@@ -239,6 +271,15 @@ mod tests {
         assert!(matches!(
             dispatch(Some("chatgpt")),
             LoginDispatch::CodexOAuth(_)
+        ));
+        // Antigravity aliases: google, gemini, google-oauth all route the same.
+        assert!(matches!(
+            dispatch(Some("google")),
+            LoginDispatch::AntigravityOAuth(_)
+        ));
+        assert!(matches!(
+            dispatch(Some("gemini")),
+            LoginDispatch::AntigravityOAuth(_)
         ));
         assert!(matches!(
             dispatch(Some("lite-llm")),

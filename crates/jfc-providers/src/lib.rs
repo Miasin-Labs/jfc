@@ -3,6 +3,7 @@ pub mod anthropic_accounts;
 pub mod anthropic_models;
 pub mod anthropic_oauth;
 pub mod anthropic_oauth_login;
+pub mod antigravity_oauth;
 pub mod bedrock;
 pub mod bedrock_wizard;
 pub mod codex_oauth;
@@ -19,6 +20,7 @@ pub mod vertex_wizard;
 
 pub use anthropic::AnthropicProvider;
 pub use anthropic_oauth::AnthropicOAuthProvider;
+pub use antigravity_oauth::AntigravityOAuthProvider;
 pub use bedrock::BedrockProvider;
 pub use codex_oauth::CodexOAuthProvider;
 pub use litellm::LiteLLMProvider;
