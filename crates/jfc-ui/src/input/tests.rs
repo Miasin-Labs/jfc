@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::navigation::{scan_path_refs, user_prompts};
 use super::*;
 use crate::app::App;
-use crate::runtime::{AppEvent, UiEvent};
+use crate::runtime::{AppEvent, ToolEvent, UiEvent};
 #[allow(unused_imports)]
 use crate::types::*;
 use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
@@ -102,6 +102,24 @@ fn make_tool(id: &str, kind: ToolKind) -> ToolCall {
         kind,
         status: ToolStatus::Pending,
         input,
+        output: ToolOutput::Empty,
+        display: crate::types::ToolDisplayState::DEFAULT,
+        elapsed_ms: None,
+        started_at: None,
+        thought_signature: None,
+    }
+}
+
+fn make_bash_tool(id: &str, command: &str) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        kind: ToolKind::Bash,
+        status: ToolStatus::Pending,
+        input: ToolInput::Bash {
+            command: command.into(),
+            timeout: None,
+            workdir: None,
+        },
         output: ToolOutput::Empty,
         display: crate::types::ToolDisplayState::DEFAULT,
         elapsed_ms: None,
@@ -326,6 +344,26 @@ async fn approval_y_dispatches_and_clears_normal() {
 }
 
 #[tokio::test]
+async fn approval_y_does_not_emit_all_complete_before_tool_finishes_robust() {
+    let mut app = test_app();
+    app.pending_approval = Some(crate::app::PendingApproval {
+        tool: make_bash_tool("t1", "sleep 1; echo done"),
+        selected: 0,
+    });
+    let (tx, mut rx) = channel();
+
+    handle_key(&mut app, key(KeyCode::Char('y')), &tx)
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+    assert!(
+        !matches!(event, Ok(Some(AppEvent::Tool(ToolEvent::AllComplete)))),
+        "approval injected AllComplete before the dispatched tool completed"
+    );
+}
+
+#[tokio::test]
 async fn approval_n_denies_normal() {
     let mut app = test_app();
     arm_approval(&mut app, ToolKind::Bash);
@@ -334,6 +372,23 @@ async fn approval_n_denies_normal() {
         .await
         .unwrap();
     assert!(app.pending_approval.is_none());
+}
+
+#[tokio::test]
+async fn approval_n_last_tool_emits_all_complete_robust() {
+    let mut app = test_app();
+    arm_approval(&mut app, ToolKind::Bash);
+    let (tx, mut rx) = channel();
+
+    handle_key(&mut app, key(KeyCode::Char('n')), &tx)
+        .await
+        .unwrap();
+
+    let event = rx.recv().await;
+    assert!(matches!(
+        event,
+        Some(AppEvent::Tool(ToolEvent::AllComplete))
+    ));
 }
 
 #[tokio::test]

@@ -49,7 +49,11 @@ fn dispatch_approved_tool(app: &App, tool: ToolCall, tx: &mpsc::Sender<AppEvent>
 /// thinking the StreamDone handler would flush them — but `StreamDone(ToolUse)`
 /// has already fired by the time the user is approving, so anything dropped
 /// into `pending_tool_calls` here would sit there forever.
-fn advance_approval_queue(app: &mut App, tx: &mpsc::Sender<AppEvent>) {
+fn advance_approval_queue(
+    app: &mut App,
+    tx: &mpsc::Sender<AppEvent>,
+    dispatched_in_current_decision: bool,
+) {
     let mut auto_approved: Vec<ToolCall> = Vec::new();
     while let Some(next) = app.approval_queue.pop_front() {
         if !app.tool_needs_approval(&next) {
@@ -69,7 +73,8 @@ fn advance_approval_queue(app: &mut App, tx: &mpsc::Sender<AppEvent>) {
         });
         break;
     }
-    if !auto_approved.is_empty() {
+    let dispatched_auto_approved = !auto_approved.is_empty();
+    if dispatched_auto_approved {
         stream::dispatch_tools_batched(
             auto_approved,
             tx,
@@ -84,7 +89,7 @@ fn advance_approval_queue(app: &mut App, tx: &mpsc::Sender<AppEvent>) {
             app.teammate_event_tx.clone(),
             app.cancel_token.clone(),
         );
-    } else if app.pending_approval.is_none() {
+    } else if app.pending_approval.is_none() && !dispatched_in_current_decision {
         // All tools have been processed (approved/denied) with no
         // dispatched batch. Signal AllComplete so the agentic loop
         // can re-invoke the model with the denial results. Without
@@ -128,12 +133,12 @@ pub(super) fn handle_approval_key(
             let tool = app.pending_approval.take().unwrap().tool;
             insert_tool_into_message(app, &tool);
             dispatch_approved_tool(app, tool, tx);
-            advance_approval_queue(app, tx);
+            advance_approval_queue(app, tx, true);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
             let tool = app.pending_approval.take().unwrap().tool;
             deny_tool(app, tool);
-            advance_approval_queue(app, tx);
+            advance_approval_queue(app, tx, false);
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
             let name = approval.tool.kind.label().to_owned();
@@ -141,7 +146,7 @@ pub(super) fn handle_approval_key(
             let tool = app.pending_approval.take().unwrap().tool;
             insert_tool_into_message(app, &tool);
             dispatch_approved_tool(app, tool, tx);
-            advance_approval_queue(app, tx);
+            advance_approval_queue(app, tx, true);
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
             let name = approval.tool.kind.label().to_owned();
@@ -149,7 +154,7 @@ pub(super) fn handle_approval_key(
             let tool = app.pending_approval.take().unwrap().tool;
             insert_tool_into_message(app, &tool);
             dispatch_approved_tool(app, tool, tx);
-            advance_approval_queue(app, tx);
+            advance_approval_queue(app, tx, true);
         }
         KeyCode::Up if approval.selected > 0 => {
             approval.selected -= 1;
@@ -160,6 +165,7 @@ pub(super) fn handle_approval_key(
         KeyCode::Enter => {
             let choice = ApprovalChoice::ALL[approval.selected];
             let tool = app.pending_approval.take().unwrap().tool;
+            let mut dispatched = false;
             match choice {
                 ApprovalChoice::Yes | ApprovalChoice::YesSession => {
                     if choice == ApprovalChoice::YesSession {
@@ -168,18 +174,20 @@ pub(super) fn handle_approval_key(
                     }
                     insert_tool_into_message(app, &tool);
                     dispatch_approved_tool(app, tool, tx);
+                    dispatched = true;
                 }
                 ApprovalChoice::Always => {
                     let name = tool.kind.label().to_owned();
                     app.always_approved.push(name);
                     insert_tool_into_message(app, &tool);
                     dispatch_approved_tool(app, tool, tx);
+                    dispatched = true;
                 }
                 ApprovalChoice::No => {
                     deny_tool(app, tool);
                 }
             }
-            advance_approval_queue(app, tx);
+            advance_approval_queue(app, tx, dispatched);
         }
         KeyCode::Esc => {
             // Esc cancels the entire batch — drop the queue too. Otherwise
@@ -216,7 +224,7 @@ pub(super) fn handle_approval_key(
                     ),
                 );
             }
-            advance_approval_queue(app, tx);
+            advance_approval_queue(app, tx, true);
         }
         _ => {}
     }
