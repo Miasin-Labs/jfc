@@ -273,10 +273,14 @@ pub fn highlight_code_raw(
 /// - `wrap_w`: hard-wrap column; different widths must produce different cached vecs.
 /// - `with_gutter`: gates the leading `│ ` span (only the markdown code-fence path
 ///   uses it; tool bodies pass false).
-/// - `border` + `text_secondary`: the only theme-dependent colors used inside
-///   `highlight_code_inner`. The actual syntect highlighting theme is hardcoded
-///   to `base16-ocean.dark`, so we only key on what the user's `Theme` actually
-///   contributes.
+/// - `border` + `text_secondary`: jfc-theme-driven colors used outside syntect
+///   (gutter span + plaintext fallback span). Switching themes must miss the
+///   cache so the gutter & fallback don't keep their stale color.
+/// - `syntect_theme_name`: the syntect theme actually used for token foregrounds
+///   (resolved by `syntect_theme_for(theme)` so light jfc themes pick a light
+///   syntect theme). Two jfc themes that happen to share border+text_secondary
+///   but route to different syntect themes must NOT alias in the cache.
+#[derive(Clone, Debug)]
 struct HighlightCacheKey {
     lang_lower: String,
     code_hash: u64,
@@ -284,6 +288,7 @@ struct HighlightCacheKey {
     with_gutter: bool,
     border: Color,
     text_secondary: Color,
+    syntect_theme_name: &'static str,
 }
 
 impl PartialEq for HighlightCacheKey {
@@ -293,15 +298,26 @@ impl PartialEq for HighlightCacheKey {
             && self.with_gutter == o.with_gutter
             && self.border == o.border
             && self.text_secondary == o.text_secondary
+            && self.syntect_theme_name == o.syntect_theme_name
             && self.lang_lower == o.lang_lower
     }
 }
 impl Eq for HighlightCacheKey {}
+// SAFETY-CONTRACT: Hash MUST consult every field PartialEq consults. The earlier
+// impl hashed only {code_hash, wrap_w, with_gutter, lang_lower}, so a theme
+// switch (which mutates border/text_secondary) landed in the same hash bucket
+// as the pre-switch entry and HashMap::get_mut returned the stale Vec<Line>.
+// That manifested as gutter+fallback spans keeping their old theme's color
+// after `/theme`. See the Rust API guidelines C-HASH-EQ:
+// https://rust-lang.github.io/api-guidelines/interoperability.html#c-hash-eq
 impl Hash for HighlightCacheKey {
     fn hash<H: Hasher>(&self, h: &mut H) {
         self.code_hash.hash(h);
         self.wrap_w.hash(h);
         self.with_gutter.hash(h);
+        self.border.hash(h);
+        self.text_secondary.hash(h);
+        self.syntect_theme_name.hash(h);
         self.lang_lower.hash(h);
     }
 }
@@ -341,6 +357,37 @@ fn hash_code(code: &str) -> u64 {
     h.finish()
 }
 
+/// Pick the syntect highlighting theme whose token foregrounds suit the user's
+/// jfc `Theme`. Previously hardcoded to `base16-ocean.dark`, which paints
+/// dark-tuned foregrounds (deep blues, near-black punctuation) onto the cream
+/// backgrounds of jfc's `light` / `github-light` themes — code blocks came out
+/// barely legible.
+///
+/// Detection is by background luminance rather than a theme-name field (jfc's
+/// `Theme` carries no name), so any future light palette routes correctly with
+/// no extra wiring. The returned name is always present in `THEME_SET`
+/// (syntect defaults + the two-face bundle); `highlight_code_inner` still falls
+/// back to the first available theme if a name ever goes missing.
+fn syntect_theme_for(theme: &jfc_theme::Theme) -> &'static str {
+    // Relative luminance (Rec. 601 weights) of the editor background. A bright
+    // background (> ~50% luminance) means a light terminal, which needs a light
+    // syntect theme for readable contrast.
+    let lum = match theme.bg {
+        ratatui::style::Color::Rgb(r, g, b) => {
+            0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
+        }
+        // Non-RGB (named/indexed) backgrounds are rare in jfc themes; assume dark.
+        _ => 0.0,
+    };
+    if lum > 140.0 {
+        // Light terminal. `base16-ocean.light` ships in syntect's defaults so
+        // it's always present, unlike the two-face-only "GitHub".
+        "base16-ocean.light"
+    } else {
+        "base16-ocean.dark"
+    }
+}
+
 fn highlight_code_inner(
     lang: &str,
     code: &str,
@@ -365,6 +412,7 @@ fn highlight_code_inner(
     };
 
     let lower = lang.to_lowercase();
+    let theme_name = syntect_theme_for(theme);
     let cache_key = HighlightCacheKey {
         lang_lower: lower.clone(),
         code_hash: hash_code(code),
@@ -372,6 +420,7 @@ fn highlight_code_inner(
         with_gutter,
         border: theme.border,
         text_secondary: theme.text_secondary,
+        syntect_theme_name: theme_name,
     };
     {
         let mut cache = HIGHLIGHT_CACHE.lock().expect("highlight cache poisoned");
@@ -386,7 +435,6 @@ fn highlight_code_inner(
     let (syntax, active_set) =
         find_syntax_in_sets(lang, &lower, &SYNTAX_SET, EXTRA_SYNTAX_SET.as_ref());
 
-    let theme_name = "base16-ocean.dark";
     let hl_theme = THEME_SET
         .themes
         .get(theme_name)
@@ -893,6 +941,16 @@ struct MdWriter<'a, I> {
     line_prefixes: Vec<Span<'static>>,
     list_indices: Vec<Option<u64>>,
     code_highlighter: Option<HighlightLines<'a>>,
+    /// The `SyntaxSet` the active highlighter was resolved from. Carried
+    /// alongside `code_highlighter` because `HighlightLines::highlight_line`
+    /// needs to be called with the SAME set that produced the syntax reference
+    /// — passing a different set produces wrong tokenization (or panics on
+    /// some grammars that reference contexts the foreign set doesn't have).
+    /// Pre-fix this was hardcoded to `&SYNTAX_SET` at every call site, so any
+    /// syntax pulled from `EXTRA_SYNTAX_SET` (the 57 grammars under
+    /// `crates/jfc-ui/syntaxes/`, e.g. Zig / Nix / Fish / TypeScript) was
+    /// tokenized against the wrong set.
+    code_highlighter_set: Option<&'static syntect::parsing::SyntaxSet>,
     link: Option<CowStr<'a>>,
     table: Option<TableState>,
     needs_newline: bool,
@@ -923,6 +981,7 @@ where
             line_prefixes: Vec::new(),
             list_indices: Vec::new(),
             code_highlighter: None,
+            code_highlighter_set: None,
             link: None,
             table: None,
             needs_newline: false,
@@ -1125,6 +1184,7 @@ where
                 )));
                 self.needs_newline = true;
                 self.code_highlighter = None;
+                self.code_highlighter_set = None;
                 self.in_code_block = false;
             }
             TagEnd::List(_) => {
@@ -1203,6 +1263,13 @@ where
             return;
         }
 
+        // Snapshot the active set before the `&mut self.code_highlighter`
+        // borrow — `highlight_line` must be called against the SAME set the
+        // syntax reference came from. Falls back to the primary bundle if
+        // somehow unset (defensive: `set_code_highlighter` always populates it,
+        // but this keeps `unwrap`-free behavior under any future refactor).
+        let active_set: &syntect::parsing::SyntaxSet =
+            self.code_highlighter_set.unwrap_or(&SYNTAX_SET);
         if let Some(highlighter) = &mut self.code_highlighter {
             // Hard-wrap each highlighted line to viewport width *minus the
             // gutter* (the `│ ` prefix we prepend below) so ratatui's
@@ -1211,7 +1278,7 @@ where
             let inner_width = self.code_wrap_width.saturating_sub(2).max(20);
             let gutter_style = self.theme.style_border;
             for raw_line in LinesWithEndings::from(text.as_ref()) {
-                let Ok(ranges) = highlighter.highlight_line(raw_line, &SYNTAX_SET) else {
+                let Ok(ranges) = highlighter.highlight_line(raw_line, active_set) else {
                     continue;
                 };
                 let mut line_spans: Vec<Span<'static>> = Vec::with_capacity(ranges.len());
@@ -1313,19 +1380,23 @@ where
 
     fn set_code_highlighter(&mut self, lang: &str) {
         let lower = lang.to_lowercase();
-        let syntax = SYNTAX_SET
-            .find_syntax_by_token(lang)
-            .or_else(|| SYNTAX_SET.find_syntax_by_extension(lang))
-            .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
-            .or_else(|| {
-                SYNTAX_SET
-                    .syntaxes()
-                    .iter()
-                    .find(|s| s.name.to_lowercase() == lower)
-            })
-            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-        let ts = &THEME_SET.themes["base16-ocean.dark"];
+        // Single source of truth for grammar selection — searches the primary
+        // two-face bundle AND the build-time `EXTRA_SYNTAX_SET` so the bundled
+        // `syntaxes/` grammars are reachable here, not just in
+        // `highlight_code_inner`. Returns the matching set so `on_text` can call
+        // `highlight_line` against it.
+        let (syntax, active_set) =
+            find_syntax_in_sets(lang, &lower, &SYNTAX_SET, EXTRA_SYNTAX_SET.as_ref());
+        // Theme follows the user's jfc palette (light themes get a light syntect
+        // theme); previously hardcoded to `base16-ocean.dark`.
+        let theme_name = syntect_theme_for(self.theme);
+        let ts = THEME_SET
+            .themes
+            .get(theme_name)
+            .or_else(|| THEME_SET.themes.values().next())
+            .expect("THEME_SET is never empty");
         self.code_highlighter = Some(HighlightLines::new(syntax, ts));
+        self.code_highlighter_set = Some(active_set);
     }
 
     fn push_inline_style(&mut self, style: Style) {
@@ -1419,14 +1490,28 @@ fn to_roman(n: u64) -> String {
     out
 }
 
-/// Hard-wrap a single styled `Line` to `width` columns. When `width == 0` the
-/// line passes through unchanged (the renderer didn't supply a budget). Splits
-/// at character boundaries — terminal columns are approximated by `chars()`.
+/// Hard-wrap a single styled `Line` to `width` *terminal cells*. When
+/// `width == 0` the line passes through unchanged (the renderer didn't supply
+/// a budget). Cell-width aware: each char's display width is measured via
+/// `unicode-width` so multi-cell glyphs (CJK / emoji / fullwidth punctuation)
+/// don't overflow the column and get clipped by the renderer. This mirrors the
+/// fix already applied to `hard_wrap_str`; the earlier `chars().count()`版本
+/// made a 60-char CJK code line register as 60 cells when its real width was
+/// 120, so the right half fell off the viewport.
+///
+/// A single char wider than `width` (a 2-cell glyph in a 1-cell window) is
+/// emitted on its own line rather than infinite-looping on undivisible content.
 pub fn hard_wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthChar;
     if width == 0 {
         return vec![line];
     }
-    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    let total: usize = line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(1))
+        .sum();
     if total <= width {
         return vec![line];
     }
@@ -1436,16 +1521,20 @@ pub fn hard_wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     for span in line.spans {
         let style = span.style;
         let s: String = span.content.into_owned();
-        let mut chars = s.chars().peekable();
         let mut buf = String::new();
-        while let Some(ch) = chars.next() {
-            buf.push(ch);
-            col += 1;
-            if col >= width && chars.peek().is_some() {
+        for ch in s.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
+            // Emit the accumulated buffer before this char would breach the
+            // column. The `cw > 0` guard keeps zero-width combining marks
+            // attached to their preceding grapheme instead of triggering a
+            // spurious wrap.
+            if cw > 0 && col + cw > width && !buf.is_empty() {
                 current.push(Span::styled(std::mem::take(&mut buf), style));
                 out.push(Line::from(std::mem::take(&mut current)));
                 col = 0;
             }
+            buf.push(ch);
+            col += cw;
         }
         if !buf.is_empty() {
             current.push(Span::styled(buf, style));
@@ -2005,6 +2094,228 @@ mod tests {
             out,
             vec!["αβ".to_string(), "γδ".to_string(), "ε".to_string()]
         );
+    }
+
+    // Cell width of one wrapped `Line` (sum of its spans' display widths).
+    fn line_cells(line: &Line) -> usize {
+        use unicode_width::UnicodeWidthChar;
+        line.spans
+            .iter()
+            .flat_map(|s| s.content.chars())
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(1))
+            .sum()
+    }
+
+    #[test]
+    fn hard_wrap_line_zero_width_passthrough_robust() {
+        let line = Line::from("hello");
+        let out = hard_wrap_line(line, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(line_text(&out[0]), "hello");
+    }
+
+    #[test]
+    fn hard_wrap_line_ascii_splits_at_width_normal() {
+        let line = Line::from("abcdefghij");
+        let out = hard_wrap_line(line, 4);
+        let texts: Vec<String> = out.iter().map(line_text).collect();
+        assert_eq!(texts, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn hard_wrap_line_cjk_respects_cell_width_robust() {
+        // Each CJK glyph is 2 cells. With the old chars()-based wrap, 10 glyphs
+        // registered as "10 cols" and never wrapped at width=8 — overflowing
+        // the viewport by 12 cells and clipping the right half. Cell-aware
+        // wrapping must split so no output line exceeds 8 cells.
+        let line = Line::from("一二三四五六七八九十"); // 10 glyphs, 20 cells
+        let out = hard_wrap_line(line, 8);
+        assert!(out.len() > 1, "20-cell CJK line must wrap at width 8");
+        for l in &out {
+            assert!(
+                line_cells(l) <= 8,
+                "wrapped line {:?} exceeds 8 cells ({})",
+                line_text(l),
+                line_cells(l)
+            );
+        }
+        // No glyphs lost in the wrap.
+        let joined: String = out.iter().map(line_text).collect();
+        assert_eq!(joined, "一二三四五六七八九十");
+    }
+
+    // ── highlight cache key — Hash/Eq contract + theme routing ───────────
+
+    /// Hash two values with the default hasher and return the digests. Used
+    /// to assert the `Hash` impl actually distinguishes inputs that `Eq`
+    /// distinguishes (Rust's C-HASH-EQ contract: `a == b` ⇒ `hash(a) == hash(b)`,
+    /// but ALSO `a != b` SHOULD usually produce different hashes — otherwise
+    /// every entry collides into one bucket and HashMap degrades to a linear
+    /// scan that returns the first PartialEq-equal match).
+    fn digest<T: Hash>(t: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn highlight_cache_key_hash_consults_every_eq_field_robust() {
+        // Two keys differing only in `border`. The old buggy Hash impl skipped
+        // `border` entirely, so both digests were identical — meaning a theme
+        // switch landed in the same bucket as the pre-switch entry and
+        // HashMap::get_mut returned stale lines. Cell-by-cell:
+        let base = HighlightCacheKey {
+            lang_lower: "rust".to_owned(),
+            code_hash: 42,
+            wrap_w: 80,
+            with_gutter: true,
+            border: ratatui::style::Color::Rgb(0, 0, 0),
+            text_secondary: ratatui::style::Color::Rgb(100, 100, 100),
+            syntect_theme_name: "base16-ocean.dark",
+        };
+
+        let mut bumped = base.clone();
+        bumped.border = ratatui::style::Color::Rgb(255, 255, 255);
+        assert_ne!(base, bumped, "Eq must distinguish on border");
+        assert_ne!(
+            digest(&base),
+            digest(&bumped),
+            "Hash must distinguish on border (or theme switches return stale cached lines)"
+        );
+
+        let mut bumped = base.clone();
+        bumped.text_secondary = ratatui::style::Color::Rgb(200, 200, 200);
+        assert_ne!(base, bumped, "Eq must distinguish on text_secondary");
+        assert_ne!(
+            digest(&base),
+            digest(&bumped),
+            "Hash must distinguish on text_secondary"
+        );
+
+        let mut bumped = base.clone();
+        bumped.syntect_theme_name = "base16-ocean.light";
+        assert_ne!(base, bumped, "Eq must distinguish on syntect_theme_name");
+        assert_ne!(
+            digest(&base),
+            digest(&bumped),
+            "Hash must distinguish on syntect_theme_name"
+        );
+    }
+
+    #[test]
+    fn highlight_cache_key_equal_inputs_hash_equal_normal() {
+        // The other half of C-HASH-EQ: equal keys MUST hash equal. Trivial but
+        // worth pinning down so a future field addition that forgets to update
+        // Hash trips this test instead of silently corrupting the cache.
+        let k = HighlightCacheKey {
+            lang_lower: "py".to_owned(),
+            code_hash: 7,
+            wrap_w: 40,
+            with_gutter: false,
+            border: ratatui::style::Color::Rgb(50, 60, 70),
+            text_secondary: ratatui::style::Color::Rgb(120, 130, 140),
+            syntect_theme_name: "base16-ocean.dark",
+        };
+        assert_eq!(k, k.clone());
+        assert_eq!(digest(&k), digest(&k.clone()));
+    }
+
+    #[test]
+    fn code_block_recolors_after_theme_switch_robust() {
+        // End-to-end: render the same code block under a dark theme, then a
+        // light theme. The light render must produce different foreground
+        // colors. Pre-fix this failed two ways:
+        //   1. The syntect theme was hardcoded to `base16-ocean.dark`, so the
+        //      light render painted near-black text on a cream background.
+        //   2. Even if (1) were fixed, the cache's broken Hash impl bucketed
+        //      both renders together — the second `to_lines` call returned the
+        //      cached dark-theme Vec<Line> regardless of theme.
+        use jfc_theme::Theme;
+        let src = "```rust\nlet x = 42;\n```\n";
+
+        // Cache is process-global; clear it so other tests' entries can't
+        // satisfy our cache-miss expectations.
+        clear_highlight_cache();
+        let dark_lines = to_lines(src, &Theme::dark(), 80);
+        let light_lines = to_lines(src, &Theme::light(), 80);
+
+        // Find the highlighted code line in each render (contains "42").
+        let pick = |ls: &[Line]| -> Vec<ratatui::style::Color> {
+            ls.iter()
+                .find(|l| line_text(l).contains("42"))
+                .map(|l| l.spans.iter().filter_map(|s| s.style.fg).collect())
+                .unwrap_or_default()
+        };
+        let dark_fgs = pick(&dark_lines);
+        let light_fgs = pick(&light_lines);
+
+        assert!(
+            !dark_fgs.is_empty() && !light_fgs.is_empty(),
+            "both renders must produce styled spans on the code line"
+        );
+        assert_ne!(
+            dark_fgs, light_fgs,
+            "light + dark themes must produce different code foregrounds — \
+             if they're identical the cache returned a stale entry or the \
+             syntect theme is still hardcoded"
+        );
+    }
+
+    #[test]
+    fn syntect_theme_for_routes_by_background_luminance_robust() {
+        use jfc_theme::Theme;
+        // Dark themes — bg luminance well under the threshold.
+        assert_eq!(syntect_theme_for(&Theme::dark()), "base16-ocean.dark");
+        assert_eq!(
+            syntect_theme_for(&Theme::tokyo_night()),
+            "base16-ocean.dark"
+        );
+        assert_eq!(
+            syntect_theme_for(&Theme::gruvbox_dark()),
+            "base16-ocean.dark"
+        );
+
+        // Light themes — bg is cream / white, must route to the light variant.
+        // Pre-fix this returned "base16-ocean.dark", painting near-black
+        // foregrounds on a cream background and rendering code unreadable.
+        assert_eq!(syntect_theme_for(&Theme::light()), "base16-ocean.light");
+        assert_eq!(
+            syntect_theme_for(&Theme::github_light()),
+            "base16-ocean.light"
+        );
+    }
+
+    #[test]
+    fn hard_wrap_line_preserves_per_span_style_robust() {
+        use ratatui::style::{Color, Style};
+        // Two styled segments on one logical line. The column counter carries
+        // across the span boundary (these are visually contiguous, like the
+        // many small spans syntect emits per line), so the wrap point need not
+        // land on the boundary — but every character must keep its original
+        // color and no text may be lost.
+        let line = Line::from(vec![
+            Span::styled("aaaaaa", Style::default().fg(Color::Red)),
+            Span::styled("bbbbbb", Style::default().fg(Color::Blue)),
+        ]);
+        let out = hard_wrap_line(line, 4);
+        // Width respected.
+        for l in &out {
+            assert!(line_cells(l) <= 4, "line {:?} over 4 cells", line_text(l));
+        }
+        // Text fully preserved.
+        let joined: String = out.iter().map(line_text).collect();
+        assert_eq!(joined, "aaaaaabbbbbb");
+        // Every 'a' span stays red, every 'b' span stays blue.
+        for l in &out {
+            for sp in &l.spans {
+                let want = if sp.content.starts_with('a') {
+                    Color::Red
+                } else {
+                    Color::Blue
+                };
+                assert_eq!(sp.style.fg, Some(want), "span {:?} lost its color", sp.content);
+            }
+        }
     }
 
     // ── v126 ordinal formatting ───────────────────────────────────────────
