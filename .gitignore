@@ -9,3 +9,10 @@ target/
 .sisyphus/
 dhat-heap.json
 profiling-results/
+
+# Local tool state
+.antigravitycli/
+.codegraph/
+.idea/
+.jfc/scratchpad/
+*.bak
