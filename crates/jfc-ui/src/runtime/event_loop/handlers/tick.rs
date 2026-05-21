@@ -119,6 +119,7 @@ pub(crate) async fn handle_tick(
                 ),
             ),
         );
+        needs_draw = true;
     }
 
     // Speculative compaction: when the context reaches ~80% of the
@@ -182,12 +183,15 @@ pub(crate) async fn handle_tick(
             let lines = delta.round() as i32;
             if lines > 0 {
                 app.scroll_down(lines as usize);
+                needs_draw = true;
             } else if lines < 0 {
                 app.scroll_up(lines.unsigned_abs() as usize);
+                needs_draw = true;
             }
             app.scroll_velocity *= 0.85;
             if app.scroll_velocity.abs() < 0.5 {
                 app.scroll_velocity = 0.0;
+                needs_draw = true;
             }
         }
     }
@@ -235,6 +239,7 @@ pub(crate) async fn handle_tick(
             ),
         );
         app.queue_background_reminder(MCP_REFRESH_REMINDER);
+        needs_draw = true;
         // Re-sync sidebar MCP status after catalog change.
         if let Some(registry) = crate::tools::snapshot_mcp_registry() {
             let servers = registry
@@ -287,6 +292,7 @@ pub(crate) async fn handle_tick(
                 ),
             );
             app.queue_background_reminder(CONFIG_RELOAD_REMINDER);
+            needs_draw = true;
         }
     }
 
@@ -299,6 +305,7 @@ pub(crate) async fn handle_tick(
             &mut app.toasts,
             toast::Toast::new(toast::ToastKind::Info, "keybindings.toml reloaded"),
         );
+        needs_draw = true;
     }
 
     // Refresh the worktree count at most once per 10s,

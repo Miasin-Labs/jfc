@@ -297,7 +297,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     }
 
     if app.mention.active && !app.mention.candidates.is_empty() {
-        mention_popup(f, app, chunks[4]);
+        mention_popup(f, app, chunks[5]);
     }
 
     if app.show_diagnostic_panel && !app.diagnostics.is_empty() {

@@ -59,8 +59,12 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Prompt strip: 2 cells reserved (glyph + trailing space).
-    let prompt_cells: u16 = 2;
+    // Prompt strip: glyph display width + trailing space. Custom prompt
+    // glyphs can be double-width, so fixed 2-cell math lets the textarea
+    // overlap the prompt.
+    let prompt_width =
+        unicode_width::UnicodeWidthStr::width(prompt_char.as_str()).min(u16::MAX as usize) as u16;
+    let prompt_cells: u16 = prompt_width.saturating_add(1);
     let textarea_x = inner.x + prompt_cells.min(inner.width);
     let textarea_w = inner.width.saturating_sub(prompt_cells);
 
@@ -90,7 +94,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
             cell.set_style(style);
         }
         // Trailing space so the glyph isn't glued to text.
-        let space_x = inner.x + 1;
+        let space_x = inner.x.saturating_add(prompt_width);
         if space_x < buf.area().right() {
             let cell = &mut buf[(space_x, inner.y)];
             cell.set_symbol(" ");
