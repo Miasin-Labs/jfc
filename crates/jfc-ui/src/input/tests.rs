@@ -403,6 +403,28 @@ async fn approval_a_promotes_always_normal() {
 }
 
 #[tokio::test]
+async fn approval_a_batches_following_auto_approved_tools_robust() {
+    let mut app = test_app();
+    app.pending_approval = Some(crate::app::PendingApproval {
+        tool: make_bash_tool("t1", "sleep 1; echo slow"),
+        selected: 0,
+    });
+    app.approval_queue
+        .push_back(make_bash_tool("t2", "echo quick"));
+    let (tx, mut rx) = channel();
+
+    handle_key(&mut app, key(KeyCode::Char('a')), &tx)
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+    assert!(
+        !matches!(event, Ok(Some(AppEvent::Tool(ToolEvent::AllComplete)))),
+        "auto-approved queued tools were dispatched as a separate early-completing batch"
+    );
+}
+
+#[tokio::test]
 async fn approval_s_promotes_session_normal() {
     let mut app = test_app();
     arm_approval(&mut app, ToolKind::Bash);

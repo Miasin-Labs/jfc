@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::render::session_picker::filtered_sessions;
-use crate::runtime::{AppEvent, UiEvent};
+use crate::runtime::{AppEvent, UiEvent, send_critical};
 
 pub(super) fn open_session_picker(app: &mut App) {
     app.show_session_picker = true;
@@ -45,18 +45,7 @@ pub(super) fn handle_session_picker_key(
                     "session_picker selected, dispatching async load"
                 );
                 close_session_picker(app);
-                // try_send is the right call here — the picker runs on
-                // the input-thread side of the channel; blocking would
-                // freeze the UI. If the bus is somehow full we drop the
-                // selection silently and log it (the user can re-pick).
-                if let Err(e) = tx.try_send(AppEvent::Ui(UiEvent::LoadSession(chosen.clone()))) {
-                    tracing::warn!(
-                        target: "jfc::session_picker",
-                        session_id = %chosen,
-                        error = %e,
-                        "failed to enqueue LoadSession event"
-                    );
-                }
+                send_critical(tx, AppEvent::Ui(UiEvent::LoadSession(chosen)));
             }
         }
         KeyCode::Up if current > 0 => {

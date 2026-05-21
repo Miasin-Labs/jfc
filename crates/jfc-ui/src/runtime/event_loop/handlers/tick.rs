@@ -95,7 +95,9 @@ pub(crate) async fn handle_tick(
     // Auto-clear expired toasts every tick. Cheap (O(N) over
     // a tiny vec capped at MAX_TOASTS) and the only reliable
     // place to do it — toasts have no creation-time timer.
-    toast::prune_expired(&mut app.toasts, std::time::Instant::now());
+    if toast::prune_expired(&mut app.toasts, std::time::Instant::now()) {
+        needs_draw = true;
+    }
 
     // Idle-return detection: if 75+ minutes since last user
     // activity and we haven't shown the prompt yet, show a
@@ -311,11 +313,36 @@ pub(crate) async fn handle_tick(
             .unwrap_or(true);
     if due {
         let cwd = std::env::current_dir().unwrap_or_default();
-        app.worktree_count = match crate::worktrees::list_worktrees_async(&cwd).await {
-            Ok(list) => list.len().saturating_sub(1),
-            Err(_) => 0,
-        };
         app.worktree_count_last_refresh = Some(now);
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let count = match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                crate::worktrees::list_worktrees_async(&cwd),
+            )
+            .await
+            {
+                Ok(Ok(list)) => list.len().saturating_sub(1),
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        target: "jfc::worktrees",
+                        %error,
+                        "worktree count refresh failed"
+                    );
+                    0
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: "jfc::worktrees",
+                        "worktree count refresh timed out"
+                    );
+                    0
+                }
+            };
+            let _ = tx
+                .send(AppEvent::Ui(UiEvent::WorktreeCountLoaded(count)))
+                .await;
+        });
     }
 
     // Git branch refresh — every 5s from cached git root.

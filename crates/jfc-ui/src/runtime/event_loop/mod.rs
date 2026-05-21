@@ -355,8 +355,19 @@ pub(crate) async fn run(
         let tx = tx.clone();
         tokio::spawn(async move {
             let mut reader = event::EventStream::new();
-            while let Some(Ok(ev)) = reader.next().await {
-                let _ = tx.send(AppEvent::Ui(UiEvent::Term(ev))).await;
+            while let Some(ev) = reader.next().await {
+                match ev {
+                    Ok(ev) => {
+                        let _ = tx.send(AppEvent::Ui(UiEvent::Term(ev))).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "jfc::ui::input",
+                            %error,
+                            "terminal event read failed; keeping input reader alive"
+                        );
+                    }
+                }
             }
         });
     }
@@ -730,6 +741,9 @@ pub(crate) async fn run(
                 }
                 AppEvent::Ui(UiEvent::LoadSession(session_id)) => {
                     handlers::ui_actions::handle_load_session(&mut app, session_id).await;
+                }
+                AppEvent::Ui(UiEvent::WorktreeCountLoaded(count)) => {
+                    app.worktree_count = count;
                 }
                 AppEvent::Ui(UiEvent::ExitPlanModeRequested { plan }) => {
                     handlers::ui_actions::handle_exit_plan_mode(&mut app, plan);

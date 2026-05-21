@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::context::ReadDedupCache;
-use crate::runtime::{AppEvent, TaskEvent, TeamEvent, ToolEvent};
+use crate::runtime::{AppEvent, TaskEvent, TeamEvent, ToolEvent, send_critical};
 use crate::scheduler;
 use crate::types::{ToolCall, ToolInput};
 use jfc_provider::{ModelId, Provider};
@@ -96,10 +96,13 @@ pub(crate) fn dispatch_tools_batched(
             ) {
                 Ok(model) => model,
                 Err(error) => {
-                    let _ = tx_task.try_send(AppEvent::Tool(ToolEvent::Result {
-                        tool_id: crate::ids::ToolId::from(task_id),
-                        result: crate::runtime::ExecutionResult::failure(error),
-                    }));
+                    send_critical(
+                        &tx_task,
+                        AppEvent::Tool(ToolEvent::Result {
+                            tool_id: crate::ids::ToolId::from(task_id),
+                            result: crate::runtime::ExecutionResult::failure(error),
+                        }),
+                    );
                     done();
                     continue;
                 }
@@ -195,44 +198,53 @@ pub(crate) fn dispatch_tools_batched(
             // entire session, so the team-mode tree (`team-lead` leader,
             // teammate rows) never activated and we fell through to
             // the generic subagent tree even though we were in a team.
-            let _ = tx_task.try_send(AppEvent::Team(TeamEvent::Spawned {
-                name: name.clone(),
-                team_name: team_name.clone(),
-                agent_id: agent_id.clone(),
-                color: Some(color.clone()),
-                agent_type: task_input.subagent_type.clone(),
-                cwd: std::env::current_dir()
-                    .ok()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                // Hand the abort handle to the main loop. It moves into
-                // app.team_context.teammates[agent_id].abort_tx where it
-                // stays alive for the teammate's lifetime. Previously the
-                // sender was named `_abort_tx` and dropped on the next
-                // line, immediately closing the channel and forcing the
-                // runner into an Aborted exit on its first stream poll.
-                abort_tx: Some(abort_tx),
-            }));
-            let _ = tx_task.try_send(AppEvent::Task(TaskEvent::Started {
-                task_id: crate::ids::TaskId::from(runner_task_id.clone()),
-                description: format!("spawn teammate: {name}"),
-                model_used: Some(teammate_model_name),
-                max_input_tokens: agent_def.and_then(|a| a.max_input_tokens),
-                // Teammates are in-process (the runner runs inside this
-                // event loop) — DON'T let the UI's TaskStarted handler
-                // register them as detached daemon workers. The daemon
-                // reconciler would later mark them stale when the UI
-                // exits, mis-labeling foreground teammates as Failed.
-                is_detached: false,
-                parent_task_id: task_input.parent_task_id.clone(),
-            }));
+            send_critical(
+                &tx_task,
+                AppEvent::Team(TeamEvent::Spawned {
+                    name: name.clone(),
+                    team_name: team_name.clone(),
+                    agent_id: agent_id.clone(),
+                    color: Some(color.clone()),
+                    agent_type: task_input.subagent_type.clone(),
+                    cwd: std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    // Hand the abort handle to the main loop. It moves into
+                    // app.team_context.teammates[agent_id].abort_tx where it
+                    // stays alive for the teammate's lifetime. Previously the
+                    // sender was named `_abort_tx` and dropped on the next
+                    // line, immediately closing the channel and forcing the
+                    // runner into an Aborted exit on its first stream poll.
+                    abort_tx: Some(abort_tx),
+                }),
+            );
+            send_critical(
+                &tx_task,
+                AppEvent::Task(TaskEvent::Started {
+                    task_id: crate::ids::TaskId::from(runner_task_id.clone()),
+                    description: format!("spawn teammate: {name}"),
+                    model_used: Some(teammate_model_name),
+                    max_input_tokens: agent_def.and_then(|a| a.max_input_tokens),
+                    // Teammates are in-process (the runner runs inside this
+                    // event loop) — DON'T let the UI's TaskStarted handler
+                    // register them as detached daemon workers. The daemon
+                    // reconciler would later mark them stale when the UI
+                    // exits, mis-labeling foreground teammates as Failed.
+                    is_detached: false,
+                    parent_task_id: task_input.parent_task_id.clone(),
+                }),
+            );
 
-            let _ = tx_task.try_send(AppEvent::Tool(ToolEvent::Result {
-                tool_id: crate::ids::ToolId::from(task_id),
-                result: crate::runtime::ExecutionResult::success(
-                    serde_json::to_string_pretty(&result_json).unwrap_or_default(),
-                ),
-            }));
+            send_critical(
+                &tx_task,
+                AppEvent::Tool(ToolEvent::Result {
+                    tool_id: crate::ids::ToolId::from(task_id),
+                    result: crate::runtime::ExecutionResult::success(
+                        serde_json::to_string_pretty(&result_json).unwrap_or_default(),
+                    ),
+                }),
+            );
             done();
             continue;
         }
@@ -299,20 +311,23 @@ pub(crate) fn dispatch_tools_batched(
             let spawn_result = crate::daemon::spawn_background_agent_worker(launch);
             match spawn_result {
                 Ok(pid) => {
-                    let _ = tx_task.try_send(AppEvent::Task(TaskEvent::Started {
-                        task_id: crate::ids::TaskId::from(task_id.clone()),
-                        description: description.clone(),
-                        model_used: model_used.clone(),
-                        max_input_tokens,
-                        // True detached background worker: the worker
-                        // process already called
-                        // `record_background_agent_started_at` with its
-                        // own PID + launch_path. The UI's TaskStarted
-                        // handler must skip the registry write so it
-                        // doesn't clobber that record.
-                        is_detached: true,
-                        parent_task_id: task_input.parent_task_id.clone(),
-                    }));
+                    send_critical(
+                        &tx_task,
+                        AppEvent::Task(TaskEvent::Started {
+                            task_id: crate::ids::TaskId::from(task_id.clone()),
+                            description: description.clone(),
+                            model_used: model_used.clone(),
+                            max_input_tokens,
+                            // True detached background worker: the worker
+                            // process already called
+                            // `record_background_agent_started_at` with its
+                            // own PID + launch_path. The UI's TaskStarted
+                            // handler must skip the registry write so it
+                            // doesn't clobber that record.
+                            is_detached: true,
+                            parent_task_id: task_input.parent_task_id.clone(),
+                        }),
+                    );
                     let result_json = serde_json::json!({
                         "status": "background_task_started",
                         "task_id": task_id.clone(),
@@ -320,23 +335,32 @@ pub(crate) fn dispatch_tools_batched(
                         "description": description.clone(),
                         "message": "Task is running in a detached worker. Use `jfc daemon agents`, `jfc daemon attach <task_id>`, `jfc daemon wait <task_id>`, or `jfc daemon kill <task_id>`."
                     });
-                    let _ = tx_task.try_send(AppEvent::Tool(ToolEvent::Result {
-                        tool_id: crate::ids::ToolId::from(task_id.clone()),
-                        result: crate::runtime::ExecutionResult::success(
-                            serde_json::to_string_pretty(&result_json).unwrap_or_default(),
-                        ),
-                    }));
+                    send_critical(
+                        &tx_task,
+                        AppEvent::Tool(ToolEvent::Result {
+                            tool_id: crate::ids::ToolId::from(task_id.clone()),
+                            result: crate::runtime::ExecutionResult::success(
+                                serde_json::to_string_pretty(&result_json).unwrap_or_default(),
+                            ),
+                        }),
+                    );
                 }
                 Err(e) => {
                     let error = format!("failed to spawn background worker: {e}");
-                    let _ = tx_task.try_send(AppEvent::Task(TaskEvent::Failed {
-                        task_id: crate::ids::TaskId::from(task_id.clone()),
-                        error: error.clone(),
-                    }));
-                    let _ = tx_task.try_send(AppEvent::Tool(ToolEvent::Result {
-                        tool_id: crate::ids::ToolId::from(task_id.clone()),
-                        result: crate::runtime::ExecutionResult::failure(error),
-                    }));
+                    send_critical(
+                        &tx_task,
+                        AppEvent::Task(TaskEvent::Failed {
+                            task_id: crate::ids::TaskId::from(task_id.clone()),
+                            error: error.clone(),
+                        }),
+                    );
+                    send_critical(
+                        &tx_task,
+                        AppEvent::Tool(ToolEvent::Result {
+                            tool_id: crate::ids::ToolId::from(task_id.clone()),
+                            result: crate::runtime::ExecutionResult::failure(error),
+                        }),
+                    );
                 }
             }
             done();
@@ -894,10 +918,7 @@ fn build_task_notification(
     body.push_str(&format!(
         "\n<usage><agent_count>{}</agent_count><agents_dispatched>{}</agents_dispatched>\
          <cache_hits>{}</cache_hits><duration_ms>{}</duration_ms></usage>\n</task-notification>",
-        outcome.agent_count,
-        outcome.total_agents_dispatched,
-        outcome.cache_hits,
-        elapsed_ms
+        outcome.agent_count, outcome.total_agents_dispatched, outcome.cache_hits, elapsed_ms
     ));
     body
 }

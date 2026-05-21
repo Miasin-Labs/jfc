@@ -1,6 +1,7 @@
 use std::process::Stdio;
 
 use super::registry::{collusion_detector, market_orchestrator, snapshot_event_sender};
+use crate::runtime::send_critical;
 
 /// SwarmProvider impl for jfc-ui — delegates to the existing
 /// `worktrees` module. Each solver gets a worktree named
@@ -225,11 +226,9 @@ impl EconomyAgentInvoker {
     /// or `emit_failed` after.
     fn emit_started(&self, task_id: &str, description: &str) {
         if let Some(tx) = &self.event_tx {
-            // try_send: lifecycle events are critical but rare (one per task
-            // start), so a full buffer indicates the UI is genuinely overwhelmed
-            // — log and continue rather than block this sync path.
-            if let Err(e) = tx.try_send(crate::runtime::AppEvent::Task(
-                crate::runtime::TaskEvent::Started {
+            send_critical(
+                tx,
+                crate::runtime::AppEvent::Task(crate::runtime::TaskEvent::Started {
                     task_id: crate::ids::TaskId::from(task_id),
                     description: description.to_owned(),
                     // Report the solver/validator model so the
@@ -247,37 +246,33 @@ impl EconomyAgentInvoker {
                     // Economy agents aren't linked to a user-facing todo —
                     // they're spawned by the bounty market, not the task queue.
                     parent_task_id: None,
-                },
-            )) {
-                tracing::warn!(target: "jfc::tools", task_id, error = %e, "TaskStarted dropped: channel full");
-            }
+                }),
+            );
         }
     }
 
     fn emit_completed(&self, task_id: &str, summary: &str, elapsed_ms: u64) {
-        if let Some(tx) = &self.event_tx
-            && let Err(e) = tx.try_send(crate::runtime::AppEvent::Task(
-                crate::runtime::TaskEvent::Completed {
+        if let Some(tx) = &self.event_tx {
+            send_critical(
+                tx,
+                crate::runtime::AppEvent::Task(crate::runtime::TaskEvent::Completed {
                     task_id: crate::ids::TaskId::from(task_id),
                     summary: summary.to_owned(),
                     elapsed_ms,
-                },
-            ))
-        {
-            tracing::warn!(target: "jfc::tools", task_id, error = %e, "TaskCompleted dropped: channel full");
+                }),
+            );
         }
     }
 
     fn emit_failed(&self, task_id: &str, error: &str) {
-        if let Some(tx) = &self.event_tx
-            && let Err(e) = tx.try_send(crate::runtime::AppEvent::Task(
-                crate::runtime::TaskEvent::Failed {
+        if let Some(tx) = &self.event_tx {
+            send_critical(
+                tx,
+                crate::runtime::AppEvent::Task(crate::runtime::TaskEvent::Failed {
                     task_id: crate::ids::TaskId::from(task_id),
                     error: error.to_owned(),
-                },
-            ))
-        {
-            tracing::warn!(target: "jfc::tools", task_id, error = %e, "TaskFailed dropped: channel full");
+                }),
+            );
         }
     }
 }

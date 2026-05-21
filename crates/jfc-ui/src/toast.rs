@@ -60,9 +60,11 @@ fn default_ttl_for(kind: ToastKind) -> Duration {
 
 /// Drop expired toasts from the queue. Called from the `Tick` handler so
 /// the toast strip auto-clears without requiring user input. Preserves
-/// insertion order for the survivors.
-pub fn prune_expired(toasts: &mut Vec<Toast>, now: Instant) {
+/// insertion order for the survivors. Returns true when a redraw is needed.
+pub fn prune_expired(toasts: &mut Vec<Toast>, now: Instant) -> bool {
+    let before = toasts.len();
     toasts.retain(|t| !t.is_expired_at(now));
+    toasts.len() != before
 }
 
 /// Cap the number of toasts kept in memory. If the model spams toasts
@@ -123,7 +125,7 @@ mod tests {
                 ttl: Duration::from_secs(2),
             },
         ];
-        prune_expired(&mut toasts, now);
+        assert!(prune_expired(&mut toasts, now));
         assert_eq!(toasts.len(), 1);
         assert_eq!(toasts[0].text, "fresh");
     }
@@ -158,7 +160,7 @@ mod tests {
                 ttl: fresh_ttl,
             },
         ];
-        prune_expired(&mut toasts, now);
+        assert!(prune_expired(&mut toasts, now));
         let order: Vec<&str> = toasts.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(order, vec!["a", "b", "c"], "survivor order preserved");
     }
@@ -178,7 +180,20 @@ mod tests {
     #[test]
     fn empty_prune_no_panic_robust() {
         let mut toasts: Vec<Toast> = Vec::new();
-        prune_expired(&mut toasts, Instant::now());
+        assert!(!prune_expired(&mut toasts, Instant::now()));
         assert!(toasts.is_empty());
+    }
+
+    #[test]
+    fn prune_reports_no_change_when_none_expired_robust() {
+        let now = Instant::now();
+        let mut toasts = vec![Toast {
+            kind: ToastKind::Info,
+            text: "fresh".into(),
+            created_at: now,
+            ttl: Duration::from_secs(10),
+        }];
+        assert!(!prune_expired(&mut toasts, now));
+        assert_eq!(toasts.len(), 1);
     }
 }

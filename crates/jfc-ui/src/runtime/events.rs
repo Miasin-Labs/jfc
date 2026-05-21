@@ -109,6 +109,10 @@ pub enum UiEvent {
     /// because the picker handler is sync; routing through here keeps
     /// the picker thin and the disk I/O on the event-loop thread.
     LoadSession(crate::ids::SessionId),
+    /// Async result from the periodic `git worktree list` refresh. The Tick
+    /// handler spawns that subprocess off-loop so a slow or locked git repo
+    /// cannot stall redraw/input processing.
+    WorktreeCountLoaded(usize),
 }
 
 // `StreamEvent::Tool(ToolCall)` is the dominant streaming payload (every

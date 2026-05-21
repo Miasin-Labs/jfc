@@ -15,16 +15,21 @@ fn insert_tool_into_message(_app: &mut App, _tool: &ToolCall) {
     // intentionally empty — the tool is already in `messages` from StreamTool.
 }
 
-fn dispatch_approved_tool(app: &App, tool: ToolCall, tx: &mpsc::Sender<AppEvent>) {
-    tracing::info!(
-        target: "jfc::ui::approval",
-        tool_kind = tool.kind.label(),
-        tool_id = %tool.id,
-        queue_remaining = app.approval_queue.len(),
-        "approved → dispatch"
-    );
+fn dispatch_approved_tools(app: &App, tools: Vec<ToolCall>, tx: &mpsc::Sender<AppEvent>) {
+    if tools.is_empty() {
+        return;
+    }
+    for tool in &tools {
+        tracing::info!(
+            target: "jfc::ui::approval",
+            tool_kind = tool.kind.label(),
+            tool_id = %tool.id,
+            queue_remaining = app.approval_queue.len(),
+            "approved → dispatch"
+        );
+    }
     stream::dispatch_tools_batched(
-        vec![tool],
+        tools,
         tx,
         Arc::clone(&app.dedup_cache),
         Some(Arc::clone(&app.task_store)),
@@ -49,11 +54,7 @@ fn dispatch_approved_tool(app: &App, tool: ToolCall, tx: &mpsc::Sender<AppEvent>
 /// thinking the StreamDone handler would flush them — but `StreamDone(ToolUse)`
 /// has already fired by the time the user is approving, so anything dropped
 /// into `pending_tool_calls` here would sit there forever.
-fn advance_approval_queue(
-    app: &mut App,
-    tx: &mpsc::Sender<AppEvent>,
-    dispatched_in_current_decision: bool,
-) {
+fn advance_approval_queue(app: &mut App) -> Vec<ToolCall> {
     let mut auto_approved: Vec<ToolCall> = Vec::new();
     while let Some(next) = app.approval_queue.pop_front() {
         if !app.tool_needs_approval(&next) {
@@ -73,29 +74,24 @@ fn advance_approval_queue(
         });
         break;
     }
-    let dispatched_auto_approved = !auto_approved.is_empty();
-    if dispatched_auto_approved {
-        stream::dispatch_tools_batched(
-            auto_approved,
-            tx,
-            Arc::clone(&app.dedup_cache),
-            Some(Arc::clone(&app.task_store)),
-            app.team_context.team_name.clone(),
-            app.current_session_id
-                .as_ref()
-                .map(|id| id.as_str().to_owned()),
-            Arc::clone(&app.provider),
-            app.model.clone(),
-            app.teammate_event_tx.clone(),
-            app.cancel_token.clone(),
-        );
-    } else if app.pending_approval.is_none() && !dispatched_in_current_decision {
+    auto_approved
+}
+
+fn finish_approval_decision(
+    app: &mut App,
+    tx: &mpsc::Sender<AppEvent>,
+    mut dispatchable: Vec<ToolCall>,
+) {
+    dispatchable.extend(advance_approval_queue(app));
+    if dispatchable.is_empty() && app.pending_approval.is_none() {
         // All tools have been processed (approved/denied) with no
         // dispatched batch. Signal AllComplete so the agentic loop
         // can re-invoke the model with the denial results. Without
         // this, a denial as the last tool leaves the loop stalled —
         // so use send_critical (never drop it on a full channel).
         crate::runtime::send_critical(tx, AppEvent::Tool(crate::runtime::ToolEvent::AllComplete));
+    } else {
+        dispatch_approved_tools(app, dispatchable, tx);
     }
 }
 
@@ -132,29 +128,26 @@ pub(super) fn handle_approval_key(
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             let tool = app.pending_approval.take().unwrap().tool;
             insert_tool_into_message(app, &tool);
-            dispatch_approved_tool(app, tool, tx);
-            advance_approval_queue(app, tx, true);
+            finish_approval_decision(app, tx, vec![tool]);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
             let tool = app.pending_approval.take().unwrap().tool;
             deny_tool(app, tool);
-            advance_approval_queue(app, tx, false);
+            finish_approval_decision(app, tx, Vec::new());
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
             let name = approval.tool.kind.label().to_owned();
             app.always_approved.push(name);
             let tool = app.pending_approval.take().unwrap().tool;
             insert_tool_into_message(app, &tool);
-            dispatch_approved_tool(app, tool, tx);
-            advance_approval_queue(app, tx, true);
+            finish_approval_decision(app, tx, vec![tool]);
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
             let name = approval.tool.kind.label().to_owned();
             app.session_approved.push(name);
             let tool = app.pending_approval.take().unwrap().tool;
             insert_tool_into_message(app, &tool);
-            dispatch_approved_tool(app, tool, tx);
-            advance_approval_queue(app, tx, true);
+            finish_approval_decision(app, tx, vec![tool]);
         }
         KeyCode::Up if approval.selected > 0 => {
             approval.selected -= 1;
@@ -165,7 +158,7 @@ pub(super) fn handle_approval_key(
         KeyCode::Enter => {
             let choice = ApprovalChoice::ALL[approval.selected];
             let tool = app.pending_approval.take().unwrap().tool;
-            let mut dispatched = false;
+            let mut dispatchable = Vec::new();
             match choice {
                 ApprovalChoice::Yes | ApprovalChoice::YesSession => {
                     if choice == ApprovalChoice::YesSession {
@@ -173,21 +166,19 @@ pub(super) fn handle_approval_key(
                         app.session_approved.push(name);
                     }
                     insert_tool_into_message(app, &tool);
-                    dispatch_approved_tool(app, tool, tx);
-                    dispatched = true;
+                    dispatchable.push(tool);
                 }
                 ApprovalChoice::Always => {
                     let name = tool.kind.label().to_owned();
                     app.always_approved.push(name);
                     insert_tool_into_message(app, &tool);
-                    dispatch_approved_tool(app, tool, tx);
-                    dispatched = true;
+                    dispatchable.push(tool);
                 }
                 ApprovalChoice::No => {
                     deny_tool(app, tool);
                 }
             }
-            advance_approval_queue(app, tx, dispatched);
+            finish_approval_decision(app, tx, dispatchable);
         }
         KeyCode::Esc => {
             // Esc cancels the entire batch — drop the queue too. Otherwise
@@ -202,13 +193,13 @@ pub(super) fn handle_approval_key(
             let label = approval.tool.kind.label().to_owned();
             let tool = app.pending_approval.take().unwrap().tool;
             insert_tool_into_message(app, &tool);
-            dispatch_approved_tool(app, tool, tx);
+            let mut dispatchable = vec![tool];
             let mut drained = 1;
             let mut keep = std::collections::VecDeque::new();
             while let Some(next) = app.approval_queue.pop_front() {
                 if next.kind.label() == label {
                     insert_tool_into_message(app, &next);
-                    dispatch_approved_tool(app, next, tx);
+                    dispatchable.push(next);
                     drained += 1;
                 } else {
                     keep.push_back(next);
@@ -224,7 +215,7 @@ pub(super) fn handle_approval_key(
                     ),
                 );
             }
-            advance_approval_queue(app, tx, true);
+            finish_approval_decision(app, tx, dispatchable);
         }
         _ => {}
     }
