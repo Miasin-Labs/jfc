@@ -165,7 +165,7 @@ fn summarize_args(args: Option<&Value>) -> String {
 /// Returns `true` if `text` contains any inline tool tag — a quick test the
 /// renderer uses to decide whether to invoke the parser at all.
 pub fn contains_inline_tools(text: &str) -> bool {
-    text.contains(OPEN_CALL) || text.contains(OPEN_RESULT)
+    text.contains(OPEN_CALL) || text.contains(OPEN_RESULT) || text.contains("<tool_use>")
 }
 
 #[cfg(test)]

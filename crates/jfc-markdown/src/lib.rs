@@ -569,6 +569,9 @@ pub fn strip_inline_tool_xml(text: &str) -> String {
         out
     }
     let s = drop_block(text, "<tool_call>", "</tool_call>", "⟪tool_call⟫");
+    // Bedrock Claude via LiteLLM emits Anthropic-style `<tool_use>` instead of
+    // `<tool_call>`; strip it too so it doesn't render as a raw JSON wall.
+    let s = drop_block(&s, "<tool_use>", "</tool_use>", "⟪tool_call⟫");
     drop_block(&s, "<tool_result>", "</tool_result>", "⟪tool_result⟫")
 }
 

@@ -744,7 +744,7 @@ mod tests {
 
     // ── Stateful accumulator (fix for LiteLLM-on-Bedrock empty-finish bug) ─
 
-    fn evs_stateful(state: &mut HashMap<usize, AccumTool>, c: ChatChunk) -> Vec<StreamEvent> {
+    fn evs_stateful(state: &mut OpenAiStreamState, c: ChatChunk) -> Vec<StreamEvent> {
         let mut out: Vec<anyhow::Result<StreamEvent>> = Vec::new();
         push_chunk_events_stateful(c, state, &mut out);
         out.into_iter().filter_map(Result::ok).collect()
@@ -756,7 +756,7 @@ mod tests {
     // synthesize a ToolDone with the assembled name/id/args.
     #[test]
     fn stateful_handles_litellm_empty_finish_chunk_normal() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
 
         // Chunk 0: name + id, no args yet.
         evs_stateful(
@@ -832,7 +832,7 @@ mod tests {
     // accumulator entry. ToolDone events are emitted in index order.
     #[test]
     fn stateful_handles_parallel_tool_calls_normal() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         // Both tools start in one chunk — different indices.
         evs_stateful(
             &mut state,
@@ -896,7 +896,7 @@ mod tests {
     // Normal: state is drained on finish so a subsequent stream starts clean.
     #[test]
     fn stateful_drains_accumulator_on_finish_normal() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         evs_stateful(
             &mut state,
             chunk(
@@ -908,16 +908,184 @@ mod tests {
             ),
         );
         assert!(
-            state.is_empty(),
-            "accumulator not drained on finish: {state:?}"
+            state.tools.is_empty(),
+            "accumulator not drained on finish: {:?}",
+            state.tools
         );
+    }
+
+    // Normal: an inline `<tool_call>{…}</tool_call>` block in the *content*
+    // stream (the LiteLLM Qwen3-on-Bedrock format, where `arguments` is a
+    // double-encoded JSON string) is intercepted and synthesized into a
+    // ToolDone — NOT leaked as text. Mirrors
+    // amazon_qwen3_transformation.py:146.
+    #[test]
+    fn inline_tool_call_in_content_becomes_tool_done_normal() {
+        let mut state = OpenAiStreamState::default();
+        // Whole block in one delta, with surrounding prose.
+        let evs = evs_stateful(
+            &mut state,
+            chunk(
+                ChunkDelta {
+                    content: Some(
+                        "Let me look. <tool_call>\n{\"name\": \"bash\", \"arguments\": \"{\\\"command\\\":\\\"ls\\\"}\"}\n</tool_call> done"
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+                None,
+            ),
+        );
+        // Prose before the tag is emitted as text.
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta.contains("Let me look."))),
+            "expected leading prose, got {evs:?}"
+        );
+        // The tool call is synthesized with the right name + (decoded) args.
+        let done = evs
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ToolDone {
+                    tool_name,
+                    input_json,
+                    ..
+                } => Some((tool_name.clone(), input_json.clone())),
+                _ => None,
+            })
+            .expect("synthesized ToolDone from inline XML");
+        assert_eq!(done.0, "bash");
+        assert_eq!(done.1, "{\"command\":\"ls\"}");
+        // The raw `<tool_call>` XML must NOT appear in any text delta.
+        assert!(
+            !evs.iter().any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta.contains("<tool_call>"))),
+            "inline XML leaked into text: {evs:?}"
+        );
+    }
+
+    // Normal: Bedrock Claude emits Anthropic-style `<tool_use>` tags (args as
+    // an object). They must intercept exactly like `<tool_call>`, and an inline
+    // `<tool_result>` (model-fabricated) must be suppressed, not leaked.
+    #[test]
+    fn inline_tool_use_claude_format_and_result_suppressed_normal() {
+        let mut state = OpenAiStreamState::default();
+        let evs = evs_stateful(
+            &mut state,
+            chunk(
+                ChunkDelta {
+                    content: Some(
+                        "<tool_use> {\"name\": \"codegraph_context\",\"arguments\":{\"query\":\"arch\",\"scope\":\"global\"}} </tool_use> <tool_result> fabricated </tool_result> Here's my take:"
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+                None,
+            ),
+        );
+        let done = evs
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ToolDone {
+                    tool_name,
+                    input_json,
+                    ..
+                } => Some((tool_name.clone(), input_json.clone())),
+                _ => None,
+            })
+            .expect("ToolDone synthesized from <tool_use>");
+        assert_eq!(done.0, "codegraph_context");
+        assert_eq!(done.1, "{\"query\":\"arch\",\"scope\":\"global\"}");
+        let text: String = evs
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { delta, .. } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        // Trailing prose survives; neither tag NOR the fabricated result leaks.
+        assert!(text.contains("Here's my take:"), "prose lost: {text:?}");
+        assert!(!text.contains("<tool_use>"), "tool_use leaked: {text:?}");
+        assert!(!text.contains("fabricated"), "fabricated result leaked: {text:?}");
+    }
+
+    // Robust: a `<tool_call>` open tag split across two content deltas is held
+    // until the close tag arrives, then synthesized once — no partial-tag text
+    // leak.
+    #[test]
+    fn inline_tool_call_split_across_deltas_robust() {
+        let mut state = OpenAiStreamState::default();
+        let first = evs_stateful(
+            &mut state,
+            chunk(
+                ChunkDelta {
+                    content: Some("pre <tool_c".into()),
+                    ..Default::default()
+                },
+                None,
+            ),
+        );
+        // The partial tag must be held back — only "pre " is safe to emit.
+        assert!(
+            !first
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta.contains("<tool_c"))),
+            "partial open tag leaked: {first:?}"
+        );
+        let second = evs_stateful(
+            &mut state,
+            chunk(
+                ChunkDelta {
+                    content: Some("all>{\"name\":\"read\",\"arguments\":{\"path\":\"/x\"}}</tool_call>".into()),
+                    ..Default::default()
+                },
+                None,
+            ),
+        );
+        let done = second
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ToolDone {
+                    tool_name,
+                    input_json,
+                    ..
+                } => Some((tool_name.clone(), input_json.clone())),
+                _ => None,
+            })
+            .expect("ToolDone after completing split tag");
+        assert_eq!(done.0, "read");
+        assert_eq!(done.1, "{\"path\":\"/x\"}");
+    }
+
+    // Robust: plain content with no inline tags streams through verbatim — the
+    // interceptor must not hold back or alter ordinary text.
+    #[test]
+    fn plain_content_passes_through_unbuffered_robust() {
+        let mut state = OpenAiStreamState::default();
+        let evs = evs_stateful(
+            &mut state,
+            chunk(
+                ChunkDelta {
+                    content: Some("just normal prose with a < less-than".into()),
+                    ..Default::default()
+                },
+                None,
+            ),
+        );
+        let text: String = evs
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { delta, .. } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "just normal prose with a < less-than");
     }
 
     // Robust: finish_reason "stop" with no tool_calls in history → just
     // emits Done(EndTurn), no spurious ToolDone.
     #[test]
     fn stateful_finish_stop_emits_no_tool_done_robust() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         evs_stateful(
             &mut state,
             chunk(
@@ -946,7 +1114,7 @@ mod tests {
     // populated on the final ToolDone — the accumulator merges in either order.
     #[test]
     fn stateful_late_name_id_still_captured_robust() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         // Args fragment first (unusual but possible).
         evs_stateful(
             &mut state,
@@ -1489,7 +1657,7 @@ mod tests {
     // uses this for o1/o3-style reasoning models.
     #[test]
     fn stateful_reasoning_content_emits_thinking_delta_normal() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         let events = evs_stateful(
             &mut state,
             chunk(
@@ -1511,7 +1679,7 @@ mod tests {
     // for the user to see.
     #[test]
     fn stateful_refusal_emits_text_delta_normal() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         let events = evs_stateful(
             &mut state,
             chunk(
@@ -1532,7 +1700,7 @@ mod tests {
     // for the UI to show "Hit max tokens" rather than "Stopped".
     #[test]
     fn stateful_finish_length_maps_to_max_tokens_robust() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         let events = evs_stateful(&mut state, chunk(ChunkDelta::default(), Some("length")));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1546,7 +1714,7 @@ mod tests {
     // verbatim. Future-proofs against a proxy emitting a novel reason.
     #[test]
     fn stateful_finish_unknown_maps_to_other_robust() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         let events = evs_stateful(
             &mut state,
             chunk(ChunkDelta::default(), Some("content_filter")),
@@ -1565,7 +1733,7 @@ mod tests {
     // returns early without panicking.
     #[test]
     fn stateful_chunk_with_no_choices_is_noop_robust() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         let chunk = ChatChunk {
             choices: vec![],
             usage: None,
@@ -1579,7 +1747,7 @@ mod tests {
     // have content="" placeholder chunks.
     #[test]
     fn stateful_empty_content_does_not_emit_text_delta_robust() {
-        let mut state: HashMap<usize, AccumTool> = HashMap::new();
+        let mut state = OpenAiStreamState::default();
         let events = evs_stateful(
             &mut state,
             chunk(
@@ -2484,7 +2652,7 @@ pub fn detect_iana_timezone() -> String {
 /// synthesizes final `ToolDone` events on `finish_reason: "tool_calls"`.
 pub(crate) fn openai_compatible_event_stream(resp: reqwest::Response) -> EventStream {
     let event_stream = jfc_anthropic_sdk::sse::response_event_stream(resp)
-        .scan(HashMap::<usize, AccumTool>::new(), |state, result| {
+        .scan(OpenAiStreamState::default(), |state, result| {
             let mut emitted: Vec<anyhow::Result<StreamEvent>> = Vec::new();
             match result {
                 Ok(ev) => {
@@ -2496,6 +2664,14 @@ pub(crate) fn openai_compatible_event_stream(resp: reqwest::Response) -> EventSt
                     );
                     if ev.data == "[DONE]" || ev.data.is_empty() {
                         tracing::debug!(target: "jfc::provider::openai_compatible", "sse [DONE]");
+                        // Flush any buffered inline-tool text/partial tag before
+                        // closing the turn so nothing is stranded in the buffer.
+                        drain_inline_tool_calls(
+                            &mut state.inline_buf,
+                            &mut state.inline_index,
+                            &mut emitted,
+                            true,
+                        );
                         emitted.push(Ok(StreamEvent::Done {
                             stop_reason: StopReason::EndTurn,
                         }));
@@ -2508,7 +2684,7 @@ pub(crate) fn openai_compatible_event_stream(resp: reqwest::Response) -> EventSt
                                             target: "jfc::provider::openai_compatible",
                                             finish_reason = reason,
                                             tool_calls = c.delta.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0),
-                                            accum = state.len(),
+                                            accum = state.tools.len(),
                                             "chunk_finish"
                                         );
                                     }
@@ -2568,13 +2744,186 @@ struct AccumTool {
     args: String,
 }
 
+/// Streaming state for the OpenAI-compatible parser. Carries the structured
+/// `tool_calls` accumulator AND a buffer for intercepting **inline**
+/// `<tool_call>{…}</tool_call>` blocks that some gateways (notably the
+/// OpenWebUI Bedrock proxy) emit as plain text instead of as structured
+/// `tool_calls` SSE deltas. Without interception those leak into the rendered
+/// transcript (the `⟪tool_call⟫` marker) and never execute.
+#[derive(Debug, Default)]
+struct OpenAiStreamState {
+    tools: HashMap<usize, AccumTool>,
+    /// Pending assistant text not yet emitted, held so a `<tool_call>` block
+    /// that spans multiple SSE deltas can be detected whole.
+    inline_buf: String,
+    /// Monotonic index for synthesized inline tool calls. Offset by a large
+    /// base so it never collides with a structured `tool_calls` index.
+    inline_index: usize,
+}
+
+/// Inline tag pairs we intercept, as `(open, close, is_call)`. Different
+/// gateways use different spellings: LiteLLM's Qwen3-on-Bedrock emits
+/// `<tool_call>` (args double-encoded), while Bedrock **Claude** emits
+/// Anthropic's `<tool_use>` (args as an object). We treat both as tool calls.
+/// `<tool_result>` blocks are the gateway's echo OR the model *fabricating* a
+/// result — either way they're suppressed, because the real result comes from
+/// actually dispatching the call. Order matters only for tie-breaking at the
+/// same offset (none overlap in practice).
+const INLINE_TAGS: &[(&str, &str, bool)] = &[
+    ("<tool_use>", "</tool_use>", true),
+    ("<tool_call>", "</tool_call>", true),
+    ("<tool_result>", "</tool_result>", false),
+];
+/// Index base for synthesized inline tool calls — keeps them out of the
+/// structured `tool_calls` index space (which starts at 0).
+const INLINE_TOOL_INDEX_BASE: usize = 100_000;
+
+/// Largest trailing run of `buf` that is a prefix of `needle` (so it might
+/// become a full match once more bytes arrive). Used to hold back a partial
+/// `<tool_call>` open tag split across SSE chunks instead of flushing it as
+/// visible text.
+fn partial_prefix_suffix_len(buf: &str, needle: &str) -> usize {
+    let max = needle.len().saturating_sub(1).min(buf.len());
+    for k in (1..=max).rev() {
+        let start = buf.len() - k;
+        if buf.is_char_boundary(start) && &buf[start..] == &needle[..k] {
+            return k;
+        }
+    }
+    0
+}
+
+/// Parse an inline `<tool_call>` body — `{"name": "...", "arguments": {...}}` —
+/// into `(name, arguments_json_string)`. `arguments` may itself be a
+/// JSON-encoded string (some gateways double-encode); both shapes normalize to
+/// a JSON object string suitable for `StreamEvent::ToolDone.input_json`.
+fn parse_inline_tool_call(body: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let name = v.get("name")?.as_str()?.to_owned();
+    let input_json = match v.get("arguments") {
+        Some(serde_json::Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() { "{}".to_owned() } else { s.to_owned() }
+        }
+        Some(other) => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_owned()),
+        None => "{}".to_owned(),
+    };
+    Some((name, input_json))
+}
+
+/// Drain complete inline `<tool_call>…</tool_call>` blocks out of `buf`,
+/// emitting `TextDelta` for surrounding prose and a synthesized `ToolDone` for
+/// each parsed call (routed through the normal dispatch pipeline exactly like
+/// a structured tool call). A partial trailing tag is held in `buf` until the
+/// next delta — unless `flush` is set (stream ending), in which case any
+/// remainder is emitted verbatim so no bytes are lost.
+fn drain_inline_tool_calls(
+    buf: &mut String,
+    inline_index: &mut usize,
+    out: &mut Vec<anyhow::Result<StreamEvent>>,
+    flush: bool,
+) {
+    loop {
+        // Find the earliest open tag among all recognized kinds.
+        let earliest = INLINE_TAGS
+            .iter()
+            .filter_map(|&(open, close, is_call)| {
+                buf.find(open).map(|at| (at, open, close, is_call))
+            })
+            .min_by_key(|&(at, ..)| at);
+
+        let Some((open_at, open, close, is_call)) = earliest else {
+            // No complete open tag. Hold back a partial open-tag suffix
+            // (e.g. a chunk ending in "<tool_u") unless we're flushing.
+            let hold = if flush {
+                0
+            } else {
+                INLINE_TAGS
+                    .iter()
+                    .map(|&(open, ..)| partial_prefix_suffix_len(buf, open))
+                    .max()
+                    .unwrap_or(0)
+            };
+            let emit_len = buf.len() - hold;
+            if emit_len > 0 {
+                let text: String = buf.drain(..emit_len).collect();
+                out.push(Ok(StreamEvent::TextDelta { index: 0, delta: text }));
+            }
+            break;
+        };
+
+        if open_at > 0 {
+            let text: String = buf.drain(..open_at).collect();
+            out.push(Ok(StreamEvent::TextDelta { index: 0, delta: text }));
+        }
+        // `buf` now starts with `open`. Search for the matching close *after*
+        // the open tag so an empty/degenerate block can't match itself.
+        match buf[open.len()..].find(close) {
+            Some(rel) => {
+                let close_at = open.len() + rel;
+                let body = buf[open.len()..close_at].trim().to_owned();
+                let block_end = close_at + close.len();
+                buf.drain(..block_end);
+                if !is_call {
+                    // Inline <tool_result> — suppress entirely. The real result
+                    // comes from dispatching the call; a model-fabricated one
+                    // here must not be fed back as truth.
+                    tracing::debug!(
+                        target: "jfc::provider::openai_compatible",
+                        "suppressed inline <tool_result> block ({} bytes)",
+                        body.len()
+                    );
+                    continue;
+                }
+                match parse_inline_tool_call(&body) {
+                    Some((name, input_json)) => {
+                        let idx = INLINE_TOOL_INDEX_BASE + *inline_index;
+                        *inline_index += 1;
+                        tracing::info!(
+                            target: "jfc::provider::openai_compatible",
+                            index = idx,
+                            tool_name = %name,
+                            tag = open,
+                            "synthesized tool_done from inline tool XML"
+                        );
+                        out.push(Ok(StreamEvent::ToolDone {
+                            index: idx,
+                            tool_name: name,
+                            tool_use_id: format!("toolu_{}", uuid::Uuid::new_v4().simple()),
+                            input_json,
+                            thought_signature: None,
+                        }));
+                    }
+                    None => {
+                        // Unparseable body — surface verbatim rather than
+                        // silently dropping the model's content.
+                        out.push(Ok(StreamEvent::TextDelta {
+                            index: 0,
+                            delta: format!("{open}{body}{close}"),
+                        }));
+                    }
+                }
+                continue;
+            }
+            None => {
+                // Open tag with no close yet.
+                if flush {
+                    let text: String = std::mem::take(buf);
+                    out.push(Ok(StreamEvent::TextDelta { index: 0, delta: text }));
+                }
+                break;
+            }
+        }
+    }
+}
+
 /// Stateful version of `push_chunk_events`. Mutates `state` to carry tool-call
 /// metadata across chunks; emits `ToolDelta` for every non-empty argument
 /// fragment, and synthesizes `ToolDone` events at finish_reason time even when
 /// the finish chunk itself carries no tool_calls (the LiteLLM-on-Bedrock bug).
 fn push_chunk_events_stateful(
     chunk: ChatChunk,
-    state: &mut HashMap<usize, AccumTool>,
+    state: &mut OpenAiStreamState,
     out: &mut Vec<anyhow::Result<StreamEvent>>,
 ) {
     let Some(choice) = chunk.choices.into_iter().next() else {
@@ -2592,10 +2941,12 @@ fn push_chunk_events_stateful(
     if let Some(text) = choice.delta.content.clone()
         && !text.is_empty()
     {
-        out.push(Ok(StreamEvent::TextDelta {
-            index: 0,
-            delta: text,
-        }));
+        // Buffer assistant text and drain any complete inline
+        // `<tool_call>…</tool_call>` blocks into synthesized ToolDone events.
+        // Plain text (no tags) passes straight through; only a partial trailing
+        // tag is ever held back, so normal streaming is unaffected.
+        state.inline_buf.push_str(&text);
+        drain_inline_tool_calls(&mut state.inline_buf, &mut state.inline_index, out, false);
     }
     if let Some(refusal) = choice.delta.refusal.clone()
         && !refusal.is_empty()
@@ -2609,7 +2960,7 @@ fn push_chunk_events_stateful(
     let tool_calls = choice.delta.tool_calls.clone().unwrap_or_default();
     for tc in &tool_calls {
         let idx = tc.index.unwrap_or(0);
-        let entry = state.entry(idx).or_default();
+        let entry = state.tools.entry(idx).or_default();
         if let Some(id) = tc.id.as_deref()
             && !id.is_empty()
         {
@@ -2632,6 +2983,10 @@ fn push_chunk_events_stateful(
     }
 
     if let Some(reason) = choice.finish_reason {
+        // Flush any buffered inline-tool text + trailing partial tag first, so
+        // a `<tool_call>` that landed right before finish still dispatches.
+        drain_inline_tool_calls(&mut state.inline_buf, &mut state.inline_index, out, true);
+
         let mapped = match reason.as_str() {
             "tool_calls" | "function_call" => StopReason::ToolUse,
             "stop" => StopReason::EndTurn,
@@ -2642,7 +2997,8 @@ fn push_chunk_events_stateful(
         // Emit ToolDone for every accumulated tool — independent of whether
         // the finish chunk's tool_calls array is populated. Sorted by index
         // for deterministic ordering across runs.
-        let mut by_index: Vec<(usize, AccumTool)> = std::mem::take(state).into_iter().collect();
+        let mut by_index: Vec<(usize, AccumTool)> =
+            std::mem::take(&mut state.tools).into_iter().collect();
         by_index.sort_by_key(|(idx, _)| *idx);
         for (idx, accum) in by_index {
             let name = accum.name.unwrap_or_default();
