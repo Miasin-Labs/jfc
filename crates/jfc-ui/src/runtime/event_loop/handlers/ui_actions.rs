@@ -65,7 +65,6 @@ pub(crate) fn handle_request_metadata(app: &mut App, meta: crate::runtime::Strea
         advertised_tool_count = meta.advertised_tool_count,
         action_expected = meta.action_expected,
         tool_choice = ?meta.tool_choice,
-        narration_retry = meta.narration_retry,
         "stream request metadata"
     );
     app.current_stream_request = Some(meta);

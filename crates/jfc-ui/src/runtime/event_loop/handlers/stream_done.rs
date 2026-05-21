@@ -6,8 +6,6 @@ use crate::runtime::{EventSender, drain_queued_prompts};
 use crate::types::*;
 use crate::{config, session, stream, types};
 
-use super::super::narration_retry::retry_narration_only_end_turn;
-
 /// Handle `StreamEvent::Done(stop_reason)`.
 pub(crate) async fn handle_stream_done(
     app: &mut App,
@@ -77,9 +75,6 @@ pub(crate) async fn handle_stream_done(
                 ),
             );
         }
-    }
-    if retry_narration_only_end_turn(app, tx, &stop_reason) {
-        return;
     }
     // v126's "Cooked for Nm Ns" post-turn footer: stamp the
     // assistant message with a randomized past-tense verb +

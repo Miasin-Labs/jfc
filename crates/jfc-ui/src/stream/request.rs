@@ -69,37 +69,15 @@ fn user_text_requests_action(text: &str) -> bool {
     }
 
     let strong_action_terms = [
-        "add",
-        "apply",
-        "build",
-        "change",
-        "check",
-        "commit",
-        "continue",
-        "create",
-        "debug",
-        "delete",
-        "do",
-        "edit",
-        "find",
-        "fix",
-        "grep",
-        "implement",
-        "inspect",
-        "investigate",
-        "look",
-        "open",
-        "patch",
-        "proceed",
-        "push",
-        "read",
-        "remove",
-        "run",
-        "search",
-        "test",
-        "trace",
-        "update",
-        "write",
+        "add", "apply", "build", "change", "check", "commit", "continue", "create", "debug",
+        "delete", "do", "edit", "find", "fix", "grep", "implement", "inspect", "investigate",
+        "look", "open", "patch", "proceed", "push", "read", "remove", "run", "search", "test",
+        "trace", "update", "write",
+        // Extended developer verb allowlist:
+        "refactor", "optimize", "reorganize", "cleanup", "clean", "format", "lint", "compile",
+        "audit", "review", "restructure", "verify", "profile", "revert", "stage", "merge",
+        "pull", "clone", "analyze", "migrate", "deploy", "install", "configure", "scaffold",
+        "generate", "rename", "move", "copy", "replace", "extract", "inline", "split",
     ];
     let has_action_term = trimmed
         .split(' ')
@@ -147,11 +125,8 @@ fn user_text_requests_action(text: &str) -> bool {
     true
 }
 
-fn anthropic_tool_choice_value(choice: StreamToolChoice) -> serde_json::Value {
-    match choice {
-        StreamToolChoice::Auto => serde_json::json!({ "type": "auto" }),
-        StreamToolChoice::Any => serde_json::json!({ "type": "any" }),
-    }
+fn anthropic_tool_choice_value(_choice: StreamToolChoice) -> serde_json::Value {
+    serde_json::json!({ "type": "auto" })
 }
 
 pub(super) async fn prepare_stream_request(
@@ -208,6 +183,12 @@ pub(super) async fn prepare_stream_request(
 ## Using your tools\n\
 Prefer dedicated tools over Bash when one fits (Read, Write, Edit, Glob, Grep) — reserve Bash for shell-only operations.\n\
 Only use tools to complete tasks. All text you output outside of tool use is displayed to the user; tools are how you take action. Never use Bash echo or code comments as a way to communicate with the user during the session.\n\
+\n\
+CRITICAL: LEADING CONVERSATIONAL PROSE IS STRICTLY FORBIDDEN during tool execution turns. \
+You must NOT explain what you are about to do. Do NOT write preambles like 'Sure, let me check the files.' \
+or 'I will run a grep search now.' Call the appropriate tool immediately in your very first token. \
+You are only allowed to output conversational prose when answering an informational question, \
+or when the task is fully completed and you are presenting the final results to the user.\n\n\
 You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between the calls, make all of the independent calls in the same block, otherwise you MUST wait for previous calls to finish first to determine the dependent values (do NOT use placeholders or guess missing parameters).\n\
 If the user provides a specific value for a parameter (for example provided in quotes), make sure to use that value EXACTLY. DO NOT make up values for or ask about optional parameters.\n\
 When reporting results, be accurate about what you verified vs. what you assumed. Distinguish between what you confirmed (ran a command, read a file) and what you believe but did not check. Do not assert assumptions as facts.";
@@ -516,28 +497,7 @@ Do not use a colon before tool calls.";
         base = base.fast_mode(true);
     }
 
-    let mut opts = thinking_mode.apply_to(base);
-    // Anthropic rejects requests where thinking is enabled AND
-    // `tool_choice` forces tool use (`type: "any"` or `type: "tool"`)
-    // with `400 invalid_request_error: "Thinking may not be enabled
-    // when tool_choice forces tool use."`. The narration-retry path
-    // sets `tool_choice: Any` to force the model to pick a tool, so
-    // we must strip thinking for that one request — the model is
-    // being instructed to commit to an action, not deliberate.
-    if matches!(overrides.tool_choice, StreamToolChoice::Any) {
-        if opts.adaptive_thinking
-            || opts.thinking_budget.is_some()
-            || opts.thinking_display.is_some()
-        {
-            tracing::debug!(
-                target: "jfc::stream::guard",
-                "stripping thinking on tool_choice=any (Anthropic API constraint)"
-            );
-        }
-        opts.adaptive_thinking = false;
-        opts.thinking_budget = None;
-        opts.thinking_display = None;
-    }
+    let opts = thinking_mode.apply_to(base);
 
     PreparedStreamRequest {
         opts,
@@ -546,7 +506,6 @@ Do not use a colon before tool calls.";
             advertised_tool_count,
             action_expected,
             tool_choice: overrides.tool_choice,
-            narration_retry: overrides.narration_retry,
         },
     }
 }

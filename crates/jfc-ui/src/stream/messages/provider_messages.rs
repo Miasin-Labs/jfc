@@ -12,38 +12,7 @@ use super::turns::{
 };
 
 pub(crate) fn build_provider_messages(msgs: &[ChatMessage]) -> Vec<ProviderMessage> {
-    let out: Vec<ProviderMessage> = msgs
-        .iter()
-        .filter_map(|m| {
-            // Same guard as `build_provider_messages_with_tool_results`:
-            // skip queued placeholders. See the longer rationale there.
-            if m.queued {
-                return None;
-            }
-            let text = chat_message_text(m);
-            if text.is_empty() && m.attachments.is_empty() {
-                return None;
-            }
-            let mut content: Vec<ProviderContent> = Vec::new();
-            if !text.is_empty() {
-                content.push(ProviderContent::Text(text));
-            }
-            push_attachments(&mut content, &m.attachments);
-            Some(ProviderMessage {
-                role: provider_role(m.role),
-                content,
-            })
-        })
-        .collect();
-    tracing::debug!(
-        target: "jfc::stream",
-        input_messages = msgs.len(),
-        output_messages = out.len(),
-        "build_provider_messages (text-only)"
-    );
-    let out = ensure_user_last(out);
-    validate_provider_messages(&out);
-    out
+    build_provider_messages_with_tool_results(msgs)
 }
 
 /// Build provider messages for a `pause_turn` resume request.

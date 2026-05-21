@@ -53,13 +53,11 @@ pub enum AppEvent {
 pub enum StreamToolChoice {
     #[default]
     Auto,
-    Any,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StreamRequestOverrides {
     pub tool_choice: StreamToolChoice,
-    pub narration_retry: bool,
     /// System reminders queued by background events (file watcher,
     /// MCP refresh, …) and drained into `prepare_stream_request` so
     /// they land in the next outbound request's system prompt exactly
@@ -72,7 +70,6 @@ pub struct StreamRequestMetadata {
     pub advertised_tool_count: usize,
     pub action_expected: bool,
     pub tool_choice: StreamToolChoice,
-    pub narration_retry: bool,
 }
 
 impl AppEvent {
