@@ -9,8 +9,16 @@ use serde::{Deserialize, Serialize};
 pub struct AgentId(pub String);
 
 impl AgentId {
+    /// Create a unique (ephemeral) agent identity. Trust does NOT persist across bounties.
     pub fn new(name: &str) -> Self {
         Self(format!("{}_{}", name, uuid::Uuid::new_v4().as_simple()))
+    }
+
+    /// Create a stable identity that persists across bounties so trust/collusion
+    /// metrics accumulate. Format: `<role>-<index>` (e.g., `solver-0`, `validator-1`).
+    /// The same role+index always maps to the same AgentId.
+    pub fn new_stable(role: &str, index: usize) -> Self {
+        Self(format!("{role}-{index}"))
     }
 }
 

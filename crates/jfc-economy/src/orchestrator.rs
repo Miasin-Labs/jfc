@@ -155,11 +155,30 @@ impl MarketOrchestrator {
         let actual_validators =
             (n_validators_per_solution as usize).min(self.charter.max_validators as usize);
 
+        // Pre-flight budget gate: ensure we can afford at least one solver
+        // round before committing worktree + LLM resources. Estimated at
+        // the charter's max_token_spend_per_agent × n_solvers as a
+        // conservative upper bound.
+        let estimated_per_solver = self.charter.max_token_spend_per_agent;
+        let estimated_total = estimated_per_solver * actual_solvers as u64;
+        if let Err(e) = self.ledger.gate_check("stub", estimated_total, 0) {
+            tracing::error!(
+                target: "jfc::economy::gate",
+                bounty_id = %bounty_id,
+                error = %e,
+                "bounty cycle blocked by pre-flight budget gate"
+            );
+            return Err(OrchestratorError::BudgetExceeded {
+                requested: estimated_total,
+                max: self.ledger.remaining(),
+            });
+        }
+
         // 1. Spawn solver pool entries + worktrees, build prompts.
         let mut prompts: Vec<SolverPrompt> = Vec::with_capacity(actual_solvers);
-        for _ in 0..actual_solvers {
-            let agent = self.solvers.spawn(bounty_id);
-            let agent_id = agent.id.clone();
+        for i in 0..actual_solvers {
+            let agent_id = AgentId::new_stable("solver", i);
+            self.solvers.spawn_with_id(agent_id.clone(), bounty_id);
             self.trust.register(agent_id.clone());
             let worktree = swarm.create_worktree(bounty_id, &agent_id).await;
             if let Some(s) = self.solvers.get_mut(&agent_id) {
@@ -254,9 +273,11 @@ impl MarketOrchestrator {
             validators_per_solution = actual_validators,
             "phase: Validating"
         );
+        let mut validator_counter = 0usize;
         for solution in solutions {
             for _ in 0..actual_validators {
-                let validator_id = AgentId::new("validator");
+                let validator_id = AgentId::new_stable("validator", validator_counter);
+                validator_counter += 1;
                 self.trust.register(validator_id.clone());
                 // Anti-collusion: the validator MUST NOT be the
                 // same agent as the solver. AgentId::new uses uuid
@@ -315,14 +336,25 @@ impl MarketOrchestrator {
                         // are mechanistic at this layer: the solver
                         // doesn't get to actually defend (that would
                         // need another LLM round-trip — defer to v2);
-                        // adjudication is "did the validator produce
-                        // a runnable test_code?" — v131 PROClaim
-                        // pattern.
+                        // adjudication runs the validator's test code
+                        // in the solver's worktree to prove the flaw.
                         if !session.is_complete() {
-                            let _ = session
-                                .submit_defense("(no defense in this iteration)".to_string());
-                            let test_fails = outcome.test_code.is_some();
-                            let _ = session.adjudicate(test_fails);
+                            session
+                                .submit_defense("(no defense in this iteration)".to_string())
+                                .ok();
+                            // Mechanistic adjudication: actually run the validator's test
+                            let solver_worktree = self
+                                .solvers
+                                .get(&solution.agent_id)
+                                .and_then(|s| s.worktree_path.as_deref());
+                            let test_fails = if let Some(ref test_code) = outcome.test_code {
+                                invoker
+                                    .adjudicate_test(test_code, solver_worktree)
+                                    .await
+                            } else {
+                                false
+                            };
+                            session.adjudicate(test_fails).ok();
                         }
                     }
                     Err(e) => {

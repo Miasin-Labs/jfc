@@ -37,6 +37,18 @@ impl SolverAgent {
         }
     }
 
+    /// Create a solver with a pre-determined stable identity (for trust persistence).
+    pub fn with_id(agent_id: AgentId, bounty_id: &str) -> Self {
+        Self {
+            id: agent_id,
+            bounty_id: bounty_id.to_string(),
+            worktree_path: None,
+            status: SolverStatus::Pending,
+            tokens_consumed: 0,
+            solution: None,
+        }
+    }
+
     pub fn start(&mut self, worktree: Option<PathBuf>) {
         self.worktree_path = worktree;
         self.status = SolverStatus::Executing;
@@ -70,6 +82,13 @@ impl SolverPool {
 
     pub fn spawn(&mut self, bounty_id: &str) -> &SolverAgent {
         let solver = SolverAgent::new(bounty_id);
+        self.solvers.push(solver);
+        self.solvers.last().unwrap()
+    }
+
+    /// Spawn a solver with a pre-determined stable identity.
+    pub fn spawn_with_id(&mut self, agent_id: AgentId, bounty_id: &str) -> &SolverAgent {
+        let solver = SolverAgent::with_id(agent_id, bounty_id);
         self.solvers.push(solver);
         self.solvers.last().unwrap()
     }
