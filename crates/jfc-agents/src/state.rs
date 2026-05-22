@@ -20,7 +20,7 @@ pub struct Skill {
 /// Parse a skill .md file: optional YAML frontmatter (between `---` lines)
 /// followed by a markdown body. Frontmatter fields: `name`, `description`.
 /// If `name` is missing, falls back to the filename stem.
-pub(super) fn parse_skill(path: &Path, raw: &str) -> Option<Skill> {
+pub fn parse_skill(path: &Path, raw: &str) -> Option<Skill> {
     let (front, body) = split_frontmatter(raw);
     let stem = path
         .file_stem()
@@ -44,7 +44,7 @@ pub(super) fn parse_skill(path: &Path, raw: &str) -> Option<Skill> {
     })
 }
 
-pub(super) fn parse_agent(path: &Path, raw: &str) -> Option<AgentDef> {
+pub fn parse_agent(path: &Path, raw: &str) -> Option<AgentDef> {
     let (front, body) = split_frontmatter(raw);
     let yaml = front?;
     let parsed: AgentFront = serde_yaml::from_str(yaml).ok()?;
@@ -66,9 +66,6 @@ pub(super) fn parse_agent(path: &Path, raw: &str) -> Option<AgentDef> {
         memory: parsed.memory,
         mcp_servers: parsed.mcp_servers.unwrap_or_default(),
         hooks: parsed.hooks.unwrap_or_default(),
-        // Auto-dispatch metadata is YAML-parsed via the same AgentFront
-        // path; defaults to None / empty so existing user-defined
-        // agents in `.claude/agents/` keep working without churn.
         key_trigger: parsed.key_trigger,
         use_when: parsed.use_when.unwrap_or_default(),
         avoid_when: parsed.avoid_when.unwrap_or_default(),
@@ -77,7 +74,7 @@ pub(super) fn parse_agent(path: &Path, raw: &str) -> Option<AgentDef> {
     })
 }
 
-pub(super) fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
+pub fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
     if !raw.starts_with("---") {
         return (None, raw);
     }
@@ -93,7 +90,7 @@ pub(super) fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct SkillFront {
+struct SkillFront {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -101,7 +98,7 @@ pub(super) struct SkillFront {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct AgentFront {
+struct AgentFront {
     pub name: String,
     #[serde(default)]
     pub model: Option<String>,
@@ -133,7 +130,6 @@ pub(super) struct AgentFront {
     pub mcp_servers: Option<Vec<String>>,
     #[serde(default)]
     pub hooks: Option<std::collections::HashMap<String, Vec<String>>>,
-    /// Auto-dispatch metadata — see `AgentDef` field docs.
     #[serde(default, rename = "keyTrigger")]
     pub key_trigger: Option<String>,
     #[serde(default, rename = "useWhen")]
@@ -148,8 +144,6 @@ pub(super) struct AgentFront {
 mod tests {
     use super::*;
 
-    // Normal: a well-formed skill file with frontmatter parses into a
-    // Skill record.
     #[test]
     fn parse_skill_with_frontmatter_normal() {
         let raw = "---\nname: my-skill\ndescription: A test skill\n---\n# Body\n\nDo the thing.";
@@ -159,8 +153,6 @@ mod tests {
         assert!(s.body.contains("Do the thing"));
     }
 
-    // Normal: a skill without frontmatter still parses, falling back to the
-    // filename stem for the `name` field.
     #[test]
     fn parse_skill_no_frontmatter_uses_filename_stem_normal() {
         let s = parse_skill(Path::new("/x/skills/snake.md"), "Just a body").expect("parsed");
@@ -169,7 +161,6 @@ mod tests {
         assert_eq!(s.body, "Just a body");
     }
 
-    // Normal: a well-formed agent file parses into an AgentDef.
     #[test]
     fn parse_agent_full_frontmatter_normal() {
         let raw = "---\nname: impl\nmodel: opus\nisolation: worktree\nskills:\n  - rust-style\nallowedTools:\n  - Read\n  - Edit\ndisallowedTools:\n  - Task\npermissionMode: acceptEdits\nbackground: true\ncolor: \"#ff0000\"\n---\n# Implementer\n\nYou implement features.";
@@ -186,23 +177,18 @@ mod tests {
         assert!(a.system_prompt.contains("You implement features"));
     }
 
-    // Robust: an agent file without frontmatter is rejected — we need at
-    // least the `name` field. Returns None.
     #[test]
     fn parse_agent_no_frontmatter_returns_none_robust() {
         let s = parse_agent(Path::new("/x/agents/x.md"), "Just a body");
         assert!(s.is_none());
     }
 
-    // Robust: malformed YAML in the frontmatter returns None for agents
-    // (which require `name`). Skills tolerate it (fallback to filename).
     #[test]
     fn parse_agent_malformed_yaml_returns_none_robust() {
         let raw = "---\nname: [missing close bracket\n---\nbody";
         assert!(parse_agent(Path::new("/x/a.md"), raw).is_none());
     }
 
-    // Normal: `split_frontmatter` extracts YAML between `---` delimiters.
     #[test]
     fn split_frontmatter_extracts_yaml_normal() {
         let raw = "---\nkey: value\n---\nbody";
@@ -211,7 +197,6 @@ mod tests {
         assert_eq!(body, "body");
     }
 
-    // Normal: PermissionMode round-trips through serde for all variants.
     #[test]
     fn permission_mode_serde_roundtrip_normal() {
         for (mode, expected) in [
@@ -231,9 +216,6 @@ mod tests {
 
     #[test]
     fn parse_agent_full_v126_frontmatter_normal() {
-        // Every new field at once — confirms `effort`/`maxTurns`/`memory`/
-        // `mcpServers`/`hooks` all land via the existing parse path. v126
-        // schema reference: cli.js:225207-225281.
         let raw = "---\n\
             name: deep-thinker\n\
             model: claude-opus-4-7\n\
@@ -257,10 +239,6 @@ mod tests {
 
     #[test]
     fn effort_xhigh_renames_normal() {
-        // v126 emits `xhigh` as one token, not `x_high` like serde's
-        // default kebab-from-PascalCase rename would produce. Pin the
-        // explicit `#[serde(rename = "xhigh")]` so a future cleanup
-        // doesn't regress to the snake-cased form.
         let parsed: Effort = serde_yaml::from_str("xhigh").unwrap();
         assert_eq!(parsed, Effort::XHigh);
         let serialized = serde_yaml::to_string(&Effort::XHigh).unwrap();
@@ -295,7 +273,6 @@ mod tests {
 
     #[test]
     fn parse_agent_minimal_defaults_new_fields_robust() {
-        // Only `name` set — every new field defaults to None / empty.
         let raw = "---\nname: bare\n---\nbody";
         let agent = parse_agent(Path::new("/x/bare.md"), raw).expect("parsed");
         assert_eq!(agent.effort, None);
@@ -307,11 +284,6 @@ mod tests {
 
     #[test]
     fn unknown_effort_value_returns_none_robust() {
-        // A typo'd effort like `ultra` (not in the enum) shouldn't
-        // crash the loader — `parse_agent` returns None for the
-        // whole file when its frontmatter fails to parse, so the
-        // bad agent is silently skipped rather than poisoning the
-        // registry.
         let raw = "---\nname: bad\neffort: ultra\n---\nbody";
         let result = parse_agent(Path::new("/x/bad.md"), raw);
         assert!(result.is_none());

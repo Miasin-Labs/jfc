@@ -2302,6 +2302,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jfc-agents"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "jfc-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "jfc-anthropic-sdk"
 version = "0.0.1"
 dependencies = [
@@ -2498,6 +2511,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jfc-tools"
+version = "0.1.0"
+dependencies = [
+ "jfc-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "jfc-ui"
 version = "0.1.0"
 dependencies = [
@@ -2522,6 +2547,7 @@ dependencies = [
  "image",
  "indexmap 2.14.0",
  "itertools 0.14.0",
+ "jfc-agents",
  "jfc-anthropic-sdk",
  "jfc-auth",
  "jfc-core",

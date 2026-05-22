@@ -73,6 +73,7 @@ rand = "0.10.1"
 libc = "0.2.186"
 jfc-anthropic-sdk = { path = "../jfc-anthropic-sdk" }
 jfc-auth = { path = "../jfc-auth" }
+jfc-agents = { path = "../jfc-agents" }
 jfc-core = { path = "../jfc-core" }
 jfc-provider = { path = "../jfc-provider" }
 jfc-session = { path = "../jfc-session" }

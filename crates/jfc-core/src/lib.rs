@@ -6,7 +6,9 @@
 
 mod agent_def;
 mod attachment;
+pub mod diff;
 mod execution;
+mod execution_result;
 mod ids;
 mod task;
 mod task_store;
@@ -16,7 +18,14 @@ mod usage;
 
 pub use agent_def::{AgentCost, AgentDef, Effort, MemoryScope, PermissionMode};
 pub use attachment::{Attachment, AttachmentKind, PastedContent};
+pub use diff::{
+    DiffHunk, DiffLine, DiffLineKind, DiffView, parse_hunk_header, parse_hunk_start,
+    parse_unified_diff, truncate_lines,
+};
 pub use execution::{ExecutionStatus, TaskLifecycle, ToolStatus};
+pub use execution_result::{
+    DiagnosticLevel, ExecutionResult, ToolDiagnostic, ToolOutcome, ToolProvenance, ToolSource,
+};
 pub use ids::{AgentId, SessionId, TaskId, ToolId};
 pub use task::{TaskInput, TaskStatusPart};
 pub use task_store::{

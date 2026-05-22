@@ -2,31 +2,21 @@
 //! auto-dispatch section, and building an agent's full system prompt by
 //! splicing in resolved skill bodies.
 
-use super::registry::find_skill_by_name;
-use super::state::Skill;
+use crate::registry::find_skill_by_name;
+use crate::state::Skill;
 use jfc_core::AgentDef;
 
 /// Render the loaded skills as a Markdown listing for injection into the
 /// system prompt. The model needs to know skills exist before it can ask to
 /// invoke them — this is the discovery surface.
 ///
-/// Format (matches v126's cli.js:48850 listing, lighter cap):
-///
-/// ```text
-/// ## Available skills
-///
-/// - `skill-name` — short description
-/// - `another-skill` — …
-/// ```
-///
 /// Description is capped at 200 chars (with `…` ellipsis on overflow) to
 /// keep per-turn token cost low — we re-inject on every stream call so
-/// every char compounds. v126 uses 1536 because their listing is cached;
-/// jfc's isn't yet.
+/// every char compounds.
 ///
 /// Returns `""` when `skills` is empty so callers can unconditionally
 /// `push_str` the result.
-pub(crate) fn render_skills_section(skills: &[Skill]) -> String {
+pub fn render_skills_section(skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
@@ -35,8 +25,6 @@ pub(crate) fn render_skills_section(skills: &[Skill]) -> String {
     for skill in skills {
         match &skill.description {
             Some(desc) if !desc.is_empty() => {
-                // Char-aware truncation — UTF-8 boundaries matter, and
-                // .len() would count bytes not characters.
                 let trimmed: String = if desc.chars().count() > MAX_DESC_CHARS {
                     let mut s: String = desc.chars().take(MAX_DESC_CHARS).collect();
                     s.push('…');
@@ -57,7 +45,7 @@ pub(crate) fn render_skills_section(skills: &[Skill]) -> String {
 /// Build the effective system prompt for an agent: its own `system_prompt`
 /// followed by each resolved skill body, separated by `## Skill: <name>`
 /// headers. Unknown skill names are skipped (with a `tracing::warn!`).
-pub(crate) fn build_agent_system_prompt(agent: &AgentDef, all_skills: &[Skill]) -> String {
+pub fn build_agent_system_prompt(agent: &AgentDef, all_skills: &[Skill]) -> String {
     if agent.skills.is_empty() {
         return agent.system_prompt.clone();
     }
@@ -84,34 +72,10 @@ pub(crate) fn build_agent_system_prompt(agent: &AgentDef, all_skills: &[Skill]) 
 }
 
 /// Render the auto-dispatch section that gets injected into the
-/// leader's system prompt. Mirrors v132's "For broad codebase
-/// exploration or research that'll take more than 3 queries, spawn
-/// Task with subagent_type=Explore" nudge plus oh-my-opencode's
-/// Sisyphus-style Intent Gate. The result reads:
-///
-/// ```text
-/// ## Delegation — fire agents proactively
-///
-/// **Default Bias: DELEGATE.** Work yourself only when the task is
-/// trivially small (one-line edit, single grep). Otherwise dispatch
-/// the matching specialist via the Task tool.
-///
-/// ### Key triggers (check BEFORE acting)
-/// - `Explore` — broad codebase exploration / 2+ modules / unfamiliar
-///   structure → fire Explore in background
-/// - `Plan` — multi-step / risky / cross-cutting change → fire Plan
-///   before any destructive edit
-/// - `verification` — after every non-trivial edit → fire verification
-///   in background to actually run + test
-///
-/// ### Delegation Trust Rule
-/// Once you fire an agent for a question, do NOT manually grep / read
-/// the same files yourself in parallel. Wait for the agent's result.
-/// ```
-///
-/// Only renders when at least one agent has a `key_trigger` populated.
-/// Returns `""` otherwise so callers can unconditionally `push_str`.
-pub(crate) fn render_dispatch_section(agents: &[AgentDef]) -> String {
+/// leader's system prompt. Only renders when at least one agent has a
+/// `key_trigger` populated. Returns `""` otherwise so callers can
+/// unconditionally `push_str`.
+pub fn render_dispatch_section(agents: &[AgentDef]) -> String {
     let triggers: Vec<&AgentDef> = agents.iter().filter(|a| a.key_trigger.is_some()).collect();
     if triggers.is_empty() {
         return String::new();
