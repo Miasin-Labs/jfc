@@ -53,6 +53,10 @@ impl LangRules {
             "c" => Some(&C_RULES),
             "cpp" => Some(&CPP_RULES),
             "php" => Some(&PHP_RULES),
+            "kotlin" => Some(&KOTLIN_RULES),
+            "swift" => Some(&SWIFT_RULES),
+            "csharp" => Some(&CSHARP_RULES),
+            "ruby" => Some(&RUBY_RULES),
             _ => None,
         }
     }
@@ -495,3 +499,232 @@ pub static PHP_RULES: LangRules = LangRules {
         "conditional_expression",
     ],
 };
+
+// ─── C# ──────────────────────────────────────────────────────────────────────
+
+static CSHARP_RULES: LangRules = LangRules {
+    branch_nodes: &[
+        "if_statement",
+        "for_statement",
+        "for_each_statement",
+        "while_statement",
+        "do_statement",
+        "catch_clause",
+        "switch_statement",
+        "switch_expression",
+        "conditional_expression",
+    ],
+    case_nodes: &["switch_section", "switch_expression_arm"],
+    logical_op_nodes: &["binary_expression"],
+    logical_operators: &["&&", "||", "??"],
+    nesting_nodes: &[
+        "if_statement",
+        "for_statement",
+        "for_each_statement",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "switch_expression",
+        "try_statement",
+        "lambda_expression",
+    ],
+    function_nodes: &["method_declaration", "constructor_declaration"],
+    body_field_names: &["body"],
+    operator_nodes: &[
+        "return_statement",
+        "if_statement",
+        "for_statement",
+        "for_each_statement",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "throw_statement",
+        "local_declaration_statement",
+        "object_creation_expression",
+    ],
+    operand_nodes: &[
+        "identifier",
+        "integer_literal",
+        "real_literal",
+        "string_literal",
+        "verbatim_string_literal",
+        "interpolated_string_expression",
+        "character_literal",
+        "boolean_literal",
+        "null_literal",
+    ],
+    operator_container_nodes: &[
+        "binary_expression",
+        "prefix_unary_expression",
+        "postfix_unary_expression",
+        "assignment_expression",
+    ],
+};
+
+// ─── Ruby ────────────────────────────────────────────────────────────────────
+
+static RUBY_RULES: LangRules = LangRules {
+    branch_nodes: &[
+        "if",
+        "unless",
+        "elsif",
+        "when",
+        "for",
+        "while",
+        "until",
+        "rescue",
+    ],
+    case_nodes: &["when"],
+    logical_op_nodes: &["binary"],
+    logical_operators: &["and", "or", "&&", "||"],
+    nesting_nodes: &[
+        "if",
+        "unless",
+        "for",
+        "while",
+        "until",
+        "rescue",
+        "case",
+    ],
+    function_nodes: &["method", "singleton_method", "lambda", "block"],
+    body_field_names: &["body"],
+    operator_nodes: &[
+        "return",
+        "if",
+        "unless",
+        "for",
+        "while",
+        "until",
+        "case",
+        "assignment",
+        "operator_assignment",
+    ],
+    operand_nodes: &[
+        "identifier",
+        "constant",
+        "integer",
+        "float",
+        "string",
+        "symbol",
+        "true",
+        "false",
+        "nil",
+    ],
+    operator_container_nodes: &[
+        "binary",
+        "unary",
+        "assignment",
+        "operator_assignment",
+    ],
+};
+
+// ─── Kotlin ──────────────────────────────────────────────────────────────────
+
+pub static KOTLIN_RULES: LangRules = LangRules {
+    branch_nodes: &[
+        "if_expression",
+        "when_expression",
+        "for_statement",
+        "while_statement",
+        "do_while_statement",
+        "catch_block",
+    ],
+    case_nodes: &["when_entry"],
+    logical_op_nodes: &["conjunction_expression", "disjunction_expression"],
+    logical_operators: &["&&", "||"],
+    nesting_nodes: &[
+        "if_expression",
+        "when_expression",
+        "for_statement",
+        "while_statement",
+        "do_while_statement",
+        "catch_block",
+    ],
+    function_nodes: &["function_declaration", "lambda_literal", "anonymous_function"],
+    body_field_names: &["body", "function_body"],
+    operator_nodes: &[
+        "if_expression",
+        "for_statement",
+        "while_statement",
+        "do_while_statement",
+        "when_expression",
+        "return_expression",
+        "throw_expression",
+        "object_creation_expression",
+    ],
+    operand_nodes: &[
+        "simple_identifier",
+        "integer_literal",
+        "real_literal",
+        "string_literal",
+        "boolean_literal",
+        "null_literal",
+    ],
+    operator_container_nodes: &[
+        "additive_expression",
+        "multiplicative_expression",
+        "comparison_expression",
+        "equality_expression",
+        "conjunction_expression",
+        "disjunction_expression",
+        "prefix_expression",
+        "postfix_expression",
+        "assignment",
+    ],
+};
+
+// ─── Swift ───────────────────────────────────────────────────────────────────
+
+pub static SWIFT_RULES: LangRules = LangRules {
+    branch_nodes: &[
+        "if_statement",
+        "guard_statement",
+        "for_statement",
+        "while_statement",
+        "repeat_while_statement",
+        "switch_statement",
+        "catch_clause",
+    ],
+    case_nodes: &["switch_case", "case_item"],
+    logical_op_nodes: &["binary_expression"],
+    logical_operators: &["&&", "||"],
+    nesting_nodes: &[
+        "if_statement",
+        "guard_statement",
+        "for_statement",
+        "while_statement",
+        "repeat_while_statement",
+        "switch_statement",
+        "catch_clause",
+    ],
+    function_nodes: &["function_declaration", "init_declaration", "closure_expression"],
+    body_field_names: &["body", "function_body"],
+    operator_nodes: &[
+        "if_statement",
+        "guard_statement",
+        "for_statement",
+        "while_statement",
+        "repeat_while_statement",
+        "switch_statement",
+        "return_statement",
+        "throw_statement",
+    ],
+    operand_nodes: &[
+        "simple_identifier",
+        "integer_literal",
+        "real_literal",
+        "string_literal",
+        "boolean_literal",
+        "nil",
+    ],
+    operator_container_nodes: &[
+        "binary_expression",
+        "prefix_expression",
+        "postfix_expression",
+        "assignment",
+        "ternary_expression",
+    ],
+};
+
+// ─── Kotlin ──────────────────────────────────────────────────────────────────
+
