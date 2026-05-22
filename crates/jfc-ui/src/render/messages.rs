@@ -445,8 +445,10 @@ fn render_workflow_detail(
 
 pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_id: &str) {
     let t = app.theme;
-    // Reserve same width as the main view: borders(2) + padding(2) + scrollbar(1) = 5
-    let inner_width = area.width.saturating_sub(5) as usize;
+    // Flat dock: a single TOP divider, not a full box — so no L/R borders.
+    // MessageView still reserves 3 cols of its inner width (scrollbar +
+    // its own L/R padding), so the height estimate is full width − 3.
+    let inner_width = area.width.saturating_sub(3) as usize;
 
     let (title_str, body_lines, use_message_view) = match app.background_tasks.get(task_id) {
         None => (format!("task {task_id} (not found)"), Vec::new(), false),
@@ -477,7 +479,7 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
     };
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .border_style(t.style_accent)
         .title(Span::styled(title_str, t.style_accent_bold))
         .style(Style::default().bg(t.bg));
@@ -679,8 +681,37 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
     }
 }
 
+/// Longest run of leading whitespace-delimited words shared by every
+/// string in `items`, returned as a borrowed prefix of the first item
+/// (including the trailing space). Empty when there are fewer than two
+/// items or they share no leading word — so callers can `strip_prefix`
+/// unconditionally. Used to de-noise the task tab strip where every tab
+/// starts with the same verb ("Implement …").
+fn common_word_prefix<'a>(items: &[&'a str]) -> &'a str {
+    if items.len() < 2 {
+        return "";
+    }
+    let first = items[0];
+    // Walk word boundaries (positions just after each space) and keep the
+    // longest boundary at which every item agrees.
+    let mut best = 0usize;
+    for (i, ch) in first.char_indices() {
+        if ch == ' ' {
+            let cand = i + 1; // include the trailing space
+            if items
+                .iter()
+                .all(|s| s.as_bytes().get(..cand) == first.as_bytes().get(..cand))
+            {
+                best = cand;
+            } else {
+                break;
+            }
+        }
+    }
+    &first[..best]
+}
+
 pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
-    use ratatui::widgets::Tabs;
     let t = app.theme;
     // Show one tab per running BackgroundTask. Selected tab tracks
     // `viewing_task_id`. Hint row sits below the tabs so the user
@@ -688,7 +719,7 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
     // previous one-line `[1 of N] ◀ back ▶ next` collapsed both
     // navigation and identity into a string that scanned poorly with
     // 5+ tasks.
-    let task_ids: Vec<String> = app.background_tasks.keys().cloned().collect();
+    let task_ids: Vec<String> = super::agents::fleet_ordered_task_ids(app);
     if task_ids.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
@@ -705,28 +736,53 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
         .as_ref()
         .and_then(|id| task_ids.iter().position(|t| t == id))
         .unwrap_or(0);
-    let titles: Vec<Line> = task_ids
+    // Strip the common leading words shared by every tab (e.g. each task
+    // is "Implement X language adapter" → drop "Implement " so the tab
+    // shows the part that actually differs instead of truncating it away).
+    let descs: Vec<&str> = task_ids
+        .iter()
+        .map(|id| {
+            app.background_tasks
+                .get(id)
+                .map(|b| b.description.as_str())
+                .unwrap_or(id.as_str())
+        })
+        .collect();
+    let common = common_word_prefix(&descs);
+
+    // Per-tab cell: a semantic status glyph (colour = state, matching the
+    // fan) + the de-prefixed, truncated title.
+    struct Tab {
+        glyph: &'static str,
+        color: ratatui::style::Color,
+        title: String,
+    }
+    let tabs: Vec<Tab> = task_ids
         .iter()
         .map(|id| {
             let bt = app.background_tasks.get(id);
             let desc = bt.map(|b| b.description.as_str()).unwrap_or(id.as_str());
-            let trimmed = if desc.chars().count() > 24 {
-                let mut s: String = desc.chars().take(23).collect();
-                s.push('…');
-                s
+            let desc = desc.strip_prefix(common).unwrap_or(desc).trim_start();
+            let desc = if desc.is_empty() {
+                bt.map(|b| b.description.as_str()).unwrap_or(id.as_str())
             } else {
-                desc.to_owned()
+                desc
             };
-            // Status glyph: animated for Running, static for Completed/Failed.
-            let glyph = match bt.map(|b| &b.status) {
+            let title = truncate_cells(desc, 22);
+            let (glyph, color) = match bt.map(|b| b.status) {
                 Some(crate::types::TaskLifecycle::Running) => {
                     let frame = (app.launched_at.elapsed().as_millis() / 240) as usize;
-                    ["✶", "✷", "✸", "✹"][frame % 4]
+                    (["✶", "✷", "✸", "✹"][frame % 4], t.warning)
                 }
-                Some(crate::types::TaskLifecycle::Completed) => "●",
-                _ => "○",
+                Some(crate::types::TaskLifecycle::Completed) => ("●", t.success),
+                Some(crate::types::TaskLifecycle::Failed) => ("✗", t.error),
+                _ => ("○", t.text_muted),
             };
-            Line::from(vec![Span::raw(glyph), Span::raw(" "), Span::raw(trimmed)])
+            Tab {
+                glyph,
+                color,
+                title,
+            }
         })
         .collect();
 
@@ -735,24 +791,89 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
-    let tabs = Tabs::new(titles)
-        .select(selected)
-        .style(t.style_text_secondary.bg(t.bg))
-        .highlight_style(
-            t.style_accent
-                .bg(t.surface_raised)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(Span::styled("·", t.style_text_muted))
-        .padding(" ", " ");
-    f.render_widget(tabs, split[0]);
+    // Window the tabs around `selected` so they never run off the edge.
+    // Grow outward (right-biased) from the selected tab while the strip
+    // fits, reserving room for the `‹ … ›` overflow arrows.
+    let n = tabs.len();
+    let avail = area.width as usize;
+    let cell_w = |i: usize| cell_width(tabs[i].glyph) + 1 + cell_width(&tabs[i].title);
+    const DIV: usize = 3; // " · "
+    let mut lo = selected;
+    let mut hi = selected;
+    let mut total = cell_w(selected);
+    loop {
+        let reserve = if lo > 0 { 2 } else { 0 } + if hi + 1 < n { 2 } else { 0 };
+        let mut grew = false;
+        if hi + 1 < n && total + DIV + cell_w(hi + 1) + reserve <= avail {
+            hi += 1;
+            total += DIV + cell_w(hi);
+            grew = true;
+        }
+        if lo > 0 && total + DIV + cell_w(lo - 1) + reserve <= avail {
+            lo -= 1;
+            total += DIV + cell_w(lo);
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
 
-    let hint = Line::from(vec![Span::styled(
-        "↑ back · ←/→ cycle · ↓ jump to latest",
-        Style::default().fg(t.text_muted),
-    )]);
+    let mut spans: Vec<Span> = Vec::new();
+    if lo > 0 {
+        spans.push(Span::styled("‹ ", Style::default().fg(t.text_muted)));
+    }
+    for i in lo..=hi {
+        if i > lo {
+            spans.push(Span::styled(" · ", Style::default().fg(t.border)));
+        }
+        let sel = i == selected;
+        let glyph_style = Style::default().fg(tabs[i].color);
+        let title_style = if sel {
+            Style::default()
+                .fg(t.text_primary)
+                .bg(t.surface_raised)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t.text_muted)
+        };
+        spans.push(Span::styled(
+            format!("{} ", tabs[i].glyph),
+            if sel {
+                glyph_style.bg(t.surface_raised)
+            } else {
+                glyph_style
+            },
+        ));
+        spans.push(Span::styled(tabs[i].title.clone(), title_style));
+    }
+    if hi + 1 < n {
+        spans.push(Span::styled(" ›", Style::default().fg(t.text_muted)));
+    }
     f.render_widget(
-        Paragraph::new(hint).style(Style::default().bg(t.bg)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(t.bg)),
+        split[0],
+    );
+
+    // Hint row + a right-aligned `n/N` position so you always know where
+    // you are in the fleet even when the window hides some tabs.
+    let hint = "↑ back · ←/→ cycle · ↓ latest";
+    let counter = format!("{}/{}", selected + 1, n);
+    let pad = (area.width as usize)
+        .saturating_sub(cell_width(hint) + cell_width(&counter) + 1)
+        .max(1);
+    let hint_line = Line::from(vec![
+        Span::styled(hint, Style::default().fg(t.text_muted)),
+        Span::styled(" ".repeat(pad), Style::default()),
+        Span::styled(
+            counter,
+            Style::default()
+                .fg(t.text_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    f.render_widget(
+        Paragraph::new(hint_line).style(Style::default().bg(t.bg)),
         split[1],
     );
 }
@@ -1138,19 +1259,11 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         };
         tail_body = format!("{dots_str} {}", segs.body);
     };
-    // Multi-agent fanout: when one or more background subagents are
-    // running concurrently, append `· N agents…` to the spinner so the
-    // user knows there's parallel work happening. Mirrors v126's
-    // `3 agents…` indicator from cli.js (line 161622, task:background).
-    // Counts Running + Idle so a teammate that finished its turn but
-    // is still alive doesn't disappear from the spinner badge — the
-    // user might still SendMessage to it.
-    let active_agents = app
-        .background_tasks
-        .values()
-        .filter(|bt| bt.status.is_alive())
-        .count();
-    let mut spans: Vec<Span<'static>> = if let Some(body) = compact_body {
+    // The `· N agents…` fanout badge that used to live here is gone — the
+    // agent fan's `agents  ●N ○N ✓N ✗N` summary line (just below the
+    // input) already carries the live count, and saying it twice was part
+    // of the "see the same agent everywhere" redundancy.
+    let spans: Vec<Span<'static>> = if let Some(body) = compact_body {
         // Compact path: keep the legacy single-string format. Compaction
         // has its own status line ("Compacting…", different shape) and
         // animating the shimmer there would be misleading — the verb
@@ -1188,17 +1301,6 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         s.push(Span::styled(tail_body, t.style_text_muted));
         s
     };
-    if active_agents > 0 {
-        let plural = if active_agents == 1 {
-            "agent"
-        } else {
-            "agents"
-        };
-        spans.push(Span::styled(
-            format!("  ⏵ {active_agents} {plural}…"),
-            t.style_accent,
-        ));
-    }
     let line = Line::from(spans);
     let row0 = Rect { height: 1, ..area };
     f.render_widget(Paragraph::new(line).style(Style::default().bg(t.bg)), row0);
@@ -1327,92 +1429,123 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
     });
 
     let total = in_progress.len() + pending.len() + completed.len();
-    let in_prog_count = in_progress.len();
+    let done = completed.len();
 
-    // Build the block title text: "N tasks (k done, m in progress, p open)"
-    let title_text = format!(
-        " {} tasks ({} done{}{}) ",
-        total,
-        completed.len(),
-        if in_prog_count > 0 {
-            format!(", {} in progress", in_prog_count)
-        } else {
-            String::new()
-        },
-        if !pending.is_empty() {
-            format!(", {} open", pending.len())
-        } else {
-            String::new()
-        },
-    );
+    // Which todo is the running agent actually working on right now?
+    // Link through the active agent's `parent_task_id` so that one task
+    // reads as the live focus (bright + animated) while the rest of the
+    // in-progress set dims — instead of N identical bold rows.
+    let active_todo_id: Option<String> = app
+        .last_active_agent_task
+        .as_deref()
+        .and_then(|aid| app.background_tasks.get(aid))
+        .and_then(|bt| bt.parent_task_id.clone());
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(t.border))
-        .title(Span::styled(
-            title_text,
+    // Header: a glanceable progress bar instead of "(99 done, 12 in
+    // progress)" arithmetic. `tasks ███████░ 89% · 99/111`.
+    let pct = if total > 0 { done * 100 / total } else { 0 };
+    const BAR_W: usize = 10;
+    let filled = (pct * BAR_W / 100).min(BAR_W);
+    let bar: String = "█".repeat(filled);
+    let rest: String = "░".repeat(BAR_W - filled);
+    let title_line = Line::from(vec![
+        Span::styled(
+            " tasks ",
             Style::default()
                 .fg(t.text_secondary)
                 .add_modifier(Modifier::BOLD),
-        ))
+        ),
+        Span::styled(bar, Style::default().fg(t.success)),
+        Span::styled(rest, Style::default().fg(t.border)),
+        Span::styled(
+            format!(" {pct}% · {done}/{total} "),
+            Style::default().fg(t.text_muted),
+        ),
+    ]);
+
+    // Flat dock: TOP divider with the progress header inline, no box.
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(t.border))
+        .title(title_line)
         .style(Style::default().bg(t.surface));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let render_width = inner.width as usize;
-    // Priority order: recently-completed fade tail first (celebration
-    // moment), then in-progress (active work), then pending (unblocked
-    // before blocked). Matches CC 2.1.144's priority ordering.
+    // The panel foregrounds ACTIVE work. Recently-completed tasks were
+    // rendered as a wall of strikethrough rows that crowded out what's
+    // live; now they collapse to a single green celebration line so the
+    // momentum still reads ("✓ 6 just completed") without burying the
+    // in-progress / pending rows underneath.
     let visible_budget = inner.height as usize;
     let mut rendered: Vec<Line<'static>> = Vec::new();
 
-    // Recently-completed first — show the "just finished" celebration
-    // at the top so the user sees momentum.
     let now_sort = std::time::Instant::now();
-    for task in &completed {
-        if rendered.len() >= visible_budget {
-            break;
-        }
-        let recent = app
-            .task_completion_times
-            .get(&task.id)
-            .is_some_and(|t| now_sort.duration_since(*t).as_secs() < 30);
-        if !recent {
-            continue;
-        }
-        let avail = render_width.saturating_sub(3);
+    let recent_done = completed
+        .iter()
+        .filter(|task| {
+            app.task_completion_times
+                .get(&task.id)
+                .is_some_and(|t| now_sort.duration_since(*t).as_secs() < 30)
+        })
+        .count();
+    if recent_done > 0 && rendered.len() < visible_budget {
+        let label = if recent_done == 1 {
+            "1 just completed".to_owned()
+        } else {
+            format!("{recent_done} just completed")
+        };
         rendered.push(Line::from(vec![
             Span::styled("✓ ", Style::default().fg(t.success)),
-            Span::styled(
-                truncate_str(&task.subject, avail),
-                Style::default()
-                    .fg(t.text_muted)
-                    .add_modifier(Modifier::CROSSED_OUT),
-            ),
+            Span::styled(label, Style::default().fg(t.success)),
         ]));
     }
 
-    // In-progress tasks with optional activeForm activity line below.
-    for task in &in_progress {
+    // In-progress tasks. The focal task (the one the running agent is on,
+    // else the first) gets an animated amber spinner + bright bold text
+    // and its activeForm sub-line; the rest dim to text_secondary with a
+    // static `◐`, so the eye lands on what's live right now.
+    let reduced = crate::spinner::reduced_motion();
+    let spin_frame = (app.launched_at.elapsed().as_millis() / 100) as usize;
+    let spinner = crate::app::SPINNER[spin_frame % crate::app::SPINNER.len()];
+    let mut focal_used = false;
+    for (i, task) in in_progress.iter().enumerate() {
         if rendered.len() >= visible_budget {
             break;
         }
-        let avail = render_width.saturating_sub(3);
-        rendered.push(Line::from(vec![
-            Span::styled(
-                "◐ ",
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                truncate_str(&task.subject, avail),
+        let is_focal = match active_todo_id.as_deref() {
+            Some(id) => task.id.as_str() == id,
+            None => i == 0 && !focal_used,
+        };
+        if is_focal {
+            focal_used = true;
+        }
+        let (glyph, glyph_style, name_style) = if is_focal {
+            let g = if reduced { "◐" } else { spinner };
+            (
+                g.to_string(),
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
                 Style::default()
                     .fg(t.text_primary)
                     .add_modifier(Modifier::BOLD),
-            ),
+            )
+        } else {
+            (
+                "◐".to_string(),
+                Style::default().fg(t.warning),
+                Style::default().fg(t.text_secondary),
+            )
+        };
+        let avail = render_width.saturating_sub(3);
+        rendered.push(Line::from(vec![
+            Span::styled(format!("{glyph} "), glyph_style),
+            Span::styled(truncate_str(&task.subject, avail), name_style),
         ]));
-        // Show activeForm as a dim sub-line if it differs from subject
-        if let Some(ref form) = task.active_form
+        // activeForm sub-line only for the focal task — that's the one
+        // whose live activity ("Constructing CFG…") is worth the row.
+        if is_focal
+            && let Some(ref form) = task.active_form
             && form != &task.subject
             && rendered.len() < visible_budget
         {
@@ -1440,7 +1573,9 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
             .map(|id| id.as_str())
             .collect();
         let blocked = !open_blockers.is_empty();
-        let icon = if blocked { "◯" } else { "☐" };
+        // Queued = hollow `○` (matches the fan's idle glyph); blocked =
+        // dotted `◌`, dimmer, with its blockers spelled out.
+        let icon = if blocked { "◌" } else { "○" };
         let color = if blocked {
             t.text_muted
         } else {
@@ -1496,18 +1631,21 @@ pub(super) fn agent_fan_below_input(f: &mut Frame, app: &App, area: Rect) {
     }
     let t = app.theme;
     let is_team = app.team_context.is_active();
-    let title = if is_team { " team " } else { " agents " };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
+    // Flat dock: a single TOP divider. The subagent path draws its own
+    // `agents  ●N ○N ✓N ✗N` summary line, so no box title there; the
+    // team path keeps a `team` label since its tree has no summary row.
+    let mut block = Block::default()
+        .borders(Borders::TOP)
         .border_style(Style::default().fg(t.border))
-        .title(Span::styled(
-            title,
+        .style(Style::default().bg(t.surface));
+    if is_team {
+        block = block.title(Span::styled(
+            " team ",
             Style::default()
                 .fg(t.text_secondary)
                 .add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().bg(t.surface));
+        ));
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
     if is_team {

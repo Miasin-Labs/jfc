@@ -41,10 +41,24 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // narrower phantom width = more visual rows than the real
     // render produces) and the input box ends up taller than
     // needed, eating into the message column.
+    // Task view collapses the entire chat dock — when reading a
+    // background agent's transcript you can't act on the input, pinned
+    // tasks, or the agent fan, so they'd just squeeze the log. Keep only
+    // the tab strip (footer) + status bar. Sidebars are also forced off
+    // so the transcript gets the full width.
+    let in_task_view = app.viewing_task_id.is_some();
+
+    // Input box is now a flat strip under a single TOP divider (no
+    // full rounded box), so its chrome is 1 row, not 2. Width chrome is
+    // likewise 4 (2 padding + 2 prompt strip), not 6 (no L/R borders).
     let total_w_pre = f.area().width as usize;
-    let input_content_w = total_w_pre.saturating_sub(6);
+    let input_content_w = total_w_pre.saturating_sub(4);
     let input_lines = input_visual_line_count(app, input_content_w);
-    let input_height = (input_lines + 2).min(8) as u16;
+    let input_height = if in_task_view {
+        0
+    } else {
+        (input_lines + 1).min(7) as u16
+    };
     // Two rows when in task view: tab strip on top, key-hint row
     // below. Was 1 when the footer was a flat back/next string;
     // expanded for the Tabs widget redesign so each tab has space
@@ -103,7 +117,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // box" reads better than "agent fan crowds the verb line", and it
     // keeps the verb glued to the prompt where the user's eye lives
     // while typing.
-    let spinner_row_height: u16 = if show_spinner { 2 } else { 0 };
+    let spinner_row_height: u16 = if show_spinner && !in_task_view { 2 } else { 0 };
     // Pinned todo list above the input, Claude-Code style. Header row
     // ("Tasks (k/n done)") + up to task_pin_visible rows + an optional
     // "+N more" footer. Height collapses to 0 when no tasks exist so
@@ -144,19 +158,24 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // task closed read as visual debt. The fade-out tail (recent_done <
     // 30s) keeps the celebratory ✓ row briefly so the user sees the
     // last completion land.
+    // Recently-completed now collapse to a single summary line (not one
+    // row per task), so they cost at most 1 row — plus an extra row for
+    // the focal in-progress task's activeForm sub-line.
+    let recent_rows = if tp_recent_done > 0 { 1 } else { 0 };
     let task_pin_rows = if tp_open == 0 && tp_recent_done == 0 {
         0
     } else {
-        let body = (tp_open + tp_recent_done).min(task_pin_visible);
-        let overflow = if tp_open + tp_recent_done > task_pin_visible {
+        let body = (tp_open + recent_rows + 1).min(task_pin_visible);
+        let overflow = if tp_open + recent_rows > task_pin_visible {
             1
         } else {
             0
         };
         body + overflow
     };
-    let tasks_pinned_height: u16 = if task_pin_rows > 0 {
-        (task_pin_rows as u16).min(10) + 2
+    // Flattened: a single TOP divider (1 row of chrome), not a full box.
+    let tasks_pinned_height: u16 = if task_pin_rows > 0 && !in_task_view {
+        (task_pin_rows as u16).min(10) + 1
     } else {
         0
     };
@@ -164,8 +183,11 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // per alive sub-agent. Capped at 8 so a fan of 30 doesn't push the
     // status bar off-screen — the user can still open the task view to
     // see all of them.
-    let agent_fan_height: u16 = if tree_rows > 0 {
-        (1 + tree_rows as u16).min(8) + 2
+    // Flattened: 1 TOP divider + 1 summary line + up to 7 agent rows.
+    // (Was a full rounded box: +2 chrome plus a leader row.) The summary
+    // line carries the fleet counts, so the per-agent rows are pure data.
+    let agent_fan_height: u16 = if tree_rows > 0 && !in_task_view {
+        (2 + tree_rows as u16).min(9)
     } else {
         0
     };
@@ -180,25 +202,37 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         crate::diagnostics::unacknowledged(&app.diagnostics, &app.delivered_diagnostics).len();
     let diag_row_height: u16 = if unack_count == 0 { 0 } else { 1 };
 
+    // In task view the agent tab strip sits at the TOP (browser-style),
+    // above the transcript — so it's the first chunk. Its height is 0
+    // outside task view, so in normal chat the slot collapses and the
+    // message area starts at the top as before.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),
-            Constraint::Length(subagent_footer_height),
-            Constraint::Length(diag_row_height),
-            Constraint::Length(spinner_row_height),
-            Constraint::Length(tasks_pinned_height),
-            Constraint::Length(input_height),
-            Constraint::Length(agent_fan_height),
-            Constraint::Length(2),
+            Constraint::Length(subagent_footer_height), // 0: task tab strip (top)
+            Constraint::Min(3),                          // 1: messages
+            Constraint::Length(diag_row_height),         // 2
+            Constraint::Length(spinner_row_height),      // 3
+            Constraint::Length(tasks_pinned_height),     // 4
+            Constraint::Length(input_height),            // 5
+            Constraint::Length(agent_fan_height),        // 6
+            Constraint::Length(2),                       // 7: status
         ])
         .split(f.area());
 
     // TODO: Wire sidebar_progress to App animation fields once Agent A adds them.
     // For now, snap to 0.0/1.0 so the ease_out_cubic path is exercised but
     // the visual result is identical to the old binary toggle.
-    let sidebar_progress: f32 = if app.show_sidebar { 1.0 } else { 0.0 };
-    let show_right = app.show_info_sidebar && f.area().width >= 100;
+    // The right info sidebar is gone entirely — Context, the git diff
+    // stat (Δ), and MCP/LSP health all live in the status bar now, so a
+    // whole column of chrome bought nothing. The left sessions sidebar
+    // still toggles, but never in task view (transcript wants the width).
+    let sidebar_progress: f32 = if app.show_sidebar && !in_task_view {
+        1.0
+    } else {
+        0.0
+    };
+    let show_right = false;
 
     // Responsive sidebars: at narrow widths the sessions sidebar
     // shrinks toward 20 cols and the info sidebar drops below 32, so
@@ -215,6 +249,12 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         (total_w / 6).clamp(36, 48) as u16
     };
 
+    // Tab strip at the top in task view (chunks[0]); collapsed otherwise.
+    if app.viewing_task_id.is_some() {
+        subagent_footer(f, app, chunks[0]);
+    }
+
+    let msg_area = chunks[1];
     match (show_left, show_right) {
         (true, true) => {
             let split = Layout::default()
@@ -224,7 +264,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
                     Constraint::Min(20),
                     Constraint::Length(right_w),
                 ])
-                .split(chunks[0]);
+                .split(msg_area);
             sidebar(f, app, split[0]);
             messages(f, app, split[1]);
             info_sidebar(f, app, split[2]);
@@ -233,7 +273,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
             let split = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(left_w), Constraint::Min(20)])
-                .split(chunks[0]);
+                .split(msg_area);
             sidebar(f, app, split[0]);
             messages(f, app, split[1]);
         }
@@ -241,17 +281,13 @@ pub fn frame(f: &mut Frame, app: &mut App) {
             let split = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(20), Constraint::Length(right_w)])
-                .split(chunks[0]);
+                .split(msg_area);
             messages(f, app, split[0]);
             info_sidebar(f, app, split[1]);
         }
         (false, false) => {
-            messages(f, app, chunks[0]);
+            messages(f, app, msg_area);
         }
-    }
-
-    if app.viewing_task_id.is_some() {
-        subagent_footer(f, app, chunks[1]);
     }
     if unack_count > 0 {
         diagnostic_row(f, app, chunks[2]);
@@ -262,7 +298,9 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     if tasks_pinned_height > 0 {
         tasks_pinned_row(f, app, chunks[4]);
     }
-    input(f, app, chunks[5]);
+    if input_height > 0 {
+        input(f, app, chunks[5]);
+    }
     if agent_fan_height > 0 {
         agent_fan_below_input(f, app, chunks[6]);
     }

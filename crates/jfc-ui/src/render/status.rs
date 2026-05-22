@@ -9,6 +9,15 @@ use ratatui::{
 use crate::app::App;
 use crate::types::Role;
 
+/// One status-bar segment: its own pre-styled spans (so a segment can be
+/// multi-colored, e.g. the diff stat's green `+` / red `−`) plus a drop
+/// priority. When the line is too narrow the lowest-priority segments are
+/// removed first, instead of char-truncating one monochrome run.
+struct StatusSeg {
+    spans: Vec<Span<'static>>,
+    prio: u8,
+}
+
 pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     let t = app.theme;
 
@@ -29,58 +38,23 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
 
     let msg_count = app.messages.iter().filter(|m| m.role == Role::User).count();
 
-    // Build status badges in priority order. Each badge is a short
-    // string fragment; we join them with a `·` separator and truncate
-    // from the right so low-priority badges drop first at narrow
-    // widths while the model name and git branch always show.
-    let mut badges: Vec<String> = Vec::new();
-
-    // Provider name renders as its own styled Span at the start of the
-    // line so we can pulse it independently — the rest of the badges
-    // share one foreground color, but the provider gets a subtle
-    // alpha-blend pulse so a glance reveals which backend is live (bedrock
-    // / anthropic-oauth / openwebui) without crowding the model name.
+    // ── Build prioritised, colour-coded segments (see `StatusSeg`) ──
     let provider_badge = pretty_provider_label(app.provider.name());
-    badges.push(app.model.to_string());
-    badges.push(effort_status_badge(app));
-
-    if app.fast_mode {
-        badges.push("⚡ FAST".to_string());
-    }
-
-    if let Some(status) = app.claude_status.as_ref() {
-        if status.is_degraded() {
-            badges.push(status.short_badge());
-        }
-    } else if app.claude_status_error.is_some() {
-        badges.push("status unreachable".to_string());
-    }
-
-    match (&app.subscription_type, &app.seat_tier) {
-        (Some(sub), Some(tier)) => badges.push(format!("{}·{}", sub, tier)),
-        (Some(sub), None) => badges.push(sub.clone()),
-        (None, Some(tier)) => badges.push(tier.clone()),
-        (None, None) => {}
-    }
-
-    match app.permission_mode {
-        crate::app::PermissionMode::Default => {}
-        mode => badges.push(format!("{} {}", mode.symbol(), mode.label())),
-    }
-
-    if let Some(branch) = app.git_branch.as_deref()
-        && !branch.is_empty()
-    {
-        let trimmed: String = if branch.chars().count() > 24 {
-            let mut s: String = branch.chars().take(23).collect();
-            s.push('…');
-            s
-        } else {
-            branch.to_owned()
+    let muted = Style::default().fg(t.text_muted);
+    let sec = Style::default().fg(t.text_secondary);
+    let gold = Style::default().fg(t.warning);
+    let mut segs: Vec<StatusSeg> = Vec::new();
+    macro_rules! push1 {
+        ($s:expr, $style:expr, $prio:expr $(,)?) => {
+            segs.push(StatusSeg {
+                spans: vec![Span::styled($s, $style)],
+                prio: $prio,
+            })
         };
-        badges.push(format!("⎇ {}", trimmed));
     }
 
+    // Identity: model first, then cost in gold (the number you watch).
+    push1!(app.model.to_string(), sec, 100);
     let cost_total = crate::cost::total_cost(&app.usage_by_model);
     if cost_total > 0.001 {
         let cost_str = if cost_total < 0.01 {
@@ -90,122 +64,160 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("${:.2}", cost_total)
         };
-        badges.push(cost_str);
+        push1!(cost_str, gold.add_modifier(Modifier::BOLD), 95);
     }
 
-    if app.leader_key_active {
-        badges.push("[^X …]".to_string());
-    } else if app.viewing_task_id.is_some() {
-        badges.push("[task view]".to_string());
-    }
-
-    let alive: Vec<&crate::app::BackgroundTask> = app
-        .background_tasks
-        .values()
-        .filter(|bt| bt.status.is_alive())
+    // Problems / actionable state — high priority, coloured to draw the eye.
+    let mcp_down: Vec<&str> = app
+        .mcp_servers
+        .iter()
+        .filter(|s| matches!(s.status, crate::types::McpStatus::Error))
+        .map(|s| s.name.as_str())
         .collect();
-    if !alive.is_empty() {
-        let total_tools: u32 = alive.iter().map(|b| b.tool_use_count).sum();
-        let total_tokens: u64 = alive
-            .iter()
-            .map(|b| {
-                b.latest_input_tokens
-                    .saturating_add(b.latest_cache_read_tokens)
-                    .saturating_add(b.latest_cache_write_tokens)
-                    .saturating_add(b.cumulative_output_tokens)
-            })
-            .sum();
-        let mut s = format!("⏵ {}", alive.len());
-        if total_tools > 0 {
-            s.push_str(&format!(
-                " · {} tool{}",
-                total_tools,
-                if total_tools == 1 { "" } else { "s" }
-            ));
+    if !mcp_down.is_empty() {
+        push1!(
+            format!("⚠ mcp: {}", mcp_down.join(", ")),
+            Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+            93,
+        );
+    }
+    if let Some(status) = app.claude_status.as_ref() {
+        if status.is_degraded() {
+            push1!(status.short_badge(), gold, 92);
         }
-        if total_tokens > 0 {
-            s.push_str(&format!(
-                " · {} tok",
-                super::format_token_count(total_tokens)
-            ));
-        }
-        badges.push(s);
+    } else if app.claude_status_error.is_some() {
+        push1!("status unreachable".to_owned(), Style::default().fg(t.error), 92);
     }
-
-    if app.worktree_count > 0 {
-        badges.push(format!("⌥ {} wt", app.worktree_count));
-    }
-
-    if !app.queued_prompts.is_empty() {
-        badges.push(format!("⏳ {} queued", app.queued_prompts.len()));
-    }
-
     let approval_count =
         app.approval_queue.len() + if app.pending_approval.is_some() { 1 } else { 0 };
     if approval_count > 0 {
-        badges.push(format!("⏸ {approval_count}"));
+        push1!(
+            format!("⏸ {approval_count}"),
+            gold.add_modifier(Modifier::BOLD),
+            90,
+        );
+    }
+    if app.leader_key_active {
+        push1!("[^X …]".to_owned(), Style::default().fg(t.accent), 88);
+    } else if app.viewing_task_id.is_some() {
+        push1!("[task view]".to_owned(), Style::default().fg(t.accent), 88);
+    }
+    if !app.queued_prompts.is_empty() {
+        push1!(format!("⏳ {} queued", app.queued_prompts.len()), muted, 80);
+    }
+    let alive_n = app
+        .background_tasks
+        .values()
+        .filter(|bt| bt.status.is_alive())
+        .count();
+    if alive_n > 0 {
+        let tools: u32 = app
+            .background_tasks
+            .values()
+            .filter(|bt| bt.status.is_alive())
+            .map(|b| b.tool_use_count)
+            .sum();
+        let s = if tools > 0 {
+            format!("⏵ {alive_n} · {tools} tools")
+        } else {
+            format!("⏵ {alive_n}")
+        };
+        push1!(s, gold, 78);
     }
 
-    if let Some(save_t) = app.last_session_save_at
-        && save_t.elapsed().as_millis() < 2000
+    // Mode flags.
+    if let crate::app::PermissionMode::Default = app.permission_mode {
+    } else {
+        push1!(
+            format!("{} {}", app.permission_mode.symbol(), app.permission_mode.label()),
+            gold,
+            85,
+        );
+    }
+    if app.fast_mode {
+        push1!("⚡ FAST".to_owned(), gold, 60);
+    }
+    if app.effort_state.current.is_some() {
+        push1!(effort_status_badge(app), muted, 50);
+    }
+
+    // Repo zone: branch · diff (green/red) · cwd.
+    if let Some(branch) = app.git_branch.as_deref().filter(|b| !b.is_empty()) {
+        push1!(format!("⎇ {}", super::truncate_str(branch, 24)), muted, 70);
+    }
+    let diff = super::collect_diff_stats(app);
+    if diff.total_files > 0 {
+        segs.push(StatusSeg {
+            spans: vec![
+                Span::styled("Δ ", muted),
+                Span::styled(format!("+{}", diff.additions), Style::default().fg(t.success)),
+                Span::styled(" ", muted),
+                Span::styled(format!("−{}", diff.deletions), Style::default().fg(t.error)),
+            ],
+            prio: 65,
+        });
+    }
+    push1!(cwd_display, muted, 45);
+
+    match (&app.subscription_type, &app.seat_tier) {
+        (Some(sub), Some(tier)) => push1!(format!("{sub}·{tier}"), muted, 40),
+        (Some(sub), None) => push1!(sub.clone(), muted, 40),
+        (None, Some(tier)) => push1!(tier.clone(), muted, 40),
+        (None, None) => {}
+    }
+    if app.worktree_count > 0 {
+        push1!(format!("⌥ {} wt", app.worktree_count), muted, 30);
+    }
+    if app
+        .last_session_save_at
+        .is_some_and(|t| t.elapsed().as_millis() < 2000)
     {
-        badges.push("✓ saved".to_string());
+        push1!("✓ saved".to_owned(), Style::default().fg(t.success), 35);
     }
+    // Lowest value — drops first when the line is tight.
+    push1!(format!("{msg_count} msgs"), muted, 10);
 
-    badges.push(format!("{} · {} msgs", cwd_display, msg_count));
-
+    // ── Assemble: provider prefix (fixed) · segments · pad · right ──
     let right = " ? help · ^P palette ";
-
     let total_width = area.width as usize;
-    let right_start = total_width.saturating_sub(right.len());
+    let right_w = super::cell_width(right);
+    let avail = total_width.saturating_sub(right_w);
 
-    // Provider prefix: ` ● <provider> · `. The bullet was previously
-    // pulsing on wall-clock time (every 1.6s regardless of network),
-    // which made the status bar feel "alive" even when literally
-    // nothing was happening — even typing in the input box, which
-    // has no network signal. Now the bullet's intensity is driven by
-    // the same `network_activity` factor the EKG sparkline uses, so
-    // the two stay in lockstep: when the EKG is actively beating
-    // (real bytes arriving), the bullet glows; when the wire is idle,
-    // the bullet sits dim. Plumb through the EKG's beat-armed state
-    // so the bullet "decays" alongside the trace over the PATTERN_LEN
-    // tick window after the last byte.
+    // Provider dot pulse — intensity tracks live network activity, so it
+    // glows only when bytes are actually arriving (not on a wall clock).
     let beat_alive = app.network_beat_remaining > 0;
     let dot_intensity = if beat_alive {
-        // Active beat → blend in proportion to current R-wave height.
         (0.4 + app.network_activity * 0.6).clamp(0.0, 1.0)
     } else {
-        // Idle → flat. No pulse, no fake "things are happening" signal.
         0.0
     };
-    let dot_color = blend_color(
-        t.border,
-        provider_accent(app.provider.name()),
-        dot_intensity,
-    );
+    let dot_color = blend_color(t.border, provider_accent(app.provider.name()), dot_intensity);
 
-    let badge_str = format!(" {} · ", badges.join(" · "));
-    // Budget for the badge string = right_start − provider prefix width.
-    let provider_prefix_width = 4 + provider_badge.chars().count(); // " ● " + name + " · "
-    let badge_budget = right_start.saturating_sub(provider_prefix_width).max(1);
-    let badge_truncated = if badge_str.chars().count() > badge_budget {
-        let truncated: String = badge_str
-            .chars()
-            .take(badge_budget.saturating_sub(1))
-            .collect();
-        format!("{truncated}…")
-    } else {
-        badge_str
+    let prefix_w = 3 + super::cell_width(&provider_badge); // " ● <provider>"
+    const SEP_W: usize = 3; // " · "
+    let seg_w = |s: &StatusSeg| -> usize {
+        s.spans.iter().map(|sp| super::cell_width(&sp.content)).sum()
     };
-    let consumed = provider_prefix_width + badge_truncated.chars().count();
-    let padding = " ".repeat(right_start.saturating_sub(consumed));
 
-    let line = Line::from(vec![
+    // Drop the lowest-priority segment until the line fits.
+    loop {
+        let segs_w: usize = segs.iter().map(|s| SEP_W + seg_w(s)).sum();
+        if prefix_w + segs_w <= avail || segs.is_empty() {
+            break;
+        }
+        if let Some((i, _)) = segs.iter().enumerate().min_by_key(|(_, s)| s.prio) {
+            segs.remove(i);
+        } else {
+            break;
+        }
+    }
+
+    let kept_w: usize = segs.iter().map(|s| SEP_W + seg_w(s)).sum();
+    let pad = avail.saturating_sub(prefix_w + kept_w);
+
+    let mut spans: Vec<Span> = vec![
         Span::raw(" "),
-        Span::styled(
-            "●",
-            Style::default().fg(dot_color).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("●", Style::default().fg(dot_color).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
         Span::styled(
             provider_badge,
@@ -213,13 +225,16 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
                 .fg(provider_accent(app.provider.name()))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(badge_truncated, Style::default().fg(t.text_secondary)),
-        Span::styled(padding, Style::default().fg(t.text_muted)),
-        Span::styled(right, Style::default().fg(t.text_muted)),
-    ]);
+    ];
+    for s in segs {
+        spans.push(Span::styled(" · ", muted));
+        spans.extend(s.spans);
+    }
+    spans.push(Span::styled(" ".repeat(pad), Style::default()));
+    spans.push(Span::styled(right, muted));
 
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(t.surface)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(t.surface)),
         rows[0],
     );
 

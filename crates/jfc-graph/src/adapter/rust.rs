@@ -6,6 +6,9 @@ use tracing::warn;
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::adapter::{AdapterError, LanguageAdapter, ParseOutcome, ParsedFile, first_syntax_error};
+use crate::cfg::build_cfg;
+use crate::complexity::compute_complexity;
+use crate::dataflow::extract_dataflow;
 use crate::edges::{EdgeData, EdgeKind};
 use crate::nodes::{NodeData, NodeId, NodeKind, Span, Visibility};
 
@@ -282,7 +285,10 @@ fn extract_function(
         metadata.insert("accessed_fields".into(), accessed.join(","));
     }
 
-    Some(build_node_data(
+    let complexity = compute_complexity(node, source.as_bytes(), "rust");
+    let cfg = build_cfg(node, source.as_bytes(), "rust");
+
+    let mut nd = build_node_data(
         &name,
         NodeKind::Function,
         node,
@@ -291,7 +297,11 @@ fn extract_function(
         file_path_str,
         scope,
         metadata,
-    ))
+    );
+    nd.complexity = complexity;
+    nd.cfg = cfg;
+    nd.dataflow = extract_dataflow(node, source.as_bytes(), "rust");
+    Some(nd)
 }
 
 fn accessed_field_names(node: TsNode<'_>, source: &str) -> Vec<String> {
@@ -435,6 +445,9 @@ fn extract_trait(
                         // Stamped on insertion via `CodeGraph::add_node`.
                         birth_revision: 0,
                         last_modified_revision: 0,
+                        complexity: None,
+            cfg: None,
+            dataflow: None,
                     });
                 }
             }
@@ -509,6 +522,9 @@ fn extract_impl(
                         // Stamped on insertion via `CodeGraph::add_node`.
                         birth_revision: 0,
                         last_modified_revision: 0,
+                        complexity: None,
+            cfg: None,
+            dataflow: None,
                     });
                 }
             }
@@ -593,6 +609,9 @@ fn build_node_data(
         // Stamped on insertion via `CodeGraph::add_node`.
         birth_revision: 0,
         last_modified_revision: 0,
+        complexity: None,
+            cfg: None,
+            dataflow: None,
     }
 }
 

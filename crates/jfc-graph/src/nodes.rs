@@ -6,6 +6,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::path::PathBuf;
 
+use crate::cfg::FunctionCfg;
+use crate::complexity::ComplexityMetrics;
+use crate::dataflow::FunctionDataflow;
+
 // Phase 9: typed-metadata projection helper.
 //
 // `NodeData::kind_data()` lives in `crate::kind_specific` because it
@@ -119,6 +123,19 @@ pub struct NodeData {
     /// "pre-history" (see field-level / struct-level docs).
     #[serde(default)]
     pub last_modified_revision: u64,
+    /// Per-function complexity metrics (cognitive, cyclomatic, nesting, Halstead,
+    /// LOC, maintainability index). Only populated for `Function` nodes when
+    /// the source is available at extraction time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<ComplexityMetrics>,
+    /// Per-function control flow graph. Only populated for `Function` nodes
+    /// when the source is available at extraction time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg: Option<FunctionCfg>,
+    /// Per-function dataflow analysis. Only populated for `Function` nodes
+    /// when the source is available at extraction time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataflow: Option<FunctionDataflow>,
 }
 
 #[cfg(test)]
@@ -171,6 +188,9 @@ mod tests {
             metadata: HashMap::from([("async".to_string(), "false".to_string())]),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         };
 
         assert_eq!(node.id, id);
@@ -227,6 +247,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         };
 
         let json = serde_json::to_string(&node).expect("serialize");

@@ -661,6 +661,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 
@@ -886,6 +889,9 @@ mod tests {
             metadata,
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 

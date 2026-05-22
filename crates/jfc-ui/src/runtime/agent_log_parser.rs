@@ -103,6 +103,12 @@ pub(crate) fn parse_agent_log_to_chat_messages(lines: &[String]) -> Vec<ChatMess
     let mut out: Vec<ChatMessage> = Vec::new();
     let mut prose_buf = String::new();
     let mut tool_idx: u32 = 0;
+    // Coalesce a run of consecutive identical tool calls into one row.
+    // A replayed agent that wrote 6 files logs 6 `Write` lines; rendering
+    // them as 6 near-identical "● Write replayed" rows is pure noise.
+    // `(name, count)` accumulates the run; flushed as `Write ×6` when the
+    // run ends (a different tool, prose, or terminal status).
+    let mut pending_tool: Option<(String, u32)> = None;
 
     let flush_prose = |out: &mut Vec<ChatMessage>, buf: &mut String| {
         if buf.is_empty() {
@@ -117,31 +123,58 @@ pub(crate) fn parse_agent_log_to_chat_messages(lines: &[String]) -> Vec<ChatMess
         buf.clear();
     };
 
+    let flush_tool =
+        |out: &mut Vec<ChatMessage>, pending: &mut Option<(String, u32)>, tool_idx: &mut u32| {
+            let Some((name, count)) = pending.take() else {
+                return;
+            };
+            let kind = ToolKind::from_name(&name);
+            // Terse summary; `×N` when the run collapsed more than one
+            // call. The old "(persisted log: tool ran — input/output not
+            // recorded)" boilerplate said nothing and repeated per row.
+            let summary = if count > 1 {
+                format!("×{count} · replayed")
+            } else {
+                "replayed".to_owned()
+            };
+            let tool = ToolCall {
+                id: ToolId::from(format!("agent-log-{tool_idx}")),
+                kind,
+                status: ExecutionStatus::Completed,
+                input: ToolInput::Generic { summary },
+                output: ToolOutput::Empty,
+                display: ToolDisplayState::DEFAULT,
+                elapsed_ms: None,
+                started_at: None,
+                thought_signature: None,
+            };
+            *tool_idx = tool_idx.saturating_add(1);
+            out.push(ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)]));
+        };
+
     for line in lines {
         match LogEntry::classify(line) {
             LogEntry::Prose(s) => {
+                flush_tool(&mut out, &mut pending_tool, &mut tool_idx);
                 prose_buf.push_str(s);
                 prose_buf.push('\n');
             }
             LogEntry::Tool { name } => {
                 flush_prose(&mut out, &mut prose_buf);
-                let kind = ToolKind::from_name(name);
-                let summary = "(persisted log: tool ran — input/output not recorded)".to_owned();
-                let tool = ToolCall {
-                    id: ToolId::from(format!("agent-log-{tool_idx}")),
-                    kind,
-                    status: ExecutionStatus::Completed,
-                    input: ToolInput::Generic { summary },
-                    output: ToolOutput::Empty,
-                    display: ToolDisplayState::DEFAULT,
-                    elapsed_ms: None,
-                    started_at: None,
-                    thought_signature: None,
-                };
-                tool_idx = tool_idx.saturating_add(1);
-                out.push(ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)]));
+                match pending_tool.as_mut() {
+                    // Same tool as the run in progress → just count it.
+                    Some((pending_name, count)) if pending_name == name => {
+                        *count += 1;
+                    }
+                    // Different tool → flush the old run, start a new one.
+                    _ => {
+                        flush_tool(&mut out, &mut pending_tool, &mut tool_idx);
+                        pending_tool = Some((name.to_owned(), 1));
+                    }
+                }
             }
             LogEntry::Terminal { status, body } => {
+                flush_tool(&mut out, &mut pending_tool, &mut tool_idx);
                 flush_prose(&mut out, &mut prose_buf);
                 let (summary, error) = match status {
                     TaskLifecycle::Failed | TaskLifecycle::Cancelled => {
@@ -166,6 +199,7 @@ pub(crate) fn parse_agent_log_to_chat_messages(lines: &[String]) -> Vec<ChatMess
             }
         }
     }
+    flush_tool(&mut out, &mut pending_tool, &mut tool_idx);
     flush_prose(&mut out, &mut prose_buf);
     out
 }

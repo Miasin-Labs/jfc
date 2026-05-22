@@ -183,6 +183,9 @@ mod revision_tracking_tests {
             // overwritten with the graph's current revision.
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 

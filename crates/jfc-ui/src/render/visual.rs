@@ -574,6 +574,45 @@ pub fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+/// Display width of a string in terminal cells. Unlike `.len()` (bytes)
+/// or `.chars().count()` (codepoints), this counts the columns the text
+/// actually occupies — CJK / fullwidth / emoji glyphs are 2 cells, the
+/// multibyte box/bullet glyphs (`▶ ● ○ ✓ ✗`) are 1 cell each. Use this
+/// for ALL layout math (padding, right-alignment, budget) so columns
+/// line up regardless of content. `unicode_width` is already a crate
+/// dep (see `input_box.rs`).
+pub fn cell_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Truncate `s` so its display width fits in `max` cells, appending `…`
+/// (itself 1 cell) when clipped. Cell-accurate counterpart to
+/// `truncate_str`, which counts codepoints and so over/undershoots on
+/// multi-cell text.
+pub fn truncate_cells(s: &str, max: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if max == 0 {
+        return String::new();
+    }
+    if cell_width(s) <= max {
+        return s.to_owned();
+    }
+    // Reserve the last cell for the ellipsis.
+    let budget = max.saturating_sub(1);
+    let mut acc = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + w > budget {
+            break;
+        }
+        acc += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 /// Like `truncate_str` but clips from the *front*, prepending `…/`
 /// so the meaningful tail (project name in a path, identifier in a
 /// long namespace) survives. Used by the sidebar's cwd display so

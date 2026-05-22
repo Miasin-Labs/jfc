@@ -49,9 +49,11 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from("")
     };
 
+    // Flat dock: a single TOP divider instead of a full rounded box.
+    // The prompt glyph + the typing surface carry the "this is the
+    // input" affordance; a box around it just stacked another border.
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
+        .borders(Borders::TOP)
         .border_style(Style::default().fg(border_color))
         .padding(Padding::horizontal(1))
         .title(title_line)
@@ -159,7 +161,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
     if !app.is_streaming
         && !in_edit_mode
         && !crate::spinner::reduced_motion()
-        && area.height > 2
+        && area.height > 1
         && area.width > 2
     {
         let cursor_x = inner
@@ -183,7 +185,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    if area.height > 2 && area.width > 2 {
+    if area.height > 1 && area.width > 2 {
         f.set_cursor_position(Position::new(
             inner
                 .x

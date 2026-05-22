@@ -331,6 +331,14 @@ pub struct BackgroundTask {
     /// incrementally by `AppEvent::WorkflowProgress` handlers in the event
     /// loop. `None` for regular subagent/swarm background tasks.
     pub workflow_progress: Option<crate::workflows::WorkflowTaskProgress>,
+    /// Wall-clock of the agent's most recent observable activity — a
+    /// streamed chunk, a tool call, or a token/usage update. Drives the
+    /// fan's `stalled Ns` flag: a *running* agent whose `last_activity_at`
+    /// is older than the stall threshold has gone quiet (wedged on a long
+    /// tool, rate-limited, or hung) and gets an amber marker so it stands
+    /// out from agents that are actually progressing. Set at spawn and
+    /// refreshed by the same handlers that bump `last_tool`/token counts.
+    pub last_activity_at: std::time::Instant,
 }
 
 pub struct App {

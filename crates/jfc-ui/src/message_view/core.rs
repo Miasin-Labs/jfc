@@ -598,6 +598,14 @@ pub(super) fn is_groupable(kind: &ToolKind) -> bool {
 fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<RenderItem<'a>> {
     let t = ctx.theme;
     let mut items: Vec<RenderItem<'a>> = Vec::new();
+    // Tracks the previous *rendered* message's role so a run of
+    // consecutive same-speaker messages doesn't repeat the label on every
+    // one — the replayed-agent transcript splits each prose block and tool
+    // call into its own assistant message, which otherwise stamps
+    // "assistant" 6+ times in a row. Suppressed only for non-streaming
+    // assistant continuations (the streaming placeholder keeps its
+    // pulsing dot label).
+    let mut prev_role: Option<Role> = None;
 
     for (idx, msg) in ctx.messages.iter().enumerate() {
         // The streaming-placeholder assistant message gets mutated in place
@@ -638,6 +646,11 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
             role: msg.role,
             is_streaming_placeholder,
         });
+        // Suppress the repeated label for a same-speaker continuation.
+        let suppress_label = prev_role == Some(msg.role)
+            && matches!(msg.role, Role::Assistant)
+            && !is_streaming_placeholder;
+        prev_role = Some(msg.role);
         let label_line = match msg.role {
             // Queued user message (pending submit): dim the role label
             // and append "[queued]" so it visually reads as pending vs
@@ -673,7 +686,9 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                 Line::from(spans)
             }
         };
-        items.push(RenderItem::TextLine(label_line));
+        if !suppress_label {
+            items.push(RenderItem::TextLine(label_line));
+        }
 
         let reasoning_expanded = ctx.reasoning_expanded.get(&idx).copied().unwrap_or(false);
 

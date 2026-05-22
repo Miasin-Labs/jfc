@@ -1938,6 +1938,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 
@@ -2138,6 +2141,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         };
         let m_id = g.add_node(m);
         let f_id = g.add_node(node("f"));
@@ -2444,6 +2450,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         });
         let a = g.add_node(node("a"));
         let b = g.add_node(node("b"));
@@ -2615,6 +2624,9 @@ mod tests {
             metadata,
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 

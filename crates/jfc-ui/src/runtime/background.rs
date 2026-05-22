@@ -64,6 +64,7 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
                 budget_killed: false,
                 parent_task_id: None,
                 workflow_progress: None,
+                last_activity_at: std::time::Instant::now(),
             });
 
         if entry.description != agent.description {
@@ -131,6 +132,16 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
         if entry.chat_messages.is_empty() && !messages.is_empty() {
             entry.chat_messages = parse_agent_log_to_chat_messages(&messages);
             changed = true;
+        }
+
+        // Any observable change from the poll counts as activity — keeps
+        // the fan's `stalled Ns` flag honest for detached/daemon agents,
+        // which never emit live `AppEvent`s and so wouldn't otherwise
+        // refresh `last_activity_at` between polls. Done before the
+        // status-parts call below (which re-borrows `app`) so `entry`'s
+        // borrow doesn't span it.
+        if changed {
+            entry.last_activity_at = std::time::Instant::now();
         }
 
         if update_task_status_parts_for_background_agent(app, id, new_status, agent) {
@@ -212,6 +223,7 @@ pub(crate) fn restore_persistent_background_agents(app: &mut App) {
                 budget_killed: false,
                 parent_task_id: None,
                 workflow_progress: None,
+                last_activity_at: std::time::Instant::now(),
             },
         );
     }

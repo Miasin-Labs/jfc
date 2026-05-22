@@ -329,6 +329,9 @@ fn expr_filter_score(expr: &Expr) -> i32 {
                         | DslOp::Since(_)
                         | DslOp::Untested
                         | DslOp::PossibleTypes
+                        | DslOp::CoChanges
+                        | DslOp::Communities
+                        | DslOp::Complexity
                         | DslOp::Hot(_)
                 ) {
                     score -= 2;

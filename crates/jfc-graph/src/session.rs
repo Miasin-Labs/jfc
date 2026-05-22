@@ -168,6 +168,30 @@ impl GraphSession {
         self.query_cache.len()
     }
 
+    /// Compute co-change analysis for a given node, using git history from
+    /// the workspace. Shells out to `git log` on demand (no cached history).
+    ///
+    /// `min_support`: minimum number of co-occurrences to include a pair.
+    /// Returns pairs sorted by confidence descending.
+    pub fn co_changes(
+        &self,
+        node_id: &crate::nodes::NodeId,
+        min_support: u32,
+    ) -> crate::co_change::CoChangeResult {
+        // Determine workspace root from the graph's first node file path,
+        // then walk up to find the git root.
+        let workspace_root = self
+            .graph
+            .all_node_ids()
+            .first()
+            .and_then(|id| self.graph.get_node(id))
+            .and_then(|n| n.file_path.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        let commits = crate::co_change::fetch_git_history(&workspace_root, 500);
+        crate::co_change::co_changes_for_nodes(&self.graph, &commits, &[node_id.clone()], min_support)
+    }
+
     pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
     }

@@ -332,7 +332,7 @@ fn render_task_detail(f: &mut Frame, app: &App, tasks: &[Task], area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled("  Model: ", Style::default().fg(t.text_muted)),
                 Span::styled(
-                    crate::message_view::pretty_model_badge(model),
+                    super::agents::model_fqn(model),
                     Style::default().fg(t.text_secondary),
                 ),
             ]));

@@ -126,6 +126,9 @@ mod tests {
             metadata: HashMap::from([("fields".to_string(), fields_meta.to_string())]),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 
@@ -146,6 +149,9 @@ mod tests {
             metadata,
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 

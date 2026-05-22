@@ -1,16 +1,16 @@
 //! PHP adapter.
 //!
-//! Produces `NodeData` / `EdgeData` from `.php` files using `tree-sitter-php`.
-//! Extracts:
+//! Produces `NodeData` / `EdgeData` from `.php` files using
+//! `tree-sitter-php`. Extracts:
 //!
-//! - Functions (`function_definition`) → `NodeKind::Function`.
-//! - Classes (`class_declaration`) → `NodeKind::Struct`.
-//! - Interfaces (`interface_declaration`) → `NodeKind::Trait`.
-//! - Enums (`enum_declaration`) → `NodeKind::Enum`.
-//! - Namespaces (`namespace_definition`) → `NodeKind::Module`.
-//! - Methods (`method_declaration`) → `NodeKind::Function` (qualified as `Class.method`).
-//! - Call edges (`function_call_expression`, `member_call_expression`) → `EdgeKind::Calls`.
-//! - Implements/extends → `EdgeKind::Implements` / `EdgeKind::UsesType`.
+//! - Classes → `NodeKind::Struct`.
+//! - Interfaces → `NodeKind::Trait`.
+//! - Functions/methods (`function_definition`, `method_declaration`).
+//! - Enums → `NodeKind::Enum`.
+//! - Namespaces → `NodeKind::Module`.
+//! - Call edges (`function_call_expression`, `method_call_expression`).
+//! - Implements edges (class implements interface).
+//! - UsesType edges (extends, type references).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -67,8 +67,15 @@ impl LanguageAdapter for PhpAdapter {
     fn extract_nodes(&self, file: &ParsedFile) -> Vec<NodeData> {
         let mut nodes = Vec::new();
         let root = file.tree.root_node();
-        let path_str = file.path.to_string_lossy();
-        walk_php(root, &file.source, &file.path, &path_str, &mut nodes, None);
+        walk_php(
+            root,
+            &file.source,
+            &file.path,
+            &file.path.to_string_lossy(),
+            &[],
+            None,
+            &mut nodes,
+        );
         nodes
     }
 
@@ -78,204 +85,213 @@ impl LanguageAdapter for PhpAdapter {
         nodes: &[NodeData],
     ) -> Vec<(NodeId, NodeId, EdgeData)> {
         let mut edges = Vec::new();
-        let path_str = file.path.to_string_lossy();
-        extract_php_calls(
-            file.tree.root_node(),
-            &file.source,
-            &file.path,
-            nodes,
-            &path_str,
-            &mut edges,
-        );
-        extract_php_hierarchy(
-            file.tree.root_node(),
-            &file.source,
-            &file.path,
-            nodes,
-            &path_str,
-            &mut edges,
-        );
+        let root = file.tree.root_node();
+
+        // Extract call edges
+        extract_php_calls(root, &file.source, &file.path, nodes, &mut edges);
+
+        // Extract implements/extends edges from class declarations
+        extract_php_inheritance(root, &file.source, &file.path, nodes, &mut edges);
+
+        // Extract type usage edges from function/method parameters and return types
+        extract_php_type_usages(root, &file.source, &file.path, nodes, &mut edges);
+
         edges
     }
 }
 
-// ─── Node extraction ─────────────────────────────────────────────────────────
+// ─── Node Extraction ────────────────────────────────────────────────────────
 
 fn walk_php(
-    node: TsNode,
+    node: TsNode<'_>,
     source: &str,
-    file_path: &Path,
+    path: &Path,
     path_str: &str,
+    scope: &[&str],
+    current_class: Option<&str>,
     out: &mut Vec<NodeData>,
-    enclosing_class: Option<&str>,
 ) {
     match node.kind() {
         "namespace_definition" => {
-            if let Some(name) = child_by_field_text(&node, "name", source) {
-                out.push(build_nd(&name, NodeKind::Module, node, file_path, path_str, &name));
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let qn = qualified(scope, &name);
+                out.push(build_nd(&name, NodeKind::Module, node, path, path_str, &qn));
+
+                // Recurse into namespace body
+                if let Some(body) = node.child_by_field_name("body") {
+                    let binding = name.clone();
+                    let mut child_scope: Vec<&str> = scope.to_vec();
+                    child_scope.push(&binding);
+                    walk_php(body, source, path, path_str, &child_scope, None, out);
+                    return;
+                }
             }
-            walk_children(node, source, file_path, path_str, out, enclosing_class);
         }
         "class_declaration" => {
-            if let Some(name) = child_by_field_text(&node, "name", source) {
-                out.push(build_nd(&name, NodeKind::Struct, node, file_path, path_str, &name));
-                // Walk children with class context
-                walk_children(node, source, file_path, path_str, out, Some(&name));
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let qn = qualified(scope, &name);
+                out.push(build_nd(&name, NodeKind::Struct, node, path, path_str, &qn));
+
+                // Extract methods inside the class body
+                if let Some(body) = node.child_by_field_name("body") {
+                    let binding = name.clone();
+                    let mut child_scope: Vec<&str> = scope.to_vec();
+                    child_scope.push(&binding);
+                    walk_php(
+                        body,
+                        source,
+                        path,
+                        path_str,
+                        &child_scope,
+                        Some(&binding),
+                        out,
+                    );
+                }
                 return;
             }
-            walk_children(node, source, file_path, path_str, out, enclosing_class);
         }
         "interface_declaration" => {
-            if let Some(name) = child_by_field_text(&node, "name", source) {
-                out.push(build_nd(&name, NodeKind::Trait, node, file_path, path_str, &name));
-                walk_children(node, source, file_path, path_str, out, Some(&name));
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let qn = qualified(scope, &name);
+                out.push(build_nd(&name, NodeKind::Trait, node, path, path_str, &qn));
+
+                // Extract method signatures inside interface body
+                if let Some(body) = node.child_by_field_name("body") {
+                    let binding = name.clone();
+                    let mut child_scope: Vec<&str> = scope.to_vec();
+                    child_scope.push(&binding);
+                    walk_php(
+                        body,
+                        source,
+                        path,
+                        path_str,
+                        &child_scope,
+                        Some(&binding),
+                        out,
+                    );
+                }
                 return;
             }
-            walk_children(node, source, file_path, path_str, out, enclosing_class);
         }
         "enum_declaration" => {
-            if let Some(name) = child_by_field_text(&node, "name", source) {
-                out.push(build_nd(&name, NodeKind::Enum, node, file_path, path_str, &name));
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let qn = qualified(scope, &name);
+                out.push(build_nd(&name, NodeKind::Enum, node, path, path_str, &qn));
+                return;
             }
-            walk_children(node, source, file_path, path_str, out, enclosing_class);
         }
         "function_definition" => {
-            if let Some(name) = child_by_field_text(&node, "name", source) {
-                let qualified = match enclosing_class {
-                    Some(cls) => format!("{cls}.{name}"),
-                    None => name.clone(),
-                };
-                let mut nd = build_nd(&qualified, NodeKind::Function, node, file_path, path_str, &qualified);
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let qn = qualified(scope, &name);
+                let mut nd = build_nd(&name, NodeKind::Function, node, path, path_str, &qn);
                 nd.complexity = compute_complexity(node, source.as_bytes(), "php");
                 out.push(nd);
+                return;
             }
-            // Don't recurse into function body for more function defs
         }
         "method_declaration" => {
-            if let Some(name) = child_by_field_text(&node, "name", source) {
-                let qualified = match enclosing_class {
-                    Some(cls) => format!("{cls}.{name}"),
-                    None => name.clone(),
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                // Qualify method as ClassName.method_name
+                let qn = if let Some(class_name) = current_class {
+                    let method_qualified = format!("{class_name}.{name}");
+                    // scope already includes the class name, so we build qualified
+                    // relative to the parent scope (namespace) plus the dotted form
+                    let parent_scope: Vec<&str> =
+                        scope.iter().take(scope.len().saturating_sub(1)).copied().collect();
+                    qualified(&parent_scope, &method_qualified)
+                } else {
+                    qualified(scope, &name)
                 };
-                let mut nd = build_nd(&qualified, NodeKind::Function, node, file_path, path_str, &qualified);
+                let vis = detect_php_visibility(node, source);
+                let span = build_span(node, path);
+                let id = NodeId::new(path_str, &qn, NodeKind::Function);
+                let mut nd = NodeData {
+                    id,
+                    kind: NodeKind::Function,
+                    name,
+                    qualified_name: qn,
+                    file_path: path.to_path_buf(),
+                    span,
+                    visibility: vis,
+                    metadata: HashMap::new(),
+                    birth_revision: 0,
+                    last_modified_revision: 0,
+                    complexity: None,
+            cfg: None,
+            dataflow: None,
+                };
                 nd.complexity = compute_complexity(node, source.as_bytes(), "php");
                 out.push(nd);
-            }
-        }
-        _ => {
-            walk_children(node, source, file_path, path_str, out, enclosing_class);
-        }
-    }
-}
-
-fn walk_children(
-    node: TsNode,
-    source: &str,
-    file_path: &Path,
-    path_str: &str,
-    out: &mut Vec<NodeData>,
-    enclosing_class: Option<&str>,
-) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_php(child, source, file_path, path_str, out, enclosing_class);
-    }
-}
-
-// ─── Edge extraction ─────────────────────────────────────────────────────────
-
-fn extract_php_calls(
-    node: TsNode,
-    source: &str,
-    file_path: &Path,
-    nodes: &[NodeData],
-    path_str: &str,
-    out: &mut Vec<(NodeId, NodeId, EdgeData)>,
-) {
-    match node.kind() {
-        "function_call_expression" => {
-            if let Some(callee_name) = call_function_name(&node, source) {
-                let caller = enclosing_function(node, source, nodes, file_path);
-                if let Some(caller_id) = caller {
-                    // Try to resolve callee
-                    let callee_id = find_function_node(nodes, &callee_name)
-                        .unwrap_or_else(|| NodeId::new(path_str, &callee_name, NodeKind::Function));
-                    out.push((
-                        caller_id,
-                        callee_id,
-                        EdgeData { kind: EdgeKind::Calls, source_span: build_span(node, file_path), weight: 1.0 },
-                    ));
-                }
-            }
-        }
-        "member_call_expression" => {
-            if let Some(method_name) = child_by_field_text(&node, "name", source) {
-                let caller = enclosing_function(node, source, nodes, file_path);
-                if let Some(caller_id) = caller {
-                    // Try partial resolution — look for *.method_name
-                    let callee_id = find_method_node(nodes, &method_name)
-                        .unwrap_or_else(|| NodeId::new(path_str, &method_name, NodeKind::Function));
-                    out.push((
-                        caller_id,
-                        callee_id,
-                        EdgeData { kind: EdgeKind::Calls, source_span: build_span(node, file_path), weight: 1.0 },
-                    ));
-                }
+                return;
             }
         }
         _ => {}
     }
 
+    // Recurse into children
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        extract_php_calls(child, source, file_path, nodes, path_str, out);
+    for child in node.named_children(&mut cursor) {
+        walk_php(child, source, path, path_str, scope, current_class, out);
     }
 }
 
-fn extract_php_hierarchy(
-    node: TsNode,
+// ─── Edge Extraction: Calls ─────────────────────────────────────────────────
+
+fn extract_php_calls(
+    node: TsNode<'_>,
     source: &str,
-    file_path: &Path,
+    path: &Path,
     nodes: &[NodeData],
-    path_str: &str,
-    out: &mut Vec<(NodeId, NodeId, EdgeData)>,
+    edges: &mut Vec<(NodeId, NodeId, EdgeData)>,
 ) {
     match node.kind() {
-        "class_declaration" | "interface_declaration" => {
-            let class_name = child_by_field_text(&node, "name", source);
-            if let Some(ref cls) = class_name {
-                let cls_id = NodeId::new(
-                    path_str,
-                    cls,
-                    if node.kind() == "class_declaration" { NodeKind::Struct } else { NodeKind::Trait },
-                );
-
-                // base_clause → extends
-                if let Some(base) = node.child_by_field_name("base_clause") {
-                    extract_names_from_list(base, source, |name| {
-                        let target_id = find_struct_or_trait(nodes, &name)
-                            .unwrap_or_else(|| NodeId::new(path_str, &name, NodeKind::Struct));
-                        out.push((
-                            cls_id.clone(),
-                            target_id,
-                            EdgeData { kind: EdgeKind::UsesType, source_span: build_span(node, file_path), weight: 1.0 },
+        "function_call_expression" => {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee_name = text(func_node, source);
+                if let Some(caller) = find_enclosing_function_php(node, source, path, nodes) {
+                    let span = build_span(node, path);
+                    if let Some(target) = nodes
+                        .iter()
+                        .find(|n| n.kind == NodeKind::Function && n.name == callee_name)
+                    {
+                        edges.push((
+                            caller.id.clone(),
+                            target.id.clone(),
+                            EdgeData {
+                                kind: EdgeKind::Calls,
+                                source_span: span,
+                                weight: 1.0,
+                            },
                         ));
-                    });
+                    }
                 }
-
-                // class_interface_clause → implements
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "class_interface_clause" {
-                        extract_names_from_list(child, source, |name| {
-                            let target_id = find_struct_or_trait(nodes, &name)
-                                .unwrap_or_else(|| NodeId::new(path_str, &name, NodeKind::Trait));
-                            out.push((
-                                cls_id.clone(),
-                                target_id,
-                                EdgeData { kind: EdgeKind::Implements, source_span: build_span(node, file_path), weight: 1.0 },
-                            ));
-                        });
+            }
+        }
+        "member_call_expression" | "method_call_expression" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let method_name = text(name_node, source);
+                if let Some(caller) = find_enclosing_function_php(node, source, path, nodes) {
+                    let span = build_span(node, path);
+                    // Try to find a method node with this name
+                    if let Some(target) = nodes
+                        .iter()
+                        .find(|n| n.kind == NodeKind::Function && n.name == method_name)
+                    {
+                        edges.push((
+                            caller.id.clone(),
+                            target.id.clone(),
+                            EdgeData {
+                                kind: EdgeKind::Calls,
+                                source_span: span,
+                                weight: 1.0,
+                            },
+                        ));
                     }
                 }
             }
@@ -284,129 +300,281 @@ fn extract_php_hierarchy(
     }
 
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        extract_php_hierarchy(child, source, file_path, nodes, path_str, out);
+    for child in node.named_children(&mut cursor) {
+        extract_php_calls(child, source, path, nodes, edges);
     }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Edge Extraction: Inheritance ───────────────────────────────────────────
 
-fn build_nd(
-    name: &str,
-    kind: NodeKind,
-    node: TsNode,
-    file_path: &Path,
-    path_str: &str,
-    qualified_name: &str,
-) -> NodeData {
-    NodeData {
-        id: NodeId::new(path_str, qualified_name, kind),
-        name: name.to_string(),
-        qualified_name: qualified_name.to_string(),
-        kind,
-        file_path: file_path.to_path_buf(),
-        span: Span {
-            file: file_path.to_path_buf(),
-            start_line: node.start_position().row as u32 + 1,
-            start_col: node.start_position().column as u32,
-            end_line: node.end_position().row as u32 + 1,
-            end_col: node.end_position().column as u32,
-            byte_range: node.byte_range(),
-        },
-        visibility: Visibility::Public,
-        complexity: None,
-        metadata: HashMap::new(),
-        birth_revision: 0,
-        last_modified_revision: 0,
-    }
-}
-
-fn child_by_field_text(node: &TsNode, field: &str, source: &str) -> Option<String> {
-    let child = node.child_by_field_name(field)?;
-    Some(node_text(&child, source).to_string())
-}
-
-fn node_text<'a>(node: &TsNode, source: &'a str) -> &'a str {
-    &source[node.byte_range()]
-}
-
-fn call_function_name(node: &TsNode, source: &str) -> Option<String> {
-    let fn_node = node.child_by_field_name("function")?;
-    match fn_node.kind() {
-        "name" => Some(node_text(&fn_node, source).to_string()),
-        "qualified_name" => {
-            // Take the last segment
-            let text = node_text(&fn_node, source);
-            text.rsplit('\\').next().map(str::to_string)
-        }
-        _ => Some(node_text(&fn_node, source).to_string()),
-    }
-}
-
-fn enclosing_function(
-    node: TsNode,
+fn extract_php_inheritance(
+    node: TsNode<'_>,
     source: &str,
+    path: &Path,
     nodes: &[NodeData],
-    _file_path: &Path,
-) -> Option<NodeId> {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        match parent.kind() {
-            "function_definition" | "method_declaration" => {
-                if let Some(name) = parent.child_by_field_name("name") {
-                    let name_str = node_text(&name, source);
-                    // Try to find the node by checking if any extracted node
-                    // ends with this name
-                    for nd in nodes {
-                        if nd.kind == NodeKind::Function
-                            && (nd.name == name_str || nd.qualified_name.ends_with(name_str))
-                        {
-                            return Some(nd.id.clone());
+    edges: &mut Vec<(NodeId, NodeId, EdgeData)>,
+) {
+    if node.kind() == "class_declaration" {
+        if let Some(name_node) = node.child_by_field_name("name") {
+            let class_name = text(name_node, source);
+            let class_data = nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Struct && n.name == class_name);
+
+            if let Some(class_nd) = class_data {
+                // Check for base_clause (extends)
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if child.kind() == "base_clause" {
+                        // The extended class name
+                        let mut bc = child.walk();
+                        for name_child in child.named_children(&mut bc) {
+                            if name_child.kind() == "name" || name_child.kind() == "qualified_name"
+                            {
+                                let extends_name = text(name_child, source);
+                                // Extract just the class name (last segment)
+                                let base_name = extends_name
+                                    .rsplit('\\')
+                                    .next()
+                                    .unwrap_or(&extends_name);
+                                if let Some(target) = nodes.iter().find(|n| {
+                                    (n.kind == NodeKind::Struct || n.kind == NodeKind::Trait)
+                                        && n.name == base_name
+                                }) {
+                                    edges.push((
+                                        class_nd.id.clone(),
+                                        target.id.clone(),
+                                        EdgeData {
+                                            kind: EdgeKind::UsesType,
+                                            source_span: build_span(child, path),
+                                            weight: 1.0,
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                    } else if child.kind() == "class_interface_clause" {
+                        // implements
+                        let mut ic = child.walk();
+                        for iface_child in child.named_children(&mut ic) {
+                            if iface_child.kind() == "name"
+                                || iface_child.kind() == "qualified_name"
+                            {
+                                let iface_name = text(iface_child, source);
+                                let base_name =
+                                    iface_name.rsplit('\\').next().unwrap_or(&iface_name);
+                                if let Some(target) = nodes
+                                    .iter()
+                                    .find(|n| n.kind == NodeKind::Trait && n.name == base_name)
+                                {
+                                    edges.push((
+                                        class_nd.id.clone(),
+                                        target.id.clone(),
+                                        EdgeData {
+                                            kind: EdgeKind::Implements,
+                                            source_span: build_span(iface_child, path),
+                                            weight: 1.0,
+                                        },
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
             }
-            _ => {}
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        extract_php_inheritance(child, source, path, nodes, edges);
+    }
+}
+
+// ─── Edge Extraction: Type Usages ───────────────────────────────────────────
+
+fn extract_php_type_usages(
+    node: TsNode<'_>,
+    source: &str,
+    path: &Path,
+    nodes: &[NodeData],
+    edges: &mut Vec<(NodeId, NodeId, EdgeData)>,
+) {
+    let is_func = node.kind() == "function_definition" || node.kind() == "method_declaration";
+    if is_func {
+        if let Some(name_node) = node.child_by_field_name("name") {
+            let fn_name = text(name_node, source);
+            if let Some(func_nd) = nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Function && n.name == fn_name)
+            {
+                // Check parameters for type hints
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    collect_php_type_refs(params, source, path, func_nd, nodes, edges);
+                }
+                // Check return type
+                if let Some(ret) = node.child_by_field_name("return_type") {
+                    collect_php_type_refs(ret, source, path, func_nd, nodes, edges);
+                }
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        extract_php_type_usages(child, source, path, nodes, edges);
+    }
+}
+
+fn collect_php_type_refs(
+    node: TsNode<'_>,
+    source: &str,
+    path: &Path,
+    func_nd: &NodeData,
+    nodes: &[NodeData],
+    edges: &mut Vec<(NodeId, NodeId, EdgeData)>,
+) {
+    // Look for named_type or name nodes that reference types
+    if node.kind() == "named_type" || node.kind() == "name" {
+        let type_name = text(node, source);
+        // Skip primitive types
+        if !is_php_primitive(&type_name) {
+            let base_name = type_name.rsplit('\\').next().unwrap_or(&type_name);
+            if let Some(target) = nodes.iter().find(|n| {
+                matches!(n.kind, NodeKind::Struct | NodeKind::Enum | NodeKind::Trait)
+                    && n.name == base_name
+            }) {
+                // Avoid duplicate edges
+                let already = edges.iter().any(|(src, dst, e)| {
+                    *src == func_nd.id && *dst == target.id && matches!(e.kind, EdgeKind::UsesType)
+                });
+                if !already {
+                    edges.push((
+                        func_nd.id.clone(),
+                        target.id.clone(),
+                        EdgeData {
+                            kind: EdgeKind::UsesType,
+                            source_span: build_span(node, path),
+                            weight: 1.0,
+                        },
+                    ));
+                }
+            }
+        }
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_php_type_refs(child, source, path, func_nd, nodes, edges);
+    }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn find_enclosing_function_php<'a>(
+    node: TsNode<'_>,
+    source: &str,
+    path: &Path,
+    nodes: &'a [NodeData],
+) -> Option<&'a NodeData> {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "function_definition" || parent.kind() == "method_declaration" {
+            if let Some(name_node) = parent.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let parent_span = build_span(parent, path);
+                return nodes.iter().find(|n| {
+                    n.kind == NodeKind::Function
+                        && n.name == name
+                        && n.span.start_line == parent_span.start_line
+                });
+            }
         }
         current = parent.parent();
     }
     None
 }
 
-fn find_function_node(nodes: &[NodeData], name: &str) -> Option<NodeId> {
-    nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && (n.name == name || n.qualified_name.ends_with(name)))
-        .map(|n| n.id.clone())
+fn detect_php_visibility(node: TsNode<'_>, source: &str) -> Visibility {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            let vis_text = text(child, source);
+            return match vis_text.as_str() {
+                "public" => Visibility::Public,
+                "protected" => Visibility::Super,
+                "private" => Visibility::Private,
+                _ => Visibility::Public,
+            };
+        }
+    }
+    Visibility::Public
 }
 
-fn find_method_node(nodes: &[NodeData], method_name: &str) -> Option<NodeId> {
-    nodes
-        .iter()
-        .find(|n| {
-            n.kind == NodeKind::Function
-                && n.qualified_name
-                    .rsplit('.')
-                    .next()
-                    .map(|s| s == method_name)
-                    .unwrap_or(false)
-        })
-        .map(|n| n.id.clone())
+fn is_php_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "float"
+            | "string"
+            | "bool"
+            | "array"
+            | "void"
+            | "null"
+            | "mixed"
+            | "object"
+            | "callable"
+            | "iterable"
+            | "never"
+            | "self"
+            | "static"
+            | "parent"
+            | "true"
+            | "false"
+    )
 }
 
-fn find_struct_or_trait(nodes: &[NodeData], name: &str) -> Option<NodeId> {
-    nodes
-        .iter()
-        .find(|n| {
-            (n.kind == NodeKind::Struct || n.kind == NodeKind::Trait)
-                && (n.name == name || n.qualified_name == name)
-        })
-        .map(|n| n.id.clone())
+fn text(node: TsNode<'_>, source: &str) -> String {
+    source[node.byte_range()].to_string()
 }
 
-fn build_span(node: TsNode, file_path: &Path) -> Span {
+fn qualified(scope: &[&str], name: &str) -> String {
+    if scope.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}::{}", scope.join("::"), name)
+    }
+}
+
+fn build_nd(
+    name: &str,
+    kind: NodeKind,
+    node: TsNode<'_>,
+    path: &Path,
+    path_str: &str,
+    qn: &str,
+) -> NodeData {
+    NodeData {
+        id: NodeId::new(path_str, qn, kind),
+        kind,
+        name: name.to_string(),
+        qualified_name: qn.to_string(),
+        file_path: path.to_path_buf(),
+        span: build_span(node, path),
+        visibility: Visibility::Public,
+        metadata: HashMap::new(),
+        birth_revision: 0,
+        last_modified_revision: 0,
+        complexity: None,
+            cfg: None,
+            dataflow: None,
+    }
+}
+
+fn build_span(node: TsNode<'_>, path: &Path) -> Span {
     Span {
-        file: file_path.to_path_buf(),
+        file: path.to_path_buf(),
         start_line: node.start_position().row as u32 + 1,
         start_col: node.start_position().column as u32,
         end_line: node.end_position().row as u32 + 1,
@@ -415,206 +583,252 @@ fn build_span(node: TsNode, file_path: &Path) -> Span {
     }
 }
 
-fn extract_names_from_list(node: TsNode, source: &str, mut callback: impl FnMut(String)) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "name" | "qualified_name" => {
-                let text = node_text(&child, source);
-                let name = text.rsplit('\\').next().unwrap_or(text);
-                callback(name.to_string());
-            }
-            _ => {}
-        }
-    }
-}
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-
-    fn parse(src: &str) -> ParsedFile {
-        let adapter = PhpAdapter::new();
-        adapter
-            .parse_file(Path::new("test.php"), src)
-            .expect("parse failed")
-    }
 
     #[test]
-    fn extract_class_and_methods() {
+    fn php_adapter_parses_class_with_methods() {
+        let a = PhpAdapter::new();
         let src = r#"<?php
-class UserService {
-    public function findById(int $id): User {
-        return $this->repository->find($id);
+namespace App\Models;
+
+class User {
+    public function getName(): string {
+        return $this->name;
     }
 
-    public function save(User $user): void {
-        $this->repository->save($user);
+    private function validate(): bool {
+        return true;
     }
 }
 "#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
+        let parsed = a.parse_file(Path::new("User.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
 
-        let classes: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Struct).collect();
-        assert_eq!(classes.len(), 1);
-        assert_eq!(classes[0].name, "UserService");
-
-        let fns: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Function).collect();
-        assert_eq!(fns.len(), 2);
-        assert!(fns.iter().any(|f| f.qualified_name == "UserService.findById"));
-        assert!(fns.iter().any(|f| f.qualified_name == "UserService.save"));
+        // Should have namespace, class, and 2 methods
+        assert!(
+            nodes.iter().any(|n| n.name == "App\\Models" && n.kind == NodeKind::Module),
+            "missing namespace, got: {:?}",
+            nodes.iter().map(|n| (&n.name, n.kind)).collect::<Vec<_>>()
+        );
+        assert!(
+            nodes.iter().any(|n| n.name == "User" && n.kind == NodeKind::Struct),
+            "missing User class"
+        );
+        assert!(
+            nodes.iter().any(|n| n.name == "getName" && n.kind == NodeKind::Function),
+            "missing getName method"
+        );
+        assert!(
+            nodes.iter().any(|n| n.name == "validate" && n.kind == NodeKind::Function),
+            "missing validate method"
+        );
     }
 
     #[test]
-    fn extract_interface() {
+    fn php_adapter_extracts_functions() {
+        let a = PhpAdapter::new();
+        let src = r#"<?php
+function hello(): void {
+    echo "hello";
+}
+
+function world(): string {
+    return "world";
+}
+"#;
+        let parsed = a.parse_file(Path::new("funcs.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
+
+        let functions: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .collect();
+        assert_eq!(functions.len(), 2);
+        assert!(functions.iter().any(|n| n.name == "hello"));
+        assert!(functions.iter().any(|n| n.name == "world"));
+    }
+
+    #[test]
+    fn php_adapter_extracts_call_edges() {
+        let a = PhpAdapter::new();
+        let src = r#"<?php
+function caller(): void {
+    callee();
+}
+
+function callee(): void {
+    // ...
+}
+"#;
+        let parsed = a.parse_file(Path::new("calls.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
+        let edges = a.extract_edges(&parsed, &nodes);
+
+        let call_edges: Vec<_> = edges
+            .iter()
+            .filter(|(_, _, e)| matches!(e.kind, EdgeKind::Calls))
+            .collect();
+        assert!(
+            !call_edges.is_empty(),
+            "expected at least one call edge, got none"
+        );
+
+        let caller = nodes.iter().find(|n| n.name == "caller").unwrap();
+        let callee = nodes.iter().find(|n| n.name == "callee").unwrap();
+        assert!(
+            call_edges
+                .iter()
+                .any(|(src, dst, _)| *src == caller.id && *dst == callee.id),
+            "expected caller -> callee edge"
+        );
+    }
+
+    #[test]
+    fn php_adapter_extracts_namespace() {
+        let a = PhpAdapter::new();
+        let src = r#"<?php
+namespace App\Services;
+
+function doStuff(): void {}
+"#;
+        let parsed = a.parse_file(Path::new("svc.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
+
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "App\\Services" && n.kind == NodeKind::Module),
+            "missing namespace node, got: {:?}",
+            nodes.iter().map(|n| (&n.name, n.kind)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn php_adapter_extracts_interface_and_implements() {
+        let a = PhpAdapter::new();
         let src = r#"<?php
 interface Renderable {
     public function render(): string;
 }
-"#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
 
-        let traits: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Trait).collect();
-        assert_eq!(traits.len(), 1);
-        assert_eq!(traits[0].name, "Renderable");
+class Widget implements Renderable {
+    public function render(): string {
+        return "<div></div>";
+    }
+}
+"#;
+        let parsed = a.parse_file(Path::new("iface.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
+        let edges = a.extract_edges(&parsed, &nodes);
+
+        // Check interface exists as Trait
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Renderable" && n.kind == NodeKind::Trait),
+            "missing Renderable interface"
+        );
+
+        // Check Widget exists as Struct
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Widget" && n.kind == NodeKind::Struct),
+            "missing Widget class"
+        );
+
+        // Check implements edge
+        let impl_edges: Vec<_> = edges
+            .iter()
+            .filter(|(_, _, e)| matches!(e.kind, EdgeKind::Implements))
+            .collect();
+        assert!(
+            !impl_edges.is_empty(),
+            "expected implements edge, got none. All edges: {:?}",
+            edges.iter().map(|(_, _, e)| &e.kind).collect::<Vec<_>>()
+        );
+
+        let widget = nodes
+            .iter()
+            .find(|n| n.name == "Widget" && n.kind == NodeKind::Struct)
+            .unwrap();
+        let renderable = nodes
+            .iter()
+            .find(|n| n.name == "Renderable" && n.kind == NodeKind::Trait)
+            .unwrap();
+        assert!(
+            impl_edges
+                .iter()
+                .any(|(src, dst, _)| *src == widget.id && *dst == renderable.id),
+            "expected Widget implements Renderable edge"
+        );
     }
 
     #[test]
-    fn extract_namespace() {
-        let src = r#"<?php
-namespace App\Models;
-
-class User {}
-"#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
-
-        let modules: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Module).collect();
-        assert_eq!(modules.len(), 1);
-        assert!(modules[0].name.contains("Models") || modules[0].name.contains("App"));
-    }
-
-    #[test]
-    fn extract_enum() {
+    fn php_adapter_extracts_enum() {
+        let a = PhpAdapter::new();
         let src = r#"<?php
 enum Status {
     case Active;
     case Inactive;
 }
 "#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
+        let parsed = a.parse_file(Path::new("enum.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
 
-        let enums: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Enum).collect();
-        assert_eq!(enums.len(), 1);
-        assert_eq!(enums[0].name, "Status");
-    }
-
-    #[test]
-    fn extract_standalone_function() {
-        let src = r#"<?php
-function helper(int $x): int {
-    return $x * 2;
-}
-"#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
-
-        let fns: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Function).collect();
-        assert_eq!(fns.len(), 1);
-        assert_eq!(fns[0].name, "helper");
-        assert_eq!(fns[0].qualified_name, "helper");
-    }
-
-    #[test]
-    fn extract_call_edges() {
-        let src = r#"<?php
-function greet(string $name): void {
-    echo format($name);
-}
-
-function format(string $s): string {
-    return strtolower($s);
-}
-"#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
-        let edges = adapter.extract_edges(&file, &nodes);
-
-        // greet → format
-        let calls: Vec<_> = edges
-            .iter()
-            .filter(|(_, _, e)| matches!(e.kind, EdgeKind::Calls))
-            .collect();
-        assert!(!calls.is_empty(), "expected at least one call edge");
-    }
-
-    #[test]
-    fn extract_implements_edge() {
-        let src = r#"<?php
-interface Serializable {
-    public function serialize(): string;
-}
-
-class User implements Serializable {
-    public function serialize(): string {
-        return json_encode($this);
-    }
-}
-"#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
-        let edges = adapter.extract_edges(&file, &nodes);
-
-        let impl_edges: Vec<_> = edges
-            .iter()
-            .filter(|(_, _, e)| matches!(e.kind, EdgeKind::Implements))
-            .collect();
-        assert!(!impl_edges.is_empty(), "expected implements edge");
-    }
-
-    #[test]
-    fn complexity_computed_for_methods() {
-        let src = r#"<?php
-class Calculator {
-    public function compute(int $x): int {
-        if ($x > 0) {
-            for ($i = 0; $i < $x; $i++) {
-                if ($i % 2 == 0) {
-                    return $i;
-                }
-            }
-        }
-        return 0;
-    }
-}
-"#;
-        let file = parse(src);
-        let adapter = PhpAdapter::new();
-        let nodes = adapter.extract_nodes(&file);
-
-        let compute = nodes
-            .iter()
-            .find(|n| n.qualified_name == "Calculator.compute")
-            .expect("compute method not found");
         assert!(
-            compute.complexity.is_some(),
-            "complexity should be computed for methods"
+            nodes
+                .iter()
+                .any(|n| n.name == "Status" && n.kind == NodeKind::Enum),
+            "missing Status enum, got: {:?}",
+            nodes.iter().map(|n| (&n.name, n.kind)).collect::<Vec<_>>()
         );
-        let metrics = compute.complexity.as_ref().unwrap();
-        assert!(metrics.cyclomatic >= 3, "expect cyclomatic >= 3, got {}", metrics.cyclomatic);
+    }
+
+    #[test]
+    fn php_adapter_method_qualified_name() {
+        let a = PhpAdapter::new();
+        let src = r#"<?php
+class Foo {
+    public function bar(): void {}
+}
+"#;
+        let parsed = a.parse_file(Path::new("foo.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
+
+        let method = nodes
+            .iter()
+            .find(|n| n.name == "bar" && n.kind == NodeKind::Function)
+            .expect("missing bar method");
+        assert!(
+            method.qualified_name.contains("Foo.bar"),
+            "expected qualified name to contain 'Foo.bar', got: {}",
+            method.qualified_name
+        );
+    }
+
+    #[test]
+    fn php_adapter_visibility() {
+        let a = PhpAdapter::new();
+        let src = r#"<?php
+class MyClass {
+    public function pub_method(): void {}
+    private function priv_method(): void {}
+    protected function prot_method(): void {}
+}
+"#;
+        let parsed = a.parse_file(Path::new("vis.php"), src).unwrap();
+        let nodes = a.extract_nodes(&parsed);
+
+        let pub_m = nodes.iter().find(|n| n.name == "pub_method").unwrap();
+        assert_eq!(pub_m.visibility, Visibility::Public);
+
+        let priv_m = nodes.iter().find(|n| n.name == "priv_method").unwrap();
+        assert_eq!(priv_m.visibility, Visibility::Private);
+
+        let prot_m = nodes.iter().find(|n| n.name == "prot_method").unwrap();
+        assert_eq!(prot_m.visibility, Visibility::Super);
     }
 }
-

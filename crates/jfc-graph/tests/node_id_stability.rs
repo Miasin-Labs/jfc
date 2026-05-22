@@ -49,6 +49,8 @@ fn make_node(name: &str, kind: NodeKind) -> NodeData {
         visibility: Visibility::Public,
         metadata: HashMap::new(),
         complexity: None,
+            cfg: None,
+            dataflow: None,
         birth_revision: 0,
         last_modified_revision: 0,
     }

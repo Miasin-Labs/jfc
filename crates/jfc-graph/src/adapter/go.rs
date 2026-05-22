@@ -15,6 +15,7 @@ use std::path::Path;
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 use crate::adapter::{AdapterError, LanguageAdapter, ParsedFile};
+use crate::complexity::compute_complexity;
 use crate::edges::{EdgeData, EdgeKind};
 use crate::nodes::{NodeData, NodeId, NodeKind, Span, Visibility};
 
@@ -95,14 +96,16 @@ fn walk_go(node: TsNode<'_>, source: &str, path: &Path, path_str: &str, out: &mu
         "function_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
-                out.push(build_nd(
+                let mut nd = build_nd(
                     &name,
                     NodeKind::Function,
                     node,
                     path,
                     path_str,
                     &name,
-                ));
+                );
+                nd.complexity = compute_complexity(node, source.as_bytes(), "go");
+                out.push(nd);
             }
         }
         "method_declaration" => {
@@ -124,14 +127,16 @@ fn walk_go(node: TsNode<'_>, source: &str, path: &Path, path_str: &str, out: &mu
                 } else {
                     format!("{receiver}::{name}")
                 };
-                out.push(build_nd(
+                let mut nd = build_nd(
                     &name,
                     NodeKind::Function,
                     node,
                     path,
                     path_str,
                     &qn,
-                ));
+                );
+                nd.complexity = compute_complexity(node, source.as_bytes(), "go");
+                out.push(nd);
             }
         }
         "type_declaration" => {
@@ -252,6 +257,9 @@ fn build_nd(
         metadata: HashMap::new(),
         birth_revision: 0,
         last_modified_revision: 0,
+        complexity: None,
+            cfg: None,
+            dataflow: None,
     }
 }
 

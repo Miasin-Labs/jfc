@@ -155,6 +155,9 @@ mod tests {
             metadata: m,
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
 

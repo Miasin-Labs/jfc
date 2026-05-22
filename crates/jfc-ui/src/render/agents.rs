@@ -18,7 +18,7 @@ pub(crate) fn format_token_count(n: u64) -> String {
 pub(crate) fn format_subagent_counters(bt: &crate::app::BackgroundTask) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(model) = bt.model_used.as_deref() {
-        let badge = crate::message_view::pretty_model_badge(model);
+        let badge = model_fqn(model);
         if !badge.is_empty() {
             parts.push(badge);
         }
@@ -45,120 +45,214 @@ pub(crate) fn format_subagent_counters(bt: &crate::app::BackgroundTask) -> Strin
     }
 }
 
+/// Full model id (FQN) for display, with the redundant provider prefix
+/// trimmed — the provider is already shown as its own badge in the
+/// status bar, so `bedrock-claude-4-6-opus` reads as `claude-4-6-opus`
+/// here. Unlike the old `pretty_model_badge` (which collapsed everything
+/// to `opus`/`sonnet`/`haiku`), this keeps the *version*, which is what a
+/// developer actually needs to tell two runs apart.
+pub(crate) fn model_fqn(raw: &str) -> String {
+    for prefix in ["bedrock-", "vertex-", "anthropic-", "openwebui-"] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            return rest.to_owned();
+        }
+    }
+    raw.to_owned()
+}
+
+/// Background-task ids in fleet display order — the same ordering the
+/// agent fan renders (failed → active → running → idle → done, then a
+/// stable id tie-break). The tab strip and the leader-key / arrow agent
+/// navigation all step through this list, so cycling moves in the same
+/// meaningful order the user sees in the fan, deterministically, instead
+/// of HashMap-iteration order (arbitrary, and not failures-first).
+pub(crate) fn fleet_ordered_task_ids(app: &App) -> Vec<String> {
+    use crate::types::TaskLifecycle;
+    let mut ids: Vec<(&str, u8)> = app
+        .background_tasks
+        .values()
+        .map(|bt| {
+            let is_active = !matches!(bt.status, TaskLifecycle::Idle)
+                && !bt.status.is_terminal()
+                && app.last_active_agent_task.as_deref() == Some(bt.task_id.as_str());
+            (bt.task_id.as_str(), fleet_rank(bt.status, is_active))
+        })
+        .collect();
+    ids.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    ids.into_iter().map(|(id, _)| id.to_owned()).collect()
+}
+
+/// Sort rank for the fleet ordering. Failures float to the very top
+/// (impossible to miss), then live work, then idle, then the
+/// recently-completed fade-out tail. Lower = higher on screen.
+fn fleet_rank(status: crate::types::TaskLifecycle, is_active: bool) -> u8 {
+    use crate::types::TaskLifecycle;
+    match status {
+        TaskLifecycle::Failed => 0,
+        _ if is_active => 1, // the agent whose stream is live right now
+        s if s.is_alive() && !matches!(s, TaskLifecycle::Idle) => 2,
+        TaskLifecycle::Idle => 3,
+        TaskLifecycle::Completed => 4,
+        TaskLifecycle::Cancelled => 5,
+        _ => 6,
+    }
+}
+
 pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
+    use crate::types::TaskLifecycle;
     if area.height == 0 || area.width < 20 {
         return;
     }
     let t = app.theme;
+    let width = area.width as usize;
 
-    // Include both live agents AND recently-completed ones — Claude
-    // Code keeps finished sub-agents in the fan as hollow circles
-    // ("pinned" view) so a fan of 15 doesn't visually deflate every
-    // time one completes. The 5-minute window matches the
-    // task-fade-out window the pinned-tasks row uses.
+    // Include both live agents AND recently-completed ones — finished
+    // sub-agents linger as a fade-out tail so a fleet of 15 doesn't
+    // visually deflate every time one completes. The 5-minute window
+    // matches the task-fade-out window the pinned-tasks row uses.
     const COMPLETED_PIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
     let now = std::time::Instant::now();
-    let mut active: Vec<&crate::app::BackgroundTask> = app
+    let mut shown: Vec<&crate::app::BackgroundTask> = app
         .background_tasks
         .values()
         .filter(|bt| {
             if bt.status.is_alive() {
                 return true;
             }
-            // Recently terminal — keep on the fan for COMPLETED_PIN_WINDOW
-            // measured from *completion*, not from start. Without this,
-            // a solver that ran longer than the pin window (e.g. a
-            // 7-minute bounty cycle) would vanish the very instant it
-            // completed, denying the user any glimpse of its terminal
-            // status. `completed_at` is None until the terminal
-            // transition writes it; fall back to started_at for
-            // legacy/migrated entries that never received the field.
             let finished_at = bt.completed_at.unwrap_or(bt.started_at);
             now.duration_since(finished_at) < COMPLETED_PIN_WINDOW || bt.last_tool.is_some()
         })
         .collect();
-    if active.is_empty() {
+    if shown.is_empty() {
         return;
     }
-    active.sort_by_key(|bt| bt.task_id.as_str().to_owned());
 
-    // New layout — mirrors Claude Code's agent panel (bullet dots, no
-    // box-drawing, right-aligned status):
-    //
-    //   ● main                                    ↑/↓ select · Enter view
-    //   ○ §8.1 EVM lifter            edit · opus · 33 tools · 193.2k tok
-    //   ○ BATCH18 lvar merge safety  Bash · opus · 10 tools · 60.1k tok
-    //
-    // Filled bullet = currently-most-active agent (the one whose
-    // last_active_agent_task matches); open bullet = idle/passive.
-    // No leader "agents" row — the bullets carry the structure.
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Row 0: main / leader agent. Mirrors cli.js's MainLine: the `▶ `
-    // pointer prefix appears when this row is "selected" (no
-    // viewing_task_id — i.e. we're focused on the input). When a
-    // sub-agent is selected (viewing_task_id is Some), main loses the
-    // pointer and dims slightly.
-    let main_selected = app.viewing_task_id.is_none();
-    let pointer = if main_selected { "▶ " } else { "  " };
-    let main_bullet = if main_selected { "● " } else { "○ " };
-    let main_label = "main";
-    let main_hint = if main_selected {
-        " ↑/↓ select · Enter to view"
-    } else {
-        ""
-    };
-    let hint_chars = main_hint.chars().count();
-    let main_padding = " ".repeat(
-        (area.width as usize)
-            .saturating_sub(pointer.len() + main_bullet.len() + main_label.len() + hint_chars),
-    );
-    let main_name_style = if main_selected {
-        Style::default()
-            .fg(t.text_primary)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(t.text_muted)
-    };
-    lines.push(Line::from(vec![
-        Span::styled(pointer, Style::default().fg(t.accent)),
-        Span::styled(
-            main_bullet,
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(main_label, main_name_style),
-        Span::styled(main_padding, Style::default()),
-        Span::styled(main_hint, Style::default().fg(t.text_muted)),
-    ]));
-
-    // Each sub-agent gets a row. Glyph mapping mirrors Claude Code's
-    // agent panel:
-    //   * Filled `●` — the active agent (most-recent stream chunk)
-    //   * Hollow `○` — idle / completed / failed (the "pinned" state)
-    //   * `✓` / `✗` — explicit completed / failed terminal markers
-    //     applied to text color, not the glyph (keeps the column
-    //     visually aligned).
-    for bt in active.iter() {
-        use crate::types::TaskLifecycle;
-        let status = bt.status;
-        let is_terminal = status.is_terminal();
-        let is_idle = matches!(status, TaskLifecycle::Idle);
-        let is_active = !is_idle
-            && !is_terminal
+    // ── Fleet counts (over ALL background tasks, not just the window) ──
+    // The summary line is the one at-a-glance health signal: how many
+    // running / idle / done / failed. With 30 agents you don't scan
+    // rows, you scan this line — and a red ✗N pulls the eye instantly.
+    let mut n_run = 0usize;
+    let mut n_idle = 0usize;
+    let mut n_done = 0usize;
+    let mut n_fail = 0usize;
+    for bt in app.background_tasks.values() {
+        match bt.status {
+            TaskLifecycle::Idle => n_idle += 1,
+            TaskLifecycle::Failed => n_fail += 1,
+            TaskLifecycle::Completed => n_done += 1,
+            TaskLifecycle::Cancelled => {}
+            s if s.is_alive() => n_run += 1,
+            _ => {}
+        }
+    }
+    let is_active_of = |bt: &crate::app::BackgroundTask| {
+        !matches!(bt.status, TaskLifecycle::Idle)
+            && !bt.status.is_terminal()
             && app
                 .last_active_agent_task
                 .as_deref()
                 .map(|id| id == bt.task_id.as_str())
-                .unwrap_or(false);
+                .unwrap_or(false)
+    };
 
-        // Status suffix on the right (right-aligned). Format mirrors
-        // Claude Code's "5s · ↓ 14.3k tokens" pattern — elapsed + a
-        // down-arrow + token count. We have richer info available
-        // (tool name, tool count) so we tuck those into the LEFT
-        // half between description and the spacer, and reserve the
-        // RIGHT half for time+tokens, which is what eyes track most.
+    // Sort: failed → active → running → idle → done. Stable tie-break on
+    // id so rows don't jitter between frames.
+    shown.sort_by(|a, b| {
+        fleet_rank(a.status, is_active_of(a))
+            .cmp(&fleet_rank(b.status, is_active_of(b)))
+            .then_with(|| a.task_id.as_str().cmp(b.task_id.as_str()))
+    });
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ── Summary header (row 0). Replaces the old "agents" box title +
+    // the "● main" row. Chips are coloured by the same semantic ramp the
+    // rows use; the keybinding hint is right-aligned. ──
+    let mut chips: Vec<Span> = vec![Span::styled(
+        "agents  ",
+        Style::default()
+            .fg(t.text_muted)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let mut chip_w = cell_width("agents  ");
+    let push_chip = |chips: &mut Vec<Span>, chip_w: &mut usize, txt: String, col| {
+        *chip_w += cell_width(&txt);
+        chips.push(Span::styled(txt, Style::default().fg(col)));
+    };
+    if n_run > 0 {
+        push_chip(&mut chips, &mut chip_w, format!("●{n_run} "), t.warning);
+    }
+    if n_idle > 0 {
+        push_chip(&mut chips, &mut chip_w, format!("○{n_idle} "), t.text_muted);
+    }
+    if n_done > 0 {
+        push_chip(&mut chips, &mut chip_w, format!("✓{n_done} "), t.success);
+    }
+    if n_fail > 0 {
+        // Failures get bold so they stand out even on a busy line.
+        chip_w += cell_width(&format!("✗{n_fail} "));
+        chips.push(Span::styled(
+            format!("✗{n_fail} "),
+            Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let hint = " ↑↓ select · ↵ view";
+    let hint_w = cell_width(hint);
+    if chip_w + hint_w < width {
+        chips.push(Span::styled(
+            " ".repeat(width - chip_w - hint_w),
+            Style::default(),
+        ));
+        chips.push(Span::styled(hint, Style::default().fg(t.text_muted)));
+    }
+    lines.push(Line::from(chips));
+
+    // ── Agent rows. Two fixed gutter columns up front:
+    //   col 0 (accent): selection pointer ▶ / blank  — the ONE accent use
+    //   col 1 (semantic): status glyph ● ○ ✓ ✗        — colour = state
+    // Then description (flex, left), then ALL metadata right-aligned in
+    // one column, shedding fields right-to-left when the row is narrow. ──
+    //
+    // Window: the summary owns 1 row; the rest go to agent rows. If the
+    // fleet overflows, drop a "+N more" footer. Sorting already floated
+    // the rows that matter (failed/running) to the top of the window.
+    let body_rows = (area.height as usize).saturating_sub(1).max(1);
+    let overflow = shown.len() > body_rows;
+    let visible_rows = if overflow {
+        body_rows.saturating_sub(1)
+    } else {
+        body_rows
+    };
+
+    for bt in shown.iter().take(visible_rows) {
+        let status = bt.status;
+        let is_terminal = status.is_terminal();
+        let is_idle = matches!(status, TaskLifecycle::Idle);
+        let is_active = is_active_of(bt);
+
+        // Selection pointer column (accent). Selected = the row whose
+        // task_id matches viewing_task_id (what ↵ opens).
+        let is_selected = app
+            .viewing_task_id
+            .as_deref()
+            .map(|id| id == bt.task_id.as_str())
+            .unwrap_or(false);
+        let ptr = if is_selected { "▶ " } else { "  " };
+
+        // Status glyph column (semantic colour, never accent).
+        let (glyph, glyph_col) = match status {
+            TaskLifecycle::Failed => ("✗ ", t.error),
+            TaskLifecycle::Completed => ("✓ ", t.success),
+            TaskLifecycle::Cancelled => ("✗ ", t.text_muted),
+            TaskLifecycle::Idle => ("○ ", t.text_muted),
+            _ if is_active => ("● ", t.warning),
+            _ => ("● ", t.text_secondary),
+        };
+
+        // Right-side metadata, highest-priority last (rightmost = where
+        // the eye lands): tool · model · count · time · ↓tok.
         let elapsed_secs = bt.started_at.elapsed().as_secs();
-        let elapsed_label = if elapsed_secs < 60 {
+        let elapsed = if elapsed_secs < 60 {
             format!("{elapsed_secs}s")
         } else if elapsed_secs < 3600 {
             format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
@@ -170,142 +264,109 @@ pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
             .saturating_add(bt.latest_cache_read_tokens)
             .saturating_add(bt.latest_cache_write_tokens)
             .saturating_add(bt.cumulative_output_tokens);
-        // Right-side label. Live agents show elapsed + token count
-        // (`2m 24s · ↓ 40.3k tok`). Terminal agents swap the elapsed
-        // for the lifecycle label (`completed · ↓ 40.3k tok`) so the
-        // pinned hollow-circle rows read at a glance.
-        let right_label: std::borrow::Cow<'_, str> = if is_terminal {
+        let time_label = if is_terminal {
             match status {
-                TaskLifecycle::Completed => "completed".into(),
-                TaskLifecycle::Failed => "failed".into(),
-                TaskLifecycle::Cancelled => "cancelled".into(),
-                _ => elapsed_label.clone().into(),
+                TaskLifecycle::Completed => "done".to_owned(),
+                TaskLifecycle::Failed => "failed".to_owned(),
+                TaskLifecycle::Cancelled => "cancelled".to_owned(),
+                _ => elapsed.clone(),
             }
         } else {
-            elapsed_label.clone().into()
+            elapsed.clone()
         };
-        let right_side = if total_tokens > 0 {
-            format!(
-                " {right_label} · ↓ {} tok",
-                format_token_count(total_tokens)
-            )
-        } else {
-            format!(" {right_label}")
-        };
+        // Build right-side fields in priority order (low → high). When
+        // the row is too narrow we drop from the FRONT (lowest priority:
+        // tool, then model, then count), keeping time + tokens.
+        let mut fields: Vec<String> = Vec::new();
+        if let Some(tool) = bt.last_tool.as_deref() {
+            fields.push(tool.to_owned());
+        }
+        if let Some(model) = bt.model_used.as_deref() {
+            let m = model_fqn(model);
+            if !m.is_empty() {
+                fields.push(m);
+            }
+        }
+        if bt.tool_use_count > 0 {
+            fields.push(format!("{} tools", bt.tool_use_count));
+        }
+        fields.push(time_label);
+        if total_tokens > 0 {
+            fields.push(format!("↓{}", format_token_count(total_tokens)));
+        }
 
-        // Selection pointer + bullet. The `▶ ` pointer appears on the
-        // row whose task_id matches `viewing_task_id` — mirrors cli.js's
-        // figures.pointer prefix that signals "this is what Enter
-        // applies to". Other rows get 2 spaces so columns stay aligned.
-        let is_selected = app
-            .viewing_task_id
-            .as_deref()
-            .map(|id| id == bt.task_id.as_str())
-            .unwrap_or(false);
-        let row_pointer = if is_selected { "▶ " } else { "  " };
-        let row_pointer_style = Style::default().fg(t.accent);
-        // Left side: bullet + description + middle stats.
-        let bullet = if is_active { "● " } else { "○ " };
-        let bullet_style = if is_active {
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-        } else if matches!(status, TaskLifecycle::Completed) {
-            // Completed agents get the success color on the hollow
-            // dot — the "that hollow green circle" the user pointed
-            // out from Claude Code's screenshot.
-            Style::default().fg(t.success)
-        } else if matches!(status, TaskLifecycle::Failed) {
-            Style::default().fg(t.error)
-        } else if matches!(status, TaskLifecycle::Cancelled) {
-            Style::default()
-                .fg(t.text_muted)
-                .add_modifier(Modifier::DIM)
-        } else if is_idle {
-            Style::default().fg(t.text_muted)
-        } else {
-            Style::default().fg(t.text_secondary)
-        };
+        let gutters_w = cell_width(ptr) + cell_width(glyph);
         let name_style = if is_active {
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD)
-        } else if is_terminal {
-            // Terminal agents fade to muted so the eye tracks live
-            // ones, but stay legible.
-            Style::default().fg(t.text_muted)
-        } else if is_idle {
+        } else if matches!(status, TaskLifecycle::Failed) {
+            Style::default().fg(t.error)
+        } else if is_terminal || is_idle {
             Style::default().fg(t.text_muted)
         } else {
             Style::default().fg(t.text_primary)
         };
-        // Middle stats: tool + model + tool count (no token count
-        // here — it lives on the right). Compact so the description
-        // gets the most room.
-        let mut mid_parts: Vec<String> = Vec::new();
-        if let Some(tool) = bt.last_tool.as_deref() {
-            mid_parts.push(tool.to_owned());
-        }
-        if let Some(model) = bt.model_used.as_deref() {
-            let badge = crate::message_view::pretty_model_badge(model);
-            if !badge.is_empty() {
-                mid_parts.push(badge);
-            }
-        }
-        if bt.tool_use_count > 0 {
-            mid_parts.push(format!("{} tools", bt.tool_use_count));
-        }
-        let mid = if mid_parts.is_empty() {
+
+        // Stall flag: a *running* agent that hasn't produced a chunk,
+        // tool call, or token in STALL_SECS has gone quiet (wedged on a
+        // long tool, rate-limited, hung). Amber `⚠ stalled Ns` next to
+        // the name so it reads apart from agents that are progressing.
+        const STALL_SECS: u64 = 30;
+        let stall = if !is_terminal && !is_idle {
+            let quiet = bt.last_activity_at.elapsed().as_secs();
+            (quiet >= STALL_SECS).then(|| format!("  ⚠ stalled {quiet}s"))
+        } else {
+            None
+        };
+        let stall_w = stall.as_deref().map(cell_width).unwrap_or(0);
+
+        // Fit: shrink the right column (drop lowest-priority fields)
+        // until name gets a sane minimum, then truncate the name.
+        const NAME_MIN: usize = 12;
+        let mut right = if fields.is_empty() {
             String::new()
         } else {
-            format!("  · {}", mid_parts.join(" · "))
+            format!("  {}", fields.join(" · "))
         };
+        while !fields.is_empty()
+            && gutters_w + NAME_MIN + stall_w + cell_width(&right) > width
+            && fields.len() > 2
+        {
+            fields.remove(0);
+            right = format!("  {}", fields.join(" · "));
+        }
+        let right_w = cell_width(&right);
+        let name_budget = width
+            .saturating_sub(gutters_w + stall_w + right_w)
+            .max(NAME_MIN);
+        let name = truncate_cells(&bt.description, name_budget);
+        let pad = width.saturating_sub(gutters_w + cell_width(&name) + stall_w + right_w);
 
-        // Running/paused glyph: cli.js's PLAY_ICON `▶` for in-flight,
-        // PAUSE_ICON `⏸` for terminal. Placed right after the
-        // description so the eye reads `description ▶ 2m 24s` as one
-        // visual chunk.
-        let activity_glyph = if is_terminal {
-            " ⏸ "
-        } else if is_idle {
-            " ⏸ "
-        } else {
-            " ▶ "
-        };
+        let mut spans = vec![
+            Span::styled(ptr, Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(glyph, Style::default().fg(glyph_col)),
+            Span::styled(name, name_style),
+        ];
+        if let Some(stall) = stall {
+            spans.push(Span::styled(
+                stall,
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled(" ".repeat(pad), Style::default()));
+        spans.push(Span::styled(right, Style::default().fg(t.text_muted)));
+        lines.push(Line::from(spans));
+    }
 
-        // Budget the description so the row fits in `area.width`:
-        // pointer(2) + bullet(2) + desc + mid + activity(3) + padding + right.
-        let fixed = row_pointer.chars().count()
-            + bullet.chars().count()
-            + mid.chars().count()
-            + activity_glyph.chars().count()
-            + right_side.chars().count();
-        let desc_budget = (area.width as usize).saturating_sub(fixed + 2).max(8);
-        let desc = bt.description.as_str();
-        let desc_trimmed = if desc.chars().count() > desc_budget {
-            let mut s: String = desc.chars().take(desc_budget.saturating_sub(1)).collect();
-            s.push('…');
-            s
-        } else {
-            desc.to_owned()
-        };
-        let pad_len = (area.width as usize).saturating_sub(
-            row_pointer.chars().count()
-                + bullet.chars().count()
-                + desc_trimmed.chars().count()
-                + mid.chars().count()
-                + activity_glyph.chars().count()
-                + right_side.chars().count(),
-        );
-        let padding = " ".repeat(pad_len);
-
-        lines.push(Line::from(vec![
-            Span::styled(row_pointer, row_pointer_style),
-            Span::styled(bullet, bullet_style),
-            Span::styled(desc_trimmed, name_style),
-            Span::styled(mid, Style::default().fg(t.text_muted)),
-            Span::styled(activity_glyph, Style::default().fg(t.text_muted)),
-            Span::styled(padding, Style::default()),
-            Span::styled(right_side, Style::default().fg(t.text_muted)),
-        ]));
+    if overflow {
+        let hidden = shown.len() - visible_rows;
+        lines.push(Line::from(Span::styled(
+            format!("  ▾ +{hidden} more (failed & running shown first)"),
+            Style::default()
+                .fg(t.text_muted)
+                .add_modifier(Modifier::ITALIC),
+        )));
     }
 
     let available_height = area.height as usize;

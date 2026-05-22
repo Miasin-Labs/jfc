@@ -126,6 +126,7 @@ pub(crate) fn handle_task_started(
             budget_killed: false,
             parent_task_id: parent_task_id.clone(),
             workflow_progress: None,
+            last_activity_at: std::time::Instant::now(),
         },
     );
     // Only register detached workers into the daemon
@@ -193,6 +194,7 @@ pub(crate) fn handle_task_progress(
             bt.chat_messages.push(types::ChatMessage::user(entry));
         }
         bt.last_tool = last_tool.clone();
+        bt.last_activity_at = std::time::Instant::now();
         if let Some(n) = tool_use_count {
             bt.tool_use_count = n;
         }

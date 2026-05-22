@@ -15,6 +15,7 @@ use std::path::Path;
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 use crate::adapter::{AdapterError, LanguageAdapter, ParsedFile};
+use crate::complexity::compute_complexity;
 use crate::edges::{EdgeData, EdgeKind};
 use crate::nodes::{NodeData, NodeId, NodeKind, Span, Visibility};
 
@@ -104,14 +105,16 @@ fn walk_py(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let qn = qualified(scope, &name);
-                out.push(build_nd(
+                let mut nd = build_nd(
                     &name,
                     NodeKind::Function,
                     node,
                     path,
                     path_str,
                     &qn,
-                ));
+                );
+                nd.complexity = compute_complexity(node, source.as_bytes(), "python");
+                out.push(nd);
             }
         }
         "class_definition" => {
@@ -216,6 +219,9 @@ fn build_nd(
         metadata: HashMap::new(),
         birth_revision: 0,
         last_modified_revision: 0,
+        complexity: None,
+            cfg: None,
+            dataflow: None,
     }
 }
 

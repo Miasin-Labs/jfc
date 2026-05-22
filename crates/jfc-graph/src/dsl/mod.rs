@@ -5,7 +5,7 @@
 //! query       := op ( '|' op )*
 //! op          := fn_select | type_select | callers | callees | depth | filter
 //!              | show | taint | preconditions | since | hot | scc
-//!              | dispatch | cluster_by_type | affected
+//!              | dispatch | cluster_by_type | affected | co_changes
 //! fn_select   := 'fn' '(' STRING ')'
 //! type_select := 'type' '(' STRING ')'
 //! callers     := 'callers'
@@ -151,6 +151,18 @@ pub enum Token {
     /// `possible_input_types` / `possible_return_types` metadata from the
     /// working set. Requires [`PossibleTypesPass`] to have run.
     PossibleTypes,
+    /// `co_changes` — postfix operator that computes temporal coupling
+    /// (co-change analysis from git history) for the working set. Returns
+    /// functions that frequently change together with the selected ones.
+    CoChanges,
+    /// `communities` — run Louvain community detection; filter to working set.
+    Communities,
+    /// `complexity` — postfix operator surfacing per-function complexity metrics.
+    Complexity,
+    /// `cfg` — postfix operator surfacing per-function control flow graph.
+    Cfg,
+    /// `dataflow` — postfix operator surfacing per-function dataflow analysis.
+    Dataflow,
     String(String),
     Number(usize),
     Ident(String),
@@ -262,6 +274,30 @@ pub enum DslOp {
     /// for nodes in the working set. Also retains only nodes that have at
     /// least one possible type (filters out functions with no type edges).
     PossibleTypes,
+    /// `co_changes` — postfix operator. For the current working set, runs
+    /// co-change analysis against git history and expands the working set
+    /// to include temporally coupled nodes. Metadata lines describe the
+    /// coupling strength. Uses `min_support=2` by default (pairs must
+    /// co-occur at least twice).
+    CoChanges,
+    /// `communities` — run Louvain community detection on the full graph,
+    /// then filter results to the working set. Metadata lines describe
+    /// each community as `community N: [node1, node2, ...]`.
+    Communities,
+    /// `complexity` — postfix enrichment operator surfacing per-function
+    /// complexity metrics (cognitive, cyclomatic, nesting, Halstead, LOC,
+    /// maintainability index) for nodes in the working set. Retains only
+    /// Function nodes that have complexity data populated.
+    Complexity,
+    /// `cfg` — postfix enrichment operator surfacing per-function control
+    /// flow graph for nodes in the working set. Retains only Function nodes
+    /// that have CFG data populated.
+    Cfg,
+    /// `dataflow` — postfix enrichment operator surfacing per-function
+    /// dataflow analysis (params, returns, assignments, arg flows, mutations)
+    /// for nodes in the working set. Retains only Function nodes that have
+    /// dataflow data populated.
+    Dataflow,
 }
 
 /// Top-level expression supporting set algebra, path patterns, and
@@ -597,6 +633,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
                     "multi_path" => tokens.push(Token::MultiPath),
                     "untested" => tokens.push(Token::Untested),
                     "possible_types" => tokens.push(Token::PossibleTypes),
+                    "co_changes" => tokens.push(Token::CoChanges),
+                    "communities" => tokens.push(Token::Communities),
+                    "complexity" => tokens.push(Token::Complexity),
+                    "cfg" => tokens.push(Token::Cfg),
+                    "dataflow" => tokens.push(Token::Dataflow),
                     _ => tokens.push(Token::Ident(word.to_string())),
                 }
             }
@@ -826,6 +867,31 @@ fn parse_op(tokens: &[Token], pos: &mut usize) -> Result<DslOp, ParseError> {
             *pos += 1;
             Ok(DslOp::PossibleTypes)
         }
+        // `co_changes` — postfix temporal coupling analysis; no arguments.
+        Token::CoChanges => {
+            *pos += 1;
+            Ok(DslOp::CoChanges)
+        }
+        // `communities` — Louvain community detection; no arguments.
+        Token::Communities => {
+            *pos += 1;
+            Ok(DslOp::Communities)
+        }
+        // `complexity` — surface per-function complexity metrics; no arguments.
+        Token::Complexity => {
+            *pos += 1;
+            Ok(DslOp::Complexity)
+        }
+        // `cfg` — surface per-function control flow graph; no arguments.
+        Token::Cfg => {
+            *pos += 1;
+            Ok(DslOp::Cfg)
+        }
+        // `dataflow` — surface per-function dataflow analysis; no arguments.
+        Token::Dataflow => {
+            *pos += 1;
+            Ok(DslOp::Dataflow)
+        }
         // `cluster by type` — exact two-keyword sequence. We don't currently
         // support clustering by anything else, but the `by` keyword leaves
         // room (`cluster by trait`, `cluster by file`) without re-parsing.
@@ -894,13 +960,13 @@ fn parse_op(tokens: &[Token], pos: &mut usize) -> Result<DslOp, ParseError> {
         Token::Ident(s) => Err(ParseError::new(
             *pos,
             format!(
-                "unknown operation '{s}'. Valid operations: fn, type, callers, callees, depth, filter, show, taint, preconditions, since, hot, scc, dispatch, cluster, affected"
+                "unknown operation '{s}'. Valid operations: fn, type, callers, callees, depth, filter, show, taint, preconditions, since, hot, scc, dispatch, cluster, affected, co_changes"
             ),
         )),
         _ => Err(ParseError::new(
             *pos,
             format!(
-                "unexpected token {:?}. Expected an operation (fn, type, callers, callees, depth, filter, show, taint, preconditions, since, hot, scc, dispatch, cluster, affected)",
+                "unexpected token {:?}. Expected an operation (fn, type, callers, callees, depth, filter, show, taint, preconditions, since, hot, scc, dispatch, cluster, affected, co_changes)",
                 token
             ),
         )),
@@ -1868,6 +1934,177 @@ impl<'a> QueryEngine<'a> {
                         }
                     }
                 }
+                // `co_changes` — temporal coupling from git history. Expands
+                // the working set to include nodes that frequently co-change
+                // with the current selection. Git history is fetched on demand.
+                DslOp::CoChanges => {
+                    let seed_nodes: Vec<NodeId> = working_set.iter().cloned().collect();
+                    // Determine workspace root heuristically from node file paths.
+                    let workspace_root = self
+                        .graph
+                        .all_node_ids()
+                        .first()
+                        .and_then(|id| self.graph.get_node(id))
+                        .and_then(|n| n.file_path.parent().map(|p| p.to_path_buf()))
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let commits =
+                        crate::co_change::fetch_git_history(&workspace_root, 500);
+                    let result = crate::co_change::co_changes_for_nodes(
+                        self.graph,
+                        &commits,
+                        &seed_nodes,
+                        2, // min_support: at least 2 co-occurrences
+                    );
+                    for pair in &result.pairs {
+                        let other = if seed_nodes.contains(&pair.node_a) {
+                            &pair.node_b
+                        } else {
+                            &pair.node_a
+                        };
+                        working_set.insert(other.clone());
+                        let other_name = self
+                            .graph
+                            .get_node(other)
+                            .map(|n| n.qualified_name.clone())
+                            .unwrap_or_else(|| format!("{other:?}"));
+                        metadata.push(format!(
+                            "co_change {} times={} confidence={:.3}",
+                            other_name, pair.times_changed_together, pair.confidence
+                        ));
+                    }
+                }
+                DslOp::Communities => {
+                    // Run Louvain community detection on the full graph,
+                    // filter to communities that overlap with the working set.
+                    let result = crate::communities::louvain(self.graph, 1.0, 42);
+                    let restrict: Option<HashSet<NodeId>> = if working_set.is_empty() {
+                        None
+                    } else {
+                        Some(working_set.iter().cloned().collect())
+                    };
+                    // Group assignments by community.
+                    let mut by_community: HashMap<u32, Vec<NodeId>> = HashMap::new();
+                    for (node_id, comm) in &result.assignments {
+                        let include = match &restrict {
+                            Some(r) => r.contains(node_id),
+                            None => true,
+                        };
+                        if include {
+                            by_community.entry(*comm).or_default().push(node_id.clone());
+                        }
+                    }
+                    // Build new working set and metadata.
+                    let mut new_set: HashSet<NodeId> = HashSet::new();
+                    let mut sorted_comms: Vec<u32> = by_community.keys().copied().collect();
+                    sorted_comms.sort();
+                    for comm in sorted_comms {
+                        let members = &by_community[&comm];
+                        let names: Vec<String> = members
+                            .iter()
+                            .take(8)
+                            .filter_map(|id| self.graph.get_node(id).map(|n| n.name.clone()))
+                            .collect();
+                        metadata.push(format!(
+                            "community {comm}: [{}]{}",
+                            names.join(", "),
+                            if members.len() > 8 {
+                                format!(" (+{} more)", members.len() - 8)
+                            } else {
+                                String::new()
+                            }
+                        ));
+                        for id in members {
+                            new_set.insert(id.clone());
+                        }
+                    }
+                    metadata.push(format!(
+                        "communities total={} modularity={:.4}",
+                        result.community_count, result.modularity
+                    ));
+                    working_set = new_set;
+                }
+                DslOp::Complexity => {
+                    // Retain only Function nodes that have complexity metrics.
+                    working_set.retain(|id| {
+                        self.graph
+                            .get_node(id)
+                            .and_then(|n| n.complexity.as_ref())
+                            .is_some()
+                    });
+                    // Surface metrics in metadata.
+                    for id in &working_set {
+                        if let Some(n) = self.graph.get_node(id) {
+                            if let Some(cx) = &n.complexity {
+                                let mut parts = vec![
+                                    format!("cognitive={}", cx.cognitive),
+                                    format!("cyclomatic={}", cx.cyclomatic),
+                                    format!("max_nesting={}", cx.max_nesting),
+                                ];
+                                if let Some(ref h) = cx.halstead {
+                                    parts.push(format!("volume={:.1}", h.volume));
+                                    parts.push(format!("effort={:.1}", h.effort));
+                                    parts.push(format!("bugs={:.3}", h.bugs));
+                                }
+                                if let Some(ref loc) = cx.loc {
+                                    parts.push(format!(
+                                        "loc(total={},source={},comment={})",
+                                        loc.total, loc.source, loc.comment
+                                    ));
+                                }
+                                if let Some(mi) = cx.maintainability_index {
+                                    parts.push(format!("MI={:.1}", mi));
+                                }
+                                metadata.push(format!(
+                                    "complexity {} {}",
+                                    n.qualified_name,
+                                    parts.join(" ")
+                                ));
+                            }
+                        }
+                    }
+                }
+                DslOp::Cfg => {
+                    // Retain only Function nodes that have CFG data.
+                    working_set.retain(|id| {
+                        self.graph
+                            .get_node(id)
+                            .and_then(|n| n.cfg.as_ref())
+                            .is_some()
+                    });
+                    // Surface CFG summary in metadata.
+                    for id in &working_set {
+                        if let Some(n) = self.graph.get_node(id) {
+                            if let Some(ref cfg) = n.cfg {
+                                metadata.push(format!(
+                                    "cfg {} {}",
+                                    n.qualified_name,
+                                    cfg.format_summary().replace('\n', " | ")
+                                ));
+                            }
+                        }
+                    }
+                }
+                DslOp::Dataflow => {
+                    // Retain only Function nodes that have dataflow data.
+                    working_set.retain(|id| {
+                        self.graph
+                            .get_node(id)
+                            .and_then(|n| n.dataflow.as_ref())
+                            .is_some()
+                    });
+                    // Surface dataflow summary in metadata.
+                    for id in &working_set {
+                        if let Some(n) = self.graph.get_node(id) {
+                            if let Some(ref df) = n.dataflow {
+                                metadata.push(format!(
+                                    "dataflow {} {}",
+                                    n.qualified_name,
+                                    df.format_summary().replace('\n', " | ")
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2084,6 +2321,87 @@ impl<'a> QueryEngine<'a> {
                             }
                         }
                     }
+                }
+                DslOp::CoChanges => {
+                    let seed_nodes: Vec<NodeId> = working_set.iter().cloned().collect();
+                    let workspace_root = self
+                        .graph
+                        .all_node_ids()
+                        .first()
+                        .and_then(|id| self.graph.get_node(id))
+                        .and_then(|n| n.file_path.parent().map(|p| p.to_path_buf()))
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let commits =
+                        crate::co_change::fetch_git_history(&workspace_root, 500);
+                    let result = crate::co_change::co_changes_for_nodes(
+                        self.graph,
+                        &commits,
+                        &seed_nodes,
+                        2,
+                    );
+                    for pair in &result.pairs {
+                        let other = if seed_nodes.contains(&pair.node_a) {
+                            &pair.node_b
+                        } else {
+                            &pair.node_a
+                        };
+                        working_set.insert(other.clone());
+                        let other_name = self
+                            .graph
+                            .get_node(other)
+                            .map(|n| n.qualified_name.clone())
+                            .unwrap_or_else(|| format!("{other:?}"));
+                        metadata.push(format!(
+                            "co_change {} times={} confidence={:.3}",
+                            other_name, pair.times_changed_together, pair.confidence
+                        ));
+                    }
+                }
+                DslOp::Communities => {
+                    let result = crate::communities::louvain(self.graph, 1.0, 42);
+                    let restrict: Option<HashSet<NodeId>> = if working_set.is_empty() {
+                        None
+                    } else {
+                        Some(working_set.iter().cloned().collect())
+                    };
+                    let mut by_community: HashMap<u32, Vec<NodeId>> = HashMap::new();
+                    for (node_id, comm) in &result.assignments {
+                        let include = match &restrict {
+                            Some(r) => r.contains(node_id),
+                            None => true,
+                        };
+                        if include {
+                            by_community.entry(*comm).or_default().push(node_id.clone());
+                        }
+                    }
+                    let mut new_set: HashSet<NodeId> = HashSet::new();
+                    let mut sorted_comms: Vec<u32> = by_community.keys().copied().collect();
+                    sorted_comms.sort();
+                    for comm in sorted_comms {
+                        let members = &by_community[&comm];
+                        let names: Vec<String> = members
+                            .iter()
+                            .take(8)
+                            .filter_map(|id| self.graph.get_node(id).map(|n| n.name.clone()))
+                            .collect();
+                        metadata.push(format!(
+                            "community {comm}: [{}]{}",
+                            names.join(", "),
+                            if members.len() > 8 {
+                                format!(" (+{} more)", members.len() - 8)
+                            } else {
+                                String::new()
+                            }
+                        ));
+                        for id in members {
+                            new_set.insert(id.clone());
+                        }
+                    }
+                    metadata.push(format!(
+                        "communities total={} modularity={:.4}",
+                        result.community_count, result.modularity
+                    ));
+                    working_set = new_set;
                 }
                 // Other ops: pass through without action (show, callers,
                 // callees, taint, etc. are handled by the full execute loop
@@ -2850,6 +3168,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         });
         let r = run_query_expr("count fn(\"foo\")", &g, &QueryConfig::default()).unwrap();
         assert!(r.metadata.iter().any(|m| m.starts_with("scalar = 1")));
@@ -2884,6 +3205,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         });
         let r = run_query_expr("fn(\"foo\")", &g, &QueryConfig::default()).unwrap();
         assert_eq!(r.nodes.len(), 1);
@@ -3000,6 +3324,9 @@ mod tests {
                 metadata: HashMap::new(),
                 birth_revision: 0,
                 last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
             }
         }
 
@@ -3063,6 +3390,9 @@ mod tests {
                 metadata: HashMap::new(),
                 birth_revision: 0,
                 last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
             }
         }
         let mut graph = CodeGraph::new();
@@ -3352,6 +3682,9 @@ mod tests {
                 metadata: HashMap::new(),
                 birth_revision: 0,
                 last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
             }
         }
         let mut g = CodeGraph::new();
@@ -3560,6 +3893,9 @@ mod tests {
                 metadata: HashMap::new(),
                 birth_revision: 0,
                 last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
             }
         }
 
@@ -3619,6 +3955,9 @@ mod tests {
             metadata: HashMap::new(),
             birth_revision: 0,
             last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
         }
     }
     fn fixture_calls_edge() -> crate::edges::EdgeData {

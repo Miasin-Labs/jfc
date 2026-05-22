@@ -817,7 +817,7 @@ async fn handle_command_keys(
         (KeyModifiers::NONE, KeyCode::Right) | (KeyModifiers::NONE, KeyCode::Left)
             if app.viewing_task_id.is_some() && !input_has_text(app) =>
         {
-            let task_ids: Vec<String> = app.background_tasks.keys().cloned().collect();
+            let task_ids: Vec<String> = crate::render::fleet_ordered_task_ids(app);
             if task_ids.is_empty() {
                 return Some(Ok(false));
             }
@@ -855,7 +855,7 @@ async fn handle_command_keys(
             // Down jumps to the most recently spawned task — useful
             // when several agents are running and you want the one
             // that just kicked off.
-            let task_ids: Vec<String> = app.background_tasks.keys().cloned().collect();
+            let task_ids: Vec<String> = crate::render::fleet_ordered_task_ids(app);
             if let Some(last) = task_ids.last() {
                 app.viewing_task_id = Some(last.clone());
                 app.scroll_to_bottom();
@@ -1319,7 +1319,7 @@ fn handle_leader_key_keys(
         app.leader_key_active = false;
         app.leader_key_timeout = None;
 
-        let task_ids: Vec<String> = app.background_tasks.keys().cloned().collect();
+        let task_ids: Vec<String> = crate::render::fleet_ordered_task_ids(app);
         let task_count = task_ids.len();
 
         match key.code {

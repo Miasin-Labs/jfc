@@ -50,6 +50,8 @@ fn make_node_with_metadata(
         visibility: Visibility::Public,
         metadata,
         complexity: None,
+            cfg: None,
+            dataflow: None,
         birth_revision: 0,
         last_modified_revision: 0,
     }

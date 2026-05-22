@@ -364,17 +364,20 @@ pub(super) fn push_task_status_lines<'a>(
     let summary = ts.summary.as_deref().unwrap_or("");
     let summary_is_block = summary.contains('\n');
 
-    let header_label: &str = if summary.is_empty() || summary_is_block {
-        ts.description.as_str()
+    // A single-line summary can still be multi-KB — the whole completion
+    // text with its newlines stripped. Showing it as the header word-wraps
+    // into a giant run-on blob that duplicates the agent's final message
+    // (already rendered just above in the transcript). Cap it to the first
+    // line at panel width; the full text lives in the transcript.
+    let header_label: String = if summary.is_empty() || summary_is_block {
+        ts.description.clone()
     } else {
-        summary
+        let first = summary.lines().next().unwrap_or(summary);
+        truncate_str(first, inner_w.saturating_sub(12).max(24))
     };
     let mut spans = vec![
         Span::styled(format!("{icon} task "), style),
-        Span::styled(
-            header_label.to_owned(),
-            Style::default().fg(t.text_secondary),
-        ),
+        Span::styled(header_label, Style::default().fg(t.text_secondary)),
         Span::styled(elapsed, Style::default().fg(t.text_muted)),
     ];
     if let Some(model) = ts.model.as_deref() {

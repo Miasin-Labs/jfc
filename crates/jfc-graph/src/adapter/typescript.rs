@@ -18,6 +18,7 @@ use std::path::Path;
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 use crate::adapter::{AdapterError, LanguageAdapter, ParsedFile};
+use crate::complexity::compute_complexity;
 use crate::edges::{EdgeData, EdgeKind};
 use crate::nodes::{NodeData, NodeId, NodeKind, Span, Visibility};
 
@@ -109,14 +110,7 @@ fn walk_ts_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let qn = qualified(scope, &name);
-                out.push(build_nd(
-                    &name,
-                    NodeKind::Function,
-                    node,
-                    path,
-                    path_str,
-                    &qn,
-                ));
+                out.push(build_fn_nd(&name, node, path, path_str, &qn, source));
             }
         }
         "class_declaration" => {
@@ -151,14 +145,7 @@ fn walk_ts_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let qn = qualified(scope, &name);
-                out.push(build_nd(
-                    &name,
-                    NodeKind::Function,
-                    node,
-                    path,
-                    path_str,
-                    &qn,
-                ));
+                out.push(build_fn_nd(&name, node, path, path_str, &qn, source));
             }
         }
         "lexical_declaration" | "variable_declaration" => {
@@ -171,14 +158,7 @@ fn walk_ts_node(
                             if matches!(value.kind(), "arrow_function" | "function") {
                                 let name = text(name_node, source);
                                 let qn = qualified(scope, &name);
-                                out.push(build_nd(
-                                    &name,
-                                    NodeKind::Function,
-                                    value,
-                                    path,
-                                    path_str,
-                                    &qn,
-                                ));
+                                out.push(build_fn_nd(&name, value, path, path_str, &qn, source));
                             }
                         }
                     }
@@ -293,7 +273,24 @@ fn build_nd(
         metadata: HashMap::new(),
         birth_revision: 0,
         last_modified_revision: 0,
+        complexity: None,
+            cfg: None,
+            dataflow: None,
     }
+}
+
+/// Build a function NodeData with complexity metrics attached.
+fn build_fn_nd(
+    name: &str,
+    node: TsNode<'_>,
+    path: &Path,
+    path_str: &str,
+    qualified_name: &str,
+    source: &str,
+) -> NodeData {
+    let mut nd = build_nd(name, NodeKind::Function, node, path, path_str, qualified_name);
+    nd.complexity = compute_complexity(node, source.as_bytes(), "typescript");
+    nd
 }
 
 fn build_span(node: TsNode<'_>, path: &Path) -> Span {

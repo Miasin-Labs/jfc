@@ -1268,6 +1268,7 @@ mod subagent_counter_tests {
             budget_killed: false,
             parent_task_id: None,
             workflow_progress: None,
+            last_activity_at: std::time::Instant::now(),
         }
     }
 

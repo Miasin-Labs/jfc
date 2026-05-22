@@ -121,18 +121,11 @@ fn cycle_expanded_view(app: &mut App) {
 }
 
 fn sorted_agent_task_ids(app: &App) -> Vec<String> {
-    let mut tasks: Vec<_> = app.background_tasks.values().collect();
-    tasks.sort_by(|a, b| {
-        let a_alive = a.status.is_alive();
-        let b_alive = b.status.is_alive();
-        b_alive
-            .cmp(&a_alive)
-            .then_with(|| a.started_at.cmp(&b.started_at))
-    });
-    tasks
-        .into_iter()
-        .map(|task| task.task_id.as_str().to_owned())
-        .collect()
+    // Single source of truth: the same fleet order the fan renders and
+    // the tab strip / leader-key navigation use (failed → active →
+    // running → idle → done). Keeps every way of stepping through agents
+    // consistent so the user's position never jumps unexpectedly.
+    crate::render::fleet_ordered_task_ids(app)
 }
 
 fn move_agent_selection(app: &mut App, delta: isize) {
