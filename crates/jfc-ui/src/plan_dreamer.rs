@@ -34,6 +34,7 @@ pub enum DreamerTask {
 
 /// Result of running a single dreamer task.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DreamerTaskResult {
     pub task: DreamerTask,
     pub duration_ms: u64,
