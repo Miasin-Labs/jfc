@@ -42,9 +42,7 @@ mod notifications;
 mod output_style;
 #[allow(dead_code)] // Public PlanStore surface — full integration pending streaming/recall wiring.
 mod plan;
-#[allow(dead_code)] // Wired by cli/daemon::spawn_from_env.
 mod dreamer_scheduler;
-#[allow(dead_code)] // Wired by future dreamer-daemon task.
 mod plan_dreamer;
 #[allow(dead_code)] // Wired by future request-builder integration task.
 mod plan_recall;
