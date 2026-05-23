@@ -17,7 +17,7 @@
 //! is enabled. The check is per-call so users can flip the flag mid-session
 //! without restarting.
 //!
-//! Cache: a process-local `OnceLock<Mutex<HashMap<PathBuf, Arc<GraphSession>>>>`
+//! Cache: delegates to the unified `tools/registry::graph_session_cache`.
 //! mirrors the cache in [`crate::tools`] but is independent — by design, the
 //! injection path must not reach into the tool dispatcher's internals. The
 //! first prompt per workspace pays the indexing cost; subsequent prompts hit
@@ -25,8 +25,8 @@
 //! the auto-context is "best-effort hint" not "ground truth" — a slightly
 //! stale graph beats a slow first-render in the hot path.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use crate::system_reminder;
 use crate::types::ChatMessage;
@@ -487,56 +487,23 @@ pub fn graph_auto_context_enabled() -> bool {
 /// reach into the tools module's private cache (sibling-agent ownership
 /// boundary) so the auto-context path keeps its own — same key shape
 /// (canonicalized workspace root), same value shape (`Arc<GraphSession>`).
-/// First call per cwd pays the full tree-sitter indexing cost; subsequent
-/// calls are an `Arc::clone`.
-fn auto_context_cache()
--> &'static Mutex<std::collections::HashMap<PathBuf, Arc<jfc_graph::session::GraphSession>>> {
-    static CACHE: OnceLock<
-        Mutex<std::collections::HashMap<PathBuf, Arc<jfc_graph::session::GraphSession>>>,
-    > = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Get-or-build a cached `GraphSession` for `cwd`. See module docs for
-/// the cache lifecycle rationale. Building uses a 64MB-stack thread
-/// like the tool dispatcher because the analysis passes (tarjan_scc,
-/// page_rank) recurse deeply on real codebases.
+/// Get-or-build a cached `GraphSession` for `cwd`. Delegates to the
+/// unified cache in `tools/registry.rs` so there's only one copy of each
+/// session in the process.
 fn get_session(cwd: &Path) -> Arc<jfc_graph::session::GraphSession> {
-    let key = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    {
-        let cache = auto_context_cache()
-            .lock()
-            .expect("auto-context cache poisoned");
-        if let Some(existing) = cache.get(&key) {
-            return Arc::clone(existing);
-        }
-    }
-    let key_clone = key.clone();
-    let session = std::thread::Builder::new()
-        .name("auto-ctx-graph-build".into())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || Arc::new(jfc_graph::session::GraphSession::from_directory(&key_clone)))
-        .expect("failed to spawn auto-context graph-build thread")
-        .join()
-        .expect("auto-context graph-build thread panicked");
-    let mut cache = auto_context_cache()
-        .lock()
-        .expect("auto-context cache poisoned");
-    if let Some(existing) = cache.get(&key) {
-        return Arc::clone(existing);
-    }
-    cache.insert(key, Arc::clone(&session));
-    session
+    crate::tools::get_or_build_graph_session(cwd)
 }
 
-/// Test-only: drop all cached sessions. Used by integration tests that
-/// build small fixture graphs and need to ensure they aren't sharing a
-/// stale `GraphSession` from an earlier test in the same process.
-#[cfg(test)]
-fn clear_auto_context_cache() {
-    if let Ok(mut cache) = auto_context_cache().lock() {
-        cache.clear();
-    }
+/// No-op kept for test compatibility. The real cache now lives solely in
+/// `tools/registry::graph_session_cache`; invalidation happens via
+/// `invalidate_graph_session_cache`. This function exists so tests that
+/// called `clear_auto_context_cache()` still compile.
+pub(crate) fn clear_auto_context_cache() {
+    // Nothing to do — the separate auto-context cache no longer exists.
+    // The caller (`invalidate_graph_session_cache`) already cleared the
+    // unified cache before calling us. This stub prevents the infinite
+    // recursion that would occur if we called back into
+    // `invalidate_graph_session_cache`.
 }
 
 /// Extract the most likely target symbol from `prompt`. Looks for an

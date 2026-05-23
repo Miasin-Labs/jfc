@@ -353,10 +353,10 @@ pub(super) async fn cmd_undo(
 ) {
     // Revert the most recent Edit / Write / MultiEdit /
     // ApplyPatch tool's filesystem mutation. Pulls from
-    // `app.tool_undo_history` which the tool dispatcher
-    // populates by capturing pre-mutation file content
-    // before the tool executes. Only undoes ONE step;
-    // run /undo repeatedly to walk back further.
+    // the static undo stack in tools/registry which the
+    // tool dispatcher populates by capturing pre-mutation
+    // file content before the tool executes. Only undoes
+    // ONE step; run /undo repeatedly to walk back further.
     app.messages.push(ChatMessage::user(text.to_owned()));
     let entry = crate::tools::pop_undo_entry();
     let Some(entry) = entry else {

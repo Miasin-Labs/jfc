@@ -54,8 +54,9 @@ pub(crate) use tasks::execute_skill;
 pub(crate) use swarm::CURRENT_AGENT_NAME;
 
 // registry
+pub(crate) use registry::get_or_build_graph_session;
 #[cfg(test)]
-pub use registry::invalidate_graph_session_cache;
+pub(crate) use registry::invalidate_graph_session_cache;
 #[cfg(test)]
 pub(crate) use registry::record_edited_file;
 pub use registry::{

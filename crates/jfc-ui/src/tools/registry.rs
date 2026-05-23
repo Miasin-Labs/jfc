@@ -95,7 +95,7 @@ pub(super) fn with_graph_session_mut<R>(
 /// Graph building and analysis (tarjan_scc, page_rank, etc.) can recurse
 /// deeply on large codebases. We spawn the build on a dedicated thread
 /// with a 64MB stack to avoid overflowing tokio's 8MB worker threads.
-pub(super) fn get_or_build_graph_session(
+pub(crate) fn get_or_build_graph_session(
     cwd: &std::path::Path,
 ) -> Arc<jfc_graph::session::GraphSession> {
     let key = graph_session_cache_key(cwd);
@@ -133,6 +133,8 @@ pub(super) fn get_or_build_graph_session(
 /// Drop the cached graph for `cwd` (or every cached graph when `cwd` is
 /// `None`). Called after writes so the next graph query re-parses the
 /// affected file. Cheap — actual rebuild only happens on the next query.
+/// Also invalidates the auto-context cache in `intent.rs` which holds a
+/// parallel copy of the same session data.
 pub fn invalidate_graph_session_cache(cwd: Option<&std::path::Path>) {
     // Same poisoning rationale as `get_or_build_graph_session`.
     let mut cache = match graph_session_cache().lock() {
@@ -146,6 +148,9 @@ pub fn invalidate_graph_session_cache(cwd: Option<&std::path::Path>) {
         }
         None => cache.clear(),
     }
+    // Keep the auto-context cache (intent.rs) in sync — it holds its own
+    // Arc<GraphSession> which would otherwise serve stale data.
+    crate::intent::clear_auto_context_cache();
 }
 
 // ---------------------------------------------------------------------------

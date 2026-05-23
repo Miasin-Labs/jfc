@@ -357,22 +357,41 @@ impl HookHandler {
                     }
                 }
                 if *async_mode {
-                    // Fire-and-forget in a background thread
+                    // Fire-and-forget in a background thread.
+                    // Capped at 8 concurrent hook threads to prevent
+                    // unbounded thread growth from chatty hooks.
+                    use std::sync::atomic::{AtomicUsize, Ordering};
+                    static HOOK_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+                    const HOOK_CAP: usize = 8;
+
+                    if HOOK_ACTIVE.load(Ordering::Acquire) >= HOOK_CAP {
+                        tracing::debug!(
+                            target: "jfc::hooks",
+                            command = %command,
+                            "hook thread cap ({HOOK_CAP}) reached, skipping async hook"
+                        );
+                        return HookAction::Continue;
+                    }
+                    HOOK_ACTIVE.fetch_add(1, Ordering::AcqRel);
+
                     let cmd = command.clone();
                     let env_vars = ctx.env_vars.clone();
                     let hook_point_str = format!("{point:?}");
                     let tool_name = ctx.tool_name.clone();
                     let session_id = ctx.session_id.clone();
-                    std::thread::spawn(move || {
-                        let _ = std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(&cmd)
-                            .env("JFC_HOOK_POINT", &hook_point_str)
-                            .env("JFC_TOOL_NAME", &tool_name)
-                            .env("JFC_SESSION_ID", &session_id)
-                            .envs(env_vars)
-                            .output();
-                    });
+                    let _ = std::thread::Builder::new()
+                        .name("jfc-hook".into())
+                        .spawn(move || {
+                            let _ = std::process::Command::new("sh")
+                                .arg("-c")
+                                .arg(&cmd)
+                                .env("JFC_HOOK_POINT", &hook_point_str)
+                                .env("JFC_TOOL_NAME", &tool_name)
+                                .env("JFC_SESSION_ID", &session_id)
+                                .envs(env_vars)
+                                .output();
+                            HOOK_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+                        });
                     return HookAction::Continue;
                 }
                 // Synchronous: run and check exit status

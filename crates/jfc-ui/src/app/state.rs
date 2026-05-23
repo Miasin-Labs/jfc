@@ -853,13 +853,10 @@ pub struct App {
     /// entries push to the back; /undo pops the back (most recent
     /// first).
     #[allow(dead_code)]
-    pub tool_undo_history: std::collections::VecDeque<crate::types::ToolUndoEntry>,
+
     /// v132 Marsh (mid-stream bash → model) buffer. Each entry is
     /// `(tool_id, line)` captured from `ToolOutputChunk`. `stream.rs`
     /// drains this on the next outbound request so the model sees what
-    /// bash printed since the last turn.
-    #[allow(dead_code)]
-    pub pending_marsh_chunks: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// Highest budget threshold the user has been warned about so far this
     /// session. 0 = no warnings yet, 80 = 80% warning shown, 100 = 100%
     /// warning shown. Prevents toast spam when the same threshold is
@@ -1193,8 +1190,6 @@ impl App {
             pinned_message_indices: std::collections::HashSet::new(),
             verbose_mode: false,
             fast_mode: false,
-            tool_undo_history: std::collections::VecDeque::new(),
-            pending_marsh_chunks: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             cost_budget_warned_at: 0,
             background_tasks: IndexMap::new(),
             show_info_sidebar: true,
