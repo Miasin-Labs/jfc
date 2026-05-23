@@ -374,6 +374,66 @@ Do not use a colon before tool calls.";
             system_prompt.push_str(&memories_section);
         }
 
+        // Plan recall — parallel to memory recall above. Two-phase LLM call
+        // selects relevant plans from `.jfc/plans/` then synthesizes a
+        // `<system-reminder>` context block. Same gating logic as memory
+        // recall: skip on empty plan set, slash commands, or when disabled
+        // via env var / runtime override / persisted config.
+        let plan_recall_enabled =
+            crate::plan_recall::is_enabled(crate::config::load().plan_recall_enabled);
+        if plan_recall_enabled {
+            if let Ok(plan_store) = crate::plan::PlanStore::open_project(Some(&cwd_path)) {
+                let plans = plan_store.list(None);
+                if !plans.is_empty() {
+                    let last_user_query = last_user_text(messages);
+                    if let Some(query) = last_user_query {
+                        let trimmed = query.trim();
+                        if !trimmed.is_empty() && !trimmed.starts_with('/') {
+                            // `run_plan_recall` handles its own caching via
+                            // `plan_recall::cache_recall` — repeated turns with
+                            // the same query reuse the prior synthesis.
+                            if let Some(block) = crate::plan_recall::run_plan_recall(
+                                trimmed,
+                                &plans,
+                                provider.clone(),
+                                model.clone(),
+                            )
+                            .await
+                            {
+                                tracing::debug!(
+                                    target: "jfc::stream",
+                                    plan_recall_block_len = block.len(),
+                                    "appending plan recall block"
+                                );
+                                system_prompt.push_str(&block);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // t221 — AutoSearchHints: scan the user's prompt for code-path /
+        // symbol mentions and inject a recall hint block built from project
+        // + user memory. Parallels the memory_recall / plan_recall hooks
+        // but is local (no LLM call) and always cheap to run.
+        if let Some(last_user_query) = last_user_text(messages) {
+            let trimmed = last_user_query.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('/') {
+                if let Some(hint_block) =
+                    jfc_learn::auto_hints::run_pre_turn_hint(trimmed, &cwd_path)
+                {
+                    tracing::debug!(
+                        target: "jfc::stream",
+                        hint_block_len = hint_block.len(),
+                        "injecting auto-hint recall block"
+                    );
+                    system_prompt.push_str("\n\n");
+                    system_prompt.push_str(&hint_block);
+                }
+            }
+        }
+
         if let Some(block) = crate::tools::render_pending_auto_context(&cwd_path) {
             system_prompt.push_str(&block);
         }

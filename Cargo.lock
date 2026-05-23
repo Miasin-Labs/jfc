@@ -2491,6 +2491,7 @@ name = "jfc-learn"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs 5.0.1",
  "regex",
  "serde",
  "serde_json",
