@@ -18,9 +18,9 @@
 //!    a *different* logical entity inheriting the same slot is correctly
 //!    distinguished.
 
+use jfc_graph::complexity::ComplexityMetrics;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use jfc_graph::complexity::ComplexityMetrics;
 
 use jfc_graph::edges::{EdgeData, EdgeKind};
 use jfc_graph::graph::CodeGraph;
@@ -49,8 +49,8 @@ fn make_node(name: &str, kind: NodeKind) -> NodeData {
         visibility: Visibility::Public,
         metadata: HashMap::new(),
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
         birth_revision: 0,
         last_modified_revision: 0,
     }

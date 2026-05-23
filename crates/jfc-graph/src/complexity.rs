@@ -309,7 +309,11 @@ fn walk_halstead(
     total_opnds: &mut u32,
 ) {
     let kind = node.kind();
-    let text_lazy = || std::str::from_utf8(&source[node.byte_range()]).unwrap_or("").to_string();
+    let text_lazy = || {
+        std::str::from_utf8(&source[node.byte_range()])
+            .unwrap_or("")
+            .to_string()
+    };
 
     if rules.operator_nodes.contains(&kind) {
         *total_ops += 1;
@@ -322,8 +326,9 @@ fn walk_halstead(
     // For binary/unary expressions, extract the operator token itself.
     if rules.operator_container_nodes.contains(&kind) {
         if let Some(op_node) = node.child_by_field_name("operator") {
-            let op_text =
-                std::str::from_utf8(&source[op_node.byte_range()]).unwrap_or("").to_string();
+            let op_text = std::str::from_utf8(&source[op_node.byte_range()])
+                .unwrap_or("")
+                .to_string();
             *total_ops += 1;
             unique_ops.insert(op_text);
         }
@@ -331,7 +336,15 @@ fn walk_halstead(
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        walk_halstead(child, source, rules, unique_ops, unique_opnds, total_ops, total_opnds);
+        walk_halstead(
+            child,
+            source,
+            rules,
+            unique_ops,
+            unique_opnds,
+            total_ops,
+            total_opnds,
+        );
     }
 }
 

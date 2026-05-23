@@ -128,7 +128,8 @@ pub fn louvain(graph: &CodeGraph, resolution: f64, seed: u64) -> CommunityResult
     }
 
     let community_count = next_label;
-    let modularity = compute_modularity(&build_adjacency_from_graph(graph).0, &community, resolution);
+    let modularity =
+        compute_modularity(&build_adjacency_from_graph(graph).0, &community, resolution);
 
     let assignments: Vec<(NodeId, u32)> = node_ids
         .into_iter()
@@ -212,7 +213,11 @@ fn local_moves(adj: &AdjList, community: &mut [u32], resolution: f64, seed: u64)
 
     // Compute total edge weight (sum of all edge weights / 2 for undirected,
     // but our adj list has each edge twice, so m = sum_of_all_weights / 2).
-    let m: f64 = adj.iter().flat_map(|neighbors| neighbors.iter().map(|(_, w)| w)).sum::<f64>() / 2.0;
+    let m: f64 = adj
+        .iter()
+        .flat_map(|neighbors| neighbors.iter().map(|(_, w)| w))
+        .sum::<f64>()
+        / 2.0;
 
     if m == 0.0 {
         return false;
@@ -252,15 +257,18 @@ fn local_moves(adj: &AdjList, community: &mut [u32], resolution: f64, seed: u64)
             }
 
             // k_i_in for current community (weights from node to own community).
-            let k_i_in_current = comm_weights.get(&(node_comm as u32)).copied().unwrap_or(0.0);
+            let k_i_in_current = comm_weights
+                .get(&(node_comm as u32))
+                .copied()
+                .unwrap_or(0.0);
 
             // sigma_tot of current community WITHOUT node i.
             let sigma_tot_current_without_i = sigma_tot[node_comm] - k_i;
 
             // The "removal cost": what we lose by removing node from its community.
             // ΔQ_remove = k_i_in_current / m - resolution * sigma_tot_current_without_i * k_i / (2m²)
-            let remove_cost = k_i_in_current / m
-                - resolution * sigma_tot_current_without_i * k_i / (2.0 * m * m);
+            let remove_cost =
+                k_i_in_current / m - resolution * sigma_tot_current_without_i * k_i / (2.0 * m * m);
 
             let mut best_gain = 0.0;
             let mut best_comm = node_comm as u32;
@@ -273,8 +281,8 @@ fn local_moves(adj: &AdjList, community: &mut [u32], resolution: f64, seed: u64)
                 let sigma_tot_target = sigma_tot[target_comm as usize];
 
                 // ΔQ_insert = k_i_in_target / m - resolution * sigma_tot_target * k_i / (2m²)
-                let insert_gain = k_i_in_target / m
-                    - resolution * sigma_tot_target * k_i / (2.0 * m * m);
+                let insert_gain =
+                    k_i_in_target / m - resolution * sigma_tot_target * k_i / (2.0 * m * m);
 
                 // Net gain = insert_gain - remove_cost
                 let gain = insert_gain - remove_cost;
@@ -354,7 +362,11 @@ fn coarsen(adj: &AdjList, community: &[u32]) -> (AdjList, Vec<u32>) {
 /// where L_c = sum of edge weights within community c (counting each
 /// undirected edge once), D_c = sum of degrees of nodes in community c.
 fn compute_modularity(adj: &AdjList, community: &[u32], resolution: f64) -> f64 {
-    let m: f64 = adj.iter().flat_map(|neighbors| neighbors.iter().map(|(_, w)| w)).sum::<f64>() / 2.0;
+    let m: f64 = adj
+        .iter()
+        .flat_map(|neighbors| neighbors.iter().map(|(_, w)| w))
+        .sum::<f64>()
+        / 2.0;
 
     if m == 0.0 {
         return 0.0;
@@ -636,7 +648,11 @@ mod tests {
         assert_eq!(result.community_count, 2);
         // Modularity for two K4 cliques with a single bridge is modest
         // because each community has exactly half the total degree.
-        assert!(result.modularity > -0.1, "modularity should be reasonable, got {}", result.modularity);
+        assert!(
+            result.modularity > -0.1,
+            "modularity should be reasonable, got {}",
+            result.modularity
+        );
     }
 
     #[test]

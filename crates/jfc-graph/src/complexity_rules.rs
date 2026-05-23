@@ -136,7 +136,11 @@ static TYPESCRIPT_RULES: LangRules = LangRules {
         "try_statement",
         "arrow_function",
     ],
-    function_nodes: &["function_declaration", "method_definition", "arrow_function"],
+    function_nodes: &[
+        "function_declaration",
+        "method_definition",
+        "arrow_function",
+    ],
     body_field_names: &["body"],
     operator_nodes: &[
         "return_statement",
@@ -226,7 +230,12 @@ static GO_RULES: LangRules = LangRules {
         "type_switch_statement",
         "select_statement",
     ],
-    case_nodes: &["expression_case", "type_case", "default_case", "communication_case"],
+    case_nodes: &[
+        "expression_case",
+        "type_case",
+        "default_case",
+        "communication_case",
+    ],
     logical_op_nodes: &["binary_expression"],
     logical_operators: &["&&", "||"],
     nesting_nodes: &[
@@ -452,7 +461,11 @@ pub static PHP_RULES: LangRules = LangRules {
         "switch_statement",
         "match_expression",
     ],
-    case_nodes: &["case_statement", "default_statement", "match_conditional_expression"],
+    case_nodes: &[
+        "case_statement",
+        "default_statement",
+        "match_conditional_expression",
+    ],
     logical_op_nodes: &["binary_expression"],
     logical_operators: &["&&", "||", "and", "or", "??"],
     nesting_nodes: &[
@@ -465,7 +478,11 @@ pub static PHP_RULES: LangRules = LangRules {
         "switch_statement",
         "match_expression",
     ],
-    function_nodes: &["function_definition", "method_declaration", "arrow_function"],
+    function_nodes: &[
+        "function_definition",
+        "method_declaration",
+        "arrow_function",
+    ],
     body_field_names: &["body"],
     operator_nodes: &[
         "if_statement",
@@ -565,27 +582,12 @@ static CSHARP_RULES: LangRules = LangRules {
 
 static RUBY_RULES: LangRules = LangRules {
     branch_nodes: &[
-        "if",
-        "unless",
-        "elsif",
-        "when",
-        "for",
-        "while",
-        "until",
-        "rescue",
+        "if", "unless", "elsif", "when", "for", "while", "until", "rescue",
     ],
     case_nodes: &["when"],
     logical_op_nodes: &["binary"],
     logical_operators: &["and", "or", "&&", "||"],
-    nesting_nodes: &[
-        "if",
-        "unless",
-        "for",
-        "while",
-        "until",
-        "rescue",
-        "case",
-    ],
+    nesting_nodes: &["if", "unless", "for", "while", "until", "rescue", "case"],
     function_nodes: &["method", "singleton_method", "lambda", "block"],
     body_field_names: &["body"],
     operator_nodes: &[
@@ -610,12 +612,7 @@ static RUBY_RULES: LangRules = LangRules {
         "false",
         "nil",
     ],
-    operator_container_nodes: &[
-        "binary",
-        "unary",
-        "assignment",
-        "operator_assignment",
-    ],
+    operator_container_nodes: &["binary", "unary", "assignment", "operator_assignment"],
 };
 
 // ─── Kotlin ──────────────────────────────────────────────────────────────────
@@ -640,7 +637,11 @@ pub static KOTLIN_RULES: LangRules = LangRules {
         "do_while_statement",
         "catch_block",
     ],
-    function_nodes: &["function_declaration", "lambda_literal", "anonymous_function"],
+    function_nodes: &[
+        "function_declaration",
+        "lambda_literal",
+        "anonymous_function",
+    ],
     body_field_names: &["body", "function_body"],
     operator_nodes: &[
         "if_expression",
@@ -697,7 +698,11 @@ pub static SWIFT_RULES: LangRules = LangRules {
         "switch_statement",
         "catch_clause",
     ],
-    function_nodes: &["function_declaration", "init_declaration", "closure_expression"],
+    function_nodes: &[
+        "function_declaration",
+        "init_declaration",
+        "closure_expression",
+    ],
     body_field_names: &["body", "function_body"],
     operator_nodes: &[
         "if_statement",
@@ -727,4 +732,3 @@ pub static SWIFT_RULES: LangRules = LangRules {
 };
 
 // ─── Kotlin ──────────────────────────────────────────────────────────────────
-

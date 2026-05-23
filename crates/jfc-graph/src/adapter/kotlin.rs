@@ -72,8 +72,22 @@ impl LanguageAdapter for KotlinAdapter {
     ) -> Vec<(NodeId, NodeId, EdgeData)> {
         let mut edges = Vec::new();
         let path_str = file.path.to_string_lossy();
-        extract_calls(file.tree.root_node(), &file.source, &file.path, nodes, &path_str, &mut edges);
-        extract_inheritance(file.tree.root_node(), &file.source, &file.path, nodes, &path_str, &mut edges);
+        extract_calls(
+            file.tree.root_node(),
+            &file.source,
+            &file.path,
+            nodes,
+            &path_str,
+            &mut edges,
+        );
+        extract_inheritance(
+            file.tree.root_node(),
+            &file.source,
+            &file.path,
+            nodes,
+            &path_str,
+            &mut edges,
+        );
         edges
     }
 }
@@ -92,30 +106,65 @@ fn walk_kotlin(
                 // Check if it's an interface or enum class
                 let first_child_kind = node.child(0).map(|c| text(&c, source));
                 if first_child_kind.as_deref() == Some("interface") {
-                    out.push(build_nd(&name, NodeKind::Trait, node, file_path, path_str, &name));
+                    out.push(build_nd(
+                        &name,
+                        NodeKind::Trait,
+                        node,
+                        file_path,
+                        path_str,
+                        &name,
+                    ));
                     walk_children(node, source, file_path, path_str, out, Some(&name));
                     return;
                 }
                 if first_child_kind.as_deref() == Some("enum") {
-                    out.push(build_nd(&name, NodeKind::Enum, node, file_path, path_str, &name));
+                    out.push(build_nd(
+                        &name,
+                        NodeKind::Enum,
+                        node,
+                        file_path,
+                        path_str,
+                        &name,
+                    ));
                     walk_children(node, source, file_path, path_str, out, Some(&name));
                     return;
                 }
-                out.push(build_nd(&name, NodeKind::Struct, node, file_path, path_str, &name));
+                out.push(build_nd(
+                    &name,
+                    NodeKind::Struct,
+                    node,
+                    file_path,
+                    path_str,
+                    &name,
+                ));
                 walk_children(node, source, file_path, path_str, out, Some(&name));
                 return;
             }
         }
         "interface_declaration" => {
             if let Some(name) = find_name(&node, source) {
-                out.push(build_nd(&name, NodeKind::Trait, node, file_path, path_str, &name));
+                out.push(build_nd(
+                    &name,
+                    NodeKind::Trait,
+                    node,
+                    file_path,
+                    path_str,
+                    &name,
+                ));
                 walk_children(node, source, file_path, path_str, out, Some(&name));
                 return;
             }
         }
         "object_declaration" => {
             if let Some(name) = find_name(&node, source) {
-                out.push(build_nd(&name, NodeKind::Module, node, file_path, path_str, &name));
+                out.push(build_nd(
+                    &name,
+                    NodeKind::Module,
+                    node,
+                    file_path,
+                    path_str,
+                    &name,
+                ));
                 walk_children(node, source, file_path, path_str, out, Some(&name));
                 return;
             }
@@ -129,7 +178,14 @@ fn walk_kotlin(
                     Some(cls) => format!("{cls}.{name}"),
                     None => name.clone(),
                 };
-                let mut nd = build_nd(&name, NodeKind::Function, node, file_path, path_str, &qualified);
+                let mut nd = build_nd(
+                    &name,
+                    NodeKind::Function,
+                    node,
+                    file_path,
+                    path_str,
+                    &qualified,
+                );
                 nd.complexity = compute_complexity(node, source.as_bytes(), "kotlin");
                 out.push(nd);
                 return;
@@ -173,7 +229,9 @@ fn extract_calls(
             if let Some(caller_id) = enclosing_fn(node, source, nodes) {
                 let callee_id = nodes
                     .iter()
-                    .find(|n| n.kind == NodeKind::Function && n.qualified_name.ends_with(&callee_name))
+                    .find(|n| {
+                        n.kind == NodeKind::Function && n.qualified_name.ends_with(&callee_name)
+                    })
                     .map(|n| n.id.clone())
                     .unwrap_or_else(|| NodeId::new(path_str, &callee_name, NodeKind::Function));
                 out.push((
@@ -220,7 +278,10 @@ fn extract_inheritance(
                     if let Some(type_name) = extract_type_name(child, source) {
                         let target_id = nodes
                             .iter()
-                            .find(|n| n.name == type_name && matches!(n.kind, NodeKind::Struct | NodeKind::Trait))
+                            .find(|n| {
+                                n.name == type_name
+                                    && matches!(n.kind, NodeKind::Struct | NodeKind::Trait)
+                            })
                             .map(|n| n.id.clone())
                             .unwrap_or_else(|| NodeId::new(path_str, &type_name, NodeKind::Trait));
                         out.push((
@@ -279,7 +340,10 @@ fn call_target_name(node: &TsNode, source: &str) -> Option<String> {
 fn extract_type_name(node: TsNode, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "user_type" || child.kind() == "type_identifier" || child.kind() == "simple_identifier" {
+        if child.kind() == "user_type"
+            || child.kind() == "type_identifier"
+            || child.kind() == "simple_identifier"
+        {
             let t = text(&child, source);
             // Strip generic args
             return Some(t.split('<').next().unwrap_or(t).trim().to_string());
@@ -356,7 +420,9 @@ mod tests {
 
     fn parse(src: &str) -> ParsedFile {
         let adapter = KotlinAdapter::new();
-        adapter.parse_file(Path::new("test.kt"), src).expect("parse")
+        adapter
+            .parse_file(Path::new("test.kt"), src)
+            .expect("parse")
     }
 
     #[test]
@@ -376,13 +442,22 @@ class UserService {
         let adapter = KotlinAdapter::new();
         let nodes = adapter.extract_nodes(&file);
 
-        let classes: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Struct).collect();
+        let classes: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Struct)
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name, "UserService");
 
-        let fns: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Function).collect();
+        let fns: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .collect();
         assert_eq!(fns.len(), 2);
-        assert!(fns.iter().any(|f| f.qualified_name == "UserService.findById"));
+        assert!(
+            fns.iter()
+                .any(|f| f.qualified_name == "UserService.findById")
+        );
         assert!(fns.iter().any(|f| f.qualified_name == "UserService.save"));
     }
 
@@ -415,7 +490,10 @@ object DatabaseConfig {
         let adapter = KotlinAdapter::new();
         let nodes = adapter.extract_nodes(&file);
 
-        let modules: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Module).collect();
+        let modules: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Module)
+            .collect();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].name, "DatabaseConfig");
     }
@@ -431,7 +509,10 @@ fun helper(x: Int): Int {
         let adapter = KotlinAdapter::new();
         let nodes = adapter.extract_nodes(&file);
 
-        let fns: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Function).collect();
+        let fns: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .collect();
         assert_eq!(fns.len(), 1);
         assert_eq!(fns[0].qualified_name, "helper");
     }

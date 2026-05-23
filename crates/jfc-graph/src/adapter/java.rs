@@ -109,7 +109,14 @@ fn walk_java(
             let mut cursor = node.walk();
             if let Some(name_node) = node.named_children(&mut cursor).next() {
                 let name = text(name_node, source);
-                out.push(build_nd(&name, NodeKind::Module, node, path, path_str, &name));
+                out.push(build_nd(
+                    &name,
+                    NodeKind::Module,
+                    node,
+                    path,
+                    path_str,
+                    &name,
+                ));
             }
         }
         "class_declaration" => {
@@ -152,14 +159,7 @@ fn walk_java(
         "enum_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
-                out.push(build_nd(
-                    &name,
-                    NodeKind::Enum,
-                    node,
-                    path,
-                    path_str,
-                    &name,
-                ));
+                out.push(build_nd(&name, NodeKind::Enum, node, path, path_str, &name));
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
                     walk_java(child, source, path, path_str, Some(&name), out);
@@ -174,8 +174,7 @@ fn walk_java(
                     Some(cls) => format!("{cls}.{name}"),
                     None => name.clone(),
                 };
-                let mut nd =
-                    build_nd(&name, NodeKind::Function, node, path, path_str, &qn);
+                let mut nd = build_nd(&name, NodeKind::Function, node, path, path_str, &qn);
                 nd.complexity = compute_complexity(node, source.as_bytes(), "java");
                 out.push(nd);
             }
@@ -187,8 +186,7 @@ fn walk_java(
                     Some(cls) => format!("{cls}.{name}"),
                     None => name.clone(),
                 };
-                let mut nd =
-                    build_nd(&name, NodeKind::Function, node, path, path_str, &qn);
+                let mut nd = build_nd(&name, NodeKind::Function, node, path, path_str, &qn);
                 nd.complexity = compute_complexity(node, source.as_bytes(), "java");
                 out.push(nd);
             }
@@ -218,9 +216,10 @@ fn extract_java_edges(
                 let callee_name = text(name_node, source);
                 if let Some(caller_id) = find_enclosing_function(node, source, nodes) {
                     // Try to find the callee among known functions.
-                    if let Some(callee) = nodes.iter().find(|n| {
-                        n.kind == NodeKind::Function && n.name == callee_name
-                    }) {
+                    if let Some(callee) = nodes
+                        .iter()
+                        .find(|n| n.kind == NodeKind::Function && n.name == callee_name)
+                    {
                         edges.push((
                             caller_id,
                             callee.id.clone(),
@@ -240,9 +239,10 @@ fn extract_java_edges(
                 let type_name = text(type_node, source);
                 if let Some(caller_id) = find_enclosing_function(node, source, nodes) {
                     // Constructor call: look for a Function node named same as type.
-                    if let Some(ctor) = nodes.iter().find(|n| {
-                        n.kind == NodeKind::Function && n.name == type_name
-                    }) {
+                    if let Some(ctor) = nodes
+                        .iter()
+                        .find(|n| n.kind == NodeKind::Function && n.name == type_name)
+                    {
                         edges.push((
                             caller_id,
                             ctor.id.clone(),
@@ -260,9 +260,9 @@ fn extract_java_edges(
             // Check for `implements` and `extends`.
             if let Some(class_name_node) = node.child_by_field_name("name") {
                 let class_name = text(class_name_node, source);
-                let class_node_data = nodes.iter().find(|n| {
-                    n.kind == NodeKind::Struct && n.name == class_name
-                });
+                let class_node_data = nodes
+                    .iter()
+                    .find(|n| n.kind == NodeKind::Struct && n.name == class_name);
 
                 if let Some(class_nd) = class_node_data {
                     // interfaces (implements clause)
@@ -388,8 +388,8 @@ fn build_nd(
         birth_revision: 0,
         last_modified_revision: 0,
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
     }
 }
 
@@ -430,13 +430,17 @@ public class UserService {
 
         // Package
         assert!(
-            nodes.iter().any(|n| n.name == "com.example" && n.kind == NodeKind::Module),
+            nodes
+                .iter()
+                .any(|n| n.name == "com.example" && n.kind == NodeKind::Module),
             "expected package node, got: {nodes:?}"
         );
 
         // Class
         assert!(
-            nodes.iter().any(|n| n.name == "UserService" && n.kind == NodeKind::Struct),
+            nodes
+                .iter()
+                .any(|n| n.name == "UserService" && n.kind == NodeKind::Struct),
             "expected class node"
         );
 
@@ -447,7 +451,9 @@ public class UserService {
             nodes.iter().filter(|n| n.kind == NodeKind::Function).collect::<Vec<_>>()
         );
         assert!(
-            nodes.iter().any(|n| n.qualified_name == "UserService.save" && n.kind == NodeKind::Function),
+            nodes
+                .iter()
+                .any(|n| n.qualified_name == "UserService.save" && n.kind == NodeKind::Function),
             "expected save method"
         );
     }
@@ -465,7 +471,9 @@ public interface Repository {
         let nodes = a.extract_nodes(&parsed);
 
         assert!(
-            nodes.iter().any(|n| n.name == "Repository" && n.kind == NodeKind::Trait),
+            nodes
+                .iter()
+                .any(|n| n.name == "Repository" && n.kind == NodeKind::Trait),
             "expected interface node"
         );
     }
@@ -483,7 +491,9 @@ public enum Status {
         let nodes = a.extract_nodes(&parsed);
 
         assert!(
-            nodes.iter().any(|n| n.name == "Status" && n.kind == NodeKind::Enum),
+            nodes
+                .iter()
+                .any(|n| n.name == "Status" && n.kind == NodeKind::Enum),
             "expected enum node"
         );
     }
@@ -502,9 +512,14 @@ public class Foo {
         let nodes = a.extract_nodes(&parsed);
 
         assert!(
-            nodes.iter().any(|n| n.qualified_name == "Foo.Foo" && n.kind == NodeKind::Function),
+            nodes
+                .iter()
+                .any(|n| n.qualified_name == "Foo.Foo" && n.kind == NodeKind::Function),
             "expected constructor node, got: {:?}",
-            nodes.iter().filter(|n| n.kind == NodeKind::Function).collect::<Vec<_>>()
+            nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Function)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -603,10 +618,25 @@ public class Logic {
             .iter()
             .find(|n| n.qualified_name == "Logic.compute")
             .expect("compute method not found");
-        let cx = compute.complexity.as_ref().expect("complexity metrics missing");
+        let cx = compute
+            .complexity
+            .as_ref()
+            .expect("complexity metrics missing");
 
-        assert!(cx.cyclomatic >= 4, "expected cyclomatic >= 4, got {}", cx.cyclomatic);
-        assert!(cx.cognitive >= 3, "expected cognitive >= 3, got {}", cx.cognitive);
-        assert!(cx.max_nesting >= 3, "expected max_nesting >= 3, got {}", cx.max_nesting);
+        assert!(
+            cx.cyclomatic >= 4,
+            "expected cyclomatic >= 4, got {}",
+            cx.cyclomatic
+        );
+        assert!(
+            cx.cognitive >= 3,
+            "expected cognitive >= 3, got {}",
+            cx.cognitive
+        );
+        assert!(
+            cx.max_nesting >= 3,
+            "expected max_nesting >= 3, got {}",
+            cx.max_nesting
+        );
     }
 }

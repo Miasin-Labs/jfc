@@ -95,7 +95,11 @@ static TYPESCRIPT_CFG_RULES: CfgRules = CfgRules {
     continue_node: Some("continue_statement"),
     throw_node: Some("throw_statement"),
     body_field: "body",
-    function_nodes: &["function_declaration", "method_definition", "arrow_function"],
+    function_nodes: &[
+        "function_declaration",
+        "method_definition",
+        "arrow_function",
+    ],
 };
 
 // ─── Python ──────────────────────────────────────────────────────────────────
@@ -212,7 +216,11 @@ static PHP_CFG_RULES: CfgRules = CfgRules {
     while_nodes: &["while_statement", "do_statement"],
     loop_node: None,
     switch_nodes: &["switch_statement", "match_expression"],
-    case_nodes: &["case_statement", "default_statement", "match_conditional_expression"],
+    case_nodes: &[
+        "case_statement",
+        "default_statement",
+        "match_conditional_expression",
+    ],
     try_nodes: &["try_statement"],
     catch_node: Some("catch_clause"),
     finally_node: Some("finally_clause"),
@@ -221,5 +229,9 @@ static PHP_CFG_RULES: CfgRules = CfgRules {
     continue_node: Some("continue_statement"),
     throw_node: Some("throw_expression"),
     body_field: "body",
-    function_nodes: &["function_definition", "method_declaration", "arrow_function"],
+    function_nodes: &[
+        "function_definition",
+        "method_declaration",
+        "arrow_function",
+    ],
 };

@@ -69,14 +69,7 @@ impl LanguageAdapter for CppAdapter {
         let mut nodes = Vec::new();
         let root = file.tree.root_node();
         let path_str = file.path.to_string_lossy();
-        walk_cpp(
-            root,
-            &file.source,
-            &file.path,
-            &path_str,
-            &[],
-            &mut nodes,
-        );
+        walk_cpp(root, &file.source, &file.path, &path_str, &[], &mut nodes);
         nodes
     }
 
@@ -173,14 +166,7 @@ fn walk_cpp(
             if !name.is_empty() {
                 let qn = qualify(scope, &name);
                 let display_name = name.clone();
-                let mut nd = build_nd(
-                    &display_name,
-                    NodeKind::Function,
-                    node,
-                    path,
-                    path_str,
-                    &qn,
-                );
+                let mut nd = build_nd(&display_name, NodeKind::Function, node, path, path_str, &qn);
                 nd.complexity = compute_complexity(node, source.as_bytes(), "cpp");
                 out.push(nd);
             }
@@ -425,11 +411,10 @@ fn extract_callee_name(node: TsNode<'_>, source: &str) -> String {
                     full.rsplit("::").next().unwrap_or(&full).to_string()
                 })
         }
-        "template_function" => {
-            node.child_by_field_name("name")
-                .map(|n| extract_callee_name(n, source))
-                .unwrap_or_default()
-        }
+        "template_function" => node
+            .child_by_field_name("name")
+            .map(|n| extract_callee_name(n, source))
+            .unwrap_or_default(),
         _ => text(node, source),
     }
 }
@@ -511,8 +496,8 @@ fn build_nd(
         birth_revision: 0,
         last_modified_revision: 0,
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
     }
 }
 
@@ -581,19 +566,15 @@ public:
         let parsed = adapter.parse_file(Path::new("test.cpp"), src).unwrap();
         let nodes = adapter.extract_nodes(&parsed);
         assert!(
-            nodes
-                .iter()
-                .any(|n| n.name == "draw"
-                    && n.kind == NodeKind::Function
-                    && n.qualified_name == "Renderer::draw"),
+            nodes.iter().any(|n| n.name == "draw"
+                && n.kind == NodeKind::Function
+                && n.qualified_name == "Renderer::draw"),
             "Expected method 'Renderer::draw', got: {nodes:?}"
         );
         assert!(
-            nodes
-                .iter()
-                .any(|n| n.name == "clear"
-                    && n.kind == NodeKind::Function
-                    && n.qualified_name == "Renderer::clear"),
+            nodes.iter().any(|n| n.name == "clear"
+                && n.kind == NodeKind::Function
+                && n.qualified_name == "Renderer::clear"),
             "Expected method 'Renderer::clear', got: {nodes:?}"
         );
     }
@@ -647,9 +628,7 @@ void caller() {
         let nodes = adapter.extract_nodes(&parsed);
         let edges = adapter.extract_edges(&parsed, &nodes);
         assert!(
-            edges
-                .iter()
-                .any(|(_, _, e)| e.kind == EdgeKind::Calls),
+            edges.iter().any(|(_, _, e)| e.kind == EdgeKind::Calls),
             "Expected Calls edge, got: {edges:?}"
         );
     }
@@ -688,11 +667,9 @@ void initialize() {
 
         // Class extracted.
         assert!(
-            nodes
-                .iter()
-                .any(|n| n.name == "Renderer"
-                    && n.kind == NodeKind::Struct
-                    && n.qualified_name == "engine::Renderer"),
+            nodes.iter().any(|n| n.name == "Renderer"
+                && n.kind == NodeKind::Struct
+                && n.qualified_name == "engine::Renderer"),
             "Missing class 'engine::Renderer', got: {:?}",
             nodes
                 .iter()
@@ -702,11 +679,9 @@ void initialize() {
 
         // Methods extracted with qualified names.
         assert!(
-            nodes
-                .iter()
-                .any(|n| n.name == "draw"
-                    && n.kind == NodeKind::Function
-                    && n.qualified_name == "engine::Renderer::draw"),
+            nodes.iter().any(|n| n.name == "draw"
+                && n.kind == NodeKind::Function
+                && n.qualified_name == "engine::Renderer::draw"),
             "Missing method 'engine::Renderer::draw', got: {:?}",
             nodes
                 .iter()
@@ -715,30 +690,24 @@ void initialize() {
         );
 
         assert!(
-            nodes
-                .iter()
-                .any(|n| n.name == "clear"
-                    && n.kind == NodeKind::Function
-                    && n.qualified_name == "engine::Renderer::clear"),
+            nodes.iter().any(|n| n.name == "clear"
+                && n.kind == NodeKind::Function
+                && n.qualified_name == "engine::Renderer::clear"),
             "Missing method 'engine::Renderer::clear'"
         );
 
         // Free function in namespace.
         assert!(
-            nodes
-                .iter()
-                .any(|n| n.name == "initialize"
-                    && n.kind == NodeKind::Function
-                    && n.qualified_name == "engine::initialize"),
+            nodes.iter().any(|n| n.name == "initialize"
+                && n.kind == NodeKind::Function
+                && n.qualified_name == "engine::initialize"),
             "Missing function 'engine::initialize'"
         );
 
         // Call edges.
         let edges = adapter.extract_edges(&parsed, &nodes);
         assert!(
-            edges
-                .iter()
-                .any(|(_, _, e)| e.kind == EdgeKind::Calls),
+            edges.iter().any(|(_, _, e)| e.kind == EdgeKind::Calls),
             "Expected at least one Calls edge from draw -> clear"
         );
     }
@@ -761,9 +730,7 @@ public:
         let nodes = adapter.extract_nodes(&parsed);
         let edges = adapter.extract_edges(&parsed, &nodes);
         assert!(
-            edges
-                .iter()
-                .any(|(_, _, e)| e.kind == EdgeKind::Implements),
+            edges.iter().any(|(_, _, e)| e.kind == EdgeKind::Implements),
             "Expected Implements edge for inheritance, got: {edges:?}"
         );
     }
@@ -791,7 +758,10 @@ public:
     #[test]
     fn cpp_adapter_file_extensions() {
         let adapter = CppAdapter::new();
-        assert_eq!(adapter.file_extensions(), &["cpp", "cc", "cxx", "hpp", "hh", "hxx"]);
+        assert_eq!(
+            adapter.file_extensions(),
+            &["cpp", "cc", "cxx", "hpp", "hh", "hxx"]
+        );
         assert_eq!(adapter.language_id(), "cpp");
     }
 

@@ -72,8 +72,22 @@ impl LanguageAdapter for SwiftAdapter {
     ) -> Vec<(NodeId, NodeId, EdgeData)> {
         let mut edges = Vec::new();
         let path_str = file.path.to_string_lossy();
-        extract_swift_calls(file.tree.root_node(), &file.source, &file.path, nodes, &path_str, &mut edges);
-        extract_swift_conformance(file.tree.root_node(), &file.source, &file.path, nodes, &path_str, &mut edges);
+        extract_swift_calls(
+            file.tree.root_node(),
+            &file.source,
+            &file.path,
+            nodes,
+            &path_str,
+            &mut edges,
+        );
+        extract_swift_conformance(
+            file.tree.root_node(),
+            &file.source,
+            &file.path,
+            nodes,
+            &path_str,
+            &mut edges,
+        );
         edges
     }
 }
@@ -103,7 +117,14 @@ fn walk_swift(
         }
         "protocol_declaration" => {
             if let Some(name) = find_swift_name(&node, source) {
-                out.push(build_nd(&name, NodeKind::Trait, node, file_path, path_str, &name));
+                out.push(build_nd(
+                    &name,
+                    NodeKind::Trait,
+                    node,
+                    file_path,
+                    path_str,
+                    &name,
+                ));
                 walk_children(node, source, file_path, path_str, out, Some(&name));
                 return;
             }
@@ -114,7 +135,14 @@ fn walk_swift(
                     Some(cls) => format!("{cls}.{name}"),
                     None => name.clone(),
                 };
-                let mut nd = build_nd(&name, NodeKind::Function, node, file_path, path_str, &qualified);
+                let mut nd = build_nd(
+                    &name,
+                    NodeKind::Function,
+                    node,
+                    file_path,
+                    path_str,
+                    &qualified,
+                );
                 nd.complexity = compute_complexity(node, source.as_bytes(), "swift");
                 out.push(nd);
                 return;
@@ -126,7 +154,14 @@ fn walk_swift(
                 Some(cls) => format!("{cls}.init"),
                 None => name.clone(),
             };
-            let mut nd = build_nd(&name, NodeKind::Function, node, file_path, path_str, &qualified);
+            let mut nd = build_nd(
+                &name,
+                NodeKind::Function,
+                node,
+                file_path,
+                path_str,
+                &qualified,
+            );
             nd.complexity = compute_complexity(node, source.as_bytes(), "swift");
             out.push(nd);
             return;
@@ -199,7 +234,11 @@ fn extract_swift_conformance(
     if node.kind() == "class_declaration" {
         if let Some(name) = find_swift_name(&node, source) {
             let src_text = source[node.byte_range()].trim_start();
-            let kind = if src_text.starts_with("enum") { NodeKind::Enum } else { NodeKind::Struct };
+            let kind = if src_text.starts_with("enum") {
+                NodeKind::Enum
+            } else {
+                NodeKind::Struct
+            };
             let src_id = NodeId::new(path_str, &name, kind);
 
             // Look for inheritance_specifier children
@@ -209,7 +248,10 @@ fn extract_swift_conformance(
                     if let Some(type_name) = extract_type_from_specifier(child, source) {
                         let target_id = nodes
                             .iter()
-                            .find(|n| n.name == type_name && matches!(n.kind, NodeKind::Struct | NodeKind::Trait))
+                            .find(|n| {
+                                n.name == type_name
+                                    && matches!(n.kind, NodeKind::Struct | NodeKind::Trait)
+                            })
                             .map(|n| n.id.clone())
                             .unwrap_or_else(|| NodeId::new(path_str, &type_name, NodeKind::Trait));
                         out.push((
@@ -253,8 +295,18 @@ fn find_swift_name(node: &TsNode, source: &str) -> Option<String> {
 fn extract_type_from_specifier(node: TsNode, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "user_type" || child.kind() == "type_identifier" || child.kind() == "simple_identifier" {
-            return Some(text(&child, source).split('<').next().unwrap_or("").trim().to_string());
+        if child.kind() == "user_type"
+            || child.kind() == "type_identifier"
+            || child.kind() == "simple_identifier"
+        {
+            return Some(
+                text(&child, source)
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            );
         }
     }
     // Fallback: just take the trimmed text minus any punctuation
@@ -348,7 +400,9 @@ mod tests {
 
     fn parse(src: &str) -> ParsedFile {
         let adapter = SwiftAdapter::new();
-        adapter.parse_file(Path::new("test.swift"), src).expect("parse")
+        adapter
+            .parse_file(Path::new("test.swift"), src)
+            .expect("parse")
     }
 
     #[test]
@@ -368,13 +422,22 @@ class UserService {
         let adapter = SwiftAdapter::new();
         let nodes = adapter.extract_nodes(&file);
 
-        let classes: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Struct).collect();
+        let classes: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Struct)
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name, "UserService");
 
-        let fns: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Function).collect();
+        let fns: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .collect();
         assert_eq!(fns.len(), 2);
-        assert!(fns.iter().any(|f| f.qualified_name == "UserService.findById"));
+        assert!(
+            fns.iter()
+                .any(|f| f.qualified_name == "UserService.findById")
+        );
         assert!(fns.iter().any(|f| f.qualified_name == "UserService.save"));
     }
 
@@ -410,11 +473,17 @@ struct Point {
         let adapter = SwiftAdapter::new();
         let nodes = adapter.extract_nodes(&file);
 
-        let structs: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Struct).collect();
+        let structs: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Struct)
+            .collect();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "Point");
 
-        let fns: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Function).collect();
+        let fns: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .collect();
         assert_eq!(fns.len(), 1);
         assert_eq!(fns[0].qualified_name, "Point.distance");
     }
@@ -449,7 +518,10 @@ func helper(x: Int) -> Int {
         let adapter = SwiftAdapter::new();
         let nodes = adapter.extract_nodes(&file);
 
-        let fns: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Function).collect();
+        let fns: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Function)
+            .collect();
         assert_eq!(fns.len(), 1);
         assert_eq!(fns[0].qualified_name, "helper");
     }

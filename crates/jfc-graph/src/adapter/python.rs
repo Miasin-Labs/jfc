@@ -105,14 +105,7 @@ fn walk_py(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let qn = qualified(scope, &name);
-                let mut nd = build_nd(
-                    &name,
-                    NodeKind::Function,
-                    node,
-                    path,
-                    path_str,
-                    &qn,
-                );
+                let mut nd = build_nd(&name, NodeKind::Function, node, path, path_str, &qn);
                 nd.complexity = compute_complexity(node, source.as_bytes(), "python");
                 out.push(nd);
             }
@@ -220,8 +213,8 @@ fn build_nd(
         birth_revision: 0,
         last_modified_revision: 0,
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
     }
 }
 

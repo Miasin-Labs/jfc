@@ -88,7 +88,10 @@ impl FunctionDataflow {
         for p in &self.params {
             let ty = p.type_annotation.as_deref().unwrap_or("?");
             let def = if p.has_default { " [default]" } else { "" };
-            out.push_str(&format!("  param[{}]: {} : {}{}\n", p.position, p.name, ty, def));
+            out.push_str(&format!(
+                "  param[{}]: {} : {}{}\n",
+                p.position, p.name, ty, def
+            ));
         }
         for r in &self.returns {
             let expr = if r.expression.len() > 60 {
@@ -112,7 +115,10 @@ impl FunctionDataflow {
             ));
         }
         for m in &self.mutations {
-            out.push_str(&format!("  mutate L{}: {}.{}()\n", m.line, m.target, m.method));
+            out.push_str(&format!(
+                "  mutate L{}: {}.{}()\n",
+                m.line, m.target, m.method
+            ));
         }
         out
     }
@@ -150,7 +156,14 @@ pub fn extract_dataflow(
     // Extract arg flows and mutations.
     let mut arg_flows = Vec::new();
     let mut mutations = Vec::new();
-    extract_calls_and_mutations(body, source, rules, &param_names, &mut arg_flows, &mut mutations);
+    extract_calls_and_mutations(
+        body,
+        source,
+        rules,
+        &param_names,
+        &mut arg_flows,
+        &mut mutations,
+    );
 
     Some(FunctionDataflow {
         params,
@@ -279,10 +292,7 @@ fn collect_returns(
     for child in node.named_children(&mut cursor) {
         // Skip nested functions.
         if child.kind().contains("function") && child.kind() != rules.return_node {
-            let is_fn = rules
-                .function_nodes
-                .iter()
-                .any(|&k| k == child.kind());
+            let is_fn = rules.function_nodes.iter().any(|&k| k == child.kind());
             if is_fn {
                 continue;
             }

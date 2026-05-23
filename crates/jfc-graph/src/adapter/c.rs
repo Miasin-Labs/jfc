@@ -142,14 +142,7 @@ fn walk_c(node: TsNode<'_>, source: &str, path: &Path, path_str: &str, out: &mut
             // Only extract if it has a body (enumerator_list).
             if has_child_kind(node, "enumerator_list") {
                 if let Some(name) = extract_type_name(node, source) {
-                    out.push(build_nd(
-                        &name,
-                        NodeKind::Enum,
-                        node,
-                        path,
-                        path_str,
-                        &name,
-                    ));
+                    out.push(build_nd(&name, NodeKind::Enum, node, path, path_str, &name));
                 }
             }
         }
@@ -255,10 +248,7 @@ fn extract_typedef_nodes(
                 NodeKind::Struct,
                 has_child_kind(type_spec, "field_declaration_list"),
             ),
-            "enum_specifier" => (
-                NodeKind::Enum,
-                has_child_kind(type_spec, "enumerator_list"),
-            ),
+            "enum_specifier" => (NodeKind::Enum, has_child_kind(type_spec, "enumerator_list")),
             _ => return,
         };
 
@@ -352,14 +342,11 @@ fn extract_c_uses_type(
                 collect_type_refs(node, source, &mut type_refs);
                 for type_name in &type_refs {
                     if let Some(target) = nodes.iter().find(|n| {
-                        &n.name == type_name
-                            && matches!(n.kind, NodeKind::Struct | NodeKind::Enum)
+                        &n.name == type_name && matches!(n.kind, NodeKind::Struct | NodeKind::Enum)
                     }) {
                         // Avoid duplicate edges.
                         let edge_exists = edges.iter().any(|(src, tgt, e)| {
-                            *src == fn_node.id
-                                && *tgt == target.id
-                                && e.kind == EdgeKind::UsesType
+                            *src == fn_node.id && *tgt == target.id && e.kind == EdgeKind::UsesType
                         });
                         if !edge_exists {
                             edges.push((
@@ -395,11 +382,7 @@ fn collect_type_refs(node: TsNode<'_>, source: &str, out: &mut Vec<String>) {
 }
 
 /// Find the enclosing function_definition and return its NodeId.
-fn find_enclosing_function(
-    node: TsNode<'_>,
-    source: &str,
-    nodes: &[NodeData],
-) -> Option<NodeId> {
+fn find_enclosing_function(node: TsNode<'_>, source: &str, nodes: &[NodeData]) -> Option<NodeId> {
     let mut parent = node.parent();
     while let Some(p) = parent {
         if p.kind() == "function_definition" {
@@ -446,8 +429,8 @@ fn build_nd(
         birth_revision: 0,
         last_modified_revision: 0,
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
     }
 }
 
@@ -546,10 +529,7 @@ void caller() {
             .iter()
             .filter(|(_, _, e)| e.kind == EdgeKind::Calls)
             .collect();
-        assert!(
-            !call_edges.is_empty(),
-            "expected call edges, got none"
-        );
+        assert!(!call_edges.is_empty(), "expected call edges, got none");
 
         let caller_id = nodes
             .iter()
@@ -565,7 +545,9 @@ void caller() {
             .clone();
 
         assert!(
-            call_edges.iter().any(|(src, tgt, _)| *src == caller_id && *tgt == helper_id),
+            call_edges
+                .iter()
+                .any(|(src, tgt, _)| *src == caller_id && *tgt == helper_id),
             "expected caller → helper edge"
         );
     }
@@ -616,14 +598,18 @@ void print_point(struct Point p) {
 
         // print_point → distance
         assert!(
-            call_edges.iter().any(|(src, tgt, _)| *src == print_point_id && *tgt == distance_id),
+            call_edges
+                .iter()
+                .any(|(src, tgt, _)| *src == print_point_id && *tgt == distance_id),
             "expected print_point → distance edge"
         );
 
         // print_point → printf (unresolved, points to synthetic id)
         let printf_id = NodeId::new("", "printf", NodeKind::Function);
         assert!(
-            call_edges.iter().any(|(src, tgt, _)| *src == print_point_id && *tgt == printf_id),
+            call_edges
+                .iter()
+                .any(|(src, tgt, _)| *src == print_point_id && *tgt == printf_id),
             "expected print_point → printf edge"
         );
     }
@@ -734,7 +720,11 @@ int distance(struct Point a, struct Point b);
         let nodes = a.extract_nodes(&parsed);
 
         // Struct should be extracted from header.
-        assert!(nodes.iter().any(|n| n.name == "Point" && n.kind == NodeKind::Struct));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Point" && n.kind == NodeKind::Struct)
+        );
         // Function declaration (prototype) should NOT be extracted — only definitions.
         let functions: Vec<_> = nodes
             .iter()

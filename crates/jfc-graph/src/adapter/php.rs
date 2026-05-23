@@ -202,8 +202,11 @@ fn walk_php(
                     let method_qualified = format!("{class_name}.{name}");
                     // scope already includes the class name, so we build qualified
                     // relative to the parent scope (namespace) plus the dotted form
-                    let parent_scope: Vec<&str> =
-                        scope.iter().take(scope.len().saturating_sub(1)).copied().collect();
+                    let parent_scope: Vec<&str> = scope
+                        .iter()
+                        .take(scope.len().saturating_sub(1))
+                        .copied()
+                        .collect();
                     qualified(&parent_scope, &method_qualified)
                 } else {
                     qualified(scope, &name)
@@ -223,8 +226,8 @@ fn walk_php(
                     birth_revision: 0,
                     last_modified_revision: 0,
                     complexity: None,
-            cfg: None,
-            dataflow: None,
+                    cfg: None,
+                    dataflow: None,
                 };
                 nd.complexity = compute_complexity(node, source.as_bytes(), "php");
                 out.push(nd);
@@ -333,10 +336,8 @@ fn extract_php_inheritance(
                             {
                                 let extends_name = text(name_child, source);
                                 // Extract just the class name (last segment)
-                                let base_name = extends_name
-                                    .rsplit('\\')
-                                    .next()
-                                    .unwrap_or(&extends_name);
+                                let base_name =
+                                    extends_name.rsplit('\\').next().unwrap_or(&extends_name);
                                 if let Some(target) = nodes.iter().find(|n| {
                                     (n.kind == NodeKind::Struct || n.kind == NodeKind::Trait)
                                         && n.name == base_name
@@ -567,8 +568,8 @@ fn build_nd(
         birth_revision: 0,
         last_modified_revision: 0,
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
     }
 }
 
@@ -608,20 +609,28 @@ class User {
 
         // Should have namespace, class, and 2 methods
         assert!(
-            nodes.iter().any(|n| n.name == "App\\Models" && n.kind == NodeKind::Module),
+            nodes
+                .iter()
+                .any(|n| n.name == "App\\Models" && n.kind == NodeKind::Module),
             "missing namespace, got: {:?}",
             nodes.iter().map(|n| (&n.name, n.kind)).collect::<Vec<_>>()
         );
         assert!(
-            nodes.iter().any(|n| n.name == "User" && n.kind == NodeKind::Struct),
+            nodes
+                .iter()
+                .any(|n| n.name == "User" && n.kind == NodeKind::Struct),
             "missing User class"
         );
         assert!(
-            nodes.iter().any(|n| n.name == "getName" && n.kind == NodeKind::Function),
+            nodes
+                .iter()
+                .any(|n| n.name == "getName" && n.kind == NodeKind::Function),
             "missing getName method"
         );
         assert!(
-            nodes.iter().any(|n| n.name == "validate" && n.kind == NodeKind::Function),
+            nodes
+                .iter()
+                .any(|n| n.name == "validate" && n.kind == NodeKind::Function),
             "missing validate method"
         );
     }

@@ -274,8 +274,8 @@ fn build_nd(
         birth_revision: 0,
         last_modified_revision: 0,
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
     }
 }
 
@@ -288,7 +288,14 @@ fn build_fn_nd(
     qualified_name: &str,
     source: &str,
 ) -> NodeData {
-    let mut nd = build_nd(name, NodeKind::Function, node, path, path_str, qualified_name);
+    let mut nd = build_nd(
+        name,
+        NodeKind::Function,
+        node,
+        path,
+        path_str,
+        qualified_name,
+    );
     nd.complexity = compute_complexity(node, source.as_bytes(), "typescript");
     nd
 }

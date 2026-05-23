@@ -379,8 +379,7 @@ src/baz.rs
         let id_foo = NodeId::new("src/foo.rs", "foo", NodeKind::Function);
         let id_bar = NodeId::new("src/bar.rs", "bar", NodeKind::Function);
         let foo_bar = result.pairs.iter().find(|p| {
-            (p.node_a == id_foo && p.node_b == id_bar)
-                || (p.node_a == id_bar && p.node_b == id_foo)
+            (p.node_a == id_foo && p.node_b == id_bar) || (p.node_a == id_bar && p.node_b == id_foo)
         });
         assert!(foo_bar.is_some(), "foo-bar pair should exist");
         let fb = foo_bar.unwrap();
@@ -493,8 +492,7 @@ src/baz.rs
         }
         // The bar-baz pair (which doesn't include foo) should NOT appear.
         let bar_baz = result.pairs.iter().find(|p| {
-            (p.node_a == id_bar && p.node_b == id_baz)
-                || (p.node_a == id_baz && p.node_b == id_bar)
+            (p.node_a == id_bar && p.node_b == id_baz) || (p.node_a == id_baz && p.node_b == id_bar)
         });
         assert!(bar_baz.is_none(), "bar-baz pair should not appear");
     }

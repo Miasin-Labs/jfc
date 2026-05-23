@@ -327,7 +327,9 @@ mod tests {
         let src = "module Authentication\n  def authenticate(user)\n    user\n  end\nend\n";
         let (nodes, _) = parse_ruby(src);
         assert!(
-            nodes.iter().any(|n| n.name == "Authentication" && n.kind == NodeKind::Module),
+            nodes
+                .iter()
+                .any(|n| n.name == "Authentication" && n.kind == NodeKind::Module),
             "expected Module node for Authentication, got: {nodes:?}"
         );
     }
@@ -337,7 +339,9 @@ mod tests {
         let src = "class User\n  def initialize(name)\n    @name = name\n  end\nend\n";
         let (nodes, _) = parse_ruby(src);
         assert!(
-            nodes.iter().any(|n| n.name == "User" && n.kind == NodeKind::Struct),
+            nodes
+                .iter()
+                .any(|n| n.name == "User" && n.kind == NodeKind::Struct),
             "expected Struct node for User, got: {nodes:?}"
         );
     }
@@ -509,19 +513,25 @@ end
 
         // Module extracted
         assert!(
-            nodes.iter().any(|n| n.name == "Authentication" && n.kind == NodeKind::Module),
+            nodes
+                .iter()
+                .any(|n| n.name == "Authentication" && n.kind == NodeKind::Module),
             "missing Authentication module"
         );
 
         // Class extracted as Struct
         assert!(
-            nodes.iter().any(|n| n.name == "User" && n.kind == NodeKind::Struct),
+            nodes
+                .iter()
+                .any(|n| n.name == "User" && n.kind == NodeKind::Struct),
             "missing User struct"
         );
 
         // Methods with qualified names
         assert!(
-            nodes.iter().any(|n| n.qualified_name == "Authentication.authenticate"),
+            nodes
+                .iter()
+                .any(|n| n.qualified_name == "Authentication.authenticate"),
             "missing Authentication.authenticate"
         );
         assert!(
@@ -541,14 +551,16 @@ end
         let auth_calls: Vec<_> = edges
             .iter()
             .filter(|(from, _, e)| {
-                nodes.iter().any(|n| n.id == *from && n.name == "authenticate")
+                nodes
+                    .iter()
+                    .any(|n| n.id == *from && n.name == "authenticate")
                     && e.kind == EdgeKind::Calls
             })
             .collect();
         assert!(
-            auth_calls.iter().any(|(_, to, _)| nodes
+            auth_calls
                 .iter()
-                .any(|n| n.id == *to && n.name == "validate")),
+                .any(|(_, to, _)| nodes.iter().any(|n| n.id == *to && n.name == "validate")),
             "expected call edge from authenticate to validate"
         );
         assert!(

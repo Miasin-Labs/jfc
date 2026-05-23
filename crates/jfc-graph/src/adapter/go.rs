@@ -96,14 +96,7 @@ fn walk_go(node: TsNode<'_>, source: &str, path: &Path, path_str: &str, out: &mu
         "function_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
-                let mut nd = build_nd(
-                    &name,
-                    NodeKind::Function,
-                    node,
-                    path,
-                    path_str,
-                    &name,
-                );
+                let mut nd = build_nd(&name, NodeKind::Function, node, path, path_str, &name);
                 nd.complexity = compute_complexity(node, source.as_bytes(), "go");
                 out.push(nd);
             }
@@ -127,14 +120,7 @@ fn walk_go(node: TsNode<'_>, source: &str, path: &Path, path_str: &str, out: &mu
                 } else {
                     format!("{receiver}::{name}")
                 };
-                let mut nd = build_nd(
-                    &name,
-                    NodeKind::Function,
-                    node,
-                    path,
-                    path_str,
-                    &qn,
-                );
+                let mut nd = build_nd(&name, NodeKind::Function, node, path, path_str, &qn);
                 nd.complexity = compute_complexity(node, source.as_bytes(), "go");
                 out.push(nd);
             }
@@ -258,8 +244,8 @@ fn build_nd(
         birth_revision: 0,
         last_modified_revision: 0,
         complexity: None,
-            cfg: None,
-            dataflow: None,
+        cfg: None,
+        dataflow: None,
     }
 }
 

@@ -87,7 +87,13 @@ impl CfgBuilder {
         }
     }
 
-    fn new_block(&mut self, label: impl Into<String>, kind: CfgBlockKind, start_line: u32, end_line: u32) -> u32 {
+    fn new_block(
+        &mut self,
+        label: impl Into<String>,
+        kind: CfgBlockKind,
+        start_line: u32,
+        end_line: u32,
+    ) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         self.blocks.push(CfgBlock {
@@ -117,7 +123,11 @@ impl CfgBuilder {
 /// Build a CFG for a function body node.
 ///
 /// Returns `None` if no rules exist for the given language or the node has no body.
-pub fn build_cfg(function_node: TsNode<'_>, source: &[u8], language_id: &str) -> Option<FunctionCfg> {
+pub fn build_cfg(
+    function_node: TsNode<'_>,
+    source: &[u8],
+    language_id: &str,
+) -> Option<FunctionCfg> {
     let rules = CfgRules::for_language(language_id)?;
 
     // Verify this is a function node.
@@ -142,7 +152,11 @@ pub fn build_cfg(function_node: TsNode<'_>, source: &[u8], language_id: &str) ->
 
     // Connect last block to EXIT if it hasn't already been connected.
     if let Some(last) = last_block {
-        if !builder.edges.iter().any(|e| e.from == last && e.to == exit_id) {
+        if !builder
+            .edges
+            .iter()
+            .any(|e| e.from == last && e.to == exit_id)
+        {
             builder.add_edge(last, exit_id, CfgEdgeKind::Normal);
         }
     }
@@ -191,7 +205,8 @@ fn walk_block(
             builder.add_edge(current, branch_id, CfgEdgeKind::Normal);
 
             // True branch: find the body/consequence.
-            let true_body = effective.child_by_field_name("consequence")
+            let true_body = effective
+                .child_by_field_name("consequence")
                 .or_else(|| effective.child_by_field_name("body"));
 
             let after_id = builder.new_block("after_if", CfgBlockKind::Normal, end, end);
@@ -210,7 +225,11 @@ fn walk_block(
             // Actually: let's just mark the edge we added (current→branch) as Normal
             // and add true/false from branch.
             if let Some(te) = true_end {
-                if !builder.edges.iter().any(|e| e.from == te && e.to == exit_id) {
+                if !builder
+                    .edges
+                    .iter()
+                    .any(|e| e.from == te && e.to == exit_id)
+                {
                     builder.add_edge(te, after_id, CfgEdgeKind::Normal);
                 }
             }
@@ -225,11 +244,17 @@ fn walk_block(
                 // Create an else block and add BranchFalse edge to it.
                 let else_start = else_node.start_position().row as u32 + 1;
                 let else_end = else_node.end_position().row as u32 + 1;
-                let else_block_id = builder.new_block("else", CfgBlockKind::Normal, else_start, else_end);
+                let else_block_id =
+                    builder.new_block("else", CfgBlockKind::Normal, else_start, else_end);
                 builder.add_edge(branch_id, else_block_id, CfgEdgeKind::BranchFalse);
-                let false_end = walk_block(builder, else_node, source, rules, else_block_id, exit_id);
+                let false_end =
+                    walk_block(builder, else_node, source, rules, else_block_id, exit_id);
                 if let Some(fe) = false_end {
-                    if !builder.edges.iter().any(|e| e.from == fe && e.to == exit_id) {
+                    if !builder
+                        .edges
+                        .iter()
+                        .any(|e| e.from == fe && e.to == exit_id)
+                    {
                         builder.add_edge(fe, after_id, CfgEdgeKind::Normal);
                     }
                 }
@@ -303,7 +328,8 @@ fn walk_block(
             for case_child in search_node.named_children(&mut case_cursor) {
                 if rules.case_nodes.contains(&case_child.kind()) {
                     found_case = true;
-                    let arm_end = walk_block(builder, case_child, source, rules, branch_id, exit_id);
+                    let arm_end =
+                        walk_block(builder, case_child, source, rules, branch_id, exit_id);
                     if let Some(ae) = arm_end {
                         builder.add_edge(ae, after_id, CfgEdgeKind::Normal);
                     }
@@ -339,11 +365,15 @@ fn walk_block(
                 let mut try_cursor = effective.walk();
                 for try_child in effective.named_children(&mut try_cursor) {
                     if try_child.kind() == catch_kind {
-                        let catch_id = builder.new_block("catch", CfgBlockKind::Exception, 
+                        let catch_id = builder.new_block(
+                            "catch",
+                            CfgBlockKind::Exception,
                             try_child.start_position().row as u32 + 1,
-                            try_child.end_position().row as u32 + 1);
+                            try_child.end_position().row as u32 + 1,
+                        );
                         builder.add_edge(try_block_id, catch_id, CfgEdgeKind::Exception);
-                        let catch_end = walk_block(builder, try_child, source, rules, catch_id, exit_id);
+                        let catch_end =
+                            walk_block(builder, try_child, source, rules, catch_id, exit_id);
                         if let Some(ce) = catch_end {
                             builder.add_edge(ce, after_id, CfgEdgeKind::Normal);
                         }
@@ -382,7 +412,9 @@ fn walk_block(
             // ─── Normal Statement ────────────────────────────────────
             // Accumulate into current block by just updating its end line.
             // But if current is the predecessor (ENTRY or a branch), create a new block.
-            if current == predecessor || builder.blocks[current as usize].kind != CfgBlockKind::Normal {
+            if current == predecessor
+                || builder.blocks[current as usize].kind != CfgBlockKind::Normal
+            {
                 let stmt_id = builder.new_block("stmt", CfgBlockKind::Normal, start, end);
                 builder.add_edge(current, stmt_id, CfgEdgeKind::Normal);
                 current = stmt_id;
@@ -393,11 +425,7 @@ fn walk_block(
         }
     }
 
-    if terminated {
-        None
-    } else {
-        Some(current)
-    }
+    if terminated { None } else { Some(current) }
 }
 
 // ─── Display ─────────────────────────────────────────────────────────────────
@@ -406,7 +434,11 @@ impl FunctionCfg {
     /// Format the CFG as a human-readable string for DSL output.
     pub fn format_summary(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("blocks={} edges={}\n", self.blocks.len(), self.edges.len()));
+        out.push_str(&format!(
+            "blocks={} edges={}\n",
+            self.blocks.len(),
+            self.edges.len()
+        ));
         for block in &self.blocks {
             out.push_str(&format!(
                 "  B{}: {:?} \"{}\" L{}-{}\n",
@@ -432,7 +464,9 @@ mod tests {
 
     fn parse_rust(src: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
         parser.parse(src, None).unwrap()
     }
 
@@ -461,15 +495,25 @@ fn foo() {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have ENTRY, EXIT, and one statement block.
-        assert!(cfg.blocks.len() >= 3, "expected >=3 blocks, got {}", cfg.blocks.len());
+        assert!(
+            cfg.blocks.len() >= 3,
+            "expected >=3 blocks, got {}",
+            cfg.blocks.len()
+        );
         assert_eq!(cfg.blocks[0].kind, CfgBlockKind::Entry);
         assert_eq!(cfg.blocks[1].kind, CfgBlockKind::Exit);
 
         // At least 2 Normal edges: ENTRY→stmt, stmt→EXIT.
-        let normal_edges: Vec<_> = cfg.edges.iter()
+        let normal_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::Normal)
             .collect();
-        assert!(normal_edges.len() >= 2, "expected >=2 normal edges, got {}", normal_edges.len());
+        assert!(
+            normal_edges.len() >= 2,
+            "expected >=2 normal edges, got {}",
+            normal_edges.len()
+        );
     }
 
     #[test]
@@ -488,16 +532,26 @@ fn foo(x: i32) {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have a Branch block.
-        let branch_blocks: Vec<_> = cfg.blocks.iter()
+        let branch_blocks: Vec<_> = cfg
+            .blocks
+            .iter()
             .filter(|b| b.kind == CfgBlockKind::Branch)
             .collect();
-        assert!(!branch_blocks.is_empty(), "expected at least one Branch block");
+        assert!(
+            !branch_blocks.is_empty(),
+            "expected at least one Branch block"
+        );
 
         // Should have BranchFalse edge (from branch to else path).
-        let false_edges: Vec<_> = cfg.edges.iter()
+        let false_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::BranchFalse)
             .collect();
-        assert!(!false_edges.is_empty(), "expected at least one BranchFalse edge");
+        assert!(
+            !false_edges.is_empty(),
+            "expected at least one BranchFalse edge"
+        );
     }
 
     #[test]
@@ -514,16 +568,23 @@ fn foo() {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have a Loop block.
-        let loop_blocks: Vec<_> = cfg.blocks.iter()
+        let loop_blocks: Vec<_> = cfg
+            .blocks
+            .iter()
             .filter(|b| b.kind == CfgBlockKind::Loop)
             .collect();
         assert!(!loop_blocks.is_empty(), "expected at least one Loop block");
 
         // Should have a LoopBack edge.
-        let loopback_edges: Vec<_> = cfg.edges.iter()
+        let loopback_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::LoopBack)
             .collect();
-        assert!(!loopback_edges.is_empty(), "expected at least one LoopBack edge");
+        assert!(
+            !loopback_edges.is_empty(),
+            "expected at least one LoopBack edge"
+        );
     }
 
     #[test]
@@ -541,22 +602,34 @@ fn foo() {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have a Loop block.
-        let loop_blocks: Vec<_> = cfg.blocks.iter()
+        let loop_blocks: Vec<_> = cfg
+            .blocks
+            .iter()
             .filter(|b| b.kind == CfgBlockKind::Loop)
             .collect();
         assert!(!loop_blocks.is_empty(), "expected at least one Loop block");
 
         // Should have a LoopBack edge.
-        let loopback_edges: Vec<_> = cfg.edges.iter()
+        let loopback_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::LoopBack)
             .collect();
-        assert!(!loopback_edges.is_empty(), "expected at least one LoopBack edge");
+        assert!(
+            !loopback_edges.is_empty(),
+            "expected at least one LoopBack edge"
+        );
 
         // Should have BranchFalse edge (condition false → after loop).
-        let false_edges: Vec<_> = cfg.edges.iter()
+        let false_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::BranchFalse)
             .collect();
-        assert!(!false_edges.is_empty(), "expected BranchFalse edge for while condition");
+        assert!(
+            !false_edges.is_empty(),
+            "expected BranchFalse edge for while condition"
+        );
     }
 
     #[test]
@@ -575,17 +648,21 @@ fn foo(x: i32) {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have a Branch block for the match.
-        let branch_blocks: Vec<_> = cfg.blocks.iter()
+        let branch_blocks: Vec<_> = cfg
+            .blocks
+            .iter()
             .filter(|b| b.kind == CfgBlockKind::Branch)
             .collect();
         assert!(!branch_blocks.is_empty(), "expected Branch block for match");
 
         // The branch block should have multiple outgoing edges (one per arm).
         let branch_id = branch_blocks[0].id;
-        let outgoing: Vec<_> = cfg.edges.iter()
-            .filter(|e| e.from == branch_id)
-            .collect();
-        assert!(outgoing.len() >= 3, "expected >=3 edges from match branch, got {}", outgoing.len());
+        let outgoing: Vec<_> = cfg.edges.iter().filter(|e| e.from == branch_id).collect();
+        assert!(
+            outgoing.len() >= 3,
+            "expected >=3 edges from match branch, got {}",
+            outgoing.len()
+        );
     }
 
     #[test]
@@ -603,13 +680,21 @@ fn foo(x: i32) -> i32 {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have a Return edge to EXIT.
-        let return_edges: Vec<_> = cfg.edges.iter()
+        let return_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::Return)
             .collect();
-        assert!(!return_edges.is_empty(), "expected at least one Return edge");
+        assert!(
+            !return_edges.is_empty(),
+            "expected at least one Return edge"
+        );
 
         // The Return edge should point to the EXIT block (id=1).
-        assert!(return_edges.iter().any(|e| e.to == 1), "Return edge should point to EXIT (id=1)");
+        assert!(
+            return_edges.iter().any(|e| e.to == 1),
+            "Return edge should point to EXIT (id=1)"
+        );
     }
 
     #[test]
@@ -628,15 +713,22 @@ fn foo() {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have both Loop and Branch blocks.
-        let loop_blocks: Vec<_> = cfg.blocks.iter()
+        let loop_blocks: Vec<_> = cfg
+            .blocks
+            .iter()
             .filter(|b| b.kind == CfgBlockKind::Loop)
             .collect();
-        let branch_blocks: Vec<_> = cfg.blocks.iter()
+        let branch_blocks: Vec<_> = cfg
+            .blocks
+            .iter()
             .filter(|b| b.kind == CfgBlockKind::Branch)
             .collect();
 
         assert!(!loop_blocks.is_empty(), "expected Loop block");
-        assert!(!branch_blocks.is_empty(), "expected Branch block inside loop");
+        assert!(
+            !branch_blocks.is_empty(),
+            "expected Branch block inside loop"
+        );
 
         // Should have both LoopBack and BranchFalse edges.
         assert!(cfg.edges.iter().any(|e| e.kind == CfgEdgeKind::LoopBack));
@@ -657,13 +749,17 @@ fn foo() {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have a Loop block (for infinite loop).
-        let loop_blocks: Vec<_> = cfg.blocks.iter()
+        let loop_blocks: Vec<_> = cfg
+            .blocks
+            .iter()
             .filter(|b| b.kind == CfgBlockKind::Loop)
             .collect();
         assert!(!loop_blocks.is_empty(), "expected Loop block for `loop`");
 
         // Should have a Break edge.
-        let break_edges: Vec<_> = cfg.edges.iter()
+        let break_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::Break)
             .collect();
         assert!(!break_edges.is_empty(), "expected Break edge");
@@ -679,7 +775,8 @@ struct Foo {
         let tree = parse_rust(src);
         let root = tree.root_node();
         let mut cursor = root.walk();
-        let struct_node = root.named_children(&mut cursor)
+        let struct_node = root
+            .named_children(&mut cursor)
             .find(|c| c.kind() == "struct_item")
             .unwrap();
 
@@ -704,7 +801,9 @@ fn foo() {
         let cfg = build_cfg(func, src.as_bytes(), "rust").unwrap();
 
         // Should have a Continue edge pointing back to loop header.
-        let continue_edges: Vec<_> = cfg.edges.iter()
+        let continue_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| e.kind == CfgEdgeKind::Continue)
             .collect();
         assert!(!continue_edges.is_empty(), "expected Continue edge");
@@ -712,7 +811,11 @@ fn foo() {
         // The Continue edge target should be a Loop block.
         for ce in &continue_edges {
             let target = &cfg.blocks[ce.to as usize];
-            assert_eq!(target.kind, CfgBlockKind::Loop, "Continue should target a Loop block");
+            assert_eq!(
+                target.kind,
+                CfgBlockKind::Loop,
+                "Continue should target a Loop block"
+            );
         }
     }
 }
