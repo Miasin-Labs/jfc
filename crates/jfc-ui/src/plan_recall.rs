@@ -191,7 +191,9 @@ pub fn cache_recall(query: &str, block: Option<String>) {
     }
 }
 
-#[cfg(test)]
+/// Clear the process-wide recall cache. Exposed publicly so integration
+/// tests (and the `/plan` slash command's invalidation hook) can force a
+/// fresh select → synthesize round-trip.
 pub fn clear_cache() {
     if let Ok(mut guard) = LAST_PLAN_RECALL.lock() {
         *guard = None;
