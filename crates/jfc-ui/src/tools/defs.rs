@@ -613,9 +613,153 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
                     "include_handles": {
                         "type": "boolean",
                         "description": "Append a `--- handles ---` footer of structured handles for chaining (default true). Set false when only summary text is needed."
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format. `markdown` (default) returns human-readable text; `json` returns a versioned schema envelope you can pipe to other tools.",
+                        "enum": ["markdown", "json"]
                     }
                 },
                 "required": ["query"]
+            }),
+        },
+        ToolDef {
+            name: "graph_context".into(),
+            description: "PRIMARY TOOL for 'how does X work' / architecture / bug-context questions. \
+                Composes search + BFS + type-hierarchy expansion + per-file diversity cap + intent \
+                detection into ONE call. Returns entry points, related symbols grouped by file, \
+                optional source blocks for entry points, and a feature/UX reminder when the task \
+                description looks like a new-feature request. Prefer this over chaining graph_search \
+                + graph_query. NOTE: surfaces CODE context, not product requirements — for new \
+                features still clarify UX/edge cases with the user.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Free-form description of the task, bug, or feature to build context for."
+                    },
+                    "max_nodes": {
+                        "type": "number",
+                        "description": "Maximum entry-point + related symbols to include (default 20, capped at 100)."
+                    },
+                    "include_code": {
+                        "type": "boolean",
+                        "description": "Whether to embed source-code blocks for entry-point symbols (default true)."
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format: `markdown` (default) or `json` (schema-versioned ContextResult envelope).",
+                        "enum": ["markdown", "json"]
+                    }
+                },
+                "required": ["task"]
+            }),
+        },
+        ToolDef {
+            name: "graph_search".into(),
+            description: "Find symbols by name with qualified-name support. Accepts simple names \
+                (`foo`), `::`-qualified (`stage_apply::run`), `.`-qualified (`Session.request`), \
+                and `/`-qualified (`stage_apply/run`) lookups. Rust prefixes `crate::`, `super::`, \
+                `self::` are stripped automatically. Returns kind, location, signature, visibility, \
+                and a chainable handle for each match. Use this when you want the symbol's *shape* \
+                — for code structure use graph_context.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Symbol name or qualified path (e.g. `foo`, `Session::request`, `stage_apply/run`)."
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Maximum results (default 10, capped at 100)."
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format: `markdown` (default) or `json` (schema-versioned envelope with NodeId list).",
+                        "enum": ["markdown", "json"]
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
+            name: "graph_callers".into(),
+            description: "Find every function that calls `symbol`. Aggregates across all matching \
+                symbols when the name is ambiguous (multiple `execute` methods, etc.) and notes the \
+                aggregation in the result. Output is file-grouped with signatures inline. Use to \
+                understand usage patterns or estimate change impact (combined with graph_impact).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol name or qualified path to find callers of."
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Maximum callers to return (default 20, capped at 100)."
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format: `markdown` (default) or `json` envelope.",
+                        "enum": ["markdown", "json"]
+                    }
+                },
+                "required": ["symbol"]
+            }),
+        },
+        ToolDef {
+            name: "graph_callees".into(),
+            description: "Find every function that `symbol` calls. Symmetric to graph_callers. \
+                Use to understand dependencies, derive a dataflow trace, or check whether a fn \
+                touches a sensitive subsystem (e.g. `graph_callees on auth_handler`).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol name or qualified path to find callees of."
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Maximum callees to return (default 20, capped at 100)."
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format: `markdown` (default) or `json` envelope.",
+                        "enum": ["markdown", "json"]
+                    }
+                },
+                "required": ["symbol"]
+            }),
+        },
+        ToolDef {
+            name: "graph_impact".into(),
+            description: "Walk incoming calls outward N hops to surface every symbol whose \
+                behaviour might shift if `symbol` changes. Output is grouped by file with \
+                `name:line` inline lists — scannable at a glance. The depth controls reach: 1 = \
+                direct callers, 2 = callers of callers (default), 3+ = full ripple. Use BEFORE \
+                touching a public-API symbol to scope the blast radius.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol name or qualified path to analyse impact for."
+                    },
+                    "depth": {
+                        "type": "number",
+                        "description": "Hops of incoming-edge expansion (default 2, capped at 10)."
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format: `markdown` (default) or `json` envelope.",
+                        "enum": ["markdown", "json"]
+                    }
+                },
+                "required": ["symbol"]
             }),
         },
         ToolDef {

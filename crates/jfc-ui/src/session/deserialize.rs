@@ -246,6 +246,7 @@ pub(crate) fn parse_legacy_graph_query(summary: &str) -> Option<ToolInput> {
         query: query.to_owned(),
         max_tokens: budget.parse().ok(),
         include_handles: None,
+        format: None,
     })
 }
 
@@ -552,6 +553,7 @@ pub(crate) fn deserialize_tool_input(input: SerializedToolInput) -> ToolInput {
             query,
             max_tokens,
             include_handles,
+            format: None,
         },
         SerializedToolInput::PostBounty {
             description,

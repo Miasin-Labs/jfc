@@ -278,10 +278,26 @@ pub(crate) fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
             query,
             max_tokens,
             include_handles,
+            format: _,
         } => SerializedToolInput::GraphQuery {
             query: query.clone(),
             max_tokens: *max_tokens,
             include_handles: *include_handles,
+        },
+        ToolInput::GraphContext { task, .. } => SerializedToolInput::Generic {
+            summary: format!("graph_context: {task}"),
+        },
+        ToolInput::GraphSearch { query, .. } => SerializedToolInput::Generic {
+            summary: format!("graph_search: {query}"),
+        },
+        ToolInput::GraphCallers { symbol, .. } => SerializedToolInput::Generic {
+            summary: format!("graph_callers: {symbol}"),
+        },
+        ToolInput::GraphCallees { symbol, .. } => SerializedToolInput::Generic {
+            summary: format!("graph_callees: {symbol}"),
+        },
+        ToolInput::GraphImpact { symbol, .. } => SerializedToolInput::Generic {
+            summary: format!("graph_impact: {symbol}"),
         },
         ToolInput::RunCoverage {
             lcov_path,

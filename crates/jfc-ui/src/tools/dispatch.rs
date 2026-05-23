@@ -323,8 +323,62 @@ pub async fn execute_tool(
                 query,
                 max_tokens,
                 include_handles,
+                format,
             },
-        ) => dispatch_heavy::execute_graph_query(query, max_tokens, include_handles, &cwd),
+        ) => dispatch_heavy::execute_graph_query(
+            query,
+            max_tokens,
+            include_handles,
+            format.as_deref(),
+            &cwd,
+        ),
+        (
+            ToolKind::GraphContext,
+            ToolInput::GraphContext {
+                task,
+                max_nodes,
+                include_code,
+                format,
+            },
+        ) => dispatch_heavy::execute_graph_context(
+            task,
+            max_nodes,
+            include_code,
+            format.as_deref(),
+            &cwd,
+        ),
+        (
+            ToolKind::GraphSearch,
+            ToolInput::GraphSearch {
+                query,
+                limit,
+                format,
+            },
+        ) => dispatch_heavy::execute_graph_search(query, limit, format.as_deref(), &cwd),
+        (
+            ToolKind::GraphCallers,
+            ToolInput::GraphCallers {
+                symbol,
+                limit,
+                format,
+            },
+        ) => dispatch_heavy::execute_graph_callers(symbol, limit, format.as_deref(), &cwd),
+        (
+            ToolKind::GraphCallees,
+            ToolInput::GraphCallees {
+                symbol,
+                limit,
+                format,
+            },
+        ) => dispatch_heavy::execute_graph_callees(symbol, limit, format.as_deref(), &cwd),
+        (
+            ToolKind::GraphImpact,
+            ToolInput::GraphImpact {
+                symbol,
+                depth,
+                format,
+            },
+        ) => dispatch_heavy::execute_graph_impact(symbol, depth, format.as_deref(), &cwd),
         (
             ToolKind::RunCoverage,
             ToolInput::RunCoverage {

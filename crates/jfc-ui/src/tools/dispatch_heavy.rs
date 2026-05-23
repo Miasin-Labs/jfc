@@ -25,12 +25,31 @@ use super::safe_tools::maybe_run_slop_guard;
 
 /// `graph_query` tool — run a code-graph DSL query, optionally appending a
 /// preconditions block and a chain-able handle footer.
+/// Whether the caller asked for JSON output. Default is markdown.
+fn wants_json(format: Option<&str>) -> bool {
+    matches!(format.map(str::to_ascii_lowercase).as_deref(), Some("json"))
+}
+
 pub(super) fn execute_graph_query(
     query: String,
     max_tokens: Option<usize>,
     include_handles: Option<bool>,
+    format: Option<&str>,
     cwd: &Path,
 ) -> ExecutionResult {
+    if wants_json(format) {
+        let session = get_or_build_graph_session(cwd);
+        return match session.query_raw(&query) {
+            Ok(result) => {
+                let env = jfc_graph::schema::wrap_query_result(result);
+                match serde_json::to_string_pretty(&env) {
+                    Ok(s) => ExecutionResult::success(s),
+                    Err(e) => ExecutionResult::failure(format!("JSON serialization error: {e}")),
+                }
+            }
+            Err(e) => ExecutionResult::failure(format!("Graph query error: {e}")),
+        };
+    }
     let budget = max_tokens.unwrap_or(4000);
     let want_handles = include_handles.unwrap_or(true);
     let session = get_or_build_graph_session(cwd);
@@ -118,6 +137,140 @@ pub(super) fn execute_graph_query(
             }
         }
         Err(e) => ExecutionResult::failure(format!("Graph query error: {e}")),
+    }
+}
+
+/// `graph_context` tool — build a codegraph_context-style markdown
+/// payload from a free-form task description. Composes search + BFS
+/// + type-hierarchy expansion + per-file diversity cap into one
+/// agent-friendly answer with feature/bug/exploration intent
+/// reminders. Use this FIRST for "how does X work" / architecture
+/// questions instead of chaining graph_search + graph_query.
+pub(super) fn execute_graph_context(
+    task: String,
+    max_nodes: Option<usize>,
+    include_code: Option<bool>,
+    format: Option<&str>,
+    cwd: &Path,
+) -> ExecutionResult {
+    let session = get_or_build_graph_session(cwd);
+    let opts = jfc_graph::context::ContextOptions {
+        max_nodes: max_nodes.unwrap_or(20).clamp(1, 100),
+        include_code: include_code.unwrap_or(true),
+        traversal_depth: 1,
+    };
+    let result = session.context(&task, opts);
+    if wants_json(format) {
+        let env = jfc_graph::schema::wrap_context_result(&result);
+        return match serde_json::to_string_pretty(&env) {
+            Ok(s) => ExecutionResult::success(s),
+            Err(e) => ExecutionResult::failure(format!("JSON serialization error: {e}")),
+        };
+    }
+    ExecutionResult::success(result.markdown)
+}
+
+/// `graph_search` tool — find symbols by name with qualified-name
+/// support (`crate::module::sym`, `Class.method`, etc.). Returns kind,
+/// location, signature, and handle for each hit.
+pub(super) fn execute_graph_search(
+    query: String,
+    limit: Option<usize>,
+    format: Option<&str>,
+    cwd: &Path,
+) -> ExecutionResult {
+    let session = get_or_build_graph_session(cwd);
+    let n = limit.unwrap_or(10).clamp(1, 100);
+    if wants_json(format) {
+        let hits: Vec<_> = session.resolve(&query).into_iter().take(n).collect();
+        let payload = serde_json::json!({
+            "schema_version": jfc_graph::schema::SCHEMA_VERSION,
+            "kind": "graph_search",
+            "data": {
+                "query": query,
+                "hits": hits,
+            }
+        });
+        return match serde_json::to_string_pretty(&payload) {
+            Ok(s) => ExecutionResult::success(s),
+            Err(e) => ExecutionResult::failure(format!("JSON serialization error: {e}")),
+        };
+    }
+    ExecutionResult::success(session.search(&query, n))
+}
+
+/// `graph_callers` tool — find every function that calls `symbol`,
+/// rendered file-grouped with signatures inline.
+pub(super) fn execute_graph_callers(
+    symbol: String,
+    limit: Option<usize>,
+    format: Option<&str>,
+    cwd: &Path,
+) -> ExecutionResult {
+    let session = get_or_build_graph_session(cwd);
+    let n = limit.unwrap_or(20).clamp(1, 100);
+    if wants_json(format) {
+        let (nodes, note) = jfc_graph::context::callers_for(&session.graph, &symbol, n);
+        return json_neighbors("graph_callers", &symbol, &nodes, note.as_deref());
+    }
+    ExecutionResult::success(session.callers(&symbol, n))
+}
+
+/// `graph_callees` tool — find every function `symbol` calls,
+/// rendered file-grouped with signatures inline.
+pub(super) fn execute_graph_callees(
+    symbol: String,
+    limit: Option<usize>,
+    format: Option<&str>,
+    cwd: &Path,
+) -> ExecutionResult {
+    let session = get_or_build_graph_session(cwd);
+    let n = limit.unwrap_or(20).clamp(1, 100);
+    if wants_json(format) {
+        let (nodes, note) = jfc_graph::context::callees_for(&session.graph, &symbol, n);
+        return json_neighbors("graph_callees", &symbol, &nodes, note.as_deref());
+    }
+    ExecutionResult::success(session.callees(&symbol, n))
+}
+
+/// `graph_impact` tool — walk incoming calls outward to surface
+/// every symbol whose behaviour might shift if `symbol` changes.
+/// Output is grouped by file with `name:line` inline lists.
+pub(super) fn execute_graph_impact(
+    symbol: String,
+    depth: Option<u8>,
+    format: Option<&str>,
+    cwd: &Path,
+) -> ExecutionResult {
+    let session = get_or_build_graph_session(cwd);
+    let d = depth.unwrap_or(2).clamp(1, 10);
+    if wants_json(format) {
+        let (nodes, note) = jfc_graph::context::impact_for(&session.graph, &symbol, d);
+        return json_neighbors("graph_impact", &symbol, &nodes, note.as_deref());
+    }
+    ExecutionResult::success(session.impact(&symbol, d))
+}
+
+/// Render a neighbour list (callers / callees / impact) as a versioned
+/// JSON envelope. Centralised so the three tools stay in sync on shape.
+fn json_neighbors(
+    kind: &str,
+    symbol: &str,
+    nodes: &[jfc_graph::nodes::NodeId],
+    note: Option<&str>,
+) -> ExecutionResult {
+    let payload = serde_json::json!({
+        "schema_version": jfc_graph::schema::SCHEMA_VERSION,
+        "kind": kind,
+        "data": {
+            "symbol": symbol,
+            "nodes": nodes,
+            "note": note,
+        }
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(s) => ExecutionResult::success(s),
+        Err(e) => ExecutionResult::failure(format!("JSON serialization error: {e}")),
     }
 }
 

@@ -221,7 +221,12 @@ macro_rules! for_each_regular_tool_input {
             TeamCreate => { team_name: req_str @ "team_name", description: opt_str @ "description" }
             TeamMemberMode => { member_name: req_str @ "member_name", mode: req_str @ "mode" }
             CodeIndex => { path: opt_str @ "path", query: opt_str @ "query", kind: opt_str @ "kind", max_entries: opt_u64_as_usize @ "max_entries" }
-            GraphQuery => { query: req_str @ "query", max_tokens: opt_u64_as_usize @ "max_tokens", include_handles: raw_bool_opt @ "include_handles" }
+            GraphQuery => { query: req_str @ "query", max_tokens: opt_u64_as_usize @ "max_tokens", include_handles: raw_bool_opt @ "include_handles", format: opt_str @ "format" }
+            GraphContext => { task: req_str @ "task", max_nodes: opt_u64_as_usize @ "max_nodes", include_code: raw_bool_opt @ "include_code", format: opt_str @ "format" }
+            GraphSearch => { query: req_str @ "query", limit: opt_u64_as_usize @ "limit", format: opt_str @ "format" }
+            GraphCallers => { symbol: req_str @ "symbol", limit: opt_u64_as_usize @ "limit", format: opt_str @ "format" }
+            GraphCallees => { symbol: req_str @ "symbol", limit: opt_u64_as_usize @ "limit", format: opt_str @ "format" }
+            GraphImpact => { symbol: req_str @ "symbol", depth: opt_u64_as_u8 @ "depth", format: opt_str @ "format" }
             RunCoverage => { lcov_path: opt_str @ "lcov_path", include_untested_list: bool_true @ "include_untested_list" }
             SymbolEdit => { handle: req_str @ "handle", new_content: req_str @ "new_content", validate: bool_field @ "validate", dispatch_cascade: bool_field @ "dispatch_cascade" }
             PostBounty => { description: req_str @ "description", budget: u64_or_0 @ "budget", acceptance_criteria: req_str @ "acceptance_criteria", max_solvers: opt_u64_as_u8 @ "max_solvers", auto_dispatch: bool_field @ "auto_dispatch" }
@@ -488,6 +493,45 @@ pub enum ToolInput {
         max_tokens: Option<usize>,
         #[serde(default)]
         include_handles: Option<bool>,
+        #[serde(default)]
+        format: Option<String>,
+    },
+    GraphContext {
+        task: String,
+        #[serde(default)]
+        max_nodes: Option<usize>,
+        #[serde(default)]
+        include_code: Option<bool>,
+        #[serde(default)]
+        format: Option<String>,
+    },
+    GraphSearch {
+        query: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        format: Option<String>,
+    },
+    GraphCallers {
+        symbol: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        format: Option<String>,
+    },
+    GraphCallees {
+        symbol: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        format: Option<String>,
+    },
+    GraphImpact {
+        symbol: String,
+        #[serde(default)]
+        depth: Option<u8>,
+        #[serde(default)]
+        format: Option<String>,
     },
     PostBounty {
         description: String,
@@ -724,6 +768,11 @@ impl ToolInput {
                 }
             }
             Self::GraphQuery { query, .. } => query.clone(),
+            Self::GraphContext { task, .. } => format!("context: {task}"),
+            Self::GraphSearch { query, .. } => format!("search: {query}"),
+            Self::GraphCallers { symbol, .. } => format!("callers: {symbol}"),
+            Self::GraphCallees { symbol, .. } => format!("callees: {symbol}"),
+            Self::GraphImpact { symbol, .. } => format!("impact: {symbol}"),
             Self::RunCoverage { lcov_path, .. } => {
                 format!("coverage({})", lcov_path.as_deref().unwrap_or("auto"))
             }
@@ -811,7 +860,9 @@ impl ToolInput {
             }
             Self::ScratchpadRead { key } => format!("scratchpad read: {key}"),
             Self::ScratchpadWrite { key, .. } => format!("scratchpad write: {key}"),
-            Self::Workflow { name, script_path, .. } => {
+            Self::Workflow {
+                name, script_path, ..
+            } => {
                 if let Some(n) = name {
                     format!("workflow: {n}")
                 } else if let Some(p) = script_path {

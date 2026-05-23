@@ -274,8 +274,26 @@ fn code_index_metadata_summary(node: &NodeData) -> Vec<String> {
 
 pub async fn all_tool_defs_with_mcp() -> Vec<jfc_provider::ToolDef> {
     let mut tools = all_tool_defs();
+    let builtin_names: std::collections::HashSet<String> =
+        tools.iter().map(|t| t.name.clone()).collect();
     if let Some(registry) = snapshot_mcp_registry() {
-        tools.extend(registry.all_advertised_tool_defs().await);
+        for tool in registry.all_advertised_tool_defs().await {
+            // Codegraph #284: external MCP servers occasionally advertise
+            // tool names that double our own prefix (e.g. an MCP server
+            // re-publishes a `graph_search` tool when we already host
+            // `graph_search` natively, producing a `mcp__jfc__graph_search`
+            // collision). Drop those: the agent gets a single, canonical
+            // implementation and shadowing surprises don't reach the model.
+            if builtin_names.contains(&tool.name) {
+                tracing::warn!(
+                    target: "jfc::tools::mcp",
+                    tool = %tool.name,
+                    "dropping MCP-advertised tool that collides with a builtin name"
+                );
+                continue;
+            }
+            tools.push(tool);
+        }
     }
     tools
 }
