@@ -291,6 +291,207 @@ impl GraphSession {
         context::resolve_symbol(&self.graph, symbol)
     }
 
+    /// Get detailed info about ONE symbol — location, signature, visibility,
+    /// and optionally its source code. For container types (struct/enum/trait/
+    /// module), `include_code=true` renders a compact member outline (fields +
+    /// method signatures + line numbers) rather than dumping the full body.
+    pub fn node(&self, symbol: &str, include_code: bool) -> String {
+        use crate::nodes::NodeKind;
+
+        let hits = context::resolve_symbol(&self.graph, symbol);
+        if hits.is_empty() {
+            return format!("No symbol found matching `{symbol}`");
+        }
+        let id = &hits[0];
+        let Some(node) = self.graph.get_node(id) else {
+            return format!("No symbol found matching `{symbol}`");
+        };
+
+        let file_path = node.file_path.display().to_string();
+        let kind_str = format!("{:?}", node.kind);
+        let vis_str = format!("{:?}", node.visibility);
+
+        // Try to read the file and extract lines.
+        let source_lines = std::fs::read_to_string(&node.file_path)
+            .ok()
+            .and_then(|content| {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = node.span.start_line.saturating_sub(1) as usize;
+                let end = (node.span.end_line as usize).min(lines.len());
+                if start >= end {
+                    return None;
+                }
+                Some(lines[start..end].iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            });
+
+        let signature = source_lines
+            .as_ref()
+            .and_then(|lines| lines.first().map(|s| s.trim().to_string()))
+            .unwrap_or_else(|| node.qualified_name.clone());
+
+        let lang = if file_path.ends_with(".rs") {
+            "rust"
+        } else if file_path.ends_with(".ts") || file_path.ends_with(".tsx") {
+            "typescript"
+        } else if file_path.ends_with(".py") {
+            "python"
+        } else {
+            ""
+        };
+
+        let mut out = String::new();
+        out.push_str(&format!("## {} ({})\n\n", node.name, kind_str));
+        out.push_str(&format!("**Location:** {}:{}\n", file_path, node.span.start_line));
+        out.push_str(&format!("**Signature:** `{}`\n", signature));
+        out.push_str(&format!("**Visibility:** {}\n", vis_str));
+
+        if include_code {
+            let is_container = matches!(node.kind, NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Module);
+            if is_container {
+                // Render a compact outline: list contained members with their line numbers.
+                out.push_str("\n**Members:**\n");
+                let children: Vec<_> = self.graph.get_edges_from(id)
+                    .iter()
+                    .filter(|(_, edge)| matches!(edge.kind, crate::edges::EdgeKind::Contains))
+                    .filter_map(|(child_id, _)| self.graph.get_node(child_id))
+                    .collect();
+                if children.is_empty() {
+                    // Fall back to showing the source.
+                    if let Some(ref lines) = source_lines {
+                        out.push_str(&format!("\n```{}\n", lang));
+                        for (i, line) in lines.iter().enumerate() {
+                            let lineno = node.span.start_line as usize + i;
+                            out.push_str(&format!("{:>4} | {}\n", lineno, line));
+                        }
+                        out.push_str("```\n");
+                    }
+                } else {
+                    out.push('\n');
+                    for child in &children {
+                        out.push_str(&format!("  - `{}` ({:?}) — line {}\n", child.name, child.kind, child.span.start_line));
+                    }
+                }
+            } else if let Some(ref lines) = source_lines {
+                out.push_str(&format!("\n```{}\n", lang));
+                for (i, line) in lines.iter().enumerate() {
+                    let lineno = node.span.start_line as usize + i;
+                    out.push_str(&format!("{:>4} | {}\n", lineno, line));
+                }
+                out.push_str("```\n");
+            }
+        }
+
+        out
+    }
+
+    /// Returns source for SEVERAL related symbols grouped by file, plus a
+    /// relationship map, in ONE capped call. Splits the query on whitespace,
+    /// resolves each term, groups by file, and renders fenced code blocks
+    /// with line numbers.
+    pub fn explore(&self, query: &str, max_files: usize) -> String {
+        use std::collections::HashMap;
+
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        if terms.is_empty() {
+            return "No search terms provided. Pass specific symbol/file/code terms.".to_string();
+        }
+
+        // Resolve all terms and group node IDs by file path.
+        let mut file_nodes: HashMap<std::path::PathBuf, Vec<NodeId>> = HashMap::new();
+        for term in &terms {
+            let hits = context::resolve_symbol(&self.graph, term);
+            for id in hits {
+                if let Some(node) = self.graph.get_node(&id) {
+                    file_nodes
+                        .entry(node.file_path.clone())
+                        .or_default()
+                        .push(id);
+                }
+            }
+        }
+
+        if file_nodes.is_empty() {
+            return format!("No symbols found matching query terms: `{query}`");
+        }
+
+        // Sort files by number of matched symbols descending, take up to max_files.
+        let mut file_list: Vec<_> = file_nodes.into_iter().collect();
+        file_list.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        file_list.truncate(max_files);
+
+        let mut out = String::new();
+        out.push_str(&format!("## Explore: `{query}`\n\n"));
+        out.push_str(&format!("{} files, {} terms\n\n", file_list.len(), terms.len()));
+
+        const MAX_OUTPUT: usize = 15000;
+
+        for (file_path, node_ids) in &file_list {
+            if out.len() >= MAX_OUTPUT {
+                out.push_str("\n[output truncated — use fewer terms or lower max_files]\n");
+                break;
+            }
+
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let lines: Vec<&str> = content.lines().collect();
+
+            // Collect spans from nodes in this file.
+            let mut ranges: Vec<(u32, u32)> = Vec::new();
+            for id in node_ids {
+                if let Some(node) = self.graph.get_node(id) {
+                    ranges.push((node.span.start_line, node.span.end_line));
+                }
+            }
+            ranges.sort_by_key(|r| r.0);
+
+            // Merge overlapping/adjacent ranges (with 2 lines of context).
+            let mut merged: Vec<(usize, usize)> = Vec::new();
+            for (start, end) in &ranges {
+                let s = (*start).saturating_sub(1).max(1) as usize - 1; // 0-indexed
+                let e = ((*end) as usize).min(lines.len());
+                if let Some(last) = merged.last_mut() {
+                    if s <= last.1 + 2 {
+                        last.1 = last.1.max(e);
+                    } else {
+                        merged.push((s, e));
+                    }
+                } else {
+                    merged.push((s, e));
+                }
+            }
+
+            let lang = if file_path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                "rust"
+            } else if file_path.extension().and_then(|e| e.to_str()) == Some("ts")
+                || file_path.extension().and_then(|e| e.to_str()) == Some("tsx")
+            {
+                "typescript"
+            } else if file_path.extension().and_then(|e| e.to_str()) == Some("py") {
+                "python"
+            } else {
+                ""
+            };
+
+            out.push_str(&format!("### {}\n\n", file_path.display()));
+            for (s, e) in &merged {
+                if out.len() >= MAX_OUTPUT {
+                    break;
+                }
+                out.push_str(&format!("```{}\n", lang));
+                for i in *s..*e {
+                    if i < lines.len() {
+                        out.push_str(&format!("{:>4} | {}\n", i + 1, lines[i]));
+                    }
+                }
+                out.push_str("```\n\n");
+            }
+        }
+
+        out
+    }
+
     /// Build a session by loading a pre-built base graph snapshot and
     /// layering branch-local diffs on top.
     ///

@@ -388,6 +388,20 @@ pub async fn execute_tool(
                 format,
             },
         ) => dispatch_heavy::execute_graph_impact(symbol, depth, format.as_deref(), &cwd),
+        (
+            ToolKind::GraphNode,
+            ToolInput::GraphNode {
+                symbol,
+                include_code,
+            },
+        ) => dispatch_heavy::execute_graph_node(symbol, include_code, &cwd),
+        (
+            ToolKind::GraphExplore,
+            ToolInput::GraphExplore {
+                query,
+                max_files,
+            },
+        ) => dispatch_heavy::execute_graph_explore(query, max_files, &cwd),
         (ToolKind::PlanCreate, ToolInput::PlanCreate { title, body }) => {
             crate::tools::plans::execute_plan_create(&title, body.as_deref())
         }

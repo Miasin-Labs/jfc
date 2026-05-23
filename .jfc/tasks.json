@@ -91,7 +91,7 @@
       "id": "t249",
       "subject": "Persist highlight line-count cache to disk",
       "description": "Persist highlight cache line counts (not full styled lines) to disk so warm_tool_height_cache can resolve heights without running syntect on known code blocks.",
-      "status": "in_progress",
+      "status": "completed",
       "blocks": [],
       "blockedBy": [],
       "created_at_ms": 1779559136041,

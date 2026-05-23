@@ -299,6 +299,12 @@ pub(crate) fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
         ToolInput::GraphImpact { symbol, .. } => SerializedToolInput::Generic {
             summary: format!("graph_impact: {symbol}"),
         },
+        ToolInput::GraphNode { symbol, .. } => SerializedToolInput::Generic {
+            summary: format!("graph_node: {symbol}"),
+        },
+        ToolInput::GraphExplore { query, .. } => SerializedToolInput::Generic {
+            summary: format!("graph_explore: {query}"),
+        },
         ToolInput::PlanCreate { title, .. } => SerializedToolInput::Generic {
             summary: format!("plan_create: {title}"),
         },

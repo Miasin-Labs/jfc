@@ -663,6 +663,8 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         | ToolKind::GraphCallers
         | ToolKind::GraphCallees
         | ToolKind::GraphImpact
+        | ToolKind::GraphNode
+        | ToolKind::GraphExplore
         | ToolKind::SymbolEdit
         | ToolKind::RunCoverage => Color::Rgb(130, 200, 180), // sage
         ToolKind::PlanCreate

@@ -763,6 +763,53 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "graph_node".into(),
+            description: "Get detailed info about ONE symbol (location, signature, docstring). \
+                Pass includeCode=true for source: a function/method returns its body; a \
+                class/interface/struct/enum returns a compact member OUTLINE (fields + method \
+                signatures + line numbers), not every method body — Read or graph_node a specific \
+                member for its body. Keep includeCode=false to minimize context. For SEVERAL \
+                related symbols, make ONE graph_explore call instead of many node calls — repeated \
+                node calls each re-read the whole context and cost far more.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Name of the symbol to get details for."
+                    },
+                    "include_code": {
+                        "type": "boolean",
+                        "description": "Include full source code (default false)."
+                    }
+                },
+                "required": ["symbol"]
+            }),
+        },
+        ToolDef {
+            name: "graph_explore".into(),
+            description: "Returns source for SEVERAL related symbols grouped by file, plus a \
+                relationship map, in ONE capped call. This is the efficient way to inspect many \
+                related symbols at once — strongly prefer it over a series of graph_node or Read \
+                calls (each separate call re-reads the whole context, so 8 node calls cost far \
+                more than 1 explore). Query with specific symbol/file/code terms, NOT \
+                natural-language sentences — run graph_search first to find names.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Symbol names, file names, or short code terms to explore."
+                    },
+                    "max_files": {
+                        "type": "number",
+                        "description": "Maximum number of files to include source from (default 12)."
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
             name: "run_coverage".into(),
             description: "Run cargo llvm-cov (or parse an existing lcov.info), annotate every \
                 Function node in the code graph with hit counts, and return a summary of \

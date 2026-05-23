@@ -251,6 +251,30 @@ pub(super) fn execute_graph_impact(
     ExecutionResult::success(session.impact(&symbol, d))
 }
 
+/// `graph_node` tool — get detailed info about ONE symbol (location,
+/// signature, visibility, source). For container types, renders a
+/// compact member outline rather than the full body.
+pub(super) fn execute_graph_node(
+    symbol: String,
+    include_code: bool,
+    cwd: &Path,
+) -> ExecutionResult {
+    let session = get_or_build_graph_session(cwd);
+    ExecutionResult::success(session.node(&symbol, include_code))
+}
+
+/// `graph_explore` tool — returns source for SEVERAL related symbols
+/// grouped by file, plus a relationship map, in ONE capped call.
+pub(super) fn execute_graph_explore(
+    query: String,
+    max_files: Option<usize>,
+    cwd: &Path,
+) -> ExecutionResult {
+    let session = get_or_build_graph_session(cwd);
+    let n = max_files.unwrap_or(12).clamp(1, 50);
+    ExecutionResult::success(session.explore(&query, n))
+}
+
 /// Render a neighbour list (callers / callees / impact) as a versioned
 /// JSON envelope. Centralised so the three tools stay in sync on shape.
 fn json_neighbors(
