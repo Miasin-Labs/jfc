@@ -139,8 +139,18 @@ static LAST_PLAN_RECALL: Mutex<Option<(u64, Option<String>)>> = Mutex::new(None)
 /// Runtime toggle. `None` ⇒ defer to persisted config.
 static RUNTIME_OVERRIDE: Mutex<Option<bool>> = Mutex::new(None);
 
-/// Returns the effective enabled-state.
+/// Returns the effective enabled-state. Precedence: env var (`JFC_PLAN_RECALL`)
+/// hard-disable, then runtime override, then the persisted config value.
 pub fn is_enabled(persisted: bool) -> bool {
+    // Env var lets the user kill plan recall without touching config or the
+    // runtime toggle (e.g. `JFC_PLAN_RECALL=0 jfc`). Recognized off-values:
+    // `0`, `off`, `false`, `no`.
+    if let Ok(v) = std::env::var("JFC_PLAN_RECALL") {
+        let v = v.trim().to_ascii_lowercase();
+        if matches!(v.as_str(), "0" | "off" | "false" | "no") {
+            return false;
+        }
+    }
     if let Ok(g) = RUNTIME_OVERRIDE.lock()
         && let Some(b) = *g
     {
@@ -165,7 +175,7 @@ fn hash_query(query: &str) -> u64 {
     h.finish()
 }
 
-fn cached_recall(query: &str) -> Option<Option<String>> {
+pub fn cached_recall(query: &str) -> Option<Option<String>> {
     let guard = LAST_PLAN_RECALL.lock().ok()?;
     let (h, block) = guard.as_ref()?;
     if *h == hash_query(query) {
@@ -175,7 +185,7 @@ fn cached_recall(query: &str) -> Option<Option<String>> {
     }
 }
 
-fn cache_recall(query: &str, block: Option<String>) {
+pub fn cache_recall(query: &str, block: Option<String>) {
     if let Ok(mut guard) = LAST_PLAN_RECALL.lock() {
         *guard = Some((hash_query(query), block));
     }
@@ -683,6 +693,63 @@ mod tests {
 
         assert!(slugs.is_empty());
         assert_eq!(provider.call_count(), 0);
+    }
+
+    // Normal: the synthesize phase must send the plan body verbatim and the
+    // user's query in the same user message, so the model has both the
+    // question and the source material in one shot. This test pins the
+    // request shape against accidental refactors (e.g. swapping to a system
+    // message, dropping the body, or splitting across multiple turns).
+    #[tokio::test]
+    async fn synthesize_call_shape_normal() {
+        clear_cache();
+        let provider = MockProvider::with_responses([json!({
+            "context_items": [
+                {"context": "Use snake_case for slugs.", "plan_slug": "style"},
+            ]
+        })
+        .to_string()]);
+
+        let plans = vec![make_plan(
+            "style",
+            "Style Plan",
+            "We use snake_case for everything.",
+        )];
+
+        let _ = synthesize_plan_context(
+            "what naming convention?",
+            &plans,
+            provider.clone(),
+            jfc_provider::ModelId::new("haiku"),
+        )
+        .await
+        .unwrap();
+
+        let calls = provider.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "synthesize must issue exactly one call");
+        let body = &calls[0];
+        // User query is present.
+        assert!(
+            body.contains("what naming convention?"),
+            "user query must appear in the synthesize prompt; got: {body}"
+        );
+        // Plan body is present.
+        assert!(
+            body.contains("We use snake_case for everything."),
+            "plan body must appear in the synthesize prompt; got: {body}"
+        );
+        // Tool-call instruction names the synthesize tool.
+        assert!(
+            body.contains(SYNTHESIZE_TOOL_NAME),
+            "prompt must instruct the model to call `{SYNTHESIZE_TOOL_NAME}`; got: {body}"
+        );
+        // The plan's slug + status frontmatter is included so the model can
+        // cite it correctly.
+        assert!(body.contains("style"), "plan slug must appear; got: {body}");
+        assert!(
+            body.contains("Status:"),
+            "plan status header must appear; got: {body}"
+        );
     }
 
     #[tokio::test]

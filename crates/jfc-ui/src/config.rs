@@ -100,6 +100,12 @@ pub struct Config {
     /// matter into the main turn instead of every memory file.
     #[serde(default = "default_memory_recall_enabled")]
     pub memory_recall_enabled: bool,
+    /// Enable two-phase plan recall — select relevant plans, then synthesize
+    /// context items into a `<system-reminder>` block. Mirrors
+    /// `memory_recall_enabled` but for `.jfc/plans/*.md`. Default true; users
+    /// can override via env var `JFC_PLAN_RECALL=0|off` or the runtime toggle.
+    #[serde(default = "default_plan_recall_enabled")]
+    pub plan_recall_enabled: bool,
     /// Optional per-session cost ceiling in USD. When set, the next-turn
     /// gate surfaces a warning toast at 80% and a high-priority warning
     /// at 100%; the user is never hard-blocked (a runaway estimate
@@ -138,6 +144,10 @@ fn default_memory_recall_enabled() -> bool {
     true
 }
 
+fn default_plan_recall_enabled() -> bool {
+    true
+}
+
 fn default_auto_compact_enabled() -> bool {
     true
 }
@@ -168,6 +178,7 @@ impl Default for Config {
             slate_enabled: false,
             slate_rules: None,
             memory_recall_enabled: default_memory_recall_enabled(),
+            plan_recall_enabled: default_plan_recall_enabled(),
             session_cost_budget_usd: None,
             auto_compact_enabled: default_auto_compact_enabled(),
             auto_compact_window: None,

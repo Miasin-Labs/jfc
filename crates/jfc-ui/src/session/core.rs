@@ -891,6 +891,7 @@ mod disk_io_tests {
                 query: "entrypoints".into(),
                 max_tokens: Some(4000),
                 include_handles: Some(true),
+                format: None,
             },
             ToolInput::Mcp {
                 name: "mcp__fs__read".into(),

@@ -766,6 +766,83 @@ mod tests {
         assert_eq!(plan.frontmatter.status, PlanStatus::Done);
     }
 
+    /// t209 end-to-end: create plan → materialize tasks → on_task_done for
+    /// one task advances the plan but does NOT flip status; completing the
+    /// remaining tasks flips the plan to Done. Verifies the full reverse
+    /// linkage contract used by `tools::dispatch::advance_linked_plans`.
+    #[test]
+    fn plan_to_task_reverse_linkage_full_lifecycle() {
+        let (_dir, store) = setup_store();
+        let task_store = jfc_session::TaskStore::in_memory();
+
+        // 1+2. Create a plan with three linked TODOs.
+        store
+            .create(
+                "Reverse Linkage Plan",
+                "## TODOs\n- [ ] 1. Alpha\n- [ ] 2. Beta\n- [ ] 3. Gamma\n",
+            )
+            .unwrap();
+
+        // 3. Materialize tasks.
+        let ids = store
+            .materialize_tasks("reverse-linkage-plan", &task_store)
+            .unwrap();
+        assert_eq!(ids.len(), 3, "expected 3 materialized tasks");
+        let plan = store.get("reverse-linkage-plan").unwrap();
+        assert_eq!(plan.frontmatter.linked_task_ids.len(), 3);
+        let initial_last_advanced = plan.frontmatter.last_advanced.clone();
+
+        // 4. Complete the first task and call on_task_done.
+        task_store
+            .update(
+                &ids[0],
+                jfc_session::TaskPatch {
+                    status: Some(jfc_session::TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let advanced = store
+            .on_task_done(&ids[0], "Alpha completed", &task_store)
+            .unwrap();
+        assert_eq!(advanced, vec!["reverse-linkage-plan".to_string()]);
+
+        // 5. Verify the plan was advanced: last_advanced updated and the
+        //    progress-log entry was appended to the body.
+        let plan = store.get("reverse-linkage-plan").unwrap();
+        assert!(plan.body.contains("Alpha completed"));
+        assert!(
+            plan.frontmatter.last_advanced.is_some()
+                && plan.frontmatter.last_advanced != initial_last_advanced
+        );
+        // Plan is NOT yet Done — two tasks still pending.
+        assert_ne!(plan.frontmatter.status, PlanStatus::Done);
+
+        // 6. Complete the remaining tasks.
+        for (i, id) in ids.iter().enumerate().skip(1) {
+            task_store
+                .update(
+                    id,
+                    jfc_session::TaskPatch {
+                        status: Some(jfc_session::TaskStatus::Completed),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store
+                .on_task_done(id, &format!("Task {i} completed"), &task_store)
+                .unwrap();
+        }
+
+        // 7. With every linked task completed, the plan flips to Done.
+        let plan = store.get("reverse-linkage-plan").unwrap();
+        assert_eq!(
+            plan.frontmatter.status,
+            PlanStatus::Done,
+            "plan should be Done once every linked task is completed"
+        );
+    }
+
     #[test]
     fn parse_todo_items_normal() {
         let body = "## TODOs\n- [ ] 1. First\n- [ ] 2. Second\n- [x] 3. Done\n## Other\n";

@@ -249,7 +249,16 @@ pub async fn execute_tool(
             owner_filter.as_deref(),
         ),
         (ToolKind::TaskDone, ToolInput::TaskDone { task_id }) => {
-            execute_task_done(task_store, &task_id)
+            let result = execute_task_done(task_store.clone(), &task_id);
+            // Plan↔task reverse linkage: when a task that was materialized
+            // from a plan is marked done, advance the linked plan (and flip
+            // it to Done when every linked task is complete).
+            if !result.is_error()
+                && let Some(store) = task_store.as_ref()
+            {
+                advance_linked_plans(store, &task_id);
+            }
+            result
         }
         (ToolKind::TaskStop, ToolInput::TaskStop { task_id }) => execute_task_stop("", &task_id),
         (ToolKind::TaskGet, ToolInput::TaskGet { task_id }) => {
@@ -878,5 +887,58 @@ pub async fn execute_tool(
              expected shape.",
             input.summary()
         )),
+    }
+}
+
+/// Post-TaskDone hook: open the project PlanStore and advance any plan whose
+/// `linked_task_ids` contains `task_id`. If every linked task is complete,
+/// the plan's status flips to `Done`. Errors are logged-and-swallowed —
+/// plan bookkeeping is best-effort and must never fail the underlying
+/// TaskDone tool call.
+fn advance_linked_plans(task_store: &TaskStore, task_id: &str) {
+    let git_root = crate::context::discover_git_root();
+    let plan_store = match crate::plan::PlanStore::open_project(git_root.as_deref()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(
+                target: "jfc::plan",
+                error = %e,
+                "advance_linked_plans: could not open PlanStore (skipping)"
+            );
+            return;
+        }
+    };
+
+    // Build a summary from the task's subject when available; fall back to
+    // a generic message so the progress-log entry still records the event.
+    let summary = task_store
+        .get(task_id)
+        .map(|t| {
+            if t.subject.is_empty() {
+                format!("Task {task_id} completed")
+            } else {
+                format!("Task {task_id} done: {}", t.subject)
+            }
+        })
+        .unwrap_or_else(|| format!("Task {task_id} completed"));
+
+    match plan_store.on_task_done(task_id, &summary, task_store) {
+        Ok(advanced) if !advanced.is_empty() => {
+            tracing::debug!(
+                target: "jfc::plan",
+                task_id,
+                plans = ?advanced,
+                "advanced linked plans on TaskDone"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                target: "jfc::plan",
+                task_id,
+                error = %e,
+                "advance_linked_plans: on_task_done failed"
+            );
+        }
     }
 }
