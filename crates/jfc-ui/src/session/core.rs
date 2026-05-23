@@ -171,6 +171,14 @@ pub async fn save_session(
         .unwrap_or_default()
         .join(".jfc/tool-height-cache.json");
     crate::message_view::persist_tool_height_cache(&height_cache_path);
+
+    // Also persist the highlight line-count cache — theme-independent
+    // counts that let future startups resolve tool heights without
+    // running syntect at all.
+    let hl_cache_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join(".jfc/highlight-heights.json");
+    jfc_markdown::persist_highlight_line_counts(&hl_cache_path);
 }
 
 pub async fn load_session(session_id: &SessionId) -> Option<Vec<ChatMessage>> {

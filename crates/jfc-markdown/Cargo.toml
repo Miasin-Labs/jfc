@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde_json = { workspace = true }
 jfc-theme = { path = "../jfc-theme" }
 itertools = "0.14"
 pulldown-cmark = "0.12"

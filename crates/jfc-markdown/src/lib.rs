@@ -515,6 +515,10 @@ fn highlight_code_inner(
         );
     }
 
+    // Record the line count in the secondary (theme-independent) cache
+    // so the tool-height persister can save counts without full styled lines.
+    record_line_count(hash_code(code), wrap_w, with_gutter, out.len());
+
     out
 }
 

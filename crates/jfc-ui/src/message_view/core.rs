@@ -447,14 +447,18 @@ impl<'a> RenderItem<'a> {
         match self {
             RenderItem::Blank => 1,
             RenderItem::TextLine(line) => {
-                if line.width() == 0 || width == 0 {
+                let line_w = line.width();
+                if line_w == 0 || width == 0 {
+                    1
+                } else if line_w <= width {
+                    // Fast path: line fits within the available width —
+                    // no word-wrapping needed. This skips constructing a
+                    // Paragraph + running WordWrapper for the ~80% of
+                    // lines that are shorter than the terminal width.
                     1
                 } else {
-                    // Use ratatui's actual word-wrap count, same as
-                    // `message_view_total_lines` does. `div_ceil(width)`
-                    // assumed character-wrap and could be off by 1+
-                    // rows for a line whose word boundaries don't land
-                    // at the column edge.
+                    // Slow path: line wraps. Use ratatui's actual
+                    // word-wrap count for accuracy.
                     use ratatui::widgets::{Paragraph, Wrap};
                     let p = Paragraph::new(line.clone()).wrap(Wrap { trim: false });
                     p.line_count(width as u16).max(1)

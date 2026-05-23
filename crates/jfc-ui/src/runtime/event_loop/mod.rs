@@ -210,10 +210,19 @@ pub(crate) async fn run(
                         .join(".jfc/tool-height-cache.json");
                     let loaded =
                         crate::message_view::load_tool_height_cache(&cache_path);
+
+                    // Also load the highlight line-count cache so syntect
+                    // doesn't need to run for known code blocks.
+                    let hl_cache_path = std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(".jfc/highlight-heights.json");
+                    let hl_loaded =
+                        jfc_markdown::load_highlight_line_counts(&hl_cache_path);
+
                     tracing::info!(
                         target: "jfc::session",
                         loaded,
-                        cache_entries_on_disk = loaded,
+                        hl_loaded,
                         "tool-height cache load attempted"
                     );
                     let warm_start = std::time::Instant::now();
@@ -312,10 +321,16 @@ pub(crate) async fn run(
                         .join(".jfc/tool-height-cache.json");
                     let loaded =
                         crate::message_view::load_tool_height_cache(&cache_path);
-                    if loaded > 0 {
+                    let hl_cache_path = std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(".jfc/highlight-heights.json");
+                    let hl_loaded =
+                        jfc_markdown::load_highlight_line_counts(&hl_cache_path);
+                    if loaded > 0 || hl_loaded > 0 {
                         tracing::debug!(
                             target: "jfc::session",
                             loaded,
+                            hl_loaded,
                             "pre-seeded tool-height cache from disk (resume)"
                         );
                     }

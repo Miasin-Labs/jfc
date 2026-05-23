@@ -2512,6 +2512,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "regex",
+ "serde_json",
  "syntect",
  "two-face",
  "unicode-width",
