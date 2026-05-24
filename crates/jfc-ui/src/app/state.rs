@@ -1020,6 +1020,14 @@ pub struct App {
     /// Last time the user interacted (typed, submitted, scrolled).
     /// Used for idle-return detection (suggest /clear after 75min away).
     pub last_user_activity_at: std::time::Instant,
+    /// Instant of the last direct user interaction (prompt submit, keypress).
+    /// Used by the session recap feature: when the user returns after
+    /// `session_recap::AWAY_THRESHOLD`, a recap is generated from messages
+    /// that arrived after this instant.
+    pub last_user_interaction_at: std::time::Instant,
+    /// Message index at the time of the last user interaction. Messages
+    /// after this index are candidates for the "while you were away" recap.
+    pub interaction_message_idx: usize,
     /// Whether the idle-return toast has been shown this idle period.
     pub idle_return_shown: bool,
     /// Files pinned into the system prompt (survive compaction).
@@ -1255,6 +1263,8 @@ impl App {
             scroll_velocity: 0.0,
             last_scroll_tick: std::time::Instant::now(),
             last_user_activity_at: std::time::Instant::now(),
+            last_user_interaction_at: std::time::Instant::now(),
+            interaction_message_idx: 0,
             idle_return_shown: false,
             pinned_files: Vec::new(),
             post_compact_reads: std::collections::HashMap::new(),

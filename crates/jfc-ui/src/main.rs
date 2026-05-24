@@ -4,11 +4,17 @@ mod app;
 
 mod atomic_write;
 mod attachments;
+mod auth;
 mod auto_mode;
 mod autonomous_loop;
 mod bash_processes;
+#[allow(dead_code)]
+mod bridge_attestation;
+mod ccr;
 mod claude_status;
 mod cli;
+#[allow(dead_code)]
+mod coach;
 mod compact;
 mod config;
 mod context;
@@ -65,6 +71,8 @@ mod sprint;
 mod stream;
 mod swarm;
 mod system_reminder;
+#[allow(dead_code)]
+mod team_onboarding;
 mod theme;
 mod toast;
 mod tools;
@@ -90,6 +98,7 @@ mod permissions;
 // (always-on) sandbox configuration. The BashSandboxConfig type is
 // referenced from app state regardless of platform/feature.
 mod sandbox;
+mod session_recap;
 mod slop_guard;
 
 /// Returns `true` when the landlock sandbox feature is enabled AND the

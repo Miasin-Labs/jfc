@@ -522,6 +522,12 @@ pub(crate) fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
         ToolInput::WaitForMcpServers { .. } => SerializedToolInput::Generic {
             summary: "WaitForMcpServers".into(),
         },
+        ToolInput::ListMcpResources { .. } => SerializedToolInput::Generic {
+            summary: "ListMcpResources".into(),
+        },
+        ToolInput::ReadMcpResource { .. } => SerializedToolInput::Generic {
+            summary: "ReadMcpResource".into(),
+        },
         ToolInput::Advisor {} => SerializedToolInput::Generic {
             summary: "Advisor".into(),
         },

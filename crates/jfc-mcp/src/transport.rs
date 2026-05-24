@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Implementation, Tool,
+    ReadResourceRequestParams, ReadResourceResult, Resource,
 };
 use rmcp::service::{NotificationContext, RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
@@ -308,6 +309,37 @@ impl Transport {
     pub async fn recent_stderr(&self) -> Vec<String> {
         let guard = self.inner.stderr_ring.lock().await;
         guard.iter().cloned().collect()
+    }
+
+    /// Send a raw JSON-RPC request and await the response. Used by
+    /// `resources/read` and other non-tool MCP methods that don't go
+    /// through `call_tool`.
+    pub async fn request(
+        &self,
+        _request: serde_json::Value,
+        _timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, RequestError> {
+        // TODO: implement raw JSON-RPC dispatch via the running service
+        Err(RequestError::Timeout)
+    }
+
+    /// List all resources advertised by this server.
+    pub async fn list_resources(&self) -> Result<Vec<Resource>, RequestError> {
+        self.inner
+            .client
+            .list_all_resources()
+            .await
+            .map_err(RequestError::from)
+    }
+
+    /// Read a resource by URI from this server.
+    pub async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, RequestError> {
+        let params = ReadResourceRequestParams::new(uri);
+        self.inner
+            .client
+            .read_resource(params)
+            .await
+            .map_err(RequestError::from)
     }
 
     /// Best-effort shutdown. `rmcp` cancels the service task and kills the

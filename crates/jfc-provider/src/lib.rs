@@ -531,6 +531,9 @@ pub struct StreamOptions {
     /// When true, enables `cache-diagnosis-2026-04-07` beta which returns cache
     /// hit/miss diagnostics in the response for prompt caching tuning.
     pub cache_diagnosis: bool,
+    /// When true, enables `prompt-caching-scope-2026-01-05` beta for scoped
+    /// prompt caching. Always enabled by default since we always want cache hits.
+    pub prompt_caching_scope: bool,
     /// Session ID for server-side request correlation (X-Claude-Code-Session-Id header).
     pub session_id: Option<String>,
 }
@@ -556,6 +559,7 @@ impl StreamOptions {
             thinking_token_count: false,
             mid_conversation_system: false,
             cache_diagnosis: false,
+            prompt_caching_scope: true,
             session_id: None,
         }
     }

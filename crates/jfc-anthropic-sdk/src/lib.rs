@@ -40,6 +40,7 @@ pub mod client;
 pub mod environments;
 pub mod error;
 pub mod files;
+pub mod managed_agents;
 pub mod messages;
 pub mod models;
 pub mod pagination;

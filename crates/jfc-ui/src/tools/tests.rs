@@ -1915,6 +1915,8 @@ fn execute_task_create_without_store_fails_robust() {
         None,
         None,
         None,
+        vec![],
+        None,
     );
     assert!(r.is_error());
     assert!(r.output.contains("Task store not available"));
@@ -1933,6 +1935,8 @@ fn execute_task_create_with_store_returns_task_json_normal() {
         None,
         None,
         None,
+        None,
+        vec![],
         None,
     );
     assert!(!r.is_error(), "{:?}", r);
@@ -1956,6 +1960,8 @@ fn execute_task_create_rejects_placeholder_fixture_robust() {
         None,
         None,
         None,
+        vec![],
+        None,
     );
     assert!(r.is_error(), "{:?}", r);
     assert!(r.output.contains("placeholder"), "{}", r.output);
@@ -1976,6 +1982,8 @@ fn execute_task_create_with_unknown_dependency_fails_robust() {
         None,
         None,
         None,
+        vec![],
+        None,
     );
     assert!(r.is_error(), "{:?}", r);
 }
@@ -1983,7 +1991,7 @@ fn execute_task_create_with_unknown_dependency_fails_robust() {
 #[test]
 fn execute_task_update_without_store_fails_robust() {
     let r = execute_task_update(
-        None, "t1", None, None, None, None, None, None, None, None, None,
+        None, "t1", None, None, None, None, None, None, None, None, None, vec![], vec![], None,
     );
     assert!(r.is_error());
 }
@@ -2002,6 +2010,8 @@ fn execute_task_update_changes_status_normal() {
         None,
         None,
         None,
+        vec![],
+        None,
     );
     assert!(!create.is_error());
     // First-created task gets id `t1`.
@@ -2016,6 +2026,9 @@ fn execute_task_update_changes_status_normal() {
         None,
         None,
         None,
+        None,
+        vec![],
+        vec![],
         None,
     );
     assert!(!r.is_error(), "{}", r.output);
@@ -2036,6 +2049,8 @@ fn execute_task_update_invalid_status_fails_robust() {
         None,
         None,
         None,
+        vec![],
+        None,
     );
     let r = execute_task_update(
         Some(store),
@@ -2048,6 +2063,9 @@ fn execute_task_update_invalid_status_fails_robust() {
         None,
         None,
         None,
+        None,
+        vec![],
+        vec![],
         None,
     );
     assert!(r.is_error(), "{}", r.output);
@@ -2067,6 +2085,8 @@ fn execute_task_done_marks_completed_normal() {
         None,
         None,
         None,
+        None,
+        vec![],
         None,
     );
     let r = execute_task_done(Some(store), "t1");
@@ -2101,6 +2121,8 @@ fn execute_task_list_returns_tasks_normal() {
         None,
         None,
         None,
+        vec![],
+        None,
     );
     execute_task_create(
         Some(store.clone()),
@@ -2112,6 +2134,8 @@ fn execute_task_list_returns_tasks_normal() {
         None,
         None,
         None,
+        None,
+        vec![],
         None,
     );
     let r = execute_task_list(Some(store), None, None);
@@ -2134,6 +2158,8 @@ fn execute_task_list_filters_by_owner_robust() {
         None,
         None,
         None,
+        vec![],
+        None,
     );
     execute_task_update(
         Some(store.clone()),
@@ -2146,6 +2172,9 @@ fn execute_task_list_filters_by_owner_robust() {
         None,
         None,
         None,
+        None,
+        vec![],
+        vec![],
         None,
     );
     let only_alice = execute_task_list(Some(store.clone()), None, Some("alice"));
@@ -2461,6 +2490,8 @@ async fn execute_tool_dispatches_task_create_normal() {
             risk: None,
             parent_id: None,
             kind: None,
+            tags: vec![],
+            priority: None,
         },
         PathBuf::from("."),
         None,

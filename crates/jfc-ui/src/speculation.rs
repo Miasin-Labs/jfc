@@ -219,3 +219,222 @@ impl SpeculationStats {
         }
     }
 }
+
+// ─── Prompt Prediction ─────────────────────────────────────────────────────
+
+use std::time::Duration;
+
+/// Minimum idle time after an assistant response before prediction fires.
+const PREDICTION_IDLE_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// Maximum number of recent messages to consider for prediction context.
+const PREDICTION_CONTEXT_WINDOW: usize = 6;
+
+/// A predicted next-prompt that can be used to speculatively pre-run tools.
+#[derive(Debug, Clone)]
+pub struct PromptPrediction {
+    pub predicted_prompt: String,
+    pub confidence: f32,
+    pub generated_at: Instant,
+}
+
+/// Holds prediction state across ticks. Tracks whether a prediction has
+/// already been generated for the current idle period (to avoid re-firing).
+#[derive(Debug)]
+pub struct PromptPredictor {
+    /// The current prediction, if one has been generated this idle period.
+    pub current: Option<PromptPrediction>,
+    /// Instant the last assistant response completed (idle clock starts here).
+    last_response_at: Option<Instant>,
+    /// Whether we've already attempted prediction for this idle period.
+    prediction_attempted: bool,
+}
+
+impl Default for PromptPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PromptPredictor {
+    pub fn new() -> Self {
+        Self {
+            current: None,
+            last_response_at: None,
+            prediction_attempted: false,
+        }
+    }
+
+    /// Notify the predictor that an assistant response just completed.
+    pub fn on_assistant_response(&mut self) {
+        self.last_response_at = Some(Instant::now());
+        self.prediction_attempted = false;
+        self.current = None;
+    }
+
+    /// Notify the predictor that the user submitted a prompt (resets state).
+    pub fn on_user_prompt(&mut self) {
+        self.last_response_at = None;
+        self.prediction_attempted = false;
+        self.current = None;
+    }
+
+    /// Check whether we should speculate. Returns `Some(predicted_prompt)` when:
+    /// - The user has been idle for >2 seconds after the last assistant response
+    /// - We haven't already predicted for this idle period
+    /// - The last messages provide enough context for a reasonable prediction
+    ///
+    /// `last_messages` should be the tail of the conversation (up to 6 messages).
+    pub fn should_speculate(
+        &mut self,
+        idle_duration: Duration,
+        last_messages: &[MessageSummary],
+    ) -> Option<String> {
+        // Don't re-predict if we already have one for this idle period
+        if self.prediction_attempted {
+            return None;
+        }
+
+        // Need at least the idle threshold
+        if idle_duration < PREDICTION_IDLE_THRESHOLD {
+            return None;
+        }
+
+        // Need at least one assistant message to predict from
+        if last_messages.is_empty() {
+            return None;
+        }
+
+        // Mark as attempted so we don't fire again this period
+        self.prediction_attempted = true;
+
+        // Generate prediction from context
+        let prediction = predict_next_prompt(last_messages)?;
+
+        let result = PromptPrediction {
+            predicted_prompt: prediction.clone(),
+            confidence: estimate_confidence(last_messages),
+            generated_at: Instant::now(),
+        };
+        self.current = Some(result);
+        Some(prediction)
+    }
+
+    /// Consume the current prediction (e.g. when starting speculative execution).
+    pub fn take_prediction(&mut self) -> Option<PromptPrediction> {
+        self.current.take()
+    }
+}
+
+/// Minimal summary of a message for prediction purposes.
+#[derive(Debug, Clone)]
+pub struct MessageSummary {
+    pub role: MessageRole,
+    pub text: String,
+    /// Tool names used in this message (if assistant).
+    pub tools_used: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+}
+
+/// Predict the user's next prompt based on recent conversation context.
+///
+/// Uses simple heuristics:
+/// - If the last assistant message ended with a question → predict an answer
+/// - If tools were recently used → predict a follow-up about results
+/// - If there's a pattern of iterative refinement → predict continuation
+///
+/// Returns `None` if no confident prediction can be made.
+pub fn predict_next_prompt(last_messages: &[MessageSummary]) -> Option<String> {
+    let window = if last_messages.len() > PREDICTION_CONTEXT_WINDOW {
+        &last_messages[last_messages.len() - PREDICTION_CONTEXT_WINDOW..]
+    } else {
+        last_messages
+    };
+
+    // Find the last assistant message
+    let last_assistant = window
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant)?;
+
+    let text = last_assistant.text.trim();
+
+    // Heuristic 1: Assistant asked a question → predict a short affirmative
+    if text.ends_with('?') {
+        // If it's a yes/no question, predict "yes"
+        let lower = text.to_lowercase();
+        if lower.contains("should i")
+            || lower.contains("shall i")
+            || lower.contains("do you want")
+            || lower.contains("would you like")
+        {
+            return Some("yes, go ahead".to_string());
+        }
+        // Otherwise can't confidently predict the answer
+        return None;
+    }
+
+    // Heuristic 2: Assistant just completed file edits → predict "run the tests"
+    if !last_assistant.tools_used.is_empty() {
+        let has_writes = last_assistant
+            .tools_used
+            .iter()
+            .any(|t| t == "Write" || t == "Edit" || t == "MultiEdit");
+        if has_writes {
+            return Some("run the tests to verify the changes work".to_string());
+        }
+    }
+
+    // Heuristic 3: Assistant showed an error → predict "fix it"
+    if text.contains("error") || text.contains("failed") || text.contains("Error") {
+        return Some("fix that error".to_string());
+    }
+
+    // Heuristic 4: Assistant completed a task → predict "continue"
+    if text.contains("Done") || text.contains("complete") || text.contains("finished") {
+        // Check if there's an ongoing multi-step pattern
+        let user_msgs: Vec<_> = window
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+        if user_msgs.len() >= 2 {
+            // If the user has been giving sequential instructions, predict "continue"
+            return Some("continue with the next step".to_string());
+        }
+    }
+
+    None
+}
+
+/// Estimate confidence (0.0–1.0) of a prediction based on context signals.
+fn estimate_confidence(messages: &[MessageSummary]) -> f32 {
+    let mut confidence: f32 = 0.3; // base
+
+    // More context → higher confidence
+    if messages.len() >= 4 {
+        confidence += 0.1;
+    }
+
+    // Recent tool usage → more predictable follow-ups
+    if let Some(last) = messages.last() {
+        if !last.tools_used.is_empty() {
+            confidence += 0.2;
+        }
+    }
+
+    // Pattern of short user messages → likely another short one
+    let short_user_count = messages
+        .iter()
+        .filter(|m| m.role == MessageRole::User && m.text.len() < 30)
+        .count();
+    if short_user_count >= 2 {
+        confidence += 0.1;
+    }
+
+    confidence.min(0.9)
+}

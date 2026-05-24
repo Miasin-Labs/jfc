@@ -158,6 +158,108 @@ pub(super) fn parse_grep_with_sep<'a>(
     })
 }
 
+/// Extract the search pattern from a grep/rg command string.
+/// Mirrors `grep_target_file` but returns the *pattern* positional
+/// instead of the file positional. For `-e PAT` / `--regexp=PAT`
+/// the flag value is the pattern; otherwise the first non-flag
+/// positional is the pattern.
+pub(super) fn grep_search_pattern(cmd: &str) -> Option<String> {
+    let toks = quote_aware_tokens(cmd);
+    let mut it = toks.into_iter();
+    let verb = it.next()?;
+    if !matches!(verb.as_str(), "grep" | "rg" | "ack" | "ag" | "ripgrep") {
+        return None;
+    }
+    const VALUE_FLAGS: &[&str] = &[
+        "-A", "-B", "-C", "-m", "--max-count", "--type", "-t", "--type-not", "-T", "--color",
+        "--colour", "-g", "--glob", "--iglob", "--include", "--exclude", "--exclude-dir",
+        "--threads", "-j",
+    ];
+    const PATTERN_FLAGS: &[&str] = &["-e", "--regexp"];
+    // `-f FILE` supplies pattern from a *file* — we can't extract a
+    // literal pattern from that, so skip it as a value flag only.
+    const PATTERN_FILE_FLAGS: &[&str] = &["-f", "--file"];
+    let mut explicit_pattern: Option<String> = None;
+    let mut first_positional: Option<String> = None;
+    while let Some(tok) = it.next() {
+        if tok.starts_with("--") {
+            let (key, inline_val) = match tok.split_once('=') {
+                Some((k, v)) => (k, Some(v.to_string())),
+                None => (tok.as_str(), None),
+            };
+            if PATTERN_FLAGS.contains(&key) {
+                let val = inline_val.or_else(|| it.next());
+                if let Some(v) = val {
+                    explicit_pattern = Some(unquote(&v));
+                }
+                continue;
+            }
+            if PATTERN_FILE_FLAGS.contains(&key) {
+                if inline_val.is_none() {
+                    it.next();
+                }
+                continue;
+            }
+            if inline_val.is_none() && VALUE_FLAGS.contains(&tok.as_str()) {
+                it.next();
+            }
+            continue;
+        }
+        if tok.starts_with('-') && tok.len() > 1 && !tok.chars().all(|c| c == '-') {
+            if PATTERN_FLAGS.contains(&tok.as_str()) {
+                if let Some(v) = it.next() {
+                    explicit_pattern = Some(unquote(&v));
+                }
+                continue;
+            }
+            if PATTERN_FILE_FLAGS.contains(&tok.as_str()) {
+                it.next();
+                continue;
+            }
+            if VALUE_FLAGS.contains(&tok.as_str()) {
+                it.next();
+            }
+            continue;
+        }
+        // First positional = pattern (unless `-e` already gave us one).
+        if first_positional.is_none() {
+            first_positional = Some(unquote(&tok));
+        }
+        // Don't break — keep scanning for explicit `-e` which wins.
+    }
+    explicit_pattern.or(first_positional)
+}
+
+/// Check whether the grep invocation is case-insensitive (`-i` /
+/// `--ignore-case`). Used to decide whether pattern matching
+/// against the body should be case-folded.
+pub(super) fn grep_is_case_insensitive(cmd: &str) -> bool {
+    let toks = quote_aware_tokens(cmd);
+    for tok in &toks {
+        if tok == "-i" || tok == "--ignore-case" {
+            return true;
+        }
+        // Bundled short flags: `-inr`, `-rni`, etc.
+        if tok.starts_with('-')
+            && !tok.starts_with("--")
+            && tok.len() > 1
+            && tok.contains('i')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strip surrounding single or double quotes from a token.
+fn unquote(s: &str) -> String {
+    s.strip_prefix('\'')
+        .and_then(|inner| inner.strip_suffix('\''))
+        .or_else(|| s.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')))
+        .unwrap_or(s)
+        .to_string()
+}
+
 pub(super) fn push_wrapped_styled_line(
     out: &mut Vec<Line<'static>>,
     spans: Vec<Span<'static>>,

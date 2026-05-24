@@ -347,6 +347,59 @@ pub(crate) async fn run(
                 );
             }
         }
+        crate::StartupSession::Fork(source_id) => {
+            // Fork: load messages from the source session, but mint a new session ID.
+            let source_session_id = crate::ids::SessionId::new(source_id.clone());
+            if let Some((messages, _saved_model)) =
+                session::load_session_with_model(&source_session_id).await
+            {
+                let new_id = crate::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
+                tracing::info!(
+                    target: "jfc::session",
+                    source = %source_session_id,
+                    new_session = %new_id,
+                    message_count = messages.len(),
+                    "forking session"
+                );
+                app.messages = messages;
+                app.current_session_id = Some(new_id);
+                app.recompute_token_estimate();
+            } else {
+                // Try loading from teleport export
+                let export_path = std::path::Path::new(".jfc/teleport")
+                    .join(format!("{source_id}.json"));
+                if export_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&export_path) {
+                        if let Ok(export) = serde_json::from_str::<serde_json::Value>(&content) {
+                            let new_id = crate::ids::SessionId::new(
+                                uuid::Uuid::new_v4().to_string(),
+                            );
+                            // Load messages from the export
+                            if let Some(msgs) = export.get("messages").and_then(|m| m.as_array()) {
+                                for msg in msgs {
+                                    let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                                    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                                    let chat_msg = if role == "assistant" {
+                                        crate::types::ChatMessage::assistant(content.to_owned())
+                                    } else {
+                                        crate::types::ChatMessage::user(content.to_owned())
+                                    };
+                                    app.messages.push(chat_msg);
+                                }
+                            }
+                            app.current_session_id = Some(new_id);
+                            app.recompute_token_estimate();
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        target: "jfc::session",
+                        source_id = %source_id,
+                        "fork source not found, starting fresh"
+                    );
+                }
+            }
+        }
     }
     restore_persistent_background_agents(&mut app);
 

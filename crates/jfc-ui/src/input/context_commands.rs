@@ -902,3 +902,195 @@ pub(super) async fn cmd_sandbox(
     };
     app.messages.push(ChatMessage::assistant(msg.to_string()));
 }
+
+pub(super) async fn cmd_permissions(
+    app: &mut App,
+    parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    app.messages.push(ChatMessage::user("/permissions".into()));
+
+    let arg = parts.get(1).copied().unwrap_or("").trim();
+
+    // Load existing rules from .jfc/settings.json
+    let settings_path = std::path::Path::new(".jfc/settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        std::fs::read_to_string(settings_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if arg.is_empty() {
+        // List current rules
+        let allow_rules = settings
+            .get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut body = String::from("**Permission Rules**\n\n");
+        body.push_str(&format!("Mode: **{}**\n\n", app.permission_mode.label()));
+        if allow_rules.is_empty() {
+            body.push_str("No custom allow rules configured.\n\n");
+        } else {
+            body.push_str("Allow rules:\n");
+            for rule in &allow_rules {
+                if let Some(s) = rule.as_str() {
+                    body.push_str(&format!("  ✓ {s}\n"));
+                }
+            }
+            body.push('\n');
+        }
+        body.push_str("Usage: `/permissions add Bash(git *)` to auto-allow a pattern.");
+        app.messages.push(ChatMessage::assistant(body));
+    } else if let Some(rule) = arg.strip_prefix("add ") {
+        // Add a new allow rule
+        let rule = rule.trim();
+        let perms = settings
+            .as_object_mut()
+            .unwrap()
+            .entry("permissions")
+            .or_insert_with(|| serde_json::json!({}));
+        let allow = perms
+            .as_object_mut()
+            .unwrap()
+            .entry("allow")
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(arr) = allow.as_array_mut() {
+            arr.push(serde_json::Value::String(rule.to_owned()));
+        }
+        // Write back
+        let _ = std::fs::create_dir_all(".jfc");
+        let _ = std::fs::write(settings_path, serde_json::to_string_pretty(&settings).unwrap());
+        app.messages.push(ChatMessage::assistant(format!(
+            "Added permission allow rule: `{rule}`"
+        )));
+    } else {
+        app.messages.push(ChatMessage::assistant(
+            "Usage: `/permissions` to list, `/permissions add <rule>` to add a rule.\n\
+             Example: `/permissions add Bash(git *)`"
+                .into(),
+        ));
+    }
+}
+
+pub(super) async fn cmd_stuck(
+    app: &mut App,
+    _parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    app.messages.push(ChatMessage::user("/stuck".into()));
+
+    let mut report = String::from("**Diagnostic Report (/stuck)**\n\n");
+
+    // Process count
+    let proc_count = std::process::Command::new("sh")
+        .args(["-c", "ps aux | wc -l"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_else(|| "unknown".into());
+    report.push_str(&format!("• Processes: {}\n", proc_count.trim()));
+
+    // Memory usage (from /proc/meminfo or sysctl)
+    let mem_info = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            let total = s.lines().find(|l| l.starts_with("MemTotal:"))?;
+            let avail = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
+            Some(format!("{} / {}", avail.trim(), total.trim()))
+        })
+        .unwrap_or_else(|| "unavailable".into());
+    report.push_str(&format!("• Memory: {mem_info}\n"));
+
+    // Active streams
+    let streaming = if app.is_streaming { "YES" } else { "no" };
+    report.push_str(&format!("• Active stream: {streaming}\n"));
+
+    // Pending tool calls
+    let pending_tools = app
+        .messages
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            crate::types::MessagePart::Tool(tc) => Some(tc),
+            _ => None,
+        })
+        .filter(|tc| tc.status == crate::types::ToolStatus::Running)
+        .count();
+    report.push_str(&format!("• Pending tool calls: {pending_tools}\n"));
+
+    // Last activity
+    let elapsed = app.last_user_activity_at.elapsed();
+    report.push_str(&format!("• Last activity: {:.1}s ago\n", elapsed.as_secs_f64()));
+
+    // Token usage
+    report.push_str(&format!(
+        "• Context tokens: {} / {}\n",
+        app.tool_ctx.approx_tokens, app.max_context_tokens
+    ));
+
+    // Session info
+    if let Some(ref id) = app.current_session_id {
+        report.push_str(&format!("• Session: {id}\n"));
+    }
+
+    app.messages.push(ChatMessage::assistant(report));
+}
+
+pub(super) async fn cmd_teleport_export(
+    app: &mut App,
+    _parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    app.messages
+        .push(ChatMessage::user("/teleport-export".into()));
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let dir = std::path::Path::new(".jfc/teleport");
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join(format!("{id}.json"));
+
+    // Build export payload
+    let messages: Vec<serde_json::Value> = app
+        .messages
+        .iter()
+        .map(|m| {
+            let content: String = m.parts.iter().map(|p| p.text_only()).collect::<Vec<_>>().join("");
+            serde_json::json!({
+                "role": m.role.to_string(),
+                "content": content,
+            })
+        })
+        .collect();
+
+    let export = serde_json::json!({
+        "id": id,
+        "session_id": app.current_session_id,
+        "model": app.model.to_string(),
+        "messages": messages,
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    match std::fs::write(&path, serde_json::to_string_pretty(&export).unwrap()) {
+        Ok(_) => {
+            app.messages.push(ChatMessage::assistant(format!(
+                "Context exported to `{}`\n\nAnother session can import with: \
+                 `--fork-session {id}`",
+                path.display()
+            )));
+        }
+        Err(e) => {
+            app.messages.push(ChatMessage::assistant(format!(
+                "Failed to export: {e}"
+            )));
+        }
+    }
+}

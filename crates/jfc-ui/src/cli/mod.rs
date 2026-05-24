@@ -74,6 +74,12 @@ pub(crate) struct Cli {
     #[arg(long = "permission-mode", value_name = "MODE")]
     permission_mode: Option<String>,
 
+    /// Fork a session: create a new session ID but copy messages from the
+    /// given session (or teleport export id). Use with `--resume` to
+    /// branch off an existing conversation.
+    #[arg(long = "fork-session", value_name = "SESSION_OR_EXPORT_ID")]
+    fork_session: Option<String>,
+
     /// Subcommand. When omitted, jfc launches the interactive TUI.
     #[command(subcommand)]
     command: Option<Command>,
@@ -142,11 +148,15 @@ pub(crate) enum StartupSession {
     Continue,
     /// Resume specific session by ID
     Resume(String),
+    /// Fork: copy messages from an existing session into a new session ID
+    Fork(String),
 }
 
 impl Cli {
     fn startup_session(&self) -> StartupSession {
-        if let Some(ref id) = self.resume {
+        if let Some(ref fork_id) = self.fork_session {
+            StartupSession::Fork(fork_id.clone())
+        } else if let Some(ref id) = self.resume {
             StartupSession::Resume(id.clone())
         } else if self.continue_session {
             StartupSession::Continue

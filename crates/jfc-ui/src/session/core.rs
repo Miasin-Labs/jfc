@@ -860,6 +860,8 @@ mod disk_io_tests {
             risk: Some("medium".into()),
             parent_id: Some("t0".into()),
             kind: Some("implementation".into()),
+            tags: vec![],
+            priority: None,
         };
         let decoded = deserialize_tool_input(serialize_tool_input(&create));
         match decoded {

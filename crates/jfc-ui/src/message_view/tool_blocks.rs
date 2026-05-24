@@ -708,6 +708,8 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         ToolKind::SendUserFile => Color::Rgb(255, 200, 130), // amber
         ToolKind::StructuredOutput => Color::Rgb(180, 230, 130), // lime
         ToolKind::WaitForMcpServers => Color::Rgb(190, 170, 240), // purple (MCP family)
+        ToolKind::ListMcpResources => Color::Rgb(190, 170, 240), // purple (MCP family)
+        ToolKind::ReadMcpResource => Color::Rgb(190, 170, 240), // purple (MCP family)
         ToolKind::Advisor => Color::Rgb(255, 215, 100), // gold
         ToolKind::ConnectGitHub => Color::Rgb(200, 200, 200), // grey
         ToolKind::Generic(_) => t.text_secondary,

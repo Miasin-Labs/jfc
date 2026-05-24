@@ -1094,6 +1094,42 @@ pub async fn execute_tool(
                 ),
             }
         }
+        (ToolKind::ListMcpResources, ToolInput::ListMcpResources { server }) => {
+            let Some(registry) = snapshot_mcp_registry() else {
+                return ExecutionResult::failure(
+                    "MCP registry not initialized.".to_string(),
+                );
+            };
+            let servers = registry.list().await;
+            let mut result = String::new();
+            for s in &servers {
+                if let Some(ref filter) = server {
+                    if s.name != *filter {
+                        continue;
+                    }
+                }
+                result.push_str(&format!("## {}\n", s.name));
+                for res in &s.resources {
+                    result.push_str(&format!("  - {} ({})\n", res.name, res.uri));
+                }
+            }
+            if result.is_empty() {
+                ExecutionResult::success("No MCP resources found.".to_string())
+            } else {
+                ExecutionResult::success(result)
+            }
+        }
+        (ToolKind::ReadMcpResource, ToolInput::ReadMcpResource { server, uri }) => {
+            let Some(registry) = snapshot_mcp_registry() else {
+                return ExecutionResult::failure(
+                    "MCP registry not initialized.".to_string(),
+                );
+            };
+            match registry.read_resource(&server, &uri).await {
+                Ok(content) => ExecutionResult::success(content),
+                Err(e) => ExecutionResult::failure(format!("Failed to read MCP resource: {e}")),
+            }
+        }
         (ToolKind::Advisor, ToolInput::Advisor {}) => {
             // The Advisor tool auto-forwards the full conversation to a stronger
             // reviewer model. We fire an event so the event loop (which holds

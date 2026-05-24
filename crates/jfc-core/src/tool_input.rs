@@ -751,6 +751,14 @@ pub enum ToolInput {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+    ListMcpResources {
+        #[serde(default)]
+        server: Option<String>,
+    },
+    ReadMcpResource {
+        server: String,
+        uri: String,
+    },
     Advisor {},
     ConnectGitHub {},
     Generic {
@@ -999,6 +1007,8 @@ impl ToolInput {
             }
             Self::StructuredOutput { .. } => "structured output".into(),
             Self::WaitForMcpServers { .. } => "waiting for MCP servers".into(),
+            Self::ListMcpResources { .. } => "listing MCP resources".into(),
+            Self::ReadMcpResource { uri, .. } => format!("reading MCP resource: {uri}"),
             Self::Advisor {} => "consulting advisor".into(),
             Self::ConnectGitHub {} => "connecting GitHub".into(),
         }
@@ -1232,6 +1242,13 @@ impl ToolInput {
                     .and_then(|m| m.get("timeout_ms"))
                     .and_then(|v| v.as_u64()),
             },
+            ToolKind::ListMcpResources => Self::ListMcpResources {
+                server: opt_str_field("server"),
+            },
+            ToolKind::ReadMcpResource => Self::ReadMcpResource {
+                server: opt_str_field("server").unwrap_or_default(),
+                uri: opt_str_field("uri").unwrap_or_default(),
+            },
             ToolKind::Advisor => Self::Advisor {},
             ToolKind::ConnectGitHub => Self::ConnectGitHub {},
             // ─── Regular kinds: parsed by the table-generated fn ───
@@ -1297,6 +1314,8 @@ impl ToolInput {
             }),
             Self::StructuredOutput { data } => data.clone(),
             Self::WaitForMcpServers { timeout_ms } => json!({ "timeout_ms": timeout_ms }),
+            Self::ListMcpResources { server } => json!({ "server": server }),
+            Self::ReadMcpResource { server, uri } => json!({ "server": server, "uri": uri }),
             Self::Advisor {} => json!({}),
             Self::ConnectGitHub {} => json!({}),
             // ─── Regular variants: serialized by the two table-generated fns ───

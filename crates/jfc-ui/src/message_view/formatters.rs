@@ -2,8 +2,63 @@ use super::assistant_parts::sanitize_terminal_text;
 use super::detection::looks_like_difftastic_output;
 use super::output_style::path_color;
 use super::syntax::lang_from_path;
-use super::truncation::{GrepLine, grep_target_file, parse_grep_line};
+use super::truncation::{
+    GrepLine, grep_is_case_insensitive, grep_search_pattern, grep_target_file, parse_grep_line,
+};
 use super::*;
+
+/// Append `body` to `spans`, with substrings matching `pattern`
+/// rendered in `match_style` and the rest in `body_style`. Mirrors
+/// the way GNU grep / ripgrep highlight matches via GREP_COLORS
+/// rather than passing the body through a syntax highlighter.
+///
+/// We deliberately do NOT run syntect here: grep emits one isolated
+/// source line per result, so syntect has no surrounding context
+/// (no open braces, no preceding `impl` block, no string-literal
+/// state) and produces inconsistent coloring for syntactically
+/// "incomplete" fragments like `fn extract_edges(`. Highlighting
+/// the *match* — what the user actually searched for — sidesteps
+/// the fragment problem entirely.
+fn push_grep_body_spans(
+    spans: &mut Vec<Span<'static>>,
+    body: &str,
+    pattern: Option<&str>,
+    case_insensitive: bool,
+    body_style: Style,
+    match_style: Style,
+) {
+    let Some(pat) = pattern.filter(|p| !p.is_empty()) else {
+        spans.push(Span::styled(body.to_owned(), body_style));
+        return;
+    };
+    let needle: String = if case_insensitive {
+        pat.to_lowercase()
+    } else {
+        pat.to_string()
+    };
+    let haystack_lower: Option<String> = case_insensitive.then(|| body.to_lowercase());
+    let haystack = haystack_lower.as_deref().unwrap_or(body);
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        let Some(rel) = haystack[cursor..].find(needle.as_str()) else {
+            spans.push(Span::styled(body[cursor..].to_owned(), body_style));
+            return;
+        };
+        let match_start = cursor + rel;
+        let match_end = match_start + needle.len();
+        if match_start > cursor {
+            spans.push(Span::styled(
+                body[cursor..match_start].to_owned(),
+                body_style,
+            ));
+        }
+        spans.push(Span::styled(
+            body[match_start..match_end].to_owned(),
+            match_style,
+        ));
+        cursor = match_end;
+    }
+}
 
 /// Render `grep -rn` / `rg` / `ack` output. Handles all the
 /// formats those tools emit (verified against ripgrep's
@@ -62,6 +117,8 @@ pub(super) fn produce_grep_output_lines(
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
     }
+    let search_pattern = grep_search_pattern(cmd);
+    let case_insensitive = grep_is_case_insensitive(cmd);
     let mut total = 0usize;
     for raw in stdout.lines() {
         total += 1;
@@ -129,37 +186,18 @@ pub(super) fn produce_grep_output_lines(
                     Style::default().fg(sep_color),
                 ));
 
-                // Syntax-highlight the match body when we can infer a
-                // language from the file path. Use the pathless_target
-                // for single-file greps that omit the path prefix.
-                let hl_path = if !path.is_empty() {
-                    Some(path)
-                } else {
-                    pathless_target.as_deref()
-                };
-                let hl_done = !is_context
-                    && hl_path.is_some()
-                    && {
-                        if let Some(lang) = hl_path.and_then(lang_from_path) {
-                            let hl = markdown::highlight_code_raw(&lang, body, 0, &t);
-                            if let Some(first) = hl.into_iter().next() {
-                                spans.extend(first.spans.into_iter().map(|s| {
-                                    Span::styled(s.content.into_owned(), s.style)
-                                }));
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    };
-                if !hl_done {
-                    spans.push(Span::styled(
-                        body.to_owned(),
-                        Style::default().fg(body_color),
-                    ));
-                }
+                let body_style = Style::default().fg(body_color);
+                let match_style = Style::default()
+                    .fg(t.warning)
+                    .add_modifier(Modifier::BOLD);
+                push_grep_body_spans(
+                    &mut spans,
+                    body,
+                    search_pattern.as_deref(),
+                    case_insensitive,
+                    body_style,
+                    match_style,
+                );
 
                 lines.push(Line::from(spans));
             }

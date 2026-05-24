@@ -303,7 +303,7 @@ slash_commands! {
         "/status" [] "show current session status" => cmd_status,
         "/bug" [] "file a bug report with session context" => cmd_bug,
         "/rewind" [] "rewind the transcript to an earlier checkpoint" => cmd_rewind,
-        "/output-style" ["/style", "/brief"] "switch output style (e.g. brief)" => cmd_output_style,
+        "/output-style" ["/style"] "switch output style (e.g. brief)" => cmd_output_style,
         "/dump-context" ["/debug-context"] "show what the model sees: memories, skills, tools" => cmd_dump_context,
         "/install-github-app" [] "install the Claude GitHub App on this repo" => cmd_install_github_app,
         "/pr" [] "show a PR + review comments (`/pr <num>`)" => cmd_pr,
@@ -313,4 +313,7 @@ slash_commands! {
         "/loop" ["/proactive"] "toggle proactive autonomous looping" => cmd_loop,
         "/schedule" ["/routines"] "manage scheduled routines" => cmd_schedule,
         "/swarm-approve" ["/swarm-deny"] "approve a pending swarm tool request" => cmd_swarm_approve,
+        "/permissions" [] "list/add permission allow/deny rules" => cmd_permissions,
+        "/stuck" [] "run diagnostic checks (processes, memory, streams)" => cmd_stuck,
+        "/teleport-export" [] "export current plan/context as importable JSON" => cmd_teleport_export,
 }

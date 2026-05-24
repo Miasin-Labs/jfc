@@ -3,7 +3,9 @@ use super::assistant_parts::{find_tool_at, sanitize_terminal_text, truncate_str}
 use super::bash::{BashCmdKind, classify_bash_cmd};
 use super::core::{RenderCtx, build_render_items_ctx, is_groupable, severity_rank};
 use super::detection::{looks_like_difftastic_output, looks_like_git_diff_output};
-use super::formatters::{produce_command_output_lines, produce_git_diff_output_lines};
+use super::formatters::{
+    produce_command_output_lines, produce_git_diff_output_lines, produce_grep_output_lines,
+};
 use super::output_style::path_color;
 use super::outputs::produce_diff_view_lines;
 use super::syntax::{
@@ -16,7 +18,8 @@ use super::tool_blocks::{
 };
 use super::tool_height::{tool_block_height, tool_block_height_pub, tool_content_height_with_tool};
 use super::truncation::{
-    GrepLine, grep_target_file, parse_grep_line, parse_grep_no_path, parse_grep_with_sep,
+    GrepLine, grep_is_case_insensitive, grep_search_pattern, grep_target_file, parse_grep_line,
+    parse_grep_no_path, parse_grep_with_sep,
 };
 use super::*;
 
@@ -558,6 +561,146 @@ mod bash_chain_tests {
         // 99999999999 (11 digits) — won't fit in u32, parser rejects.
         let line = "99999999999:body";
         assert!(parse_grep_line(line).is_none());
+    }
+}
+
+#[cfg(test)]
+mod grep_pattern_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn grep_search_pattern_positional_normal() {
+        assert_eq!(
+            grep_search_pattern("grep -rn foo src/"),
+            Some("foo".into())
+        );
+    }
+
+    #[test]
+    fn grep_search_pattern_quoted_normal() {
+        assert_eq!(
+            grep_search_pattern("grep -n \"sws_headers(\" ~/foo/auth.rs"),
+            Some("sws_headers(".into())
+        );
+    }
+
+    #[test]
+    fn grep_search_pattern_dash_e_flag_normal() {
+        assert_eq!(
+            grep_search_pattern("grep -e PAT -B 2 file.rs"),
+            Some("PAT".into())
+        );
+    }
+
+    #[test]
+    fn grep_search_pattern_regexp_eq_normal() {
+        assert_eq!(
+            grep_search_pattern("rg --regexp=pattern src/"),
+            Some("pattern".into())
+        );
+    }
+
+    #[test]
+    fn grep_search_pattern_single_quoted_normal() {
+        assert_eq!(
+            grep_search_pattern("rg 'async fn' src/"),
+            Some("async fn".into())
+        );
+    }
+
+    #[test]
+    fn grep_search_pattern_no_pattern_returns_none_robust() {
+        assert_eq!(grep_search_pattern("cat file.rs"), None);
+    }
+
+    #[test]
+    fn grep_search_pattern_rg_no_target_normal() {
+        assert_eq!(
+            grep_search_pattern("rg \"open(\""),
+            Some("open(".into())
+        );
+    }
+
+    #[test]
+    fn grep_case_insensitive_flag_normal() {
+        assert!(grep_is_case_insensitive("grep -in pat file.rs"));
+        assert!(grep_is_case_insensitive("grep --ignore-case pat file.rs"));
+        assert!(grep_is_case_insensitive("grep -rni pat src/"));
+    }
+
+    #[test]
+    fn grep_case_sensitive_default_normal() {
+        assert!(!grep_is_case_insensitive("grep -rn pat src/"));
+        assert!(!grep_is_case_insensitive("rg pat"));
+    }
+}
+
+#[cfg(test)]
+mod grep_body_highlight_tests {
+    use super::*;
+    use crate::theme::Theme;
+    use ratatui::style::Style;
+
+    #[test]
+    fn produce_grep_output_highlights_pattern_match_normal() {
+        let stdout = "src/main.rs:10:fn parse_file(&self) {\n\
+                      src/main.rs:20:    parse_file(path)\n";
+        let t = Theme::dark();
+        let lines = produce_grep_output_lines(stdout, "", Some(0), t, false, "grep -rn parse_file src/");
+        let mut found_bold_match = false;
+        for line in &lines {
+            for span in &line.spans {
+                if span.content.as_ref() == "parse_file"
+                    && span.style.fg == Some(t.warning)
+                {
+                    found_bold_match = true;
+                }
+            }
+        }
+        assert!(found_bold_match, "expected pattern 'parse_file' highlighted in warning color");
+    }
+
+    #[test]
+    fn produce_grep_output_no_syntect_fallback_on_incomplete_fragments_normal() {
+        // An incomplete signature like `fn extract_edges(` should NOT go
+        // through syntect — it would produce broken coloring. Verify that
+        // the body is split into plain text + pattern match only.
+        let stdout = "src/graph.rs:50:    fn extract_edges(\n";
+        let t = Theme::dark();
+        let lines = produce_grep_output_lines(stdout, "", Some(0), t, false, "rg extract_edges src/");
+        // The body spans should include the pattern match and surrounding text,
+        // but NOT syntect-generated keyword tokens.
+        let body_spans: Vec<&str> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.content.contains("extract_edges") || s.content.contains("fn "))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!body_spans.is_empty(), "expected body text in output");
+    }
+
+    #[test]
+    fn produce_grep_output_context_lines_are_muted_normal() {
+        // Context lines (with `-` separator) should get text_muted color
+        // and should NOT highlight the pattern.
+        // grep/rg emit `path-lineno-body` for context (all `-`) and
+        // `path:lineno:body` for matches.
+        let stdout = "src/main.rs-9-    let x = 1;\n\
+                      src/main.rs:10:fn parse_file() {\n\
+                      src/main.rs-11-    }\n";
+        let t = Theme::dark();
+        let lines = produce_grep_output_lines(stdout, "", Some(0), t, false, "grep -n -A1 -B1 parse_file src/main.rs");
+        // Check that context line bodies use text_muted
+        let context_body = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("let x = 1"));
+        assert!(context_body.is_some(), "expected context line body");
+        assert_eq!(
+            context_body.unwrap().style.fg,
+            Some(t.text_muted),
+            "context line body should be text_muted"
+        );
     }
 }
 

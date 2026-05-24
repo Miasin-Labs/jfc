@@ -28,6 +28,15 @@ use jfc_provider::ToolDef;
 use super::protocol::{self, McpTool, ToolCallOutcome};
 use super::transport::{RequestError, SpawnConfig, Transport, TransportKind};
 
+/// An MCP resource entry (from `resources/list`).
+#[derive(Debug, Clone)]
+pub struct McpResource {
+    pub name: String,
+    pub uri: String,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+}
+
 /// Status of an MCP server entry. Drives the `/mcp list` display and
 /// the [`crate::types::McpServerInfo`] sidebar block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +69,8 @@ pub struct McpServer {
     /// Cached tool list from the most recent `tools/list`. Empty for
     /// `Failed` / `Disabled` entries.
     pub tools: Vec<McpTool>,
+    /// Cached resource list from `resources/list`. Empty when unsupported.
+    pub resources: Vec<McpResource>,
     /// `None` for `Failed` / `Disabled`. Otherwise the live transport.
     pub transport: Option<Transport>,
     /// Original spawn config — kept so `/mcp restart` can re-spawn
@@ -174,6 +185,39 @@ impl McpRegistry {
         out
     }
 
+    /// Read a resource from a specific server by URI.
+    /// Returns the resource content as a string or an error.
+    pub async fn read_resource(
+        &self,
+        server_name: &str,
+        uri: &str,
+    ) -> Result<String, DispatchError> {
+        let server = self
+            .get(server_name)
+            .await
+            .ok_or_else(|| DispatchError::UnknownServer(server_name.to_owned()))?;
+        let transport = server
+            .transport
+            .as_ref()
+            .ok_or_else(|| DispatchError::ServerNotConnected(server_name.to_owned()))?;
+        let result = transport
+            .read_resource(uri)
+            .await
+            .map_err(DispatchError::Request)?;
+        // Extract text from the first content item
+        use rmcp::model::ResourceContents;
+        let text = result
+            .contents
+            .into_iter()
+            .next()
+            .map(|c| match c {
+                ResourceContents::TextResourceContents { text, .. } => text,
+                ResourceContents::BlobResourceContents { blob, .. } => blob,
+            })
+            .unwrap_or_default();
+        Ok(text)
+    }
+
     /// Dispatch a tool call to the server identified by the
     /// `mcp__<server>__<tool>` name. Returns
     /// `Err(DispatchError::NotMcpName)` when the name doesn't match the
@@ -251,6 +295,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
                 name: name.to_owned(),
                 status: McpServerStatus::Failed,
                 tools: Vec::new(),
+                resources: Vec::new(),
                 transport: None,
                 spawn_cfg: SpawnConfig {
                     server_name: name.to_owned(),
@@ -278,6 +323,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
             name: name.to_owned(),
             status: McpServerStatus::Failed,
             tools: Vec::new(),
+            resources: Vec::new(),
             transport: None,
             spawn_cfg,
         };
@@ -295,6 +341,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
         name: name.to_owned(),
         status: McpServerStatus::Connected,
         tools,
+        resources: Vec::new(),
         transport: Some(transport),
         spawn_cfg,
     }
@@ -380,6 +427,7 @@ mod tests {
             name: name.to_owned(),
             status,
             tools,
+            resources: Vec::new(),
             transport: None,
             spawn_cfg: SpawnConfig {
                 server_name: name.to_owned(),

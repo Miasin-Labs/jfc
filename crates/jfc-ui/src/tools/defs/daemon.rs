@@ -15,6 +15,8 @@ pub fn daemon_tool_defs() -> Vec<ToolDef> {
         scratchpad_write_def(),
         workflow_def(),
         wait_for_mcp_servers_def(),
+        list_mcp_resources_def(),
+        read_mcp_resource_def(),
     ]
 }
 
@@ -266,6 +268,45 @@ fn wait_for_mcp_servers_def() -> ToolDef {
                     "description": "Maximum time to wait for servers in milliseconds (default 30s)"
                 }
             }
+        }),
+    }
+}
+
+fn list_mcp_resources_def() -> ToolDef {
+    ToolDef {
+        name: "ListMcpResources".into(),
+        description: "List resources exposed by connected MCP servers. Optionally \
+            filter by server name. Returns resource names and URIs grouped by server.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "Optional server name to filter resources from a single server"
+                }
+            }
+        }),
+    }
+}
+
+fn read_mcp_resource_def() -> ToolDef {
+    ToolDef {
+        name: "ReadMcpResource".into(),
+        description: "Read the contents of a specific MCP resource by URI. \
+            The server name identifies which MCP server hosts the resource.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "Name of the MCP server hosting the resource"
+                },
+                "uri": {
+                    "type": "string",
+                    "description": "URI of the resource to read"
+                }
+            },
+            "required": ["server", "uri"]
         }),
     }
 }
