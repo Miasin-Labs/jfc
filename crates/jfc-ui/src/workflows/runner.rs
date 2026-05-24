@@ -487,6 +487,7 @@ async fn run_one_agent(
         mode: None,
         isolation: req.isolation.clone(),
         parent_task_id: None,
+            schema: None,
     };
 
     // Resolve an agent definition if a custom agentType was requested.

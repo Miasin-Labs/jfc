@@ -1162,6 +1162,7 @@ impl ToolInput {
                 mode: opt_str_field("mode"),
                 isolation: opt_str_field("isolation"),
                 parent_task_id: opt_str_field("parent_task_id"),
+                schema: obj.and_then(|m| m.get("schema")).cloned(),
             }),
             ToolKind::Skill => Self::Skill {
                 name: opt_str_field("name")

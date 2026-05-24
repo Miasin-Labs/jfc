@@ -441,6 +441,7 @@ pub(crate) fn deserialize_tool_input(input: SerializedToolInput) -> ToolInput {
             mode,
             isolation,
             parent_task_id,
+            schema: None,
         }),
         SerializedToolInput::TaskCreate {
             subject,

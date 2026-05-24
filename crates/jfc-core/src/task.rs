@@ -34,6 +34,9 @@ pub struct TaskInput {
     pub isolation: Option<String>,
     /// Queued-task id (`t<N>`) this delegation is fulfilling.
     pub parent_task_id: Option<String>,
+    /// Optional JSON Schema that the subagent's StructuredOutput tool will
+    /// validate against. Set by the parent agent to enforce output shape.
+    pub schema: Option<serde_json::Value>,
 }
 
 impl TaskInput {

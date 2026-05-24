@@ -417,7 +417,16 @@ pub async fn execute_task(
     task_store: Option<std::sync::Arc<jfc_session::TaskStore>>,
     active_team_name: Option<&str>,
 ) -> ExecutionResult {
-    execute_task_inner(
+    // StructuredOutput schema: when the parent provides a schema, install
+    // it so the subagent's StructuredOutput tool call validates against it.
+    if let Some(ref schema) = task_input.schema {
+        if let Err(e) = crate::tools::structured_output::set_active_schema(Some(schema)) {
+            return ExecutionResult::failure(format!(
+                "Task: invalid schema rejected: {e}"
+            ));
+        }
+    }
+    let result = execute_task_inner(
         task_input,
         provider,
         model_id,
@@ -429,7 +438,12 @@ pub async fn execute_task(
         active_team_name.map(str::to_owned),
         0,
     )
-    .await
+    .await;
+    // Clear schema regardless of success/failure.
+    if task_input.schema.is_some() {
+        crate::tools::structured_output::clear_active_schema();
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -889,6 +889,9 @@ pub(super) async fn cmd_sandbox(
     _tx: Option<&mpsc::Sender<AppEvent>>,
 ) {
     app.bash_sandbox.enabled = !app.bash_sandbox.enabled;
+    // Mirror the toggle into the global static so the bash dispatch path
+    // (which doesn't have access to `&mut App`) sees the new config.
+    crate::sandbox::install_bash_sandbox_config(app.bash_sandbox.clone());
     let avail = crate::sandbox::is_bwrap_available();
     let msg = if app.bash_sandbox.enabled {
         if avail {
@@ -1090,6 +1093,153 @@ pub(super) async fn cmd_teleport_export(
         Err(e) => {
             app.messages.push(ChatMessage::assistant(format!(
                 "Failed to export: {e}"
+            )));
+        }
+    }
+}
+
+pub(super) async fn cmd_team_onboarding(
+    app: &mut App,
+    _parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let guide = crate::team_onboarding::generate_onboarding_guide(&root);
+    app.messages.push(ChatMessage::assistant(guide));
+}
+
+pub(super) async fn cmd_coach(
+    app: &mut App,
+    _parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    // Build session stats from app.messages
+    let mut stats = crate::coach::SessionStats {
+        total_tool_calls: 0,
+        read_calls: 0,
+        write_calls: 0,
+        bash_calls: 0,
+        search_calls: 0,
+        total_tokens_in: 0,
+        total_tokens_out: 0,
+        session_duration_secs: app.launched_at.elapsed().as_secs(),
+        compaction_count: 0,
+        error_count: 0,
+    };
+    for m in &app.messages {
+        for p in &m.parts {
+            if let crate::types::MessagePart::Tool(t) = p {
+                stats.total_tool_calls += 1;
+                match t.kind.label() {
+                    "Read" => stats.read_calls += 1,
+                    "Write" => stats.write_calls += 1,
+                    "Bash" => stats.bash_calls += 1,
+                    "Grep" | "Glob" | "GraphSearch" | "GraphContext" => stats.search_calls += 1,
+                    _ => {}
+                }
+                if t.status == crate::types::ExecutionStatus::Failed {
+                    stats.error_count += 1;
+                }
+            }
+        }
+    }
+    let tips = crate::coach::generate_coaching_tips(&stats);
+    app.messages.push(ChatMessage::assistant(format!(
+        "## Coaching tips\n\n{tips}"
+    )));
+}
+
+pub(super) async fn cmd_remote(
+    app: &mut App,
+    parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    let prompt = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+    if prompt.trim().is_empty() {
+        app.messages.push(ChatMessage::assistant(
+            "Usage: `/remote <prompt>` — spawn a CCR remote session with this prompt.".into(),
+        ));
+        return;
+    }
+    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(k) => k,
+        Err(_) => {
+            app.messages.push(ChatMessage::assistant(
+                "ANTHROPIC_API_KEY not set — `/remote` requires it.".into(),
+            ));
+            return;
+        }
+    };
+    let client = reqwest::Client::new();
+    match crate::ccr::spawn_remote_session(
+        &client,
+        &api_key,
+        "https://api.anthropic.com",
+        prompt.clone(),
+        "default".to_string(),
+    ).await {
+        Ok(session) => {
+            app.messages.push(ChatMessage::assistant(format!(
+                "Remote CCR session spawned: `{}`\nURL: {}",
+                session.session_id, session.session_url
+            )));
+        }
+        Err(e) => {
+            app.messages.push(ChatMessage::assistant(format!(
+                "Remote spawn failed: {e}"
+            )));
+        }
+    }
+}
+
+pub(super) async fn cmd_oauth_login(
+    app: &mut App,
+    _parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    let cfg = crate::auth::device_flow::DeviceFlowConfig {
+        client_id: std::env::var("JFC_OAUTH_CLIENT_ID")
+            .unwrap_or_else(|_| "jfc-cli".into()),
+        device_auth_url: std::env::var("JFC_OAUTH_DEVICE_URL")
+            .unwrap_or_else(|_| "https://auth.anthropic.com/oauth/device/code".into()),
+        token_url: std::env::var("JFC_OAUTH_TOKEN_URL")
+            .unwrap_or_else(|_| "https://auth.anthropic.com/oauth/token".into()),
+        scopes: vec!["openid".into(), "offline_access".into()],
+    };
+    let client = reqwest::Client::new();
+    let device_resp = match crate::auth::device_flow::request_device_code(&client, &cfg).await {
+        Ok(r) => r,
+        Err(e) => {
+            app.messages.push(ChatMessage::assistant(format!(
+                "OAuth device-code request failed: {e}"
+            )));
+            return;
+        }
+    };
+    app.messages.push(ChatMessage::assistant(format!(
+        "Go to: **{}**\nEnter code: **{}**\n\nPolling for completion (expires in {}s)...",
+        device_resp.verification_uri, device_resp.user_code, device_resp.expires_in,
+    )));
+    match crate::auth::device_flow::poll_for_token(
+        &client,
+        &cfg,
+        &device_resp.device_code,
+        device_resp.interval,
+        device_resp.expires_in,
+    ).await {
+        Ok(token) => {
+            let _ = crate::auth::device_flow::store_token(&token);
+            app.messages.push(ChatMessage::assistant(
+                "Login successful — token stored in `.jfc/credentials.json`.".into(),
+            ));
+        }
+        Err(e) => {
+            app.messages.push(ChatMessage::assistant(format!(
+                "OAuth poll failed: {e}"
             )));
         }
     }
