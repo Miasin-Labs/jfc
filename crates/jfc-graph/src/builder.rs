@@ -5,6 +5,8 @@ use tracing::warn;
 use crate::adapter::{AdapterError, LanguageAdapter};
 use crate::call_site::CallSite;
 use crate::graph::CodeGraph;
+use crate::ir::lower_for_language;
+use crate::nodes::NodeKind;
 use crate::resolver::ReferenceResolver;
 
 /// Result of a build pass — the graph plus diagnostics that the caller should
@@ -113,6 +115,19 @@ impl GraphBuilder {
             }
 
             all_sites.extend(adapter.extract_call_sites(&parsed, &nodes));
+
+            // IR lowering: for each Function node, find its tree-sitter node
+            // and lower the body to the language-agnostic IR.
+            let lang_id = adapter.language_id();
+            for node_data in nodes.iter().filter(|n| n.kind == NodeKind::Function) {
+                let byte_start = node_data.span.byte_range.start;
+                let ts_node = find_ts_node_at(parsed.tree.root_node(), byte_start);
+                if let Some(ts_fn) = ts_node {
+                    if let Some(ir_fn) = lower_for_language(lang_id, ts_fn, &parsed.source) {
+                        result.graph.ir_functions.insert(node_data.id.clone(), ir_fn);
+                    }
+                }
+            }
         }
 
         // Cross-file call resolution: every captured site is now scored
@@ -154,6 +169,29 @@ impl GraphBuilder {
         files.sort();
         files
     }
+}
+
+/// Find a named tree-sitter node whose `start_byte` matches `byte_offset`.
+/// Used to correlate `NodeData.span.byte_range.start` back to the AST node
+/// for IR lowering.
+fn find_ts_node_at(root: tree_sitter::Node, byte_offset: usize) -> Option<tree_sitter::Node> {
+    if root.start_byte() == byte_offset && root.is_named() {
+        return Some(root);
+    }
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        // Skip subtrees that can't contain the target offset.
+        if child.end_byte() <= byte_offset {
+            continue;
+        }
+        if child.start_byte() > byte_offset {
+            break;
+        }
+        if let Some(found) = find_ts_node_at(child, byte_offset) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -244,5 +282,22 @@ mod tests {
             graph2.edge_count(),
             "edge counts differ between builds"
         );
+    }
+
+    #[test]
+    fn test_build_populates_ir_functions() {
+        let adapter = RustAdapter::new();
+        let sample = fixtures_dir().join("sample.rs");
+        let result = GraphBuilder::build_from_files_with_result(&[sample], &adapter);
+
+        assert!(
+            !result.graph.ir_functions.is_empty(),
+            "expected ir_functions to be populated for sample.rs, got 0"
+        );
+
+        // Verify at least one IR function has a non-empty body
+        let has_body = result.graph.ir_functions.values()
+            .any(|ir| !ir.body.is_empty());
+        assert!(has_body, "expected at least one IR function with a non-empty body");
     }
 }

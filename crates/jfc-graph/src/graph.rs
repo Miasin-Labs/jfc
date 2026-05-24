@@ -44,6 +44,7 @@ use thiserror::Error;
 use crate::adapter::LanguageAdapter;
 use crate::edges::{EdgeData, EdgeKind};
 use crate::index::Indices;
+use crate::ir::IrFunction;
 use crate::nodes::{NodeData, NodeId, NodeKind};
 use crate::persistence::GraphEvent;
 
@@ -133,6 +134,10 @@ pub struct CodeGraph {
     /// constructed as a `NodeData` literal but never inserted via
     /// `add_node`.
     revision: u64,
+    /// Per-function IR lowerings, keyed by the function's [`NodeId`].
+    /// Populated by [`crate::builder::GraphBuilder`] when the source is
+    /// available and the language adapter supports IR lowering.
+    pub ir_functions: HashMap<NodeId, IrFunction>,
 }
 
 impl CodeGraph {
@@ -142,6 +147,7 @@ impl CodeGraph {
             index_map: HashMap::new(),
             indices: Indices::default(),
             revision: 0,
+            ir_functions: HashMap::new(),
         }
     }
 
