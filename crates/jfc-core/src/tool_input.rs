@@ -114,6 +114,24 @@ macro_rules! ti_parse {
     ($obj:ident, $tool:ident, raw_opt, $k:literal) => {
         $obj.and_then(|m| m.get($k)).cloned()
     };
+    ($obj:ident, $tool:ident, str_vec, $k:literal) => {
+        $obj.and_then(|m| m.get($k))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default()
+    };
+    // str_vec with a fallback alias key — tries $k first, falls back to $alias
+    ($obj:ident, $tool:ident, str_vec_alias, $k:literal, $alias:literal) => {
+        $obj.and_then(|m| m.get($k).or_else(|| m.get($alias)))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default()
+    };
+    ($obj:ident, $tool:ident, opt_u8, $k:literal) => {
+        $obj.and_then(|m| m.get($k))
+            .and_then(|v| v.as_u64())
+            .map(|n| n.min(9) as u8)
+    };
 }
 
 /// `to_value` serialize stanza for one field rule. Appends to `$v` (a
@@ -188,6 +206,17 @@ macro_rules! ti_ser {
             $v[$k] = serde_json::json!($field);
         }
     };
+    // alias variant — serialize under primary key only
+    ($v:ident, $field:ident, str_vec_alias, $k:literal, $alias:literal) => {
+        if !$field.is_empty() {
+            $v[$k] = serde_json::json!($field);
+        }
+    };
+    ($v:ident, $field:ident, opt_u8, $k:literal) => {
+        if let Some(x) = $field {
+            $v[$k] = serde_json::json!(x);
+        }
+    };
 }
 
 /// **The table.** Single source of truth for every *regular* (rule-driven)
@@ -209,7 +238,7 @@ macro_rules! for_each_regular_tool_input {
             Grep => { pattern: req_str @ "pattern", path: opt_str @ "path", glob: opt_str @ "glob", output_mode: opt_str @ "output_mode" }
             Search => { query: req_str @ "query", path: opt_str @ "path" }
             ApplyPatch => { patch: req_str @ "patch" }
-            TaskUpdate => { task_id: req_str @ "task_id", status: opt_str @ "status", subject: opt_str @ "subject", description: opt_str @ "description", owner: opt_str @ "owner", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind" }
+            TaskUpdate => { task_id: req_str @ "task_id", status: opt_str @ "status", subject: opt_str @ "subject", description: opt_str @ "description", owner: opt_str @ "owner", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind", blocked_by: str_vec @ "blocked_by", tags: str_vec @ "tags", priority: opt_u8 @ "priority" }
             TaskList => { status_filter: opt_str @ "status_filter", owner_filter: opt_str @ "owner_filter" }
             TaskDone => { task_id: req_str @ "task_id" }
             TaskStop => { task_id: req_str @ "task_id" }
@@ -279,7 +308,7 @@ macro_rules! for_each_to_value_only_tool_input {
     ($cb:ident) => {
         $cb! {
             Bash => { command: req_str @ "command", timeout: opt_u64 @ "timeout", workdir: opt_str @ "workdir" }
-            TaskCreate => { subject: req_str @ "subject", description: req_str @ "description", active_form: opt_str @ "active_form", blocked_by: str_vec @ "blocked_by", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind" }
+            TaskCreate => { subject: req_str @ "subject", description: req_str @ "description", active_form: opt_str @ "active_form", blocked_by: str_vec @ "blocked_by", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind", tags: str_vec @ "tags", priority: opt_u8 @ "priority" }
             Skill => { name: req_str @ "name", args: opt_str @ "args" }
             SendMessage => { to: req_str @ "to", message: req_str @ "message", summary: opt_str @ "summary" }
         }
@@ -431,6 +460,8 @@ pub enum ToolInput {
         risk: Option<String>,
         parent_id: Option<String>,
         kind: Option<String>,
+        tags: Vec<String>,
+        priority: Option<u8>,
     },
     TaskUpdate {
         task_id: String,
@@ -443,6 +474,9 @@ pub enum ToolInput {
         risk: Option<String>,
         parent_id: Option<String>,
         kind: Option<String>,
+        blocked_by: Vec<String>,
+        tags: Vec<String>,
+        priority: Option<u8>,
     },
     TaskList {
         status_filter: Option<String>,
@@ -1019,8 +1053,9 @@ impl ToolInput {
                 }
             }
             ToolKind::TaskCreate => {
+                // depends_on is an alias for blocked_by
                 let blocked_by = obj
-                    .and_then(|map| map.get("blocked_by"))
+                    .and_then(|map| map.get("blocked_by").or_else(|| map.get("depends_on")))
                     .and_then(|value| value.as_array())
                     .map(|arr| {
                         arr.iter()
@@ -1028,6 +1063,19 @@ impl ToolInput {
                             .collect()
                     })
                     .unwrap_or_default();
+                let tags = obj
+                    .and_then(|map| map.get("tags"))
+                    .and_then(|value| value.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|value| value.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let priority = obj
+                    .and_then(|map| map.get("priority"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v.min(9) as u8);
                 let subject = opt_str_field("subject")
                     .or_else(|| opt_str_field("description"))
                     .ok_or_else(|| ToolInputError::MissingField {
@@ -1050,6 +1098,8 @@ impl ToolInput {
                     risk: opt_str_field("risk"),
                     parent_id: opt_str_field("parent_id"),
                     kind: opt_str_field("kind"),
+                    tags,
+                    priority,
                 }
             }
             ToolKind::TaskValidate => Self::TaskValidate,

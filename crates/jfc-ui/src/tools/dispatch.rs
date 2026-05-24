@@ -197,6 +197,8 @@ pub async fn execute_tool(
                 risk,
                 parent_id,
                 kind,
+                tags,
+                priority,
             },
         ) => execute_task_create(
             task_store,
@@ -209,6 +211,8 @@ pub async fn execute_tool(
             risk,
             parent_id,
             kind,
+            tags,
+            priority,
         ),
         (
             ToolKind::TaskUpdate,
@@ -223,6 +227,9 @@ pub async fn execute_tool(
                 risk,
                 parent_id,
                 kind,
+                blocked_by,
+                tags,
+                priority,
             },
         ) => execute_task_update(
             task_store,
@@ -236,6 +243,9 @@ pub async fn execute_tool(
             risk,
             parent_id,
             kind,
+            blocked_by,
+            tags,
+            priority,
         ),
         (
             ToolKind::TaskList,
@@ -782,7 +792,7 @@ pub async fn execute_tool(
             // is the success acknowledgment — the actual mode flip
             // happens when the main loop drains `UiEvent::ExitPlanModeRequested`.
             if let Some(tx) = snapshot_event_sender() {
-                let _ = tx
+                _ = tx
                     .send(crate::runtime::AppEvent::Ui(
                         crate::runtime::UiEvent::ExitPlanModeRequested { plan: plan.clone() },
                     ))

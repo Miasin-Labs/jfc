@@ -16,7 +16,7 @@ use crate::dataflow::FunctionDataflow;
 // imports the marker types from there. We re-export the constructor
 // here so callers can use `node.kind_data()` directly.
 
-/// Exactly 5 node kinds — no more, no less.
+/// Node kinds for the code graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
     Function,
@@ -24,6 +24,16 @@ pub enum NodeKind {
     Enum,
     Module,
     Trait,
+    /// A variant of an enum (e.g. `Option::Some`, `Result::Err`).
+    EnumVariant,
+    /// A field of a struct or enum variant.
+    Field,
+    /// A type alias (`type Foo = Bar`).
+    TypeAlias,
+    /// A constant (`const` or `static`).
+    Constant,
+    /// An interface (for languages that have them; Rust uses Trait).
+    Interface,
 }
 
 /// Visibility of a code item.

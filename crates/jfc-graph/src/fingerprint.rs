@@ -33,13 +33,17 @@
 //!
 //! ## Choice of digest size
 //!
-//! [`Fingerprint`] wraps a `u64` produced by [`std::hash::DefaultHasher`]
-//! (currently SipHash-1-3). This is a **non-cryptographic** digest suitable
-//! for in-process / on-disk-but-trusted cache keys. It is NOT a content
-//! address for adversarial inputs, NOT stable across stdlib versions, and
-//! NOT collision-resistant in the cryptographic sense. If a future consumer
-//! needs cross-version persistence or adversarial robustness, switch to a
-//! `[u8; 32]` SHA-256 backing — the trait shape stays the same.
+//! [`Fingerprint`] wraps a `u64` truncated from a BLAKE3 digest.
+//! BLAKE3 is deterministic and platform-independent, so fingerprints
+//! computed on CI can be shared with developer machines without
+//! worrying about per-process seeds or compiler-version drift (the
+//! original SipHash-based `DefaultHasher` suffered from both issues).
+//!
+//! The backing is still **non-cryptographic** in spirit — we only keep
+//! 64 bits, so collisions are at the birthday-bound (~2³²). This is
+//! fine for trusted cache keys; if a future consumer needs full
+//! collision resistance, widen to `[u8; 32]` — the trait shape stays
+//! the same.
 //!
 //! ## Sort key contract
 //!
@@ -53,7 +57,7 @@
 //!   declaration order (this is the Rust derive convention; it's stable).
 
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
@@ -104,18 +108,36 @@ impl From<Fingerprint> for cache::Fingerprint {
     }
 }
 
-/// Builder for fingerprints — wraps a [`DefaultHasher`] so impls can stream
-/// many values into a single digest without allocating intermediate buffers.
+/// Builder for fingerprints — wraps a [`blake3::Hasher`] behind the
+/// [`std::hash::Hasher`] trait so that `Hash`-able types can be streamed
+/// into a BLAKE3 digest without any call-site changes.
 ///
-/// Using a dedicated newtype (instead of exposing `DefaultHasher` directly)
-/// lets us swap the backing function later (e.g. to `siphasher::sip` for
-/// version-stable digests, or to SHA-256 for `[u8; 32]` outputs) without
-/// touching every call site.
-pub struct FingerprintHasher(DefaultHasher);
+/// Using a dedicated newtype (instead of exposing the inner hasher
+/// directly) keeps the public API stable: swapping the backing digest
+/// (previously SipHash, now BLAKE3) required zero changes to callers.
+pub struct FingerprintHasher(Blake3StdHasher);
+
+/// Adapter: exposes a [`blake3::Hasher`] through [`std::hash::Hasher`]
+/// so `Hash::hash()` calls land in BLAKE3.
+struct Blake3StdHasher(blake3::Hasher);
+
+impl Hasher for Blake3StdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        let hash = self.0.finalize();
+        let bytes: [u8; 8] = hash.as_bytes()[..8]
+            .try_into()
+            .expect("BLAKE3 output is always >= 8 bytes");
+        u64::from_le_bytes(bytes)
+    }
+}
 
 impl FingerprintHasher {
     pub fn new() -> Self {
-        Self(DefaultHasher::new())
+        Self(Blake3StdHasher(blake3::Hasher::new()))
     }
 
     /// Stream a `Hash`-able value into the digest. Use this for primitives
@@ -348,5 +370,24 @@ mod tests {
         let empty = g.fingerprint();
         g.add_node(make_node("foo", NodeKind::Function));
         assert_ne!(empty, g.fingerprint());
+    }
+
+    /// Pin the BLAKE3-derived fingerprint for a fixed input. This is the
+    /// whole reason for the SipHash → BLAKE3 migration: the digest must be
+    /// the same byte-for-byte on every machine and every Rust version so
+    /// indices built on CI can be shipped to developer laptops. If this
+    /// test ever starts failing, something perturbed the digest pipeline
+    /// (hasher impl, encoding, byte order) and cross-machine cache reuse
+    /// will silently break — investigate before updating the constant.
+    #[test]
+    fn fingerprint_is_cross_machine_stable() {
+        let mut h = FingerprintHasher::new();
+        h.update(&"hello world");
+        assert_eq!(h.finish().as_u64(), 0x33aad8805c476b70);
+
+        // The empty hasher's finalize is also pinned — finalize-on-empty
+        // is a well-defined BLAKE3 output, not a per-process seed.
+        let empty = FingerprintHasher::new();
+        assert_eq!(empty.finish().as_u64(), 0xa6a1f9f5b94913af);
     }
 }

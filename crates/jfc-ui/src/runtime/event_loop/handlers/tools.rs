@@ -590,11 +590,17 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
                 "mixed-mode pause_turn: local tools complete, resuming server-side sampling loop"
             );
             stream::continue_after_pause_turn(app, tx).await;
-        } else if app.queued_prompts.iter().any(|queued| !queued.is_meta) {
+        } else if !app.queued_prompts.is_empty() {
+            // Drain whenever ANY prompt is queued (meta OR non-meta).
+            // Previously this only fired for non-meta prompts, which
+            // meant slash commands (`/tasks`, `/market`, local actions)
+            // submitted mid-stream would sit in the queue until the
+            // entire agentic loop concluded — making the TUI appear
+            // to silently ignore them.
             tracing::info!(
                 target: "jfc::stream",
                 queued = app.queued_prompts.len(),
-                "agentic loop yielding to queued user prompt before continuation"
+                "agentic loop yielding to queued prompt before continuation"
             );
             drain_queued_prompts(app, tx).await;
         } else {

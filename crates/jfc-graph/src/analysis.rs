@@ -1352,6 +1352,7 @@ pub fn to_dot(graph: &CodeGraph) -> String {
                 crate::nodes::NodeKind::Enum => "diamond",
                 crate::nodes::NodeKind::Module => "folder",
                 crate::nodes::NodeKind::Trait => "ellipse",
+                _ => "ellipse",
             };
             let label = format!("{}\\n({:?})", data.name, data.kind);
             out.push_str(&format!(
@@ -1372,6 +1373,9 @@ pub fn to_dot(graph: &CodeGraph) -> String {
             EdgeKind::UnresolvedCall(name) => name.as_str(),
             EdgeKind::UsesType => "uses_type",
             EdgeKind::References => "refs",
+            EdgeKind::Extends => "extends",
+            EdgeKind::Returns => "returns",
+            EdgeKind::TypeOf => "type_of",
             EdgeKind::Contains => "contains",
             EdgeKind::Implements => "implements",
             EdgeKind::ExternalCall(crate_name, _) => crate_name.as_str(),
@@ -1414,6 +1418,7 @@ pub fn to_dot_subgraph(graph: &CodeGraph, nodes: &[NodeId]) -> String {
                     crate::nodes::NodeKind::Enum => "diamond",
                     crate::nodes::NodeKind::Module => "folder",
                     crate::nodes::NodeKind::Trait => "ellipse",
+                    _ => "ellipse",
                 };
                 out.push_str(&format!(
                     "    n{} [label=\"{}\", shape={}];\n",
@@ -1441,6 +1446,9 @@ pub fn to_dot_subgraph(graph: &CodeGraph, nodes: &[NodeId]) -> String {
                     EdgeKind::Contains => "contains",
                     EdgeKind::Implements => "implements",
                     EdgeKind::ExternalCall(crate_name, _) => crate_name.as_str(),
+                    EdgeKind::Extends => "extends",
+                    EdgeKind::Returns => "returns",
+                    EdgeKind::TypeOf => "type_of",
                 };
                 out.push_str(&format!(
                     "    n{} -> n{} [label=\"{}\"];\n",

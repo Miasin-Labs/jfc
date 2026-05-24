@@ -165,6 +165,8 @@ pub(crate) fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
             risk,
             parent_id,
             kind,
+            tags: _,
+            priority: _,
         } => SerializedToolInput::TaskCreate {
             subject: subject.clone(),
             description: description.clone(),
@@ -187,6 +189,9 @@ pub(crate) fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
             risk,
             parent_id,
             kind,
+            blocked_by: _,
+            tags: _,
+            priority: _,
         } => SerializedToolInput::TaskUpdate {
             task_id: task_id.clone(),
             status: status.clone(),

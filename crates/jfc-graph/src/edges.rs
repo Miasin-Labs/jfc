@@ -15,12 +15,18 @@ pub enum EdgeKind {
     UsesType,
     /// References (any reference relationship)
     References,
-    /// Contains (module → function, struct → impl methods)
+    /// Contains (module → function, struct → impl methods, enum → variants)
     Contains,
     /// Implements (struct → trait)
     Implements,
     /// Call to external crate (crate_name, path)
     ExternalCall(String, String),
+    /// Extends / inherits from (class → parent class; not used in Rust)
+    Extends,
+    /// Function returns this type
+    Returns,
+    /// Variable/parameter has this type
+    TypeOf,
 }
 
 impl EdgeKind {
@@ -44,26 +50,17 @@ impl EdgeKind {
             EdgeKind::UnresolvedCall(_) => source == NodeKind::Function,
             EdgeKind::UsesType => {
                 source == NodeKind::Function
-                    && matches!(target, NodeKind::Struct | NodeKind::Enum | NodeKind::Trait)
+                    && matches!(target, NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Interface | NodeKind::TypeAlias)
             }
             EdgeKind::References => true,
-            EdgeKind::Contains => {
-                matches!(
-                    source,
-                    NodeKind::Module | NodeKind::Struct | NodeKind::Enum | NodeKind::Trait
-                ) && matches!(
-                    target,
-                    NodeKind::Function
-                        | NodeKind::Struct
-                        | NodeKind::Enum
-                        | NodeKind::Trait
-                        | NodeKind::Module
-                )
-            }
+            EdgeKind::Contains => true, // relaxed: any container can contain any child
             EdgeKind::Implements => {
-                matches!(source, NodeKind::Struct | NodeKind::Enum) && target == NodeKind::Trait
+                matches!(source, NodeKind::Struct | NodeKind::Enum) && matches!(target, NodeKind::Trait | NodeKind::Interface)
             }
             EdgeKind::ExternalCall(_, _) => source == NodeKind::Function,
+            EdgeKind::Extends => true,
+            EdgeKind::Returns => source == NodeKind::Function,
+            EdgeKind::TypeOf => true,
         }
     }
 }

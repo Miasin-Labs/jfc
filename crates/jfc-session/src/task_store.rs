@@ -394,7 +394,7 @@ impl TaskStore {
             return;
         }
         if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).ok();
         }
         if let Ok(json) = serde_json::to_string_pretty(inner) {
             // Unique temp name (pid + nanos) so two processes persisting
@@ -483,6 +483,8 @@ impl TaskStore {
             risk: None,
             parent_id: None,
             kind: None,
+            tags: Vec::new(),
+            priority: None,
         };
         inner.tasks.insert(id, task.clone());
         self.persist(&inner);
@@ -568,6 +570,12 @@ impl TaskStore {
         if let Some(k) = patch.kind {
             task.kind = Some(k);
         }
+        if let Some(tags) = patch.tags {
+            task.tags = tags;
+        }
+        if let Some(p) = patch.priority {
+            task.priority = Some(p);
+        }
 
         let updated = task.clone();
         // If we just completed this task, anything it blocks may now be
@@ -598,10 +606,8 @@ impl TaskStore {
         Ok(())
     }
 
-    /// All tasks, sorted by creation order. Excludes Deleted unless asked.
-    /// Sort key is the numeric suffix of the task id (`t1`, `t2`, …) so we
-    /// get strict monotonic order even when multiple creates fall in the
-    /// same millisecond.
+    /// All tasks, sorted by priority (lower = higher priority), then creation order.
+    /// Excludes Deleted unless asked.
     pub fn list(&self, deleted_filter: DeletedFilter) -> Vec<Task> {
         let mut out: Vec<Task> = self
             .inner
@@ -612,11 +618,14 @@ impl TaskStore {
             .filter(|t| deleted_filter.includes_deleted() || t.status != TaskStatus::Deleted)
             .cloned()
             .collect();
-        out.sort_by_key(|t| {
-            t.id.as_str()
-                .strip_prefix('t')
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0)
+        out.sort_by(|a, b| {
+            let pa = a.priority.unwrap_or(5);
+            let pb = b.priority.unwrap_or(5);
+            pa.cmp(&pb).then_with(|| {
+                let id_a = a.id.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                let id_b = b.id.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                id_a.cmp(&id_b)
+            })
         });
         tracing::trace!(
             target: "jfc::tasks",
@@ -628,7 +637,7 @@ impl TaskStore {
     }
 
     /// Atomically claim the first pending, unowned task whose blockers are
-    /// all completed. Used by in-process teammates while idle-polling.
+    /// all completed. Prefers higher-priority (lower number) tasks.
     pub fn claim_next_available(&self, owner: &str) -> Option<Task> {
         let mut inner = self.inner.lock().unwrap();
         let completed = inner
@@ -638,11 +647,16 @@ impl TaskStore {
             .map(|t| t.id.clone())
             .collect::<BTreeSet<_>>();
         let mut ids = inner.tasks.keys().cloned().collect::<Vec<_>>();
-        ids.sort_by_key(|id| {
-            id.as_str()
-                .strip_prefix('t')
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0)
+        ids.sort_by(|a, b| {
+            let task_a = inner.tasks.get(a.as_str());
+            let task_b = inner.tasks.get(b.as_str());
+            let pa = task_a.and_then(|t| t.priority).unwrap_or(5);
+            let pb = task_b.and_then(|t| t.priority).unwrap_or(5);
+            pa.cmp(&pb).then_with(|| {
+                let id_a = a.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                let id_b = b.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                id_a.cmp(&id_b)
+            })
         });
         let claim_id = ids.into_iter().find(|id| {
             inner.tasks.get(id.as_str()).is_some_and(|task| {
@@ -1081,7 +1095,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let _ = t3;
+        drop(t3);
         let c = store.counts();
         assert_eq!(c.completed, 1);
         assert_eq!(c.in_progress, 1);

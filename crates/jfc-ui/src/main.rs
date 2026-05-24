@@ -29,6 +29,7 @@ mod inline_tools;
 mod input;
 mod keybindings;
 mod keywords;
+mod learn_lifecycle;
 mod lsp_client;
 mod lsp_rpc;
 mod managed_session;

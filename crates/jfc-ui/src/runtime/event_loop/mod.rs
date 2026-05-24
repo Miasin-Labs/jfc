@@ -350,6 +350,9 @@ pub(crate) async fn run(
     }
     restore_persistent_background_agents(&mut app);
 
+    // Check for pending historian transcripts from previous sessions.
+    crate::learn_lifecycle::on_session_start(&app.cwd);
+
     // Apply persisted reasoning_effort from config.toml. MUST run AFTER
     // the --continue/--resume block above (which may switch `app.model` to
     // the session's saved model) so the effort resolves for the ACTUAL
@@ -383,7 +386,7 @@ pub(crate) async fn run(
         let name = ProviderId::from(p.name());
         tokio::spawn(async move {
             let models = p.fetch_models().await.unwrap_or_default();
-            let _ = tx
+            _ = tx
                 .send(AppEvent::Provider(ProviderEvent::ModelsLoaded {
                     provider: name,
                     models,
@@ -400,7 +403,7 @@ pub(crate) async fn run(
         let tx = tx.clone();
         tokio::spawn(async move {
             if let Ok(profile) = oauth.fetch_profile().await {
-                let _ = tx
+                _ = tx
                     .send(AppEvent::Provider(ProviderEvent::ProfileLoaded {
                         seat_tier: profile.seat_tier,
                         subscription_type: profile.subscription_type,
@@ -418,7 +421,7 @@ pub(crate) async fn run(
             while let Some(ev) = reader.next().await {
                 match ev {
                     Ok(ev) => {
-                        let _ = tx.send(AppEvent::Ui(UiEvent::Term(ev))).await;
+                        _ = tx.send(AppEvent::Ui(UiEvent::Term(ev))).await;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -443,7 +446,7 @@ pub(crate) async fn run(
                     IDLE_TICK_MS
                 };
                 tokio::time::sleep(Duration::from_millis(ms)).await;
-                let _ = tx.try_send(AppEvent::Ui(UiEvent::Tick));
+                _ = tx.try_send(AppEvent::Ui(UiEvent::Tick));
             }
         });
     }
@@ -454,7 +457,7 @@ pub(crate) async fn run(
         let mut teammate_rx = app.teammate_event_rx.take().unwrap();
         tokio::spawn(async move {
             while let Some(ev) = teammate_rx.recv().await {
-                let _ = tx.send(AppEvent::Team(TeamEvent::Runner(ev))).await;
+                _ = tx.send(AppEvent::Team(TeamEvent::Runner(ev))).await;
             }
         });
     }
@@ -513,7 +516,7 @@ pub(crate) async fn run(
                     },
                 })
                 .collect();
-            let _ = tx_mcp
+            _ = tx_mcp
                 .send(AppEvent::Provider(ProviderEvent::McpUpdated { servers }))
                 .await;
         });
@@ -606,7 +609,7 @@ pub(crate) async fn run(
                 } else {
                     format!("stream task cancelled: {join_err}")
                 };
-                let _ = tx_guard
+                _ = tx_guard
                     .send(AppEvent::Stream(StreamEvent::Error(msg)))
                     .await;
             }
@@ -908,7 +911,7 @@ pub(crate) async fn run(
                 app.sync_task_completions();
                 draw_synchronized(terminal, &mut app)?;
                 set_terminal_title(&app);
-                let _ = execute!(
+                _ = execute!(
                     io::stdout(),
                     if want_streaming_cursor {
                         SetCursorStyle::SteadyBlock
@@ -928,6 +931,12 @@ pub(crate) async fn run(
             pending_draw = true;
         }
     }
+
+    // Post-session learning: fire historian to extract facts from this session's
+    // transcript. Runs synchronously (blocking on exit is acceptable — it's a
+    // single LLM call, ~2-5s) so the user's learning is captured before the
+    // process exits. Best-effort: failures are logged, never surfaced.
+    crate::learn_lifecycle::on_session_end(&app.messages, &app.cwd);
 
     Ok(())
 }

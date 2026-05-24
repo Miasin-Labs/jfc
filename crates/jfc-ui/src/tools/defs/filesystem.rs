@@ -26,7 +26,7 @@ pub fn filesystem_tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "Read".into(),
-            description: "Read a file or directory from the local filesystem. Returns file contents with line numbers prefixed.".into(),
+            description: "Read a file or directory from the local filesystem. Returns file contents with line numbers prefixed. For reading MULTIPLE related symbols at once, prefer `graph_explore` (one call replaces 5+ Read calls). For checking a symbol's signature/location without reading the whole file, use `graph_node`.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -137,7 +137,7 @@ pub fn filesystem_tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "Grep".into(),
-            description: "Fast content search using ripgrep. Searches file contents using regular expressions.".into(),
+            description: "Fast content search using ripgrep. Searches file contents using regular expressions. NOTE: For finding symbols by name (functions, structs, enums), prefer `graph_search` — it's faster and returns exact locations. For finding all callers/callees of a function, use `graph_callers`/`graph_callees` instead of grepping for the function name. Reserve Grep for string literals, config values, error messages, comments, and non-identifier patterns.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

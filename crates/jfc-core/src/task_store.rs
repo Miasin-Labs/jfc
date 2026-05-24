@@ -163,6 +163,10 @@ pub struct Task {
     pub parent_id: Option<TodoTaskId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<TaskKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
 }
 
 impl Task {
@@ -199,6 +203,8 @@ pub struct TaskPatch {
     pub risk: Option<TaskRisk>,
     pub parent_id: Option<TodoTaskId>,
     pub kind: Option<TaskKind>,
+    pub tags: Option<Vec<String>>,
+    pub priority: Option<u8>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]

@@ -980,9 +980,14 @@ fn parse_node_kind(s: &str, pos: usize) -> Result<NodeKind, ParseError> {
         "Enum" => Ok(NodeKind::Enum),
         "Module" => Ok(NodeKind::Module),
         "Trait" => Ok(NodeKind::Trait),
+        "EnumVariant" => Ok(NodeKind::EnumVariant),
+        "Field" => Ok(NodeKind::Field),
+        "TypeAlias" => Ok(NodeKind::TypeAlias),
+        "Constant" => Ok(NodeKind::Constant),
+        "Interface" => Ok(NodeKind::Interface),
         _ => Err(ParseError::new(
             pos,
-            format!("unknown node kind '{s}'. Valid kinds: Function, Struct, Enum, Module, Trait"),
+            format!("unknown node kind '{s}'. Valid kinds: Function, Struct, Enum, Module, Trait, EnumVariant, Field, TypeAlias, Constant, Interface"),
         )),
     }
 }
@@ -1407,11 +1412,14 @@ fn parse_edge_kind(s: &str, pos: usize) -> Result<EdgeKind, ParseError> {
         "Contains" => Ok(EdgeKind::Contains),
         "Implements" => Ok(EdgeKind::Implements),
         "ExternalCall" => Ok(EdgeKind::ExternalCall(String::new(), String::new())),
+        "Extends" => Ok(EdgeKind::Extends),
+        "Returns" => Ok(EdgeKind::Returns),
+        "TypeOf" => Ok(EdgeKind::TypeOf),
         _ => Err(ParseError::new(
             pos,
             format!(
                 "unknown edge kind '{s}'. Valid: Calls, UnresolvedCall, UsesType, \
-                 References, Contains, Implements, ExternalCall"
+                 References, Contains, Implements, ExternalCall, Extends, Returns, TypeOf"
             ),
         )),
     }
@@ -1495,6 +1503,11 @@ impl QueryResult {
                     NodeKind::Enum => "enum",
                     NodeKind::Trait => "trait",
                     NodeKind::Module => "mod",
+                    NodeKind::EnumVariant => "variant",
+                    NodeKind::Field => "field",
+                    NodeKind::TypeAlias => "type",
+                    NodeKind::Constant => "const",
+                    NodeKind::Interface => "interface",
                 };
                 Some(format!("{}:{}", prefix, node.qualified_name))
             })

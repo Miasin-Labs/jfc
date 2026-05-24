@@ -17,6 +17,8 @@ pub(super) fn execute_task_create(
     risk: Option<String>,
     parent_id: Option<String>,
     kind: Option<String>,
+    tags: Vec<String>,
+    priority: Option<u8>,
 ) -> ExecutionResult {
     debug!(target: "jfc::tools", %subject, blocked_count = blocked_by.len(), "task_create: creating");
     let Some(store) = store else {
@@ -41,7 +43,9 @@ pub(super) fn execute_task_create(
                 || verification_command.is_some()
                 || parsed_risk.is_some()
                 || parent_id.is_some()
-                || parsed_kind.is_some();
+                || parsed_kind.is_some()
+                || !tags.is_empty()
+                || priority.is_some();
             if has_extras {
                 let patch = TaskPatch {
                     acceptance_criteria,
@@ -49,6 +53,8 @@ pub(super) fn execute_task_create(
                     risk: parsed_risk,
                     parent_id: parent_id.map(jfc_session::TaskId::from),
                     kind: parsed_kind,
+                    tags: if tags.is_empty() { None } else { Some(tags) },
+                    priority,
                     ..Default::default()
                 };
                 match store.update(task.id.as_str(), patch) {
@@ -92,6 +98,9 @@ pub(super) fn execute_task_update(
     risk: Option<String>,
     parent_id: Option<String>,
     kind: Option<String>,
+    blocked_by: Vec<String>,
+    tags: Vec<String>,
+    priority: Option<u8>,
 ) -> ExecutionResult {
     debug!(target: "jfc::tools", task_id, status = status.as_deref(), "task_update: updating");
     let Some(store) = store else {
@@ -120,6 +129,9 @@ pub(super) fn execute_task_update(
         risk: risk.as_deref().and_then(parse_risk),
         parent_id: parent_id.map(jfc_session::TaskId::from),
         kind: kind.as_deref().and_then(parse_kind),
+        blocked_by: if blocked_by.is_empty() { None } else { Some(blocked_by) },
+        tags: if tags.is_empty() { None } else { Some(tags) },
+        priority,
         ..Default::default()
     };
     match store.update(task_id, patch) {
@@ -259,9 +271,9 @@ pub(super) fn execute_task_done(store: Option<Arc<TaskStore>>, task_id: &str) ->
     }
 
     // Evaluator gate: scan recently-modified files for stub patterns
-    // (todo!(), unimplemented!(), etc.). Only fires when a git root is
+    // (e.g. placeholder macros). Only fires when a git root is
     // discoverable AND we're not in a test environment (tests run in the
-    // repo itself and would always find TODOs in unrelated files).
+    // repo itself and would always find placeholders in unrelated files).
     // Disable with JFC_SKIP_EVALUATOR=1 for CI/test contexts.
     if std::env::var("JFC_SKIP_EVALUATOR").is_err()
         && !cfg!(test)

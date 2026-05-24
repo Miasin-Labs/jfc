@@ -159,6 +159,11 @@ fn parse_code_index_kind(kind: &str) -> Option<NodeKind> {
         "enum" => Some(NodeKind::Enum),
         "mod" | "module" => Some(NodeKind::Module),
         "trait" => Some(NodeKind::Trait),
+        "enumvariant" | "variant" => Some(NodeKind::EnumVariant),
+        "field" | "property" => Some(NodeKind::Field),
+        "typealias" | "type" => Some(NodeKind::TypeAlias),
+        "constant" | "const" | "static" => Some(NodeKind::Constant),
+        "interface" => Some(NodeKind::Interface),
         _ => None,
     }
 }
@@ -204,6 +209,11 @@ fn code_index_kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Enum => "enum",
         NodeKind::Module => "mod",
         NodeKind::Trait => "trait",
+        NodeKind::EnumVariant => "variant",
+        NodeKind::Field => "field",
+        NodeKind::TypeAlias => "type",
+        NodeKind::Constant => "const",
+        NodeKind::Interface => "interface",
     }
 }
 
@@ -225,6 +235,11 @@ fn code_index_handle(node: &NodeData) -> String {
             NodeKind::Enum => "enum",
             NodeKind::Module => "mod",
             NodeKind::Trait => "trait",
+            NodeKind::EnumVariant => "variant",
+            NodeKind::Field => "field",
+            NodeKind::TypeAlias => "type",
+            NodeKind::Constant => "const",
+            NodeKind::Interface => "interface",
         },
         node.qualified_name
     )
@@ -264,6 +279,7 @@ fn code_index_metadata_summary(node: &NodeData) -> Vec<String> {
             }
         }
         NodeKind::Module => {}
+        _ => {}
     }
     parts
 }

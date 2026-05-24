@@ -424,7 +424,248 @@ fn kind_prefix(kind: NodeKind) -> &'static str {
         NodeKind::Enum => "enum",
         NodeKind::Module => "mod",
         NodeKind::Trait => "trait",
+        NodeKind::EnumVariant => "variant",
+        NodeKind::Field => "field",
+        NodeKind::TypeAlias => "type",
+        NodeKind::Constant => "const",
+        NodeKind::Interface => "interface",
     }
+}
+
+/// Bounded Levenshtein edit distance. Returns `max_dist + 1` early when
+/// the distance is known to exceed `max_dist`. O(min(len(a),len(b))) memory.
+/// Compares case-folded inputs.
+pub fn bounded_edit_distance(a: &str, b: &str, max_dist: usize) -> usize {
+    let a = a.to_ascii_lowercase();
+    let b = b.to_ascii_lowercase();
+    let al = a.len();
+    let bl = b.len();
+    if a == b {
+        return 0;
+    }
+    if al.abs_diff(bl) > max_dist {
+        return max_dist + 1;
+    }
+    if al == 0 {
+        return bl;
+    }
+    if bl == 0 {
+        return al;
+    }
+
+    let mut prev: Vec<usize> = (0..=bl).collect();
+    let mut cur = vec![0; bl + 1];
+
+    for (i, ca) in a.bytes().enumerate() {
+        cur[0] = i + 1;
+        let mut row_min = cur[0];
+        for (j, cb) in b.bytes().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            let ins = cur[j] + 1;
+            let del = prev[j + 1] + 1;
+            let sub = prev[j] + cost;
+            cur[j + 1] = ins.min(del).min(sub);
+            if cur[j + 1] < row_min {
+                row_min = cur[j + 1];
+            }
+        }
+        if row_min > max_dist {
+            return max_dist + 1;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[bl]
+}
+
+/// Fuzzy search over all node names in the graph. Returns (NodeId, distance)
+/// pairs sorted by distance then name length (shorter = better).
+pub fn fuzzy_search(
+    graph: &crate::graph::CodeGraph,
+    query: &str,
+    max_dist: usize,
+    limit: usize,
+) -> Vec<(crate::nodes::NodeId, usize)> {
+    let mut results = Vec::new();
+    let lower_query = query.to_ascii_lowercase();
+
+    for id in graph.all_node_ids() {
+        let Some(node) = graph.get_node(id) else { continue };
+        let name_lower = node.name.to_ascii_lowercase();
+        // Try substring first (distance 0 equivalent)
+        if name_lower.contains(&lower_query) {
+            results.push((id.clone(), 0));
+            continue;
+        }
+        // Only fuzzy-match if names are similar length
+        if name_lower.len().abs_diff(lower_query.len()) > max_dist {
+            continue;
+        }
+        let dist = bounded_edit_distance(&node.name, query, max_dist);
+        if dist <= max_dist {
+            results.push((id.clone(), dist));
+        }
+    }
+
+    results.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| {
+        let na = graph.get_node(&a.0).map(|n| n.name.len()).unwrap_or(0);
+        let nb = graph.get_node(&b.0).map(|n| n.name.len()).unwrap_or(0);
+        na.cmp(&nb)
+    }));
+    results.truncate(limit);
+    results
+}
+
+/// A parsed search query, separated into free-form `text` plus structured
+/// filters extracted from `kind:`, `path:`, and `name:` field prefixes.
+///
+/// Constructed by [`parse_query`]; consumed by [`filtered_search`]. Empty
+/// filter vectors mean "no constraint on this axis".
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ParsedQuery {
+    /// Whitespace-joined remainder after pulling out recognized prefixes.
+    pub text: String,
+    /// Allowed [`NodeKind`]s from `kind:` tokens. Empty = any kind.
+    pub kinds: Vec<crate::nodes::NodeKind>,
+    /// `path:` substrings; a node matches if its `file_path` contains
+    /// at least one (case-insensitive).
+    pub path_filters: Vec<String>,
+    /// `name:` substrings; a node matches if its `name` contains at
+    /// least one (case-insensitive).
+    pub name_filters: Vec<String>,
+}
+
+impl ParsedQuery {
+    /// `true` iff any structured filter (kind/path/name) is populated.
+    /// Used by callers to decide between filtered vs. legacy search paths.
+    pub fn has_filters(&self) -> bool {
+        !self.kinds.is_empty() || !self.path_filters.is_empty() || !self.name_filters.is_empty()
+    }
+}
+
+/// Map a `kind:foo` token's payload to a [`NodeKind`].
+///
+/// Recognises the same prefixes [`kind_prefix`] emits, plus a few
+/// human-friendly aliases (`function`, `variant`, `type`, `const`).
+/// Returns `None` for unknown payloads so the caller can pass the
+/// original `kind:foo` token through to `text` untouched.
+fn parse_kind_token(payload: &str) -> Option<crate::nodes::NodeKind> {
+    use crate::nodes::NodeKind;
+    match payload.to_ascii_lowercase().as_str() {
+        "function" | "fn" => Some(NodeKind::Function),
+        "struct" => Some(NodeKind::Struct),
+        "enum" => Some(NodeKind::Enum),
+        "trait" => Some(NodeKind::Trait),
+        "module" | "mod" => Some(NodeKind::Module),
+        "variant" | "enumvariant" => Some(NodeKind::EnumVariant),
+        "field" => Some(NodeKind::Field),
+        "type" | "typealias" => Some(NodeKind::TypeAlias),
+        "const" | "constant" => Some(NodeKind::Constant),
+        "interface" => Some(NodeKind::Interface),
+        _ => None,
+    }
+}
+
+/// Parse a raw user query into a [`ParsedQuery`].
+///
+/// Whitespace-splits `raw`. Tokens matching `kind:<v>`, `path:<v>`,
+/// `name:<v>` are pulled into the corresponding filter vectors;
+/// unknown `foo:bar` prefixes and bare words fall through to `text`
+/// (joined with single spaces, original order preserved).
+///
+/// An unknown `kind:` payload (e.g. `kind:thingamajig`) also falls
+/// through to `text` so the user sees their query echoed verbatim
+/// rather than silently dropped.
+pub fn parse_query(raw: &str) -> ParsedQuery {
+    let mut parsed = ParsedQuery::default();
+    let mut text_parts: Vec<&str> = Vec::new();
+
+    for token in raw.split_whitespace() {
+        if let Some(rest) = token.strip_prefix("kind:") {
+            if let Some(kind) = parse_kind_token(rest) {
+                parsed.kinds.push(kind);
+                continue;
+            }
+        } else if let Some(rest) = token.strip_prefix("path:") {
+            if !rest.is_empty() {
+                parsed.path_filters.push(rest.to_string());
+                continue;
+            }
+        } else if let Some(rest) = token.strip_prefix("name:") {
+            if !rest.is_empty() {
+                parsed.name_filters.push(rest.to_string());
+                continue;
+            }
+        }
+        text_parts.push(token);
+    }
+
+    parsed.text = text_parts.join(" ");
+    parsed
+}
+
+/// Resolve `query.text` (if any) then apply the structured filters.
+///
+/// - If `text` is empty, the candidate set is *every* node in the graph.
+/// - If `text` is non-empty, candidates come from
+///   [`crate::context::resolve_symbol`].
+/// - Each populated filter list narrows the candidates: a node passes a
+///   filter list iff at least one entry matches (logical OR within a
+///   list; AND across lists). Path and name comparisons are
+///   case-insensitive substring checks.
+/// - Output is truncated to `limit` while preserving resolver order.
+pub fn filtered_search(
+    graph: &CodeGraph,
+    query: &ParsedQuery,
+    limit: usize,
+) -> Vec<crate::nodes::NodeId> {
+    let candidates: Vec<crate::nodes::NodeId> = if query.text.is_empty() {
+        graph.all_node_ids().into_iter().cloned().collect()
+    } else {
+        crate::context::resolve_symbol(graph, &query.text)
+    };
+
+    let lower_paths: Vec<String> = query
+        .path_filters
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    let lower_names: Vec<String> = query
+        .name_filters
+        .iter()
+        .map(|n| n.to_ascii_lowercase())
+        .collect();
+
+    let mut out: Vec<crate::nodes::NodeId> = Vec::new();
+    for id in candidates {
+        let Some(node) = graph.get_node(&id) else {
+            continue;
+        };
+
+        if !query.kinds.is_empty() && !query.kinds.contains(&node.kind) {
+            continue;
+        }
+
+        if !lower_paths.is_empty() {
+            let path_lower = node.file_path.to_string_lossy().to_ascii_lowercase();
+            if !lower_paths.iter().any(|p| path_lower.contains(p)) {
+                continue;
+            }
+        }
+
+        if !lower_names.is_empty() {
+            let name_lower = node.name.to_ascii_lowercase();
+            if !lower_names.iter().any(|n| name_lower.contains(n)) {
+                continue;
+            }
+        }
+
+        out.push(id);
+        if out.len() >= limit {
+            break;
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -871,5 +1112,237 @@ mod tests {
             assert_eq!(e1.kind, e2.kind);
             assert_eq!(e1.file_path, e2.file_path);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // bounded_edit_distance tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn edit_distance_identical_is_zero() {
+        assert_eq!(bounded_edit_distance("foo", "foo", 5), 0);
+        // Case-folded: equal modulo case.
+        assert_eq!(bounded_edit_distance("Foo", "fOO", 5), 0);
+    }
+
+    #[test]
+    fn edit_distance_empty_inputs() {
+        assert_eq!(bounded_edit_distance("", "", 3), 0);
+        assert_eq!(bounded_edit_distance("", "abc", 5), 3);
+        assert_eq!(bounded_edit_distance("abc", "", 5), 3);
+    }
+
+    #[test]
+    fn edit_distance_basic_edits() {
+        // single substitution
+        assert_eq!(bounded_edit_distance("cat", "bat", 5), 1);
+        // single insertion
+        assert_eq!(bounded_edit_distance("cat", "cats", 5), 1);
+        // single deletion
+        assert_eq!(bounded_edit_distance("cats", "cat", 5), 1);
+        // classic kitten/sitting = 3
+        assert_eq!(bounded_edit_distance("kitten", "sitting", 5), 3);
+    }
+
+    #[test]
+    fn edit_distance_early_exit_on_length_gap() {
+        // Length diff alone exceeds bound; must short-circuit to max+1.
+        let d = bounded_edit_distance("a", "abcdefghij", 3);
+        assert_eq!(d, 4, "len-gap short-circuit should return max_dist+1");
+    }
+
+    #[test]
+    fn edit_distance_early_exit_on_row_min() {
+        // Strings of equal length but very different content; row-min
+        // pruning kicks in.
+        let d = bounded_edit_distance("aaaaaa", "bbbbbb", 2);
+        assert_eq!(d, 3, "row-min pruning should return max_dist+1");
+    }
+
+    #[test]
+    fn edit_distance_at_exact_bound() {
+        // Distance == max_dist must be reported as-is, not pruned.
+        assert_eq!(bounded_edit_distance("cat", "bat", 1), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // parse_query tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn parse_query_empty_input() {
+        let p = parse_query("");
+        assert_eq!(p.text, "");
+        assert!(p.kinds.is_empty());
+        assert!(p.path_filters.is_empty());
+        assert!(p.name_filters.is_empty());
+        assert!(!p.has_filters());
+    }
+
+    #[test]
+    fn parse_query_plain_text_only() {
+        let p = parse_query("foo bar baz");
+        assert_eq!(p.text, "foo bar baz");
+        assert!(!p.has_filters());
+    }
+
+    #[test]
+    fn parse_query_extracts_kind() {
+        let p = parse_query("kind:function authenticate");
+        assert_eq!(p.text, "authenticate");
+        assert_eq!(p.kinds, vec![NodeKind::Function]);
+        assert!(p.has_filters());
+    }
+
+    #[test]
+    fn parse_query_extracts_path_and_name() {
+        let p = parse_query("path:src/api name:auth handler");
+        assert_eq!(p.text, "handler");
+        assert_eq!(p.path_filters, vec!["src/api".to_string()]);
+        assert_eq!(p.name_filters, vec!["auth".to_string()]);
+        assert!(p.has_filters());
+    }
+
+    #[test]
+    fn parse_query_recognizes_all_kinds() {
+        let p = parse_query(
+            "kind:function kind:struct kind:enum kind:trait kind:module \
+             kind:variant kind:field kind:type kind:const kind:interface",
+        );
+        assert_eq!(p.text, "");
+        assert_eq!(
+            p.kinds,
+            vec![
+                NodeKind::Function,
+                NodeKind::Struct,
+                NodeKind::Enum,
+                NodeKind::Trait,
+                NodeKind::Module,
+                NodeKind::EnumVariant,
+                NodeKind::Field,
+                NodeKind::TypeAlias,
+                NodeKind::Constant,
+                NodeKind::Interface,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_query_passes_through_unknown_prefix() {
+        // `foo:bar` is not a recognized prefix; must show up verbatim in text.
+        let p = parse_query("foo:bar real query");
+        assert_eq!(p.text, "foo:bar real query");
+        assert!(!p.has_filters());
+    }
+
+    #[test]
+    fn parse_query_passes_through_unknown_kind_payload() {
+        // Recognized prefix but bogus payload: keep the token in text rather
+        // than silently dropping it.
+        let p = parse_query("kind:thingamajig leftover");
+        assert_eq!(p.text, "kind:thingamajig leftover");
+        assert!(p.kinds.is_empty());
+        assert!(!p.has_filters());
+    }
+
+    #[test]
+    fn parse_query_kind_is_case_insensitive() {
+        let p = parse_query("kind:Function kind:STRUCT");
+        assert_eq!(p.kinds, vec![NodeKind::Function, NodeKind::Struct]);
+    }
+
+    #[test]
+    fn parse_query_multiple_filters_accumulate() {
+        let p = parse_query("kind:fn kind:struct path:src/a path:src/b name:foo name:bar query");
+        assert_eq!(p.text, "query");
+        assert_eq!(p.kinds, vec![NodeKind::Function, NodeKind::Struct]);
+        assert_eq!(p.path_filters, vec!["src/a".to_string(), "src/b".to_string()]);
+        assert_eq!(p.name_filters, vec!["foo".to_string(), "bar".to_string()]);
+    }
+
+    #[test]
+    fn parse_query_empty_path_or_name_payload_passes_through() {
+        // `path:` with no payload is meaningless; leave it in text so the
+        // user sees their typo.
+        let p = parse_query("path: name: legitimate");
+        assert_eq!(p.text, "path: name: legitimate");
+        assert!(p.path_filters.is_empty());
+        assert!(p.name_filters.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // filtered_search tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn filtered_search_kind_only_returns_all_matching_kind() {
+        let graph = build_test_graph();
+        let query = parse_query("kind:function");
+        let hits = filtered_search(&graph, &query, 50);
+        // foo and bar are the two functions in the test graph.
+        assert_eq!(hits.len(), 2);
+        for id in &hits {
+            assert_eq!(graph.get_node(id).unwrap().kind, NodeKind::Function);
+        }
+    }
+
+    #[test]
+    fn filtered_search_path_filter_narrows_set() {
+        let graph = build_test_graph();
+        let query = parse_query("path:sample.rs");
+        let hits = filtered_search(&graph, &query, 50);
+        assert_eq!(hits.len(), 2, "only nodes in src/sample.rs should match");
+        for id in &hits {
+            let node = graph.get_node(id).unwrap();
+            assert!(node.file_path.to_string_lossy().contains("sample.rs"));
+        }
+    }
+
+    #[test]
+    fn filtered_search_name_filter_case_insensitive() {
+        let graph = build_test_graph();
+        let query = parse_query("name:CONFIG");
+        let hits = filtered_search(&graph, &query, 50);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(graph.get_node(&hits[0]).unwrap().name, "Config");
+    }
+
+    #[test]
+    fn filtered_search_combined_filters_intersect_across_axes() {
+        let graph = build_test_graph();
+        // kind=function AND path=sample.rs AND name=foo → just foo.
+        let query = parse_query("kind:function path:sample.rs name:foo");
+        let hits = filtered_search(&graph, &query, 50);
+        assert_eq!(hits.len(), 1);
+        let node = graph.get_node(&hits[0]).unwrap();
+        assert_eq!(node.name, "foo");
+        assert_eq!(node.kind, NodeKind::Function);
+    }
+
+    #[test]
+    fn filtered_search_respects_limit() {
+        let graph = build_test_graph();
+        let query = parse_query("kind:function");
+        let hits = filtered_search(&graph, &query, 1);
+        assert_eq!(hits.len(), 1, "limit must cap output");
+    }
+
+    #[test]
+    fn filtered_search_empty_text_walks_all_nodes() {
+        let graph = build_test_graph();
+        // No text, just a kind filter → enumerate the whole graph and keep
+        // nodes matching the kind.
+        let query = parse_query("kind:struct");
+        let hits = filtered_search(&graph, &query, 50);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(graph.get_node(&hits[0]).unwrap().kind, NodeKind::Struct);
+    }
+
+    #[test]
+    fn filtered_search_no_matches_returns_empty() {
+        let graph = build_test_graph();
+        let query = parse_query("kind:function name:does_not_exist_anywhere");
+        let hits = filtered_search(&graph, &query, 50);
+        assert!(hits.is_empty());
     }
 }

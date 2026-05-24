@@ -42,7 +42,7 @@ fn code_index_def() -> ToolDef {
                 "kind": {
                     "type": "string",
                     "description": "Optional symbol kind filter.",
-                    "enum": ["function", "struct", "enum", "module", "trait"]
+                    "enum": ["function", "struct", "enum", "module", "trait", "enum_variant", "field", "type_alias", "constant"]
                 },
                 "max_entries": {
                     "type": "number",

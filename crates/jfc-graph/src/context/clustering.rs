@@ -133,6 +133,11 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Enum => "enum",
         NodeKind::Trait => "trait",
         NodeKind::Module => "mod",
+        NodeKind::EnumVariant => "variant",
+        NodeKind::Field => "field",
+        NodeKind::TypeAlias => "type",
+        NodeKind::Constant => "const",
+        NodeKind::Interface => "interface",
     }
 }
 

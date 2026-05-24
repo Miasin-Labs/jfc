@@ -46,6 +46,20 @@ pub fn task_tool_defs() -> Vec<ToolDef> {
                         "type": "string",
                         "enum": ["milestone", "task", "check", "decision"],
                         "description": "Task kind: milestone (grouping), task (work unit), check (verification), decision (requires input)"
+                    },
+                    "depends_on": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Alias for blocked_by. Task ids that must complete before this task can start."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Labels/tags for categorizing the task (e.g. 'bug', 'feature', 'refactor')"
+                    },
+                    "priority": {
+                        "type": "number",
+                        "description": "Priority 0-9 (0=highest, 9=lowest). Affects ordering in task list."
                     }
                 },
                 "required": ["subject", "description"]
@@ -99,6 +113,25 @@ pub fn task_tool_defs() -> Vec<ToolDef> {
                         "type": "string",
                         "enum": ["milestone", "task", "check", "decision"],
                         "description": "Task kind"
+                    },
+                    "blocked_by": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Task ids that must complete before this task can start."
+                    },
+                    "depends_on": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Alias for blocked_by. Task ids that must complete before this task can start."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Labels/tags for categorizing the task"
+                    },
+                    "priority": {
+                        "type": "number",
+                        "description": "Priority 0-9 (0=highest, 9=lowest)"
                     }
                 },
                 "required": ["task_id"]

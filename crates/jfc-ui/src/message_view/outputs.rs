@@ -118,27 +118,43 @@ pub(super) fn produce_diff_view_lines(
             };
 
             let mut content_spans: Vec<Span<'static>> = Vec::new();
+            // Span composition: keep syntect's foreground, force the
+            // diff bg tint over it, and dim removed lines so deletions
+            // read as fading out.
+            let extra_mod =
+                matches!(dl.kind, DiffLineKind::Removed).then_some(Modifier::DIM);
+            let push_hl_spans = |target: &mut Vec<Span<'static>>, hl_spans: &[Span<'static>]| {
+                for sp in hl_spans {
+                    let mut style = sp.style;
+                    style.bg = Some(bg_color);
+                    if let Some(m) = extra_mod {
+                        style = style.add_modifier(m);
+                    }
+                    target.push(Span::styled(sp.content.clone().into_owned(), style));
+                }
+            };
             match highlighted.as_ref().and_then(|h| h.get(idx)) {
                 Some(hl) => {
-                    // Span composition: keep syntect's foreground, force
-                    // the diff bg tint over it, and dim removed lines so
-                    // deletions read as fading out.
-                    let extra_mod =
-                        matches!(dl.kind, DiffLineKind::Removed).then_some(Modifier::DIM);
-                    for sp in &hl.spans {
-                        let mut style = sp.style;
-                        style.bg = Some(bg_color);
-                        if let Some(m) = extra_mod {
-                            style = style.add_modifier(m);
-                        }
-                        content_spans.push(Span::styled(sp.content.clone().into_owned(), style));
-                    }
+                    push_hl_spans(&mut content_spans, &hl.spans);
                 }
                 None => {
-                    content_spans.push(Span::styled(
-                        sanitize_terminal_text(&dl.content),
-                        Style::default().fg(fg_color).bg(bg_color),
-                    ));
+                    // Resilient fallback: re-run syntect on just this
+                    // line so a hunk-level mismatch doesn't strip all
+                    // color from every row.
+                    let sanitized = sanitize_terminal_text(&dl.content);
+                    let single = lang.as_deref().and_then(|l| {
+                        markdown::highlight_code_raw(l, &sanitized, 0, &t)
+                            .into_iter()
+                            .next()
+                    });
+                    if let Some(hl) = single {
+                        push_hl_spans(&mut content_spans, &hl.spans);
+                    } else {
+                        content_spans.push(Span::styled(
+                            sanitized,
+                            Style::default().fg(fg_color).bg(bg_color),
+                        ));
+                    }
                 }
             }
 

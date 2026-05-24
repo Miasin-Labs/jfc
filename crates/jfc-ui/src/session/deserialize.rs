@@ -462,6 +462,8 @@ pub(crate) fn deserialize_tool_input(input: SerializedToolInput) -> ToolInput {
             risk,
             parent_id,
             kind,
+            tags: Vec::new(),
+            priority: None,
         },
         SerializedToolInput::TaskUpdate {
             task_id,
@@ -485,6 +487,9 @@ pub(crate) fn deserialize_tool_input(input: SerializedToolInput) -> ToolInput {
             risk,
             parent_id,
             kind,
+            blocked_by: Vec::new(),
+            tags: Vec::new(),
+            priority: None,
         },
         SerializedToolInput::TaskList {
             status_filter,

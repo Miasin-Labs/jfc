@@ -262,8 +262,49 @@ impl GraphSession {
     /// Render a `## Search Results` markdown block for `query` — the
     /// MCP-friendly counterpart to `find_by_name` lookup.
     pub fn search(&self, query: &str, limit: usize) -> String {
+        // Field-qualified syntax (`kind:fn path:src/api name:auth foo`) takes
+        // priority: when the parser extracts any structured filter, route
+        // through `filtered_search` so callers can scope the result set
+        // without piggy-backing on text-match heuristics.
+        let parsed = crate::symbols::parse_query(query);
+        if parsed.has_filters() {
+            let hits = crate::symbols::filtered_search(&self.graph, &parsed, limit);
+            let note = if hits.len() == limit {
+                Some(format!("Capped at {limit}; broaden the query for more"))
+            } else {
+                None
+            };
+            return context::render::render_search_results(
+                &self.graph,
+                Some(&self.symbols),
+                query,
+                &hits,
+                note.as_deref(),
+            );
+        }
+
         let mut hits = context::resolve_symbol(&self.graph, query);
         hits.truncate(limit);
+
+        // Fuzzy fallback: if exact match finds nothing, try edit distance ≤ 2
+        if hits.is_empty() {
+            let fuzzy = crate::symbols::fuzzy_search(&self.graph, query, 2, limit);
+            if !fuzzy.is_empty() {
+                let fuzzy_ids: Vec<_> = fuzzy.iter().map(|(id, _)| id.clone()).collect();
+                let note = Some(format!(
+                    "No exact match for `{query}`. Showing {} fuzzy results (edit distance ≤ 2):",
+                    fuzzy_ids.len()
+                ));
+                return context::render::render_search_results(
+                    &self.graph,
+                    Some(&self.symbols),
+                    query,
+                    &fuzzy_ids,
+                    note.as_deref(),
+                );
+            }
+        }
+
         let note = if hits.is_empty() {
             None
         } else if hits.len() == limit {

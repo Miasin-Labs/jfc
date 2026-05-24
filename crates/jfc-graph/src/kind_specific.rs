@@ -167,6 +167,9 @@ impl KindData {
             NodeKind::Module => {
                 // Modules have no kind-specific structured fields.
             }
+            _ => {
+                // New node kinds (EnumVariant, Field, etc.) — no kind-specific fields yet.
+            }
         }
         k
     }

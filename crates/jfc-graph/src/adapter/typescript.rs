@@ -8,7 +8,12 @@
 //! - Classes → `NodeKind::Struct` (closest semantic match).
 //! - Interfaces → `NodeKind::Trait`.
 //! - Modules/namespaces → `NodeKind::Module`.
-//! - Enums → `NodeKind::Enum`.
+//! - Enums → `NodeKind::Enum`, with variants emitted as
+//!   `NodeKind::EnumVariant` children.
+//! - Class fields (`public_field_definition`) and interface property
+//!   signatures (`property_signature`) → `NodeKind::Field`.
+//! - Type aliases (`type_alias_declaration`) → `NodeKind::TypeAlias`.
+//! - Top-level / class-level `const` declarations → `NodeKind::Constant`.
 //! - Call edges (`call_expression` → callee identifier resolution).
 //! - Type references → `UsesType` edges.
 
@@ -118,6 +123,9 @@ fn walk_ts_node(
                 let name = text(name_node, source);
                 let qn = qualified(scope, &name);
                 out.push(build_nd(&name, NodeKind::Struct, node, path, path_str, &qn));
+                // Emit Field nodes for class fields before descending so
+                // methods picked up by the recursive walk don't shadow them.
+                extract_ts_class_fields(node, source, path, path_str, &qn, out);
                 // Descend into class body for methods.
                 if let Some(body) = node.child_by_field_name("body") {
                     let mut child_scope: Vec<&str> = scope.to_vec();
@@ -132,6 +140,8 @@ fn walk_ts_node(
                 let name = text(name_node, source);
                 let qn = qualified(scope, &name);
                 out.push(build_nd(&name, NodeKind::Trait, node, path, path_str, &qn));
+                // Interface properties also become Field nodes.
+                extract_ts_interface_fields(node, source, path, path_str, &qn, out);
             }
         }
         "enum_declaration" => {
@@ -139,6 +149,25 @@ fn walk_ts_node(
                 let name = text(name_node, source);
                 let qn = qualified(scope, &name);
                 out.push(build_nd(&name, NodeKind::Enum, node, path, path_str, &qn));
+                extract_ts_enum_variants(node, source, path, path_str, &qn, out);
+            }
+        }
+        "type_alias_declaration" => {
+            // `type Foo = Bar` — first named child / `name` field is the type identifier.
+            let name_node = node
+                .child_by_field_name("name")
+                .or_else(|| node.named_child(0));
+            if let Some(name_node) = name_node {
+                let name = text(name_node, source);
+                let qn = qualified(scope, &name);
+                out.push(build_nd(
+                    &name,
+                    NodeKind::TypeAlias,
+                    node,
+                    path,
+                    path_str,
+                    &qn,
+                ));
             }
         }
         "method_definition" => {
@@ -149,17 +178,34 @@ fn walk_ts_node(
             }
         }
         "lexical_declaration" | "variable_declaration" => {
-            // const foo = () => {} or const foo = function() {}
+            // Determine whether this is a `const` declaration.
+            let is_const = node
+                .child(0)
+                .map(|c| &source[c.byte_range()] == "const")
+                .unwrap_or(false);
+
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "variable_declarator" {
                     if let Some(name_node) = child.child_by_field_name("name") {
+                        let name = text(name_node, source);
+                        let qn = qualified(scope, &name);
                         if let Some(value) = child.child_by_field_name("value") {
                             if matches!(value.kind(), "arrow_function" | "function") {
-                                let name = text(name_node, source);
-                                let qn = qualified(scope, &name);
                                 out.push(build_fn_nd(&name, value, path, path_str, &qn, source));
+                                continue;
                             }
+                        }
+                        // Non-function `const` → emit as a Constant node.
+                        if is_const {
+                            out.push(build_nd(
+                                &name,
+                                NodeKind::Constant,
+                                child,
+                                path,
+                                path_str,
+                                &qn,
+                            ));
                         }
                     }
                 }
@@ -186,6 +232,111 @@ fn walk_ts_node(
     for child in node.named_children(&mut cursor) {
         walk_ts_node(child, source, path, path_str, scope, out);
     }
+}
+
+/// Emit `NodeKind::EnumVariant` nodes for each `enum_assignment` /
+/// `property_identifier` directly under an `enum_body`.
+///
+/// `parent_qn` is the qualified name of the enclosing enum (e.g. `Color`)
+/// — variants are namespaced under it (`Color::Red`).
+fn extract_ts_enum_variants(
+    enum_node: TsNode<'_>,
+    source: &str,
+    path: &Path,
+    path_str: &str,
+    parent_qn: &str,
+    out: &mut Vec<NodeData>,
+) {
+    let body = match enum_node.child_by_field_name("body") {
+        Some(b) => b,
+        None => return,
+    };
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        // `enum_assignment` (with explicit value) wraps a property_identifier;
+        // bare variants are `property_identifier` directly.
+        let name_node = match child.kind() {
+            "enum_assignment" => child.named_child(0),
+            "property_identifier" => Some(child),
+            _ => continue,
+        };
+        let Some(name_node) = name_node else { continue };
+        if name_node.kind() != "property_identifier" {
+            continue;
+        }
+        let name = text(name_node, source);
+        let qn = format!("{parent_qn}::{name}");
+        out.push(build_nd(
+            &name,
+            NodeKind::EnumVariant,
+            child,
+            path,
+            path_str,
+            &qn,
+        ));
+    }
+}
+
+/// Emit `NodeKind::Field` nodes for each `public_field_definition` in a class.
+fn extract_ts_class_fields(
+    class_node: TsNode<'_>,
+    source: &str,
+    path: &Path,
+    path_str: &str,
+    class_qn: &str,
+    out: &mut Vec<NodeData>,
+) {
+    let body = match class_node.child_by_field_name("body") {
+        Some(b) => b,
+        None => return,
+    };
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() != "public_field_definition" {
+            continue;
+        }
+        let name_node = child
+            .child_by_field_name("name")
+            .or_else(|| find_first_kind(child, "property_identifier"));
+        let Some(name_node) = name_node else { continue };
+        let name = text(name_node, source);
+        let qn = format!("{class_qn}::{name}");
+        out.push(build_nd(&name, NodeKind::Field, child, path, path_str, &qn));
+    }
+}
+
+/// Emit `NodeKind::Field` nodes for each `property_signature` in an interface.
+fn extract_ts_interface_fields(
+    iface_node: TsNode<'_>,
+    source: &str,
+    path: &Path,
+    path_str: &str,
+    iface_qn: &str,
+    out: &mut Vec<NodeData>,
+) {
+    let body = match iface_node.child_by_field_name("body") {
+        Some(b) => b,
+        None => return,
+    };
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() != "property_signature" {
+            continue;
+        }
+        let name_node = child
+            .child_by_field_name("name")
+            .or_else(|| find_first_kind(child, "property_identifier"));
+        let Some(name_node) = name_node else { continue };
+        let name = text(name_node, source);
+        let qn = format!("{iface_qn}::{name}");
+        out.push(build_nd(&name, NodeKind::Field, child, path, path_str, &qn));
+    }
+}
+
+/// First named child of `node` whose `kind()` matches `kind`.
+fn find_first_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
 
 fn extract_ts_edges(
@@ -412,6 +563,96 @@ function callee() {}
                     && nodes.iter().any(|n| n.id == *to && n.name == "callee")
             }),
             "should find caller → callee edge"
+        );
+    }
+
+    #[test]
+    fn ts_adapter_extracts_enum_variants() {
+        let adapter = TypeScriptAdapter::new();
+        let path = Path::new("test.ts");
+        let src = "enum Direction { Up, Down, Left, Right }";
+        let parsed = adapter.parse_file(path, src).unwrap();
+        let nodes = adapter.extract_nodes(&parsed);
+        assert!(nodes.iter().any(|n| n.name == "Direction" && n.kind == NodeKind::Enum));
+        for v in &["Up", "Down", "Left", "Right"] {
+            assert!(
+                nodes.iter().any(|n| n.name == *v && n.kind == NodeKind::EnumVariant),
+                "missing EnumVariant node for {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn ts_adapter_extracts_enum_variants_with_values() {
+        let adapter = TypeScriptAdapter::new();
+        let path = Path::new("test.ts");
+        let src = r#"enum Color { Red = "RED", Green = "GREEN" }"#;
+        let parsed = adapter.parse_file(path, src).unwrap();
+        let nodes = adapter.extract_nodes(&parsed);
+        assert!(nodes.iter().any(|n| n.name == "Red" && n.kind == NodeKind::EnumVariant));
+        assert!(nodes.iter().any(|n| n.name == "Green" && n.kind == NodeKind::EnumVariant));
+    }
+
+    #[test]
+    fn ts_adapter_extracts_class_fields() {
+        let adapter = TypeScriptAdapter::new();
+        let path = Path::new("test.ts");
+        let src = "class Widget {\n  name: string;\n  count: number;\n  render() {}\n}";
+        let parsed = adapter.parse_file(path, src).unwrap();
+        let nodes = adapter.extract_nodes(&parsed);
+        assert!(
+            nodes.iter().any(|n| n.name == "name" && n.kind == NodeKind::Field),
+            "expected Field node for 'name', got: {:?}",
+            nodes.iter().filter(|n| n.kind == NodeKind::Field).collect::<Vec<_>>()
+        );
+        assert!(nodes.iter().any(|n| n.name == "count" && n.kind == NodeKind::Field));
+        // render should still be a Function, not a Field.
+        assert!(nodes.iter().any(|n| n.name == "render" && n.kind == NodeKind::Function));
+    }
+
+    #[test]
+    fn ts_adapter_extracts_interface_fields() {
+        let adapter = TypeScriptAdapter::new();
+        let path = Path::new("test.ts");
+        let src = "interface Config {\n  host: string;\n  port: number;\n}";
+        let parsed = adapter.parse_file(path, src).unwrap();
+        let nodes = adapter.extract_nodes(&parsed);
+        assert!(nodes.iter().any(|n| n.name == "host" && n.kind == NodeKind::Field));
+        assert!(nodes.iter().any(|n| n.name == "port" && n.kind == NodeKind::Field));
+    }
+
+    #[test]
+    fn ts_adapter_extracts_type_alias() {
+        let adapter = TypeScriptAdapter::new();
+        let path = Path::new("test.ts");
+        let src = "type ID = string;\ntype Result<T> = Success<T> | Failure;";
+        let parsed = adapter.parse_file(path, src).unwrap();
+        let nodes = adapter.extract_nodes(&parsed);
+        assert!(
+            nodes.iter().any(|n| n.name == "ID" && n.kind == NodeKind::TypeAlias),
+            "expected TypeAlias for ID"
+        );
+        assert!(
+            nodes.iter().any(|n| n.name == "Result" && n.kind == NodeKind::TypeAlias),
+            "expected TypeAlias for Result"
+        );
+    }
+
+    #[test]
+    fn ts_adapter_extracts_const_as_constant() {
+        let adapter = TypeScriptAdapter::new();
+        let path = Path::new("test.ts");
+        let src = "const MAX_SIZE = 100;\nconst greet = () => {};";
+        let parsed = adapter.parse_file(path, src).unwrap();
+        let nodes = adapter.extract_nodes(&parsed);
+        assert!(
+            nodes.iter().any(|n| n.name == "MAX_SIZE" && n.kind == NodeKind::Constant),
+            "expected Constant for MAX_SIZE"
+        );
+        // greet should still be a Function, not a Constant.
+        assert!(
+            nodes.iter().any(|n| n.name == "greet" && n.kind == NodeKind::Function),
+            "expected Function for greet (arrow fn)"
         );
     }
 

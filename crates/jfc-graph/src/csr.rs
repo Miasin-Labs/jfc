@@ -67,6 +67,9 @@ pub enum EdgeKindTag {
     Contains = 4,
     Implements = 5,
     ExternalCall = 6,
+    Extends = 7,
+    Returns = 8,
+    TypeOf = 9,
 }
 
 impl EdgeKindTag {
@@ -79,6 +82,9 @@ impl EdgeKindTag {
             EdgeKind::Contains => Self::Contains,
             EdgeKind::Implements => Self::Implements,
             EdgeKind::ExternalCall(_, _) => Self::ExternalCall,
+            EdgeKind::Extends => Self::Extends,
+            EdgeKind::Returns => Self::Returns,
+            EdgeKind::TypeOf => Self::TypeOf,
         }
     }
 }

@@ -49,9 +49,14 @@ pub(super) fn produce_grep_output_lines(
     let pathless = first_data
         .map(|l| matches!(parse_grep_line(l), Some(GrepLine::Match { path: "", .. })))
         .unwrap_or(false);
-    if pathless && let Some(target) = grep_target_file(cmd) {
+    let pathless_target: Option<String> = if pathless {
+        grep_target_file(cmd)
+    } else {
+        None
+    };
+    if let Some(target) = pathless_target.as_deref() {
         lines.push(Line::from(Span::styled(
-            target,
+            target.to_owned(),
             Style::default()
                 .fg(t.accent)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -123,10 +128,39 @@ pub(super) fn produce_grep_output_lines(
                     sep_str.to_owned(),
                     Style::default().fg(sep_color),
                 ));
-                spans.push(Span::styled(
-                    body.to_owned(),
-                    Style::default().fg(body_color),
-                ));
+
+                // Syntax-highlight the match body when we can infer a
+                // language from the file path. Use the pathless_target
+                // for single-file greps that omit the path prefix.
+                let hl_path = if !path.is_empty() {
+                    Some(path)
+                } else {
+                    pathless_target.as_deref()
+                };
+                let hl_done = !is_context
+                    && hl_path.is_some()
+                    && {
+                        if let Some(lang) = hl_path.and_then(lang_from_path) {
+                            let hl = markdown::highlight_code_raw(&lang, body, 0, &t);
+                            if let Some(first) = hl.into_iter().next() {
+                                spans.extend(first.spans.into_iter().map(|s| {
+                                    Span::styled(s.content.into_owned(), s.style)
+                                }));
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                if !hl_done {
+                    spans.push(Span::styled(
+                        body.to_owned(),
+                        Style::default().fg(body_color),
+                    ));
+                }
+
                 lines.push(Line::from(spans));
             }
             Some(GrepLine::HeadingPath(path)) => {
@@ -360,10 +394,11 @@ pub(super) fn produce_git_diff_output_lines(
             .map(|(_, content)| content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        // `wrap_w=0` → 1:1 line mapping from `highlight_code_raw`
+        // (no wrapping inside syntect). On pathological inputs syntect
+        // can still drift by a line; the per-line fallback below
+        // re-highlights individually rather than dropping all color.
         let highlighted = lang.as_deref().and_then(|l| {
-            // `wrap_w=0` → 1:1 line mapping from `highlight_code_raw`
-            // (no wrapping inside syntect). The `hl.len() == hunk.len()`
-            // invariant below relies on this contract.
             let hl = markdown::highlight_code_raw(l, &body, 0, &t);
             (hl.len() == hunk.len()).then_some(hl)
         });
@@ -380,23 +415,38 @@ pub(super) fn produce_git_diff_output_lines(
                 format!("{sigil} "),
                 Style::default().fg(fg_color).bg(bg_color),
             )];
+            let extra_mod = matches!(kind, DiffLineKind::Removed).then_some(Modifier::DIM);
+            let push_hl_spans = |target: &mut Vec<Span<'static>>, hl_spans: &[Span<'static>]| {
+                for sp in hl_spans {
+                    let mut style = sp.style;
+                    style.bg = Some(bg_color);
+                    if let Some(m) = extra_mod {
+                        style = style.add_modifier(m);
+                    }
+                    target.push(Span::styled(sp.content.clone().into_owned(), style));
+                }
+            };
             match highlighted.as_ref().and_then(|h| h.get(idx)) {
                 Some(hl) => {
-                    let extra_mod = matches!(kind, DiffLineKind::Removed).then_some(Modifier::DIM);
-                    for sp in &hl.spans {
-                        let mut style = sp.style;
-                        style.bg = Some(bg_color);
-                        if let Some(m) = extra_mod {
-                            style = style.add_modifier(m);
-                        }
-                        spans.push(Span::styled(sp.content.clone().into_owned(), style));
-                    }
+                    push_hl_spans(&mut spans, &hl.spans);
                 }
                 None => {
-                    spans.push(Span::styled(
-                        content,
-                        Style::default().fg(fg_color).bg(bg_color),
-                    ));
+                    // Resilient fallback: re-run syntect on just this
+                    // line so a hunk-level mismatch doesn't strip all
+                    // color from every row in the block.
+                    let single = lang.as_deref().and_then(|l| {
+                        markdown::highlight_code_raw(l, &content, 0, &t)
+                            .into_iter()
+                            .next()
+                    });
+                    if let Some(hl) = single {
+                        push_hl_spans(&mut spans, &hl.spans);
+                    } else {
+                        spans.push(Span::styled(
+                            content,
+                            Style::default().fg(fg_color).bg(bg_color),
+                        ));
+                    }
                 }
             }
             lines.push(Line::from(spans).style(Style::default().bg(bg_color)));

@@ -7,6 +7,14 @@ Your strengths:
 - Performing multi-step research tasks
 
 Guidelines:
+- **Prefer graph tools over grep for structural queries:**
+  - `code_index` — discover modules, functions, structs, enums without reading files
+  - `graph_search` — find symbols by name (faster + more precise than grep for identifiers)
+  - `graph_callers` / `graph_callees` — find all callers/callees (replaces grep for function names)
+  - `graph_impact` — blast radius analysis (who breaks if X changes)
+  - `graph_context` — "how does X work" in one call (replaces 5+ grep/read cycles)
+  - `graph_explore` — read several related symbols grouped by file in one call
+- **Use Grep when:** searching for string literals, config values, error messages, comments, or non-identifier patterns
 - For file searches: search broadly when you don't know where something lives. Use Read when you know the specific file path.
 - For analysis: Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
 - Be thorough: Check multiple locations, consider different naming conventions, look for related files.

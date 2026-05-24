@@ -173,6 +173,7 @@ fn priority_key(
         | Some(NodeKind::Module) => 1,
         Some(NodeKind::Function) => 2,
         None => 3,
+        Some(_) => 2,
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::{
     Frame,
@@ -10,6 +10,44 @@ use ratatui::{
 
 use crate::app::App;
 use jfc_session::{DeletedFilter, Task, TaskStatus};
+
+/// Build a tree-ordered list of tasks. Root tasks (no parent) come first,
+/// children are placed immediately after their parent with depth tracking.
+fn tree_order(tasks: &[Task]) -> Vec<(&Task, u8)> {
+    let mut children_of: HashMap<&str, Vec<&Task>> = HashMap::new();
+    let mut roots: Vec<&Task> = Vec::new();
+
+    for t in tasks {
+        if let Some(ref pid) = t.parent_id {
+            children_of.entry(pid.as_str()).or_default().push(t);
+        } else {
+            roots.push(t);
+        }
+    }
+
+    let mut result = Vec::with_capacity(tasks.len());
+    let mut stack: Vec<(&Task, u8)> = roots.into_iter().rev().map(|t| (t, 0u8)).collect();
+
+    while let Some((task, depth)) = stack.pop() {
+        result.push((task, depth));
+        if let Some(kids) = children_of.get(task.id.as_str()) {
+            for kid in kids.iter().rev() {
+                stack.push((kid, depth + 1));
+            }
+        }
+    }
+    result
+}
+
+/// Render a tree prefix for the given depth level.
+fn tree_prefix(depth: u8) -> String {
+    if depth == 0 {
+        String::new()
+    } else {
+        let indent = "  ".repeat((depth - 1) as usize);
+        format!("{indent}├ ")
+    }
+}
 
 pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
     let t = app.theme;
@@ -73,9 +111,11 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
         ),
     ]);
 
-    let rows: Vec<Row> = all_tasks
+    let ordered = tree_order(&all_tasks);
+
+    let rows: Vec<Row> = ordered
         .iter()
-        .map(|tk| {
+        .map(|(tk, depth)| {
             let (icon, status_style) = match tk.status {
                 TaskStatus::Pending => ("□ pending", t.style_text_muted),
                 TaskStatus::InProgress => ("▣ in_progress", t.style_accent_bold),
@@ -99,10 +139,13 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
                 .map(|id| id.as_str())
                 .collect();
 
+            let prefix = tree_prefix(*depth);
+            let subject_display = format!("{prefix}{}", tk.subject);
+
             Row::new(vec![
                 Cell::from(tk.id.to_string()).style(Style::default().fg(t.text_muted)),
                 Cell::from(icon).style(status_style),
-                Cell::from(tk.subject.clone()).style(subj_style),
+                Cell::from(subject_display).style(subj_style),
                 Cell::from(tk.owner.clone().unwrap_or_default())
                     .style(Style::default().fg(t.text_secondary)),
                 Cell::from(task_model_badge(tk).unwrap_or_default())
@@ -113,8 +156,8 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
         .collect();
 
     // Clamp selection to valid range.
-    if !all_tasks.is_empty() {
-        let max = all_tasks.len().saturating_sub(1);
+    if !ordered.is_empty() {
+        let max = ordered.len().saturating_sub(1);
         if app.task_panel_selected > max {
             app.task_panel_selected = max;
         }
@@ -192,7 +235,8 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
     .style(Style::default().bg(t.surface));
 
     // When detail mode is active, split the popup vertically: top = table, bottom = detail.
-    if app.task_panel_detail && !all_tasks.is_empty() {
+    let ordered_tasks: Vec<&Task> = ordered.iter().map(|(t, _)| *t).collect();
+    if app.task_panel_detail && !ordered_tasks.is_empty() {
         use ratatui::layout::{Direction, Layout};
 
         let chunks = Layout::default()
@@ -201,18 +245,17 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
             .split(popup);
 
         f.render_stateful_widget(table, chunks[0], &mut app.task_panel_state);
-        render_task_detail(f, app, &all_tasks, chunks[1]);
+        if let Some(task) = ordered_tasks.get(app.task_panel_selected) {
+            render_task_detail(f, app, task, chunks[1]);
+        }
     } else {
         f.render_stateful_widget(table, popup, &mut app.task_panel_state);
     }
 }
 
 /// Render the detail pane for the currently-selected task.
-fn render_task_detail(f: &mut Frame, app: &App, tasks: &[Task], area: Rect) {
+fn render_task_detail(f: &mut Frame, app: &App, task: &Task, area: Rect) {
     let t = app.theme;
-    let Some(task) = tasks.get(app.task_panel_selected) else {
-        return;
-    };
 
     let mut lines: Vec<Line> = Vec::new();
 

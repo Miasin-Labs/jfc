@@ -334,6 +334,7 @@ pub fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Enum => "enum",
         NodeKind::Trait => "trait",
         NodeKind::Module => "module",
+        _ => "symbol",
     }
 }
 
@@ -346,6 +347,7 @@ pub fn edge_kind_label(kind: &EdgeKind) -> &'static str {
         EdgeKind::Contains => "contains",
         EdgeKind::Implements => "implements",
         EdgeKind::ExternalCall(_, _) => "external_call",
+        _ => "→",
     }
 }
 
@@ -379,6 +381,7 @@ fn signature_for(node: &NodeData) -> String {
         NodeKind::Enum => format!("enum {}", node.name),
         NodeKind::Trait => format!("trait {}", node.name),
         NodeKind::Module => format!("mod {}", node.name),
+        _ => format!("{} ({})", node.name, format!("{:?}", node.kind)),
     }
 }
 

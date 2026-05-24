@@ -38,13 +38,13 @@ pub fn write_atomic_sync(path: &Path, content: impl AsRef<[u8]>) -> io::Result<(
         if let Some(parent) = path.parent()
             && let Ok(dir) = File::open(parent)
         {
-            let _ = dir.sync_all();
+            dir.sync_all().ok();
         }
         Ok(())
     })();
 
     if result.is_err() {
-        let _ = remove_file(&tmp);
+        remove_file(&tmp).ok();
     }
     result
 }

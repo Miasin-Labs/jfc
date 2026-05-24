@@ -463,44 +463,110 @@ pub(crate) async fn maybe_resume_after_background(app: &mut App, tx: &EventSende
     if !all_bg_done {
         return;
     }
-    if app.turn_started_at.is_some()
-        && app.pending_tool_calls.is_empty()
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && !app.is_streaming
-        && app.compacting_started_at.is_none()
-        && stream::should_continue_loop(&app.messages)
-    {
-        // Respect the same policy gates as the post-tool AllComplete path
-        // (handlers/tools.rs): never continue while a compaction is in flight
-        // (the compaction-done handler resumes), and yield to a queued user
-        // prompt rather than silently continuing the agentic loop ahead of
-        // the user's steering input.
-        if app.queued_prompts.iter().any(|queued| !queued.is_meta) {
-            tracing::info!(
+
+    // Case 1: The leader is still inside a turn — apply the existing
+    // continuation policy. Respect compaction-in-flight and queued user
+    // prompts the same way the post-tool AllComplete path does.
+    if app.turn_started_at.is_some() {
+        if app.pending_tool_calls.is_empty()
+            && app.pending_approval.is_none()
+            && app.approval_queue.is_empty()
+            && !app.is_streaming
+            && app.compacting_started_at.is_none()
+            && stream::should_continue_loop(&app.messages)
+        {
+            if app.queued_prompts.iter().any(|queued| !queued.is_meta) {
+                tracing::info!(
+                    target: "jfc::task",
+                    queued = app.queued_prompts.len(),
+                    "all background tasks terminal — yielding to queued user prompt"
+                );
+                crate::runtime::drain_queued_prompts(app, tx).await;
+            } else {
+                tracing::info!(
+                    target: "jfc::task",
+                    "all background tasks terminal — triggering agentic continuation"
+                );
+                stream::continue_agentic_loop(app, tx).await;
+            }
+        } else if app.pending_tool_calls.is_empty()
+            && !app.is_streaming
+            && !stream::should_continue_loop(&app.messages)
+        {
+            // All done and the model already emitted EndTurn — just clear the
+            // turn timer so the spinner stops.
+            tracing::debug!(
                 target: "jfc::task",
-                queued = app.queued_prompts.len(),
-                "all background tasks terminal — yielding to queued user prompt"
+                "all background tasks terminal, turn complete — clearing turn_started_at"
             );
-            crate::runtime::drain_queued_prompts(app, tx).await;
-        } else {
-            tracing::info!(
-                target: "jfc::task",
-                "all background tasks terminal — triggering agentic continuation"
-            );
-            stream::continue_agentic_loop(app, tx).await;
+            app.turn_started_at = None;
         }
-    } else if app.turn_started_at.is_some()
-        && app.pending_tool_calls.is_empty()
-        && !app.is_streaming
-        && !stream::should_continue_loop(&app.messages)
-    {
-        // All done and the model already emitted EndTurn — just clear the
-        // turn timer so the spinner stops.
-        tracing::debug!(
-            target: "jfc::task",
-            "all background tasks terminal, turn complete — clearing turn_started_at"
-        );
-        app.turn_started_at = None;
+        return;
     }
+
+    // Case 2: Auto-wake the idle leader.
+    //
+    // The spawning turn finished long ago (the Task tool returned its
+    // "Spawned" result almost immediately, so `turn_started_at` was cleared).
+    // Now that every background subagent has reached a terminal state, inject
+    // a system-reminder digest of their results and open a fresh turn so the
+    // main agent automatically summarizes the work for the user — no manual
+    // nudge required.
+    //
+    // Skip if we have nothing to report (e.g. all bg slots were cancelled
+    // before producing a summary), if a stream is already active, or if a
+    // compaction is in flight. Any pending approval / pending tool also
+    // means the leader is mid-flight and should not be force-woken.
+    if app.is_streaming
+        || app.compacting_started_at.is_some()
+        || app.pending_approval.is_some()
+        || !app.approval_queue.is_empty()
+        || !app.pending_tool_calls.is_empty()
+    {
+        return;
+    }
+
+    let mut completed_summaries: Vec<String> = Vec::new();
+    for bt in app.background_tasks.values() {
+        if let Some(ref summary) = bt.summary {
+            completed_summaries.push(format!("- {}: {}", bt.description, summary));
+        } else if let Some(ref err) = bt.error {
+            completed_summaries.push(format!("- {} (failed): {}", bt.description, err));
+        }
+    }
+
+    if completed_summaries.is_empty() {
+        return;
+    }
+
+    // If a queued user prompt is sitting in the buffer, prefer draining it —
+    // the user's words are higher priority than an auto-summary turn.
+    if app.queued_prompts.iter().any(|queued| !queued.is_meta) {
+        tracing::info!(
+            target: "jfc::task::autowake",
+            queued = app.queued_prompts.len(),
+            "all background tasks complete — yielding to queued user prompt instead of autowake"
+        );
+        crate::runtime::drain_queued_prompts(app, tx).await;
+        return;
+    }
+
+    tracing::info!(
+        target: "jfc::task::autowake",
+        count = completed_summaries.len(),
+        "all background tasks complete — autowaking idle leader to summarize results"
+    );
+
+    let reminder = format!(
+        "All background subagents have finished their work. Here is the summary of results:\n\n\
+         {}\n\n\
+         Review these results and write a final, concise summary for the user. \
+         If any task failed, explain what went wrong and recommend next steps.",
+        completed_summaries.join("\n")
+    );
+
+    crate::system_reminder::append_to_last_user(&mut app.messages, &reminder);
+    app.agentic_turn_count = 0;
+    app.turn_started_at = Some(std::time::Instant::now());
+    stream::continue_agentic_loop(app, tx).await;
 }

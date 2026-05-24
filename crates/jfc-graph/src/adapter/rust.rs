@@ -156,6 +156,8 @@ impl LanguageAdapter for RustAdapter {
             &mut edges,
         );
 
+        emit_containment_edges(nodes, &mut edges);
+
         edges
     }
 
@@ -190,12 +192,12 @@ fn extract_nodes_recursive(
                 }
             }
             "struct_item" => {
-                if let Some(nd) = extract_struct(child, source, file_path, file_path_str, scope) {
+                if let Some(nd) = extract_struct(child, source, file_path, file_path_str, scope, out) {
                     out.push(nd);
                 }
             }
             "enum_item" => {
-                if let Some(nd) = extract_enum(child, source, file_path, file_path_str, scope) {
+                if let Some(nd) = extract_enum(child, source, file_path, file_path_str, scope, out) {
                     out.push(nd);
                 }
             }
@@ -235,6 +237,20 @@ fn extract_nodes_recursive(
             }
             "impl_item" => {
                 extract_impl(child, source, file_path, file_path_str, scope, out);
+            }
+            "type_item" => {
+                if let Some(nd) =
+                    extract_type_alias(child, source, file_path, file_path_str, scope)
+                {
+                    out.push(nd);
+                }
+            }
+            "const_item" | "static_item" => {
+                if let Some(nd) =
+                    extract_constant(child, source, file_path, file_path_str, scope)
+                {
+                    out.push(nd);
+                }
             }
             _ => {
                 extract_nodes_recursive(child, source, file_path, file_path_str, scope, out);
@@ -340,6 +356,7 @@ fn extract_struct(
     file_path: &Path,
     file_path_str: &str,
     scope: &[&str],
+    out: &mut Vec<NodeData>,
 ) -> Option<NodeData> {
     let name = get_node_name(node, "name", source)?;
 
@@ -359,6 +376,34 @@ fn extract_struct(
                     fields.push(format!(
                         "{{\"name\":\"{field_name}\",\"type\":\"{field_type}\"}}"
                     ));
+                    // Emit a first-class Field node
+                    let qualified = build_qualified_name(scope, &format!("{name}::{field_name}"));
+                    let span = Span {
+                        file: file_path.to_path_buf(),
+                        start_line: field_child.start_position().row as u32 + 1,
+                        start_col: field_child.start_position().column as u32,
+                        end_line: field_child.end_position().row as u32 + 1,
+                        end_col: field_child.end_position().column as u32,
+                        byte_range: field_child.start_byte()..field_child.end_byte(),
+                    };
+                    let fid = NodeId::new(file_path_str, &qualified, NodeKind::Field);
+                    let mut fmeta = HashMap::new();
+                    fmeta.insert("type".to_string(), field_type);
+                    out.push(NodeData {
+                        id: fid,
+                        kind: NodeKind::Field,
+                        name: field_name.clone(),
+                        qualified_name: qualified,
+                        file_path: file_path.to_path_buf(),
+                        span,
+                        visibility: Visibility::Private,
+                        metadata: fmeta,
+                        birth_revision: 0,
+                        last_modified_revision: 0,
+                        complexity: None,
+                        cfg: None,
+                        dataflow: None,
+                    });
                 }
             }
         }
@@ -385,6 +430,7 @@ fn extract_enum(
     file_path: &Path,
     file_path_str: &str,
     scope: &[&str],
+    out: &mut Vec<NodeData>,
 ) -> Option<NodeData> {
     let name = get_node_name(node, "name", source)?;
 
@@ -396,7 +442,34 @@ fn extract_enum(
         for variant_child in variant_list.named_children(&mut variant_cursor) {
             if variant_child.kind() == "enum_variant" {
                 if let Some(variant_name_node) = variant_child.child_by_field_name("name") {
-                    variants.push(node_text(variant_name_node, source));
+                    let vname = node_text(variant_name_node, source);
+                    variants.push(vname.clone());
+                    // Emit a first-class EnumVariant node
+                    let qualified = build_qualified_name(scope, &format!("{name}::{vname}"));
+                    let span = Span {
+                        file: file_path.to_path_buf(),
+                        start_line: variant_child.start_position().row as u32 + 1,
+                        start_col: variant_child.start_position().column as u32,
+                        end_line: variant_child.end_position().row as u32 + 1,
+                        end_col: variant_child.end_position().column as u32,
+                        byte_range: variant_child.start_byte()..variant_child.end_byte(),
+                    };
+                    let vid = NodeId::new(file_path_str, &qualified, NodeKind::EnumVariant);
+                    out.push(NodeData {
+                        id: vid,
+                        kind: NodeKind::EnumVariant,
+                        name: vname,
+                        qualified_name: qualified,
+                        file_path: file_path.to_path_buf(),
+                        span,
+                        visibility: Visibility::Public,
+                        metadata: HashMap::new(),
+                        birth_revision: 0,
+                        last_modified_revision: 0,
+                        complexity: None,
+                        cfg: None,
+                        dataflow: None,
+                    });
                 }
             }
         }
@@ -408,6 +481,54 @@ fn extract_enum(
     Some(build_node_data(
         &name,
         NodeKind::Enum,
+        node,
+        source,
+        file_path,
+        file_path_str,
+        scope,
+        metadata,
+    ))
+}
+
+fn extract_type_alias(
+    node: TsNode<'_>,
+    source: &str,
+    file_path: &Path,
+    file_path_str: &str,
+    scope: &[&str],
+) -> Option<NodeData> {
+    let name = get_node_name(node, "name", source)?;
+    Some(build_node_data(
+        &name,
+        NodeKind::TypeAlias,
+        node,
+        source,
+        file_path,
+        file_path_str,
+        scope,
+        HashMap::new(),
+    ))
+}
+
+fn extract_constant(
+    node: TsNode<'_>,
+    source: &str,
+    file_path: &Path,
+    file_path_str: &str,
+    scope: &[&str],
+) -> Option<NodeData> {
+    let name = get_node_name(node, "name", source)?;
+    let mut metadata = HashMap::new();
+    if let Some(type_node) = node.child_by_field_name("type") {
+        metadata.insert("type".to_string(), node_text(type_node, source));
+    }
+    metadata.insert(
+        "const_kind".to_string(),
+        if node.kind() == "static_item" { "static" } else { "const" }.to_string(),
+    );
+    Some(build_node_data(
+        &name,
+        NodeKind::Constant,
         node,
         source,
         file_path,
@@ -924,6 +1045,73 @@ fn extract_impl_edges(
             }
         } else {
             extract_impl_edges(child, source, file_path, name_to_node, edges);
+        }
+    }
+}
+
+/// Emits `Contains` edges linking parent `Enum`→`EnumVariant` and
+/// `Struct`→`Field` nodes. Children are matched to parents by checking
+/// whether the child's `qualified_name` starts with the parent's
+/// `qualified_name + "::"`. Matching is scoped per file so that two
+/// independently-defined types with the same qualified name in
+/// different files don't cross-link.
+fn emit_containment_edges(
+    nodes: &[NodeData],
+    edges: &mut Vec<(NodeId, NodeId, EdgeData)>,
+) {
+    // Group nodes by file path. We only need parent-candidate lookups
+    // per file, so build a small per-file index of (Enum, Struct)
+    // parent nodes.
+    let mut by_file: HashMap<&Path, Vec<&NodeData>> = HashMap::new();
+    for n in nodes {
+        by_file.entry(n.file_path.as_path()).or_default().push(n);
+    }
+
+    for (_file, file_nodes) in &by_file {
+        // Pre-collect candidate parents (Enums and Structs) for this file.
+        let enums: Vec<&NodeData> = file_nodes
+            .iter()
+            .copied()
+            .filter(|n| n.kind == NodeKind::Enum)
+            .collect();
+        let structs: Vec<&NodeData> = file_nodes
+            .iter()
+            .copied()
+            .filter(|n| n.kind == NodeKind::Struct)
+            .collect();
+
+        for child in file_nodes {
+            let parents: &[&NodeData] = match child.kind {
+                NodeKind::EnumVariant => &enums,
+                NodeKind::Field => &structs,
+                _ => continue,
+            };
+
+            // Pick the most specific (longest) qualified prefix match —
+            // this matters when nested types share a common prefix.
+            let mut best: Option<&NodeData> = None;
+            for parent in parents {
+                let prefix = format!("{}::", parent.qualified_name);
+                if child.qualified_name.starts_with(&prefix)
+                    && best
+                        .map(|b| parent.qualified_name.len() > b.qualified_name.len())
+                        .unwrap_or(true)
+                {
+                    best = Some(parent);
+                }
+            }
+
+            if let Some(parent) = best {
+                edges.push((
+                    parent.id.clone(),
+                    child.id.clone(),
+                    EdgeData {
+                        kind: EdgeKind::Contains,
+                        source_span: child.span.clone(),
+                        weight: 1.0,
+                    },
+                ));
+            }
         }
     }
 }
