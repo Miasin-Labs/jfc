@@ -31,19 +31,26 @@
 //! solver — good enough for "could X alias Y" questions, less precise than
 //! a sparse flow-sensitive pass.
 //!
+//! # Interprocedural mode
+//!
+//! [`analyze_interprocedural`] enriches per-function results by propagating
+//! caller argument pts-sets into callee parameter pts-sets (and callee
+//! return values back to caller call-site destinations) across `Calls`
+//! edges. Fixed-point iteration (max 8 rounds) ensures transitive
+//! dataflow stabilizes.
+//!
 //! # Limitations
 //!
-//! - No interprocedural propagation. Callsite arguments don't flow into
-//!   the callee's parameter sets. (The IR's `Call` op generates a fresh
-//!   heap location for the result; the caller doesn't see the callee's
-//!   constraints yet.)
 //! - Branch- and loop-insensitive — all paths are merged.
 //! - Recursion through fields is bounded by [`MAX_FIELD_DEPTH`] so the
 //!   worklist always terminates even on pathologic cyclic field stores.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
+use crate::edges::EdgeKind;
+use crate::graph::CodeGraph;
 use crate::ir::{IrFunction, IrOp, Operand, Var};
+use crate::nodes::NodeId;
 
 /// Maximum nesting depth for `Field(Field(...))` abstract locations. Bounds
 /// the worklist termination cost on cyclic field stores like
@@ -352,6 +359,173 @@ fn operand_pts(pts: &PointsToTable, operand: &Operand) -> Vec<AbstractLocation> 
     }
 }
 
+// ─── Interprocedural analysis ────────────────────────────────────────────────
+
+/// Maximum fixed-point iteration rounds for interprocedural propagation.
+const MAX_INTERPROC_ROUNDS: usize = 8;
+
+/// Run interprocedural points-to analysis across the call graph.
+///
+/// 1. Compute intraprocedural results for each function.
+/// 2. Propagate argument pts-sets into callee parameters and callee return
+///    pts-sets back into caller call-site destinations.
+/// 3. Re-analyze callees with enriched seeds until stable (max 8 rounds).
+pub fn analyze_interprocedural(
+    graph: &CodeGraph,
+    ir_map: &HashMap<NodeId, IrFunction>,
+) -> HashMap<NodeId, PointsToTable> {
+    let mut tables: HashMap<NodeId, PointsToTable> = ir_map
+        .iter()
+        .map(|(id, ir)| (id.clone(), analyze(ir)))
+        .collect();
+
+    for _round in 0..MAX_INTERPROC_ROUNDS {
+        if !propagate_one_round(graph, ir_map, &mut tables) {
+            break;
+        }
+    }
+    tables
+}
+
+/// Single propagation round. Returns `true` if any table grew.
+fn propagate_one_round(
+    graph: &CodeGraph,
+    ir_map: &HashMap<NodeId, IrFunction>,
+    tables: &mut HashMap<NodeId, PointsToTable>,
+) -> bool {
+    let mut changed = false;
+    let caller_ids: Vec<NodeId> = tables.keys().cloned().collect();
+
+    for caller_id in &caller_ids {
+        let edges = graph.get_edges_from(caller_id);
+        let call_edges: Vec<NodeId> = edges
+            .iter()
+            .filter(|(_, ed)| matches!(ed.kind, EdgeKind::Calls))
+            .map(|(target, _)| (*target).clone())
+            .collect();
+
+        for callee_id in &call_edges {
+            if propagate_caller_to_callee(caller_id, callee_id, ir_map, tables) {
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Propagate argument and return pts-sets between a caller-callee pair.
+fn propagate_caller_to_callee(
+    caller_id: &NodeId,
+    callee_id: &NodeId,
+    ir_map: &HashMap<NodeId, IrFunction>,
+    tables: &mut HashMap<NodeId, PointsToTable>,
+) -> bool {
+    let (Some(caller_ir), Some(callee_ir)) =
+        (ir_map.get(caller_id), ir_map.get(callee_id))
+    else {
+        return false;
+    };
+
+    let arg_seeds = collect_arg_seeds(caller_ir, callee_ir, tables.get(caller_id));
+    let ret_seeds = collect_ret_seeds(callee_ir, tables.get(callee_id));
+    let call_dsts = collect_call_dsts(caller_ir, &callee_ir.name);
+
+    let mut changed = false;
+    if let Some(callee_pts) = tables.get_mut(callee_id) {
+        for (param, locs) in &arg_seeds {
+            if callee_pts.add_var_set(param.clone(), locs) {
+                changed = true;
+            }
+        }
+    }
+    if let Some(caller_pts) = tables.get_mut(caller_id) {
+        for dst in &call_dsts {
+            if caller_pts.add_var_set(dst.clone(), &ret_seeds) {
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Map caller argument pts-sets to callee parameter variables.
+fn collect_arg_seeds(
+    caller_ir: &IrFunction,
+    callee_ir: &IrFunction,
+    caller_pts: Option<&PointsToTable>,
+) -> Vec<(Var, BTreeSet<AbstractLocation>)> {
+    let Some(pts) = caller_pts else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for op in &caller_ir.body {
+        let IrOp::Call { callee, args, .. } = op else {
+            continue;
+        };
+        if callee != &callee_ir.name {
+            continue;
+        }
+        for (i, arg) in args.iter().enumerate() {
+            let Some(param) = callee_ir.params.get(i) else {
+                continue;
+            };
+            let arg_set = operand_pts_set(pts, arg);
+            if !arg_set.is_empty() {
+                result.push((param.clone(), arg_set));
+            }
+        }
+    }
+    result
+}
+
+/// Collect the pts-set of all return values in a callee.
+fn collect_ret_seeds(
+    callee_ir: &IrFunction,
+    callee_pts: Option<&PointsToTable>,
+) -> BTreeSet<AbstractLocation> {
+    let Some(pts) = callee_pts else {
+        return BTreeSet::new();
+    };
+    let mut ret_set = BTreeSet::new();
+    for op in &callee_ir.body {
+        let IrOp::Return { value: Some(val) } = op else {
+            continue;
+        };
+        for loc in operand_pts_set(pts, val) {
+            ret_set.insert(loc);
+        }
+    }
+    ret_set
+}
+
+/// Find all destination variables in the caller for calls to `callee_name`.
+fn collect_call_dsts(caller_ir: &IrFunction, callee_name: &str) -> Vec<Var> {
+    caller_ir
+        .body
+        .iter()
+        .filter_map(|op| match op {
+            IrOp::Call {
+                dst: Some(d),
+                callee,
+                ..
+            } if callee == callee_name => Some(d.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Resolve an operand's pts-set for interprocedural seed building.
+fn operand_pts_set(pts: &PointsToTable, operand: &Operand) -> BTreeSet<AbstractLocation> {
+    match operand {
+        Operand::Var(v) => pts.vars.get(v).cloned().unwrap_or_default(),
+        Operand::Temp(t) => {
+            let tv = Var::new(format!("__t{t}"));
+            pts.vars.get(&tv).cloned().unwrap_or_default()
+        }
+        Operand::Const(_) => BTreeSet::new(),
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -529,6 +703,193 @@ mod tests {
         });
         // If this loops forever the test runner will time out;
         // termination is the assertion.
-        let _ = analyze(&f);
+        analyze(&f);
+    }
+
+    // ─── Interprocedural tests ───────────────────────────────────────────
+
+    use crate::edges::EdgeData;
+    use crate::graph::CodeGraph;
+    use crate::nodes::{NodeData, NodeId, NodeKind, Span, Visibility};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn mk_span() -> Span {
+        Span {
+            file: PathBuf::from("test.rs"),
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 0,
+            byte_range: 0..0,
+        }
+    }
+
+    fn mk_node_data(name: &str) -> NodeData {
+        NodeData {
+            id: NodeId::new("test.rs", name, NodeKind::Function),
+            kind: NodeKind::Function,
+            name: name.to_string(),
+            qualified_name: name.to_string(),
+            file_path: PathBuf::from("test.rs"),
+            span: mk_span(),
+            visibility: Visibility::Private,
+            metadata: HashMap::new(),
+            birth_revision: 0,
+            last_modified_revision: 0,
+            complexity: None,
+            cfg: None,
+            dataflow: None,
+        }
+    }
+
+    fn calls_edge() -> EdgeData {
+        EdgeData {
+            kind: EdgeKind::Calls,
+            source_span: mk_span(),
+            weight: 1.0,
+        }
+    }
+
+    #[test]
+    fn interprocedural_return_flows_to_caller() {
+        // source() returns a param-location; main calls source() and
+        // assigns to `x`. x's pts should contain source's return location.
+        let mut source_ir = IrFunction::new("source");
+        source_ir.params.push(Var::new("seed"));
+        source_ir.push(IrOp::Return {
+            value: Some(Operand::Var(Var::new("seed"))),
+        });
+
+        let mut main_ir = IrFunction::new("main");
+        main_ir.push(IrOp::Call {
+            dst: Some(Var::new("x")),
+            callee: "source".into(),
+            args: vec![],
+        });
+
+        let source_nd = mk_node_data("source");
+        let main_nd = mk_node_data("main");
+        let source_id = source_nd.id.clone();
+        let main_id = main_nd.id.clone();
+
+        let mut graph = CodeGraph::new();
+        graph.add_node(source_nd);
+        graph.add_node(main_nd);
+        graph.add_edge(&main_id, &source_id, calls_edge()).unwrap();
+
+        let mut ir_map: HashMap<NodeId, IrFunction> = HashMap::new();
+        ir_map.insert(source_id.clone(), source_ir);
+        ir_map.insert(main_id.clone(), main_ir);
+
+        let tables = analyze_interprocedural(&graph, &ir_map);
+        let main_pts = tables.get(&main_id).expect("main table");
+        let x_pts = main_pts.pts_of(&Var::new("x")).expect("x tracked");
+
+        // source's return is `seed` → Param("seed"); it should flow to x.
+        assert!(
+            x_pts.contains(&AbstractLocation::param("seed")),
+            "expected Param(seed) in pts(x), got {:?}",
+            x_pts,
+        );
+    }
+
+    #[test]
+    fn interprocedural_arg_flows_to_callee_param() {
+        // main has param `data`, calls sink(data). sink's param `x` pts
+        // should include main's Param("data") location.
+        let mut main_ir = IrFunction::new("main");
+        main_ir.params.push(Var::new("data"));
+        main_ir.push(IrOp::Call {
+            dst: None,
+            callee: "sink".into(),
+            args: vec![Operand::Var(Var::new("data"))],
+        });
+
+        let mut sink_ir = IrFunction::new("sink");
+        sink_ir.params.push(Var::new("x"));
+
+        let main_nd = mk_node_data("main");
+        let sink_nd = mk_node_data("sink");
+        let main_id = main_nd.id.clone();
+        let sink_id = sink_nd.id.clone();
+
+        let mut graph = CodeGraph::new();
+        graph.add_node(main_nd);
+        graph.add_node(sink_nd);
+        graph.add_edge(&main_id, &sink_id, calls_edge()).unwrap();
+
+        let mut ir_map: HashMap<NodeId, IrFunction> = HashMap::new();
+        ir_map.insert(main_id.clone(), main_ir);
+        ir_map.insert(sink_id.clone(), sink_ir);
+
+        let tables = analyze_interprocedural(&graph, &ir_map);
+        let sink_pts = tables.get(&sink_id).expect("sink table");
+        let x_pts = sink_pts.pts_of(&Var::new("x")).expect("x tracked");
+
+        assert!(
+            x_pts.contains(&AbstractLocation::param("data")),
+            "expected Param(data) in pts(x), got {:?}",
+            x_pts,
+        );
+    }
+
+    #[test]
+    fn interprocedural_transitive_source_to_sink() {
+        // source() → returns Param("taint")
+        // sink(x) — just receives
+        // main: sink(source())
+        //
+        // After propagation: sink's param should contain Param("taint").
+        let mut source_ir = IrFunction::new("source");
+        source_ir.params.push(Var::new("taint"));
+        source_ir.push(IrOp::Return {
+            value: Some(Operand::Var(Var::new("taint"))),
+        });
+
+        let mut sink_ir = IrFunction::new("sink");
+        sink_ir.params.push(Var::new("x"));
+
+        // main: tmp = source(); sink(tmp);
+        let mut main_ir = IrFunction::new("main");
+        main_ir.push(IrOp::Call {
+            dst: Some(Var::new("tmp")),
+            callee: "source".into(),
+            args: vec![],
+        });
+        main_ir.push(IrOp::Call {
+            dst: None,
+            callee: "sink".into(),
+            args: vec![Operand::Var(Var::new("tmp"))],
+        });
+
+        let source_nd = mk_node_data("source");
+        let sink_nd = mk_node_data("sink");
+        let main_nd = mk_node_data("main");
+        let source_id = source_nd.id.clone();
+        let sink_id = sink_nd.id.clone();
+        let main_id = main_nd.id.clone();
+
+        let mut graph = CodeGraph::new();
+        graph.add_node(source_nd);
+        graph.add_node(sink_nd);
+        graph.add_node(main_nd);
+        graph.add_edge(&main_id, &source_id, calls_edge()).unwrap();
+        graph.add_edge(&main_id, &sink_id, calls_edge()).unwrap();
+
+        let mut ir_map: HashMap<NodeId, IrFunction> = HashMap::new();
+        ir_map.insert(source_id.clone(), source_ir);
+        ir_map.insert(sink_id.clone(), sink_ir);
+        ir_map.insert(main_id.clone(), main_ir);
+
+        let tables = analyze_interprocedural(&graph, &ir_map);
+        let sink_pts = tables.get(&sink_id).expect("sink table");
+        let x_pts = sink_pts.pts_of(&Var::new("x")).expect("x tracked");
+
+        assert!(
+            x_pts.contains(&AbstractLocation::param("taint")),
+            "transitive: expected Param(taint) in sink's pts(x), got {:?}",
+            x_pts,
+        );
     }
 }

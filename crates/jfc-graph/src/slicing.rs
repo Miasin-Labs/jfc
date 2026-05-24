@@ -22,10 +22,13 @@
 //! Until that lands, [`EmptyOracle`] returns no dependencies — slices over it
 //! contain only the seed.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use crate::edges::EdgeKind;
 use crate::graph::CodeGraph;
+use crate::ir::IrFunction;
 use crate::nodes::NodeId;
+use crate::points_to::{analyze_interprocedural, PointsToTable};
 
 /// Pluggable dataflow source: provides def-use and use-def relationships
 /// over [`NodeId`]s.
@@ -66,6 +69,105 @@ impl DataflowOracle for EmptyOracle {
     fn use_defs(&self, _: &NodeId) -> Vec<NodeId> {
         Vec::new()
     }
+}
+
+/// Points-to-backed dataflow oracle. Uses interprocedural alias analysis
+/// results to derive coarse def-use / use-def chains across functions.
+///
+/// The edges are derived from the call graph:
+/// - `def_uses(callee)` → callers that pass aliased arguments into callee.
+/// - `use_defs(caller)` → callees whose parameters alias caller's values.
+pub struct PointsToOracle {
+    /// Per-function points-to tables (interprocedural results).
+    tables: HashMap<NodeId, PointsToTable>,
+    /// caller → callees (forward call edges).
+    callees_of: HashMap<NodeId, Vec<NodeId>>,
+    /// callee → callers (backward call edges).
+    callers_of: HashMap<NodeId, Vec<NodeId>>,
+}
+
+impl PointsToOracle {
+    /// Build from a code graph and IR map by running interprocedural
+    /// points-to analysis and caching the call graph topology.
+    pub fn build(graph: &CodeGraph, ir_map: &HashMap<NodeId, IrFunction>) -> Self {
+        let tables = analyze_interprocedural(graph, ir_map);
+        let (callees_of, callers_of) = extract_call_edges(graph, &tables);
+        Self {
+            tables,
+            callees_of,
+            callers_of,
+        }
+    }
+
+    /// Check whether two functions share aliased parameter/return flow.
+    fn has_alias_flow(&self, from: &NodeId, to: &NodeId) -> bool {
+        let (Some(from_pts), Some(to_pts)) = (self.tables.get(from), self.tables.get(to)) else {
+            return false;
+        };
+        // Check if any variable in `from` shares locations with any param in `to`.
+        for from_set in from_pts.vars.values() {
+            for to_set in to_pts.vars.values() {
+                if from_set.intersection(to_set).next().is_some() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+impl DataflowOracle for PointsToOracle {
+    fn def_uses(&self, node: &NodeId) -> Vec<NodeId> {
+        let Some(callers) = self.callers_of.get(node) else {
+            return Vec::new();
+        };
+        callers
+            .iter()
+            .filter(|caller| self.has_alias_flow(caller, node))
+            .cloned()
+            .collect()
+    }
+
+    fn use_defs(&self, node: &NodeId) -> Vec<NodeId> {
+        let Some(callees) = self.callees_of.get(node) else {
+            return Vec::new();
+        };
+        callees
+            .iter()
+            .filter(|callee| self.has_alias_flow(node, callee))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Extract forward/backward call edges from the graph for nodes in the
+/// analysis set.
+fn extract_call_edges(
+    graph: &CodeGraph,
+    tables: &HashMap<NodeId, PointsToTable>,
+) -> (HashMap<NodeId, Vec<NodeId>>, HashMap<NodeId, Vec<NodeId>>) {
+    let mut callees_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut callers_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+
+    for node_id in tables.keys() {
+        for (target, ed) in graph.get_edges_from(node_id) {
+            if !matches!(ed.kind, EdgeKind::Calls) {
+                continue;
+            }
+            if !tables.contains_key(target) {
+                continue;
+            }
+            callees_of
+                .entry(node_id.clone())
+                .or_default()
+                .push(target.clone());
+            callers_of
+                .entry(target.clone())
+                .or_default()
+                .push(node_id.clone());
+        }
+    }
+    (callees_of, callers_of)
 }
 
 /// Backward slice: every node that can affect the value at `seed`.
@@ -325,5 +427,125 @@ mod tests {
         assert_eq!(slice.len(), 1);
         assert!(slice.contains(&seed));
         assert!(!slice.contains(&phantom));
+    }
+
+    // ─── PointsToOracle tests ────────────────────────────────────────────
+
+    use crate::edges::{EdgeData, EdgeKind};
+    use crate::ir::{IrFunction, IrOp, Operand, Var};
+
+    fn calls_edge() -> EdgeData {
+        EdgeData {
+            kind: EdgeKind::Calls,
+            source_span: Span {
+                file: PathBuf::from("test.rs"),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 0,
+                byte_range: 0..0,
+            },
+            weight: 1.0,
+        }
+    }
+
+    #[test]
+    fn points_to_oracle_forward_slice_connected_chain() {
+        // source → main → sink (all connected via Calls edges).
+        // source returns param "taint", main passes it to sink.
+        let mut source_ir = IrFunction::new("source");
+        source_ir.params.push(Var::new("taint"));
+        source_ir.push(IrOp::Return {
+            value: Some(Operand::Var(Var::new("taint"))),
+        });
+
+        let mut main_ir = IrFunction::new("main");
+        main_ir.push(IrOp::Call {
+            dst: Some(Var::new("tmp")),
+            callee: "source".into(),
+            args: vec![],
+        });
+        main_ir.push(IrOp::Call {
+            dst: None,
+            callee: "sink".into(),
+            args: vec![Operand::Var(Var::new("tmp"))],
+        });
+
+        let mut sink_ir = IrFunction::new("sink");
+        sink_ir.params.push(Var::new("x"));
+
+        let (mut graph, ids) = graph_with(&["source", "main", "sink"]);
+        let (source_id, main_id, sink_id) =
+            (ids[0].clone(), ids[1].clone(), ids[2].clone());
+
+        graph
+            .add_edge(&main_id, &source_id, calls_edge())
+            .unwrap();
+        graph.add_edge(&main_id, &sink_id, calls_edge()).unwrap();
+
+        let mut ir_map: HashMap<NodeId, IrFunction> = HashMap::new();
+        ir_map.insert(source_id, source_ir);
+        ir_map.insert(main_id.clone(), main_ir);
+        ir_map.insert(sink_id.clone(), sink_ir);
+
+        let oracle = super::PointsToOracle::build(&graph, &ir_map);
+
+        // Forward slice from main should reach sink (use_defs follows flow).
+        let fwd = forward_slice(&graph, &oracle, &main_id, 10);
+        assert!(
+            fwd.contains(&sink_id),
+            "forward slice from main should include sink, got {:?}",
+            fwd,
+        );
+    }
+
+    #[test]
+    fn points_to_oracle_backward_slice_connected_chain() {
+        // main calls source, passes result to sink.
+        // Backward from sink should reach main (the caller that passes data).
+        let mut source_ir = IrFunction::new("source");
+        source_ir.params.push(Var::new("taint"));
+        source_ir.push(IrOp::Return {
+            value: Some(Operand::Var(Var::new("taint"))),
+        });
+
+        let mut main_ir = IrFunction::new("main");
+        main_ir.push(IrOp::Call {
+            dst: Some(Var::new("tmp")),
+            callee: "source".into(),
+            args: vec![],
+        });
+        main_ir.push(IrOp::Call {
+            dst: None,
+            callee: "sink".into(),
+            args: vec![Operand::Var(Var::new("tmp"))],
+        });
+
+        let mut sink_ir = IrFunction::new("sink");
+        sink_ir.params.push(Var::new("x"));
+
+        let (mut graph, ids) = graph_with(&["source", "main", "sink"]);
+        let (source_id, main_id, sink_id) =
+            (ids[0].clone(), ids[1].clone(), ids[2].clone());
+
+        graph
+            .add_edge(&main_id, &source_id, calls_edge())
+            .unwrap();
+        graph.add_edge(&main_id, &sink_id, calls_edge()).unwrap();
+
+        let mut ir_map: HashMap<NodeId, IrFunction> = HashMap::new();
+        ir_map.insert(source_id, source_ir);
+        ir_map.insert(main_id.clone(), main_ir);
+        ir_map.insert(sink_id.clone(), sink_ir);
+
+        let oracle = super::PointsToOracle::build(&graph, &ir_map);
+
+        // Backward slice from sink should reach main (def_uses).
+        let bwd = backward_slice(&graph, &oracle, &sink_id, 10);
+        assert!(
+            bwd.contains(&main_id),
+            "backward slice from sink should include main, got {:?}",
+            bwd,
+        );
     }
 }
