@@ -4,12 +4,15 @@ mod app;
 
 mod atomic_write;
 mod attachments;
+#[allow(dead_code)]
 mod auth;
 mod auto_mode;
+#[allow(dead_code)]
 mod autonomous_loop;
 mod bash_processes;
 #[allow(dead_code)]
 mod bridge_attestation;
+#[allow(dead_code)]
 mod ccr;
 mod claude_status;
 mod cli;
@@ -65,6 +68,7 @@ mod sdk_bridge;
 mod session;
 mod session_naming;
 mod slate;
+#[allow(dead_code)]
 mod speculation;
 mod spinner;
 mod sprint;
@@ -77,6 +81,7 @@ mod theme;
 mod toast;
 mod tools;
 mod types;
+#[allow(dead_code)]
 mod ultraplan;
 mod web_cache;
 mod web_search;
@@ -97,7 +102,9 @@ mod permissions;
 // Sandbox module: contains both landlock (feature-gated) and bwrap
 // (always-on) sandbox configuration. The BashSandboxConfig type is
 // referenced from app state regardless of platform/feature.
+#[allow(dead_code)]
 mod sandbox;
+#[allow(dead_code)]
 mod session_recap;
 mod slop_guard;
 

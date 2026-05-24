@@ -991,8 +991,10 @@ pub struct App {
     pub autonomous_loop: Option<crate::autonomous_loop::AutonomousLoopState>,
     /// Active speculation session — set when prompt-suggestion speculation
     /// is running, cleared on accept/discard. See `crate::speculation`.
+    #[allow(dead_code)]
     pub active_speculation_id: Option<String>,
     /// Per-session accumulated speculation stats (time saved, accept/discard counts).
+    #[allow(dead_code)]
     pub speculation_stats: crate::speculation::SpeculationStats,
     /// Bash sandbox configuration (bwrap network/filesystem isolation).
     /// When `enabled = true` and bwrap is present, bash commands are wrapped.
@@ -1024,9 +1026,11 @@ pub struct App {
     /// Used by the session recap feature: when the user returns after
     /// `session_recap::AWAY_THRESHOLD`, a recap is generated from messages
     /// that arrived after this instant.
+    #[allow(dead_code)]
     pub last_user_interaction_at: std::time::Instant,
     /// Message index at the time of the last user interaction. Messages
     /// after this index are candidates for the "while you were away" recap.
+    #[allow(dead_code)]
     pub interaction_message_idx: usize,
     /// Whether the idle-return toast has been shown this idle period.
     pub idle_return_shown: bool,
