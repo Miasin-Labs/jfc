@@ -969,7 +969,10 @@ pub(super) async fn cmd_permissions(
         }
         // Write back
         let _ = std::fs::create_dir_all(".jfc");
-        let _ = std::fs::write(settings_path, serde_json::to_string_pretty(&settings).unwrap());
+        let _ = std::fs::write(
+            settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        );
         app.messages.push(ChatMessage::assistant(format!(
             "Added permission allow rule: `{rule}`"
         )));
@@ -1031,7 +1034,10 @@ pub(super) async fn cmd_stuck(
 
     // Last activity
     let elapsed = app.last_user_activity_at.elapsed();
-    report.push_str(&format!("• Last activity: {:.1}s ago\n", elapsed.as_secs_f64()));
+    report.push_str(&format!(
+        "• Last activity: {:.1}s ago\n",
+        elapsed.as_secs_f64()
+    ));
 
     // Token usage
     report.push_str(&format!(
@@ -1066,7 +1072,12 @@ pub(super) async fn cmd_teleport_export(
         .messages
         .iter()
         .map(|m| {
-            let content: String = m.parts.iter().map(|p| p.text_only()).collect::<Vec<_>>().join("");
+            let content: String = m
+                .parts
+                .iter()
+                .map(|p| p.text_only())
+                .collect::<Vec<_>>()
+                .join("");
             serde_json::json!({
                 "role": m.role.to_string(),
                 "content": content,
@@ -1091,9 +1102,8 @@ pub(super) async fn cmd_teleport_export(
             )));
         }
         Err(e) => {
-            app.messages.push(ChatMessage::assistant(format!(
-                "Failed to export: {e}"
-            )));
+            app.messages
+                .push(ChatMessage::assistant(format!("Failed to export: {e}")));
         }
     }
 }
@@ -1180,7 +1190,9 @@ pub(super) async fn cmd_remote(
         "https://api.anthropic.com",
         prompt.clone(),
         "default".to_string(),
-    ).await {
+    )
+    .await
+    {
         Ok(session) => {
             app.messages.push(ChatMessage::assistant(format!(
                 "Remote CCR session spawned: `{}`\nURL: {}",
@@ -1188,9 +1200,8 @@ pub(super) async fn cmd_remote(
             )));
         }
         Err(e) => {
-            app.messages.push(ChatMessage::assistant(format!(
-                "Remote spawn failed: {e}"
-            )));
+            app.messages
+                .push(ChatMessage::assistant(format!("Remote spawn failed: {e}")));
         }
     }
 }
@@ -1202,8 +1213,7 @@ pub(super) async fn cmd_oauth_login(
     _tx: Option<&mpsc::Sender<AppEvent>>,
 ) {
     let cfg = crate::auth::device_flow::DeviceFlowConfig {
-        client_id: std::env::var("JFC_OAUTH_CLIENT_ID")
-            .unwrap_or_else(|_| "jfc-cli".into()),
+        client_id: std::env::var("JFC_OAUTH_CLIENT_ID").unwrap_or_else(|_| "jfc-cli".into()),
         device_auth_url: std::env::var("JFC_OAUTH_DEVICE_URL")
             .unwrap_or_else(|_| "https://auth.anthropic.com/oauth/device/code".into()),
         token_url: std::env::var("JFC_OAUTH_TOKEN_URL")
@@ -1230,7 +1240,9 @@ pub(super) async fn cmd_oauth_login(
         &device_resp.device_code,
         device_resp.interval,
         device_resp.expires_in,
-    ).await {
+    )
+    .await
+    {
         Ok(token) => {
             let _ = crate::auth::device_flow::store_token(&token);
             app.messages.push(ChatMessage::assistant(
@@ -1238,9 +1250,8 @@ pub(super) async fn cmd_oauth_login(
             ));
         }
         Err(e) => {
-            app.messages.push(ChatMessage::assistant(format!(
-                "OAuth poll failed: {e}"
-            )));
+            app.messages
+                .push(ChatMessage::assistant(format!("OAuth poll failed: {e}")));
         }
     }
 }
@@ -1373,11 +1384,7 @@ pub(super) async fn cmd_babysit_prs(
     _tx: Option<&mpsc::Sender<AppEvent>>,
 ) {
     app.messages.push(ChatMessage::user(
-        parts
-            .iter()
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" "),
+        parts.iter().copied().collect::<Vec<_>>().join(" "),
     ));
 
     let arg = parts.get(1).copied().unwrap_or("").trim();
@@ -1466,11 +1473,8 @@ pub(super) async fn cmd_babysit_prs(
                         let cmd = "sh -c 'mkdir -p .jfc && \
                                    gh pr list --json number,title,reviewDecision,statusCheckRollup \
                                    --limit 10 > .jfc/pr-status.json 2>&1'";
-                        let id = daemon.add_cron_job(
-                            sched,
-                            "jfc /babysit-prs PR status refresher",
-                            cmd,
-                        );
+                        let id =
+                            daemon.add_cron_job(sched, "jfc /babysit-prs PR status refresher", cmd);
                         app.babysit_prs_cron_id = Some(id.clone());
                         report.push_str(&format!(
                             "\n_Registered cron job `{id}` ({normalized}) — \
@@ -1547,9 +1551,7 @@ pub(super) async fn cmd_morning_checkin(
                     } else {
                         "CI ✓"
                     };
-                    body.push_str(&format!(
-                        "- **#{num}** {title} — {review} · {ci}\n"
-                    ));
+                    body.push_str(&format!("- **#{num}** {title} — {review} · {ci}\n"));
                 }
             }
         }

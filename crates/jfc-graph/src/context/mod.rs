@@ -27,12 +27,12 @@ use crate::edges::EdgeKind;
 use crate::graph::CodeGraph;
 use crate::nodes::NodeId;
 use crate::symbols::SymbolTable;
-use crate::traversal::{traverse, TraversalConfig, TraversalDirection};
+use crate::traversal::{TraversalConfig, TraversalDirection, traverse};
 
 pub use budget::ExploreBudget;
 pub use expansion::ExpandedSubgraph;
-pub use heuristics::{classify_intent, TaskIntent};
-pub use resolver::{matches_symbol, resolve_symbol, MatchQuality};
+pub use heuristics::{TaskIntent, classify_intent};
+pub use resolver::{MatchQuality, matches_symbol, resolve_symbol};
 
 /// Options for `codegraph_context`-style queries.
 #[derive(Debug, Clone)]
@@ -169,9 +169,9 @@ fn pick_entry_points(graph: &CodeGraph, task: &str, limit: usize) -> Vec<NodeId>
 fn extract_identifiers(task: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for raw in task.split(|c: char| {
-        !c.is_alphanumeric() && c != '_' && c != ':' && c != '.' && c != '/'
-    }) {
+    for raw in
+        task.split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':' && c != '.' && c != '/')
+    {
         if raw.len() < 3 || STOP_WORDS.contains(&raw.to_lowercase().as_str()) {
             continue;
         }
@@ -187,20 +187,15 @@ fn extract_identifiers(task: &str) -> Vec<String> {
 }
 
 const STOP_WORDS: &[&str] = &[
-    "the", "and", "for", "with", "from", "this", "that", "have", "into", "but", "not",
-    "are", "was", "were", "has", "had", "its", "can", "did", "may", "also", "than",
-    "then", "them", "each", "some", "such", "only", "same", "about", "after", "before",
-    "between", "through", "during", "without", "again", "further", "once", "here",
-    "there", "both", "just", "more", "most", "very", "how", "what", "when", "where",
-    "which", "who", "why", "does", "doing", "done", "use", "used", "using",
+    "the", "and", "for", "with", "from", "this", "that", "have", "into", "but", "not", "are",
+    "was", "were", "has", "had", "its", "can", "did", "may", "also", "than", "then", "them",
+    "each", "some", "such", "only", "same", "about", "after", "before", "between", "through",
+    "during", "without", "again", "further", "once", "here", "there", "both", "just", "more",
+    "most", "very", "how", "what", "when", "where", "which", "who", "why", "does", "doing", "done",
+    "use", "used", "using",
 ];
 
-fn expand_related(
-    graph: &CodeGraph,
-    seeds: &[NodeId],
-    depth: u8,
-    budget: usize,
-) -> Vec<NodeId> {
+fn expand_related(graph: &CodeGraph, seeds: &[NodeId], depth: u8, budget: usize) -> Vec<NodeId> {
     let config = TraversalConfig {
         max_depth: depth as usize,
         max_nodes: budget,
@@ -255,19 +250,11 @@ fn read_node_source(graph: &CodeGraph, id: &NodeId) -> Option<String> {
 
 /// Render a callers / callees result starting from one or more
 /// resolved seed nodes.
-pub fn callers_for(
-    graph: &CodeGraph,
-    symbol: &str,
-    limit: usize,
-) -> (Vec<NodeId>, Option<String>) {
+pub fn callers_for(graph: &CodeGraph, symbol: &str, limit: usize) -> (Vec<NodeId>, Option<String>) {
     aggregate_neighbors(graph, symbol, limit, NeighborDirection::Incoming)
 }
 
-pub fn callees_for(
-    graph: &CodeGraph,
-    symbol: &str,
-    limit: usize,
-) -> (Vec<NodeId>, Option<String>) {
+pub fn callees_for(graph: &CodeGraph, symbol: &str, limit: usize) -> (Vec<NodeId>, Option<String>) {
     aggregate_neighbors(graph, symbol, limit, NeighborDirection::Outgoing)
 }
 

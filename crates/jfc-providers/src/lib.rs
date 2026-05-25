@@ -1,3 +1,12 @@
+//! Concrete provider backends implementing the `jfc-provider` traits.
+//!
+//! Supports Anthropic (API key + multi-account Claude.ai OAuth), OpenAI,
+//! Codex/ChatGPT OAuth, OpenWebUI/LiteLLM proxies, Bedrock, Vertex, and
+//! Gemini/Antigravity. Each backend handles its own auth lifecycle, model
+//! catalogue, streaming SSE parsing, and request/response transformation,
+//! including inline `<tool_call>` XML interception for proxy routes that don't
+//! emit native tool calls.
+
 pub mod anthropic;
 pub mod anthropic_accounts;
 pub mod anthropic_models;

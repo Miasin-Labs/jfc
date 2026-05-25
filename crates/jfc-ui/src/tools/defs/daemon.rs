@@ -26,7 +26,8 @@ fn cron_create_def() -> ToolDef {
         description: "Register a recurring cron job with the local jfc daemon. \
             Schedule accepts five-field crontab (`*/5 * * * *`), `@hourly`, \
             `@daily`, `@weekly`, or `@every <duration>` (e.g. `@every 5m`, \
-            `@every 1h30m`). Returns the new job's id.".into(),
+            `@every 1h30m`). Returns the new job's id."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -64,7 +65,8 @@ fn schedule_wakeup_def() -> ToolDef {
         name: "ScheduleWakeup".into(),
         description: "Schedule a one-shot wakeup that re-posts a prompt to \
             the conversation after `delay_seconds` elapse. Persisted to \
-            daemon state so it replays after restart.".into(),
+            daemon state so it replays after restart."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -82,7 +84,8 @@ fn monitor_def() -> ToolDef {
         name: "Monitor".into(),
         description: "Spawn a long-running command and stream stdout \
             line-by-line, returning the first line matching the `until` \
-            regex. Times out after 60s.".into(),
+            regex. Times out after 60s."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -101,7 +104,8 @@ fn lsp_def() -> ToolDef {
             `references`, `implementation`, `type_definition`, `document_symbols`, \
             `workspace_symbols`, `incoming_calls`, or `outgoing_calls` at a specific \
             source location. Uses the already-spawned LSP client (rust-analyzer / zls / \
-            etc.) — returns an error if no LSP is running for the workspace.".into(),
+            etc.) — returns an error if no LSP is running for the workspace."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -138,7 +142,8 @@ fn push_notification_def() -> ToolDef {
         description: "Send a desktop notification to the user via the \
             native notification daemon (notify-send / NotificationCenter / \
             Toast). Use sparingly for events that need attention while \
-            the user has switched focus away from the terminal.".into(),
+            the user has switched focus away from the terminal."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -163,7 +168,8 @@ fn remote_trigger_def() -> ToolDef {
             in `~/.config/jfc/triggers.toml`. Use to fire CI runs, Slack \
             hooks, custom alert endpoints, etc. without exposing the URL \
             to the model. Triggers are looked up by `trigger_id`; unknown \
-            IDs return an error.".into(),
+            IDs return an error."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -256,7 +262,8 @@ fn wait_for_mcp_servers_def() -> ToolDef {
         description: "Block until all configured MCP servers report ready. \
             Returns a list of connected servers and any that timed out. \
             Use this at session start when you need MCP tools to be available \
-            before proceeding.".into(),
+            before proceeding."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -276,7 +283,8 @@ fn list_mcp_resources_def() -> ToolDef {
     ToolDef {
         name: "ListMcpResources".into(),
         description: "List resources exposed by connected MCP servers. Optionally \
-            filter by server name. Returns resource names and URIs grouped by server.".into(),
+            filter by server name. Returns resource names and URIs grouped by server."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -293,7 +301,8 @@ fn read_mcp_resource_def() -> ToolDef {
     ToolDef {
         name: "ReadMcpResource".into(),
         description: "Read the contents of a specific MCP resource by URI. \
-            The server name identifies which MCP server hosts the resource.".into(),
+            The server name identifies which MCP server hosts the resource."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

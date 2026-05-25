@@ -130,9 +130,7 @@ fn run_learn_dreamer(
     project_root: &std::path::Path,
     lease_path: &std::path::Path,
 ) -> Result<String, String> {
-    use jfc_learn::dreamer::{
-        Dreamer, DreamerTask, MemoryRecord, acquire_lease, release_lease,
-    };
+    use jfc_learn::dreamer::{Dreamer, DreamerTask, MemoryRecord, acquire_lease, release_lease};
 
     // Acquire the learn lease (cross-process exclusion).
     let lease = acquire_lease(lease_path).map_err(|e| e.to_string())?;

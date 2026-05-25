@@ -202,7 +202,6 @@ pub fn should_compact(current_tokens: usize, max_context_tokens: usize) -> bool 
     should
 }
 
-
 mod engine;
 
 pub use engine::{CompactProgressCb, CompactResult, compact};

@@ -50,12 +50,27 @@ impl EdgeKind {
             EdgeKind::UnresolvedCall(_) => source == NodeKind::Function,
             EdgeKind::UsesType => {
                 source == NodeKind::Function
-                    && matches!(target, NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Interface | NodeKind::TypeAlias)
+                    && matches!(
+                        target,
+                        NodeKind::Struct
+                            | NodeKind::Enum
+                            | NodeKind::Trait
+                            | NodeKind::Interface
+                            | NodeKind::TypeAlias
+                    )
             }
             EdgeKind::References => true,
-            EdgeKind::Contains => matches!(source, NodeKind::Module | NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Interface),
+            EdgeKind::Contains => matches!(
+                source,
+                NodeKind::Module
+                    | NodeKind::Struct
+                    | NodeKind::Enum
+                    | NodeKind::Trait
+                    | NodeKind::Interface
+            ),
             EdgeKind::Implements => {
-                matches!(source, NodeKind::Struct | NodeKind::Enum) && matches!(target, NodeKind::Trait | NodeKind::Interface)
+                matches!(source, NodeKind::Struct | NodeKind::Enum)
+                    && matches!(target, NodeKind::Trait | NodeKind::Interface)
             }
             EdgeKind::ExternalCall(_, _) => source == NodeKind::Function,
             EdgeKind::Extends => true,

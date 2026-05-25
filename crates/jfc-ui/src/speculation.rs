@@ -64,11 +64,7 @@ pub fn accept_overlay() -> std::io::Result<usize> {
         return Ok(0);
     };
     let mut copied = 0;
-    fn walk(
-        src: &Path,
-        dst: &Path,
-        copied: &mut usize,
-    ) -> std::io::Result<()> {
+    fn walk(src: &Path, dst: &Path, copied: &mut usize) -> std::io::Result<()> {
         if !src.exists() {
             return Ok(());
         }
@@ -103,9 +99,7 @@ pub fn discard_overlay() -> std::io::Result<()> {
 }
 
 /// Tools allowed during speculation (read-only + scoped writes).
-const ALLOWED_SPECULATION_TOOLS: &[&str] = &[
-    "Read", "Glob", "Grep", "ToolSearch", "WebFetch",
-];
+const ALLOWED_SPECULATION_TOOLS: &[&str] = &["Read", "Glob", "Grep", "ToolSearch", "WebFetch"];
 
 /// Tools that can write during speculation (scoped to cwd).
 const WRITE_SPECULATION_TOOLS: &[&str] = &["Write", "Edit"];

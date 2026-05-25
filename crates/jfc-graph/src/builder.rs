@@ -124,7 +124,10 @@ impl GraphBuilder {
                 let ts_node = find_ts_node_at(parsed.tree.root_node(), byte_start);
                 if let Some(ts_fn) = ts_node {
                     if let Some(ir_fn) = lower_for_language(lang_id, ts_fn, &parsed.source) {
-                        result.graph.ir_functions.insert(node_data.id.clone(), ir_fn);
+                        result
+                            .graph
+                            .ir_functions
+                            .insert(node_data.id.clone(), ir_fn);
                     }
                 }
             }
@@ -296,8 +299,14 @@ mod tests {
         );
 
         // Verify at least one IR function has a non-empty body
-        let has_body = result.graph.ir_functions.values()
+        let has_body = result
+            .graph
+            .ir_functions
+            .values()
             .any(|ir| !ir.body.is_empty());
-        assert!(has_body, "expected at least one IR function with a non-empty body");
+        assert!(
+            has_body,
+            "expected at least one IR function with a non-empty body"
+        );
     }
 }

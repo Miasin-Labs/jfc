@@ -987,7 +987,9 @@ fn parse_node_kind(s: &str, pos: usize) -> Result<NodeKind, ParseError> {
         "Interface" => Ok(NodeKind::Interface),
         _ => Err(ParseError::new(
             pos,
-            format!("unknown node kind '{s}'. Valid kinds: Function, Struct, Enum, Module, Trait, EnumVariant, Field, TypeAlias, Constant, Interface"),
+            format!(
+                "unknown node kind '{s}'. Valid kinds: Function, Struct, Enum, Module, Trait, EnumVariant, Field, TypeAlias, Constant, Interface"
+            ),
         )),
     }
 }

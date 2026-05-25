@@ -142,7 +142,10 @@ pub fn enforce_file_diversity(
     for id in &nodes {
         order.push(id.clone());
         if let Some(node) = graph.get_node(id) {
-            by_file.entry(node.file_path.clone()).or_default().push(id.clone());
+            by_file
+                .entry(node.file_path.clone())
+                .or_default()
+                .push(id.clone());
         }
     }
 
@@ -158,11 +161,7 @@ pub fn enforce_file_diversity(
 
 /// Lower key = higher priority. Roots win, then struct/enum/trait,
 /// then function.
-fn priority_key(
-    graph: &CodeGraph,
-    id: &NodeId,
-    roots: &HashSet<NodeId>,
-) -> u8 {
+fn priority_key(graph: &CodeGraph, id: &NodeId, roots: &HashSet<NodeId>) -> u8 {
     if roots.contains(id) {
         return 0;
     }
@@ -183,11 +182,7 @@ fn priority_key(
 /// if a test entry survives the cap, fine; otherwise it's dropped too,
 /// because anchoring exploration results on test files generally
 /// pollutes the answer.
-pub fn cap_test_files(
-    graph: &CodeGraph,
-    nodes: Vec<NodeId>,
-    max_non_prod: usize,
-) -> Vec<NodeId> {
+pub fn cap_test_files(graph: &CodeGraph, nodes: Vec<NodeId>, max_non_prod: usize) -> Vec<NodeId> {
     let mut test_count = 0usize;
     let mut out = Vec::with_capacity(nodes.len());
     for id in nodes {
@@ -238,7 +233,9 @@ fn edge_kind_matches(kind: &EdgeKind, allowed: &[EdgeKind]) -> bool {
     if allowed.is_empty() {
         return true;
     }
-    allowed.iter().any(|a| std::mem::discriminant(a) == std::mem::discriminant(kind))
+    allowed
+        .iter()
+        .any(|a| std::mem::discriminant(a) == std::mem::discriminant(kind))
 }
 
 /// Co-location boost: count how many distinct *seed names* appear in
@@ -409,7 +406,11 @@ mod tests {
         let t1 = g.add_node(n("t1", NodeKind::Function, "src/tests/a.rs"));
         let t2 = g.add_node(n("t2", NodeKind::Function, "src/tests/b.rs"));
         let t3 = g.add_node(n("t3", NodeKind::Function, "src/tests/c.rs"));
-        let kept = cap_test_files(&g, vec![prod.clone(), t1.clone(), t2.clone(), t3.clone()], 1);
+        let kept = cap_test_files(
+            &g,
+            vec![prod.clone(), t1.clone(), t2.clone(), t3.clone()],
+            1,
+        );
         assert_eq!(kept.len(), 2);
         assert!(kept.contains(&prod));
     }

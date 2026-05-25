@@ -62,10 +62,7 @@ pub fn build_ranges(
             continue;
         }
         let span_size = node.span.end_line.saturating_sub(node.span.start_line) + 1;
-        if is_envelope_kind(node.kind)
-            && file_line_count > 0
-            && span_size * 2 > file_line_count
-        {
+        if is_envelope_kind(node.kind) && file_line_count > 0 && span_size * 2 > file_line_count {
             continue;
         }
         let importance = if entry_points.contains(id) { 10 } else { 1 };
@@ -97,7 +94,11 @@ pub fn build_clusters(ranges: &[Range], gap_threshold: u32) -> Vec<Cluster> {
     let mut current = Cluster {
         start: ranges[0].start,
         end: ranges[0].end,
-        symbols: vec![format!("{}({})", ranges[0].name, kind_label(ranges[0].kind))],
+        symbols: vec![format!(
+            "{}({})",
+            ranges[0].name,
+            kind_label(ranges[0].kind)
+        )],
         score: ranges[0].importance as u32,
         max_importance: ranges[0].importance,
     };
@@ -144,11 +145,7 @@ fn kind_label(kind: NodeKind) -> &'static str {
 /// Read `file` and slice out `[cluster.start - padding, cluster.end +
 /// padding]`, returning the slice with 1-indexed line-number prefixes
 /// (cat-n style). Returns `None` if the file can't be read.
-pub fn read_cluster_source(
-    file: &Path,
-    cluster: &Cluster,
-    context_padding: u32,
-) -> Option<String> {
+pub fn read_cluster_source(file: &Path, cluster: &Cluster, context_padding: u32) -> Option<String> {
     let content = std::fs::read_to_string(file).ok()?;
     let lines: Vec<&str> = content.lines().collect();
     let start = (cluster.start.saturating_sub(1 + context_padding)) as usize;
@@ -186,7 +183,11 @@ pub fn rank_clusters_for_inclusion(clusters: &[Cluster]) -> Vec<usize> {
                 .partial_cmp(&density_a)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| cb.score.cmp(&ca.score))
-                .then_with(|| span_a.partial_cmp(&span_b).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| {
+                    span_a
+                        .partial_cmp(&span_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         })
     });
     idx

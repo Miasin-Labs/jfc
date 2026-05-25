@@ -1,3 +1,11 @@
+//! Core provider abstraction: the `Provider` trait, `ModelSpec` parsing,
+//! `StreamOptions` builder, cost accounting, and retry primitives shared by
+//! every concrete backend in `jfc-providers`.
+//!
+//! This crate defines the contract — request/response shapes, streaming event
+//! types, model identification, and pricing — without binding to any specific
+//! API. Concrete implementations (Anthropic, OpenAI, Bedrock, Gemini, etc.)
+//! live in `jfc-providers` and implement these traits.
 #![allow(dead_code)]
 
 use std::{borrow::Borrow, collections::HashMap, fmt, ops::Deref, pin::Pin};

@@ -489,7 +489,9 @@ pub fn fuzzy_search(
     let lower_query = query.to_ascii_lowercase();
 
     for id in graph.all_node_ids() {
-        let Some(node) = graph.get_node(id) else { continue };
+        let Some(node) = graph.get_node(id) else {
+            continue;
+        };
         let name_lower = node.name.to_ascii_lowercase();
         // Try substring first (distance 0 equivalent)
         if name_lower.contains(&lower_query) {
@@ -506,11 +508,13 @@ pub fn fuzzy_search(
         }
     }
 
-    results.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| {
-        let na = graph.get_node(&a.0).map(|n| n.name.len()).unwrap_or(0);
-        let nb = graph.get_node(&b.0).map(|n| n.name.len()).unwrap_or(0);
-        na.cmp(&nb)
-    }));
+    results.sort_by(|a, b| {
+        a.1.cmp(&b.1).then_with(|| {
+            let na = graph.get_node(&a.0).map(|n| n.name.len()).unwrap_or(0);
+            let nb = graph.get_node(&b.0).map(|n| n.name.len()).unwrap_or(0);
+            na.cmp(&nb)
+        })
+    });
     results.truncate(limit);
     results
 }
@@ -1256,7 +1260,10 @@ mod tests {
         let p = parse_query("kind:fn kind:struct path:src/a path:src/b name:foo name:bar query");
         assert_eq!(p.text, "query");
         assert_eq!(p.kinds, vec![NodeKind::Function, NodeKind::Struct]);
-        assert_eq!(p.path_filters, vec!["src/a".to_string(), "src/b".to_string()]);
+        assert_eq!(
+            p.path_filters,
+            vec!["src/a".to_string(), "src/b".to_string()]
+        );
         assert_eq!(p.name_filters, vec!["foo".to_string(), "bar".to_string()]);
     }
 

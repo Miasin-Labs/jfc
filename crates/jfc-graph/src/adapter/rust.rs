@@ -192,12 +192,15 @@ fn extract_nodes_recursive(
                 }
             }
             "struct_item" => {
-                if let Some(nd) = extract_struct(child, source, file_path, file_path_str, scope, out) {
+                if let Some(nd) =
+                    extract_struct(child, source, file_path, file_path_str, scope, out)
+                {
                     out.push(nd);
                 }
             }
             "enum_item" => {
-                if let Some(nd) = extract_enum(child, source, file_path, file_path_str, scope, out) {
+                if let Some(nd) = extract_enum(child, source, file_path, file_path_str, scope, out)
+                {
                     out.push(nd);
                 }
             }
@@ -239,16 +242,13 @@ fn extract_nodes_recursive(
                 extract_impl(child, source, file_path, file_path_str, scope, out);
             }
             "type_item" => {
-                if let Some(nd) =
-                    extract_type_alias(child, source, file_path, file_path_str, scope)
+                if let Some(nd) = extract_type_alias(child, source, file_path, file_path_str, scope)
                 {
                     out.push(nd);
                 }
             }
             "const_item" | "static_item" => {
-                if let Some(nd) =
-                    extract_constant(child, source, file_path, file_path_str, scope)
-                {
+                if let Some(nd) = extract_constant(child, source, file_path, file_path_str, scope) {
                     out.push(nd);
                 }
             }
@@ -544,7 +544,12 @@ fn extract_constant(
     }
     metadata.insert(
         "const_kind".to_string(),
-        if node.kind() == "static_item" { "static" } else { "const" }.to_string(),
+        if node.kind() == "static_item" {
+            "static"
+        } else {
+            "const"
+        }
+        .to_string(),
     );
     Some(build_node_data(
         &name,
@@ -707,7 +712,8 @@ fn extract_type_params(node: TsNode<'_>, source: &str) -> Option<String> {
 /// `{"foo": ["String", "i32"]}`, or `None` if no turbofished calls found.
 fn extract_callee_type_args(func_node: TsNode<'_>, source: &str) -> Option<String> {
     let body = func_node.child_by_field_name("body")?;
-    let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     collect_turbofish_calls(body, source, &mut map);
     if map.is_empty() {
         return None;
@@ -965,14 +971,20 @@ fn extract_call_site_kind(
 ) -> Option<(String, Vec<String>, CallSiteKind)> {
     let func_child = call_node.child_by_field_name("function")?;
     match func_child.kind() {
-        "identifier" => Some((node_text(func_child, source), Vec::new(), CallSiteKind::Bare)),
+        "identifier" => Some((
+            node_text(func_child, source),
+            Vec::new(),
+            CallSiteKind::Bare,
+        )),
         "field_expression" => {
             let field = func_child.child_by_field_name("field")?;
-            Some((node_text(field, source), Vec::new(), CallSiteKind::MethodCall))
+            Some((
+                node_text(field, source),
+                Vec::new(),
+                CallSiteKind::MethodCall,
+            ))
         }
-        "scoped_identifier" => {
-            extract_scoped_call_site(func_child, source)
-        }
+        "scoped_identifier" => extract_scoped_call_site(func_child, source),
         "generic_function" => {
             // Turbofish: `foo::<T>(...)` — unwrap the inner identifier/scoped_identifier.
             extract_generic_function_call_site(func_child, source)
@@ -1012,7 +1024,11 @@ fn extract_generic_function_call_site(
     }
     if let Some(field_expr) = find_child_by_kind(node, "field_expression") {
         let field = field_expr.child_by_field_name("field")?;
-        return Some((node_text(field, source), Vec::new(), CallSiteKind::MethodCall));
+        return Some((
+            node_text(field, source),
+            Vec::new(),
+            CallSiteKind::MethodCall,
+        ));
     }
     None
 }
@@ -1199,10 +1215,7 @@ fn extract_impl_edges(
 /// `qualified_name + "::"`. Matching is scoped per file so that two
 /// independently-defined types with the same qualified name in
 /// different files don't cross-link.
-fn emit_containment_edges(
-    nodes: &[NodeData],
-    edges: &mut Vec<(NodeId, NodeId, EdgeData)>,
-) {
+fn emit_containment_edges(nodes: &[NodeData], edges: &mut Vec<(NodeId, NodeId, EdgeData)>) {
     // Group nodes by file path. We only need parent-candidate lookups
     // per file, so build a small per-file index of (Enum, Struct)
     // parent nodes.
@@ -1570,9 +1583,7 @@ fn known() {}
             .filter(|s| s.caller_id == caller_node.id)
             .collect();
 
-        let has_unknown = caller_sites
-            .iter()
-            .any(|s| s.name == "unknown_function");
+        let has_unknown = caller_sites.iter().any(|s| s.name == "unknown_function");
         assert!(
             has_unknown,
             "expected call site for 'unknown_function', got: {caller_sites:?}"

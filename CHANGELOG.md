@@ -30,7 +30,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- README expanded to document all 18 crates, missing subsystems, and graph-discovered features
+- README expanded to document all 20 crates (added `jfc-session`, `jfc-tools`), missing subsystems, and graph-discovered features
+- **License**: fix `Cargo.toml` workspace license from `MIT` to `AGPL-3.0` to match `LICENSE` file
+- **Cargo.toml**: add `repository`, `homepage`, `keywords`, `categories` metadata
+- **Crate docs**: add `//!` crate-level doc comments to jfc-economy, jfc-graph, jfc-markdown, jfc-memory, jfc-provider, jfc-providers, jfc-theme
+- **Formatting**: `cargo fmt --all` sweep across 93 files to normalize workspace formatting
+- **.gitignore**: stop tracking runtime state (`.jfc/tasks.json`, `.jfc/learn/`, cache/height files, per-crate `.jfc/` dirs)
+
+### Added (project infrastructure)
+
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy`, `cargo test`, and public-build verification on push/PR
+- **CONTRIBUTING.md**: build instructions, test commands, PR process, coding style, feature flags
+- **SECURITY.md**: vulnerability reporting via GitHub advisories or email, scope table, disclosure policy
+- **CHANGELOG.md**: comprehensive history from all 401 commits
+- **.editorconfig**: UTF-8, LF, 4-space Rust indent, 2-space TOML/YAML
+- **.gitattributes**: `diff=rust` for `.rs`, linguist-vendored for `research/`, binary rules for images
 
 ---
 

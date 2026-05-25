@@ -17,7 +17,8 @@ pub fn economy_tool_defs() -> Vec<ToolDef> {
                 orchestrator's CFO layer gates spending so the cycle \
                 can't exceed it. Use post+run when you want competitive, \
                 cross-validated output instead of a single-shot edit. \
-                Inspect state via `market_status` or /market.".into(),
+                Inspect state via `market_status` or /market."
+                .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -52,7 +53,8 @@ pub fn economy_tool_defs() -> Vec<ToolDef> {
                 settlement (winner, total cost, payout count) when the \
                 cycle completes. Errors fast if the bounty is not in \
                 Open state or the provider isn't registered with the \
-                tool layer.".into(),
+                tool layer."
+                .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -76,7 +78,8 @@ pub fn economy_tool_defs() -> Vec<ToolDef> {
                 flagged for collusion / rubber-stamping / griefing. \
                 Optionally pass `bounty_id` to get the specific bounty's \
                 phase (Posting / Bidding / Executing / Validating / \
-                Settling / Complete).".into(),
+                Settling / Complete)."
+                .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

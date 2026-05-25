@@ -412,9 +412,7 @@ pub(crate) async fn handle_task_failed(
     if !was_cancelled && factory_mode_enabled() {
         // Use the linked task id (the queued todo) for cascade/replan;
         // fall back to the agent task id if no linkage exists.
-        let cascade_id = linked_task_id
-            .as_deref()
-            .unwrap_or(task_id.as_str());
+        let cascade_id = linked_task_id.as_deref().unwrap_or(task_id.as_str());
         let cascaded_ids = app.task_store.cascade_failure(cascade_id);
         let subject = app
             .task_store

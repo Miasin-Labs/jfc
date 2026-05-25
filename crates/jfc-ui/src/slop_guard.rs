@@ -666,7 +666,10 @@ pub fn check_metric_mimicry(file_content: &str) -> Vec<SlopFinding> {
         if t.contains("assert!(true)") {
             findings.push(SlopFinding {
                 rule: "metric_mimicry".into(),
-                message: format!("Line ~{}: `assert!(true)` always passes — test verifies nothing", i + 1),
+                message: format!(
+                    "Line ~{}: `assert!(true)` always passes — test verifies nothing",
+                    i + 1
+                ),
                 file: None,
                 line: Some(i + 1),
             });
@@ -713,10 +716,16 @@ pub fn check_metric_mimicry(file_content: &str) -> Vec<SlopFinding> {
         }
 
         // assert!(!false)
-        if t.contains("assert!(!false)") || t.contains("assert!(1 == 1)") || t.contains("assert!(0 == 0)") {
+        if t.contains("assert!(!false)")
+            || t.contains("assert!(1 == 1)")
+            || t.contains("assert!(0 == 0)")
+        {
             findings.push(SlopFinding {
                 rule: "metric_mimicry".into(),
-                message: format!("Line ~{}: tautological assertion — always passes, verifies nothing", i + 1),
+                message: format!(
+                    "Line ~{}: tautological assertion — always passes, verifies nothing",
+                    i + 1
+                ),
                 file: None,
                 line: Some(i + 1),
             });
@@ -765,8 +774,12 @@ pub fn check_conditional_tests(file_content: &str) -> Vec<SlopFinding> {
         }
         if in_test_fn {
             for ch in line.chars() {
-                if ch == '{' { depth += 1; }
-                if ch == '}' { depth -= 1; }
+                if ch == '{' {
+                    depth += 1;
+                }
+                if ch == '}' {
+                    depth -= 1;
+                }
             }
 
             let t = line.trim();
@@ -813,18 +826,30 @@ pub fn check_naming_quality(file_content: &str) -> Vec<SlopFinding> {
     let mut findings = Vec::new();
 
     let vague_names: &[&str] = &[
-        "handle_data", "process_item", "do_stuff", "do_thing", "do_work",
-        "handle_event", "process_data", "run_task", "execute_action",
-        "manager", "handler", "processor", "helper", "utils",
+        "handle_data",
+        "process_item",
+        "do_stuff",
+        "do_thing",
+        "do_work",
+        "handle_event",
+        "process_data",
+        "run_task",
+        "execute_action",
+        "manager",
+        "handler",
+        "processor",
+        "helper",
+        "utils",
     ];
 
-    let binding_re = regex::Regex::new(
-        r"(?:let|const|static|fn)\s+(mut\s+)?([a-z_][a-z0-9_]*)"
-    ).unwrap();
+    let binding_re =
+        regex::Regex::new(r"(?:let|const|static|fn)\s+(mut\s+)?([a-z_][a-z0-9_]*)").unwrap();
 
     let is_test_region = |pos: usize| -> bool {
         file_content[..pos].rfind("#[cfg(test)]").is_some()
-            && file_content[..pos].rfind("\nmod ").map_or(false, |m| m > file_content[..pos].rfind("#[cfg(test)]").unwrap_or(0))
+            && file_content[..pos].rfind("\nmod ").map_or(false, |m| {
+                m > file_content[..pos].rfind("#[cfg(test)]").unwrap_or(0)
+            })
     };
 
     let mut vague_count = 0;
@@ -842,7 +867,11 @@ pub fn check_naming_quality(file_content: &str) -> Vec<SlopFinding> {
                 let n = name.as_str();
 
                 // Skip test code (test names can be descriptive-verbose)
-                let line_start = file_content.lines().take(i).map(|l| l.len() + 1).sum::<usize>();
+                let line_start = file_content
+                    .lines()
+                    .take(i)
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>();
                 if is_test_region(line_start) {
                     continue;
                 }
@@ -960,18 +989,50 @@ pub fn check_security_regression(old_content: Option<&str>, new_content: &str) -
 
     // Security-critical patterns: if they existed before and vanished, that's bad
     let security_patterns: &[(&str, &str, &str)] = &[
-        ("prepare(", "parameterized query", "SQL injection risk: parameterized queries replaced with string building"),
-        ("bind(", "parameter binding", "SQL injection risk: parameter binding removed"),
+        (
+            "prepare(",
+            "parameterized query",
+            "SQL injection risk: parameterized queries replaced with string building",
+        ),
+        (
+            "bind(",
+            "parameter binding",
+            "SQL injection risk: parameter binding removed",
+        ),
         ("hmac", "HMAC verification", "integrity check removed"),
-        ("verify_signature", "signature verification", "signature verification removed"),
-        ("hash_password", "password hashing", "password hashing removed"),
-        ("bcrypt", "bcrypt", "bcrypt usage removed — verify replacement is equally secure"),
-        ("argon2", "argon2", "argon2 usage removed — verify replacement is equally secure"),
+        (
+            "verify_signature",
+            "signature verification",
+            "signature verification removed",
+        ),
+        (
+            "hash_password",
+            "password hashing",
+            "password hashing removed",
+        ),
+        (
+            "bcrypt",
+            "bcrypt",
+            "bcrypt usage removed — verify replacement is equally secure",
+        ),
+        (
+            "argon2",
+            "argon2",
+            "argon2 usage removed — verify replacement is equally secure",
+        ),
         ("csrf", "CSRF protection", "CSRF protection removed"),
         ("rate_limit", "rate limiting", "rate limiting removed"),
         ("escape_html", "HTML escaping", "XSS protection removed"),
-        ("sanitize_input", "input sanitization", "input sanitization removed"),
-        ("Content-Security-Policy", "CSP header", "CSP header removed"),
+        (
+            "sanitize_input",
+            "input sanitization",
+            "input sanitization removed",
+        ),
+        (
+            "Content-Security-Policy",
+            "CSP header",
+            "CSP header removed",
+        ),
     ];
 
     for (pattern, _name, warning) in security_patterns {
@@ -1033,8 +1094,10 @@ pub fn check_premature_abstraction(file_content: &str) -> Vec<SlopFinding> {
             if let Some(name) = caps.get(1) {
                 // Skip well-known patterns
                 let n = name.as_str();
-                if !["Debug", "Clone", "Default", "Display", "Error", "From", "Into", "Iterator"]
-                    .contains(&n)
+                if ![
+                    "Debug", "Clone", "Default", "Display", "Error", "From", "Into", "Iterator",
+                ]
+                .contains(&n)
                 {
                     traits.push((n.to_string(), i + 1));
                 }
@@ -1202,7 +1265,9 @@ pub fn check_complexity_delta(old_content: Option<&str>, new_content: &str) -> V
 
     // Simple complexity proxy: count control flow keywords
     let complexity_of = |content: &str| -> usize {
-        let keywords = ["if ", "else ", "match ", "while ", "for ", "loop ", "&&", "||", "?"];
+        let keywords = [
+            "if ", "else ", "match ", "while ", "for ", "loop ", "&&", "||", "?",
+        ];
         keywords.iter().map(|kw| content.matches(kw).count()).sum()
     };
 
@@ -1210,7 +1275,8 @@ pub fn check_complexity_delta(old_content: Option<&str>, new_content: &str) -> V
     let new_complexity = complexity_of(new_content);
 
     if old_complexity > 0 {
-        let increase_pct = ((new_complexity as f64 - old_complexity as f64) / old_complexity as f64 * 100.0) as i64;
+        let increase_pct = ((new_complexity as f64 - old_complexity as f64) / old_complexity as f64
+            * 100.0) as i64;
         if increase_pct > 30 && new_complexity > old_complexity + 10 {
             findings.push(SlopFinding {
                 rule: "complexity_delta".into(),
@@ -1487,7 +1553,9 @@ mod tests {
         let code = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let x = 5;\n        assert_eq!(x, x);\n    }\n}";
         let findings = check_metric_mimicry(code);
         assert!(
-            findings.iter().any(|f| f.rule == "metric_mimicry" && f.message.contains("identical")),
+            findings
+                .iter()
+                .any(|f| f.rule == "metric_mimicry" && f.message.contains("identical")),
             "expected self-equality finding, got: {findings:?}"
         );
     }
@@ -1525,7 +1593,8 @@ mod tests {
 
     #[test]
     fn security_regression_flags_removed_crypto_normal() {
-        let old = "fn auth() {\n    let h = bcrypt::hash(password)?;\n    verify_signature(&token)?;\n}";
+        let old =
+            "fn auth() {\n    let h = bcrypt::hash(password)?;\n    verify_signature(&token)?;\n}";
         let new = "fn auth() {\n    // simplified\n    Ok(())\n}";
         let findings = check_security_regression(Some(old), new);
         assert!(

@@ -1,3 +1,7 @@
+//! Terminal themes and color management for the TUI. Provides the `Theme`
+//! struct with semantic style accessors (user, assistant, tool, error, etc.),
+//! a palette validation system, and ANSI color normalization. Themes are
+//! persisted via `/theme` and loaded at startup.
 #![allow(dead_code)]
 
 use ratatui::style::{Color, Modifier, Style};

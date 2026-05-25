@@ -123,7 +123,10 @@ fn pick_model(
                 return Ok(m.id.clone());
             }
         }
-        anyhow::bail!("requested model {name:?} not available on provider {}", provider.name());
+        anyhow::bail!(
+            "requested model {name:?} not available on provider {}",
+            provider.name()
+        );
     }
     models
         .into_iter()
@@ -166,7 +169,12 @@ async fn run_turn(
     while let Some(event) = stream.next().await {
         match event {
             Ok(StreamEvent::TextDelta { delta, .. }) => text.push_str(&delta),
-            Ok(StreamEvent::ToolDone { tool_use_id, tool_name, input_json, .. }) => {
+            Ok(StreamEvent::ToolDone {
+                tool_use_id,
+                tool_name,
+                input_json,
+                ..
+            }) => {
                 let input = serde_json::from_str(&input_json)
                     .unwrap_or(serde_json::Value::String(input_json));
                 tool_calls.push(ToolCallRecord {
@@ -175,7 +183,10 @@ async fn run_turn(
                     input,
                 });
             }
-            Ok(StreamEvent::Done { stop_reason: reason, .. }) => {
+            Ok(StreamEvent::Done {
+                stop_reason: reason,
+                ..
+            }) => {
                 stop_reason = Some(format!("{reason:?}"));
                 break;
             }

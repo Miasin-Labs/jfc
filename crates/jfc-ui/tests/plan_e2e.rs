@@ -340,11 +340,7 @@ fn plan_e2e_cross_session_lifecycle() {
             "last_advanced must reflect session-2 advancements"
         );
         // Sanity: progress log carries every advancement.
-        for needle in [
-            "Picked JWT",
-            "Session store wired",
-            "Threat model written",
-        ] {
+        for needle in ["Picked JWT", "Session store wired", "Threat model written"] {
             assert!(
                 plan.body.contains(needle),
                 "progress log must contain '{needle}', got body: {}",
@@ -376,10 +372,8 @@ fn plan_e2e_cross_session_lifecycle() {
                 "plan_slug": "design-auth-flow"
             }]
         });
-        let provider = MockProvider::with_responses([
-            select_resp.to_string(),
-            synth_resp.to_string(),
-        ]);
+        let provider =
+            MockProvider::with_responses([select_resp.to_string(), synth_resp.to_string()]);
 
         // run_plan_recall has a process-wide cache; clear it so prior tests
         // (or a previous invocation of this one) don't poison the result.
@@ -396,7 +390,8 @@ fn plan_e2e_cross_session_lifecycle() {
             ModelId::new("mock-model"),
         ));
 
-        let block = block_opt.expect("recall pipeline must return a block when both phases respond");
+        let block =
+            block_opt.expect("recall pipeline must return a block when both phases respond");
         assert!(
             block.contains("<system-reminder>"),
             "recall block must wrap output in <system-reminder>, got: {block}"

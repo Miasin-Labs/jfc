@@ -591,8 +591,8 @@ pub fn auto_doc_suggest_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::classify;
+    use super::*;
     use crate::types::{MessagePart, Role};
 
     #[test]

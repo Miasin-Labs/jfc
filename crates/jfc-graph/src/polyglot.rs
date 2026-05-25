@@ -204,10 +204,7 @@ pub fn detect_wasm_exports(graph: &CodeGraph) -> Vec<Boundary> {
 fn route_matches(route_pattern: &str, client_path: &str) -> bool {
     // Strip query / fragment from the client path — `?foo=bar` and
     // `#anchor` aren't part of the route surface.
-    let client = client_path
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(client_path);
+    let client = client_path.split(['?', '#']).next().unwrap_or(client_path);
 
     // Normalise leading slashes — treat `users/:id` and `/users/:id` the same.
     let pat = route_pattern.trim_start_matches('/');
@@ -311,11 +308,9 @@ pub fn resolve_cross_language_calls(
     let routes: Vec<(String, String, NodeId)> = boundaries
         .iter()
         .filter_map(|b| match &b.kind {
-            BoundaryKind::HttpRoute { method, path } => Some((
-                method.to_uppercase(),
-                path.clone(),
-                b.provider_node.clone(),
-            )),
+            BoundaryKind::HttpRoute { method, path } => {
+                Some((method.to_uppercase(), path.clone(), b.provider_node.clone()))
+            }
             _ => None,
         })
         .collect();
@@ -434,7 +429,11 @@ mod tests {
         let handler_id = g.add_node(handler);
 
         // A non-handler function should be ignored.
-        g.add_node(make_fn("src/util.rs", "crate::util::helper", HashMap::new()));
+        g.add_node(make_fn(
+            "src/util.rs",
+            "crate::util::helper",
+            HashMap::new(),
+        ));
 
         let boundaries = detect_http_routes(&g);
         assert_eq!(boundaries.len(), 1);
@@ -458,15 +457,13 @@ mod tests {
         let mut handler_md = HashMap::new();
         handler_md.insert("http_route".to_string(), "/users/:id".to_string());
         handler_md.insert("http_method".to_string(), "GET".to_string());
-        let handler_id =
-            g.add_node(make_fn("src/api.rs", "crate::api::get_user", handler_md));
+        let handler_id = g.add_node(make_fn("src/api.rs", "crate::api::get_user", handler_md));
 
         // TypeScript client calling /users/42
         let mut client_md = HashMap::new();
         client_md.insert("http_client_target".to_string(), "/users/42".to_string());
         client_md.insert("http_client_method".to_string(), "GET".to_string());
-        let client_id =
-            g.add_node(make_fn("web/src/user.ts", "user::fetchUser", client_md));
+        let client_id = g.add_node(make_fn("web/src/user.ts", "user::fetchUser", client_md));
 
         // Unrelated function — should not get an edge.
         let _other = g.add_node(make_fn(
@@ -488,9 +485,7 @@ mod tests {
         let outgoing = g.get_edges_from(&client_id);
         let polyglot_edges: Vec<_> = outgoing
             .iter()
-            .filter(|(_, e)| {
-                matches!(&e.kind, EdgeKind::ExternalCall(c, _) if c == "http")
-            })
+            .filter(|(_, e)| matches!(&e.kind, EdgeKind::ExternalCall(c, _) if c == "http"))
             .collect();
         assert_eq!(polyglot_edges.len(), 1);
         let (target, edge) = polyglot_edges[0];

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use crate::context::budget::ExploreBudget;
-use crate::context::heuristics::{reminder_for, TaskIntent};
+use crate::context::heuristics::{TaskIntent, reminder_for};
 use crate::edges::EdgeKind;
 use crate::graph::CodeGraph;
 use crate::nodes::{NodeData, NodeId, NodeKind, Visibility};
@@ -74,7 +74,11 @@ pub fn render_node_list(
             continue;
         };
         let sig = signature_for(node);
-        let sig_suffix = if sig.is_empty() { String::new() } else { format!(" — `{sig}`") };
+        let sig_suffix = if sig.is_empty() {
+            String::new()
+        } else {
+            format!(" — `{sig}`")
+        };
         out.push_str(&format!(
             "- {} ({}) — {}{}{}\n",
             node.name,
@@ -102,7 +106,10 @@ pub fn render_impact(
     let mut total = 0usize;
     for id in nodes {
         if let Some(node) = graph.get_node(id) {
-            by_file.entry(node.file_path.clone()).or_default().push(node);
+            by_file
+                .entry(node.file_path.clone())
+                .or_default()
+                .push(node);
             total += 1;
         }
     }
@@ -164,7 +171,9 @@ fn push_entry_points(out: &mut String, graph: &CodeGraph, entry_points: &[NodeId
     }
     out.push_str("### Entry Points\n\n");
     for id in entry_points {
-        let Some(node) = graph.get_node(id) else { continue };
+        let Some(node) = graph.get_node(id) else {
+            continue;
+        };
         out.push_str(&format!(
             "- **{}** ({}) — {}{}\n",
             node.name,
@@ -188,7 +197,10 @@ fn push_related_symbols(out: &mut String, graph: &CodeGraph, related: &[NodeId])
     let mut by_file: HashMap<std::path::PathBuf, Vec<&NodeData>> = HashMap::new();
     for id in related {
         if let Some(node) = graph.get_node(id) {
-            by_file.entry(node.file_path.clone()).or_default().push(node);
+            by_file
+                .entry(node.file_path.clone())
+                .or_default()
+                .push(node);
         }
     }
     let mut files: Vec<_> = by_file.into_iter().collect();
@@ -209,7 +221,9 @@ fn push_code_blocks(out: &mut String, graph: &CodeGraph, code_blocks: &[(NodeId,
     }
     out.push_str("### Code\n\n");
     for (id, body) in code_blocks {
-        let Some(node) = graph.get_node(id) else { continue };
+        let Some(node) = graph.get_node(id) else {
+            continue;
+        };
         out.push_str(&format!(
             "#### {} ({}:{})\n\n",
             node.name,
@@ -283,7 +297,10 @@ pub fn render_explore(
             lines.push(format!("- {path}: {symbols}"));
         }
         if additional_files.len() > 10 {
-            lines.push(format!("- ... and {} more files", additional_files.len() - 10));
+            lines.push(format!(
+                "- ... and {} more files",
+                additional_files.len() - 10
+            ));
         }
     }
 

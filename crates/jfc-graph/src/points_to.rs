@@ -285,12 +285,7 @@ fn saturate_worklist(ir: &IrFunction, pts: &mut PointsToTable) {
     }
 }
 
-fn worklist_field_read(
-    dst: &Var,
-    base: &Operand,
-    field: &str,
-    pts: &mut PointsToTable,
-) -> bool {
+fn worklist_field_read(dst: &Var, base: &Operand, field: &str, pts: &mut PointsToTable) -> bool {
     let mut changed = false;
     let base_set = base_pts(pts, base).into_owned();
     for base_loc in &base_set {
@@ -420,9 +415,7 @@ fn propagate_caller_to_callee(
     ir_map: &HashMap<NodeId, IrFunction>,
     tables: &mut HashMap<NodeId, PointsToTable>,
 ) -> bool {
-    let (Some(caller_ir), Some(callee_ir)) =
-        (ir_map.get(caller_id), ir_map.get(callee_id))
-    else {
+    let (Some(caller_ir), Some(callee_ir)) = (ir_map.get(caller_id), ir_map.get(callee_id)) else {
         return false;
     };
 
@@ -682,7 +675,9 @@ mod tests {
         let pts = analyze(&f);
         let y_set = pts.pts_of(&Var::new("y")).unwrap();
         assert!(
-            y_set.iter().any(|l| matches!(l, AbstractLocation::Literal(_))),
+            y_set
+                .iter()
+                .any(|l| matches!(l, AbstractLocation::Literal(_))),
             "binop result should yield a Literal location"
         );
     }

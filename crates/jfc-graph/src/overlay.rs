@@ -183,8 +183,13 @@ pub fn save_snapshot_bincode(
         nodes,
         edges,
     };
-    let encoded = bincode::serde::encode_to_vec(&snap, bincode::config::standard())
-        .map_err(|e| OverlayError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+    let encoded =
+        bincode::serde::encode_to_vec(&snap, bincode::config::standard()).map_err(|e| {
+            OverlayError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
     fs::write(path, encoded)?;
     Ok(())
 }
@@ -192,8 +197,13 @@ pub fn save_snapshot_bincode(
 /// Load a bincode-serialized graph snapshot.
 pub fn load_snapshot_bincode(path: &Path) -> Result<LoadedSnapshot, OverlayError> {
     let raw = fs::read(path)?;
-    let (snap, _): (OverlaySnapshot, _) = bincode::serde::decode_from_slice(&raw, bincode::config::standard())
-        .map_err(|e| OverlayError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+    let (snap, _): (OverlaySnapshot, _) =
+        bincode::serde::decode_from_slice(&raw, bincode::config::standard()).map_err(|e| {
+            OverlayError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
     if snap.schema_version != OVERLAY_SCHEMA_VERSION {
         return Err(OverlayError::SchemaMismatch {
             expected: OVERLAY_SCHEMA_VERSION,
@@ -227,7 +237,10 @@ pub struct LoadedSnapshot {
 /// contents differ from the base. Soft-fails to an empty Vec when
 /// git is unavailable or the comparison can't be made — the caller
 /// can still use the base unchanged.
-pub fn diff_against_base(workspace_root: &Path, base_ref: &str) -> Result<Vec<PathBuf>, OverlayError> {
+pub fn diff_against_base(
+    workspace_root: &Path,
+    base_ref: &str,
+) -> Result<Vec<PathBuf>, OverlayError> {
     // Resolve merge-base first so we diff against the actual branch
     // point, not the tip of base_ref. Mirrors `git diff base...HEAD`
     // semantics without requiring the three-dot syntax (which
@@ -243,7 +256,9 @@ pub fn diff_against_base(workspace_root: &Path, base_ref: &str) -> Result<Vec<Pa
             String::from_utf8_lossy(&merge_base.stderr).trim()
         )));
     }
-    let merge_base_sha = String::from_utf8_lossy(&merge_base.stdout).trim().to_string();
+    let merge_base_sha = String::from_utf8_lossy(&merge_base.stdout)
+        .trim()
+        .to_string();
     if merge_base_sha.is_empty() {
         return Err(OverlayError::Git(
             "merge-base returned empty SHA".to_string(),
@@ -342,8 +357,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let snap_path = dir.join("base.json");
 
-        save_base_snapshot(&snap_path, &graph, Path::new("/tmp/workspace"), Some("abc1234"))
-            .expect("save");
+        save_base_snapshot(
+            &snap_path,
+            &graph,
+            Path::new("/tmp/workspace"),
+            Some("abc1234"),
+        )
+        .expect("save");
         let loaded = load_base_snapshot(&snap_path).expect("load");
         assert_eq!(loaded.base_ref.as_deref(), Some("abc1234"));
         assert_eq!(loaded.graph.node_count(), graph.node_count());

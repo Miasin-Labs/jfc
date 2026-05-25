@@ -71,18 +71,16 @@ pub(super) async fn execute_bash_inner(
 
     // Sandbox: when bwrap is configured + available, wrap the command.
     let (executable, args) = match crate::sandbox::active_bash_sandbox_config() {
-        Some(ref cfg) if cfg.enabled => {
-            match crate::sandbox::build_bwrap_argv(cfg, cwd) {
-                Some(mut bwrap_argv) => {
-                    bwrap_argv.push("bash".into());
-                    bwrap_argv.push("-c".into());
-                    bwrap_argv.push(command.clone());
-                    let exe = bwrap_argv.remove(0);
-                    (exe, bwrap_argv)
-                }
-                None => ("bash".to_string(), vec!["-c".into(), command.clone()]),
+        Some(ref cfg) if cfg.enabled => match crate::sandbox::build_bwrap_argv(cfg, cwd) {
+            Some(mut bwrap_argv) => {
+                bwrap_argv.push("bash".into());
+                bwrap_argv.push("-c".into());
+                bwrap_argv.push(command.clone());
+                let exe = bwrap_argv.remove(0);
+                (exe, bwrap_argv)
             }
-        }
+            None => ("bash".to_string(), vec!["-c".into(), command.clone()]),
+        },
         _ => ("bash".to_string(), vec!["-c".into(), command.clone()]),
     };
 

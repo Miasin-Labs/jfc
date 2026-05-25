@@ -109,8 +109,7 @@ mod classifier;
 mod graph_context;
 
 pub use classifier::classify;
-pub use graph_context::{
-    auto_doc_suggest_enabled, auto_inject_graph_context, auto_plan_mode_enabled,
-    is_graph_intent,
-};
 pub(crate) use graph_context::clear_auto_context_cache;
+pub use graph_context::{
+    auto_doc_suggest_enabled, auto_inject_graph_context, auto_plan_mode_enabled, is_graph_intent,
+};

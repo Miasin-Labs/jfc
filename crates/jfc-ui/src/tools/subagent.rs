@@ -423,9 +423,7 @@ pub async fn execute_task(
     // it so the subagent's StructuredOutput tool call validates against it.
     if let Some(ref schema) = task_input.schema {
         if let Err(e) = crate::tools::structured_output::set_active_schema(Some(schema)) {
-            return ExecutionResult::failure(format!(
-                "Task: invalid schema rejected: {e}"
-            ));
+            return ExecutionResult::failure(format!("Task: invalid schema rejected: {e}"));
         }
     }
     let result = execute_task_inner(

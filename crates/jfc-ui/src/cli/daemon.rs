@@ -74,10 +74,9 @@ pub(super) async fn run_daemon_subcommand(sub: DaemonSubcommand) -> anyhow::Resu
             // dreamers own their own lease + circuit breaker, so the
             // scheduler is fire-and-forget; the handle is kept alive for
             // the daemon's lifetime so the spawned task isn't dropped.
-            let project_root = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let _dreamer_handle =
-                crate::dreamer_scheduler::spawn_from_env(project_root);
+            let project_root =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let _dreamer_handle = crate::dreamer_scheduler::spawn_from_env(project_root);
 
             run_daemon(paths)
                 .await

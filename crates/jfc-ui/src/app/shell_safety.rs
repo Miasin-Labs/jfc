@@ -532,7 +532,10 @@ fn match_remaining_segment(command: &str, args: &[String]) -> Result<(), &'stati
                     explicit_script = true;
                     scripts.push(expr);
                     i += 1;
-                } else if a == "-n" || a == "--quiet" || a == "--silent" || a == "-l"
+                } else if a == "-n"
+                    || a == "--quiet"
+                    || a == "--silent"
+                    || a == "-l"
                     || a.starts_with("-n") && a.len() <= 3
                 {
                     i += 1;

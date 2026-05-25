@@ -1,3 +1,10 @@
+//! Markdown rendering for the terminal: parses CommonMark via `pulldown-cmark`
+//! and lowers it into styled `ratatui` `Text`/`Line`/`Span` structures.
+//!
+//! Handles fenced code blocks with syntax highlighting, inline code, lists,
+//! tables, headings, and emphasis, plus fence-detection helpers used to decide
+//! when a streaming response has an unclosed code block.
+
 use itertools::{Itertools, Position};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options as ParseOptions, Parser, Tag, TagEnd};
 use ratatui::{
@@ -534,7 +541,11 @@ fn record_line_count(code_hash: u64, wrap_w: usize, with_gutter: bool, count: us
 }
 
 /// Look up a previously-recorded line count. Returns `None` on miss.
-pub fn highlight_line_count_cached(code_hash: u64, wrap_w: usize, with_gutter: bool) -> Option<usize> {
+pub fn highlight_line_count_cached(
+    code_hash: u64,
+    wrap_w: usize,
+    with_gutter: bool,
+) -> Option<usize> {
     HIGHLIGHT_LINE_COUNT_CACHE
         .lock()
         .ok()

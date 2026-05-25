@@ -41,6 +41,8 @@ jfc/
 │   ├── jfc-auth/           # OAuth core + credential vault
 │   ├── jfc-mcp/            # MCP server: tool dispatch, transport, protocol, registry
 │   ├── jfc-memory/         # Memory recall & persistence
+│   ├── jfc-session/        # Session + task store persistence, task status types
+│   ├── jfc-tools/          # Shared tool definitions and execution contracts
 │   ├── jfc-web/            # Web search (Google CSE, arXiv, Semantic Scholar)
 │   ├── jfc-markdown/       # Markdown rendering utilities, fence detection
 │   └── jfc-theme/          # Terminal themes, palette validation, ANSI color management

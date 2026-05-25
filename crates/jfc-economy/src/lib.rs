@@ -1,3 +1,14 @@
+//! Bounty marketplace: the agent economy where coding tasks are auctioned to
+//! competing solver agents, adversarially cross-validated, and settled against
+//! a token ledger.
+//!
+//! The lifecycle is post → bid → solve → validate → settle: a bounty is
+//! registered with a budget and acceptance criteria, solver agents compete in
+//! parallel git worktrees, validators challenge surviving solutions in sealed
+//! sessions, and the market ranks winners while updating trust scores and
+//! recording ledger usage. A charter layer enforces spending limits and a
+//! collusion detector flags rubber-stamping and griefing.
+
 pub mod auction;
 pub mod bounty;
 pub mod charter;

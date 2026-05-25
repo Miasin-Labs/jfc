@@ -111,8 +111,7 @@ impl<'g> ReferenceResolver<'g> {
             let score = score_candidate(site, cand);
             match &best {
                 Some((best_id, best_score)) => {
-                    let better = score > *best_score
-                        || (score == *best_score && cand_id < best_id);
+                    let better = score > *best_score || (score == *best_score && cand_id < best_id);
                     if better {
                         best = Some((cand_id.clone(), score));
                     }
@@ -127,9 +126,7 @@ impl<'g> ReferenceResolver<'g> {
         if score < RESOLUTION_FLOOR {
             return false;
         }
-        if !self.graph.contains_node(&site.caller_id)
-            || !self.graph.contains_node(&target_id)
-        {
+        if !self.graph.contains_node(&site.caller_id) || !self.graph.contains_node(&target_id) {
             return false;
         }
         if existing_calls_edge(self.graph, &site.caller_id, &target_id) {
@@ -166,9 +163,7 @@ fn score_candidate(site: &CallSite, cand: &NodeData) -> i32 {
     if matches!(cand.kind, NodeKind::Function) {
         score += 25;
     }
-    if matches!(site.kind, CallSiteKind::MethodCall)
-        && cand.qualified_name.contains("::")
-    {
+    if matches!(site.kind, CallSiteKind::MethodCall) && cand.qualified_name.contains("::") {
         // `obj.method()` — anything that lives under a Type:: prefix is
         // more likely to be the actual target than a free function.
         score += 10;
@@ -305,7 +300,11 @@ mod tests {
 
     #[test]
     fn qualifier_bonus_matches_path_segment() {
-        let cand = fn_node("execute_tool", "crate::execute_tool", "src/tools/dispatch.rs");
+        let cand = fn_node(
+            "execute_tool",
+            "crate::execute_tool",
+            "src/tools/dispatch.rs",
+        );
         let site = CallSite {
             caller_id: NodeId::new("src/caller.rs", "crate::caller", NodeKind::Function),
             file_path: PathBuf::from("src/caller.rs"),

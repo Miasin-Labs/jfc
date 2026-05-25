@@ -79,10 +79,9 @@ pub fn matches_symbol(node: &NodeData, symbol: &str) -> MatchQuality {
         .filter(|s| !s.is_empty())
         .collect();
     let all_hit = hints.iter().all(|hint| {
-        segments.iter().any(|seg| {
-            *seg == *hint
-                || seg.rsplit_once('.').map(|(stem, _)| stem) == Some(*hint)
-        })
+        segments
+            .iter()
+            .any(|seg| *seg == *hint || seg.rsplit_once('.').map(|(stem, _)| stem) == Some(*hint))
     });
     if all_hit {
         MatchQuality::FilePathContainment

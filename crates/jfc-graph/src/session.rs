@@ -312,7 +312,13 @@ impl GraphSession {
         } else {
             None
         };
-        context::render::render_search_results(&self.graph, Some(&self.symbols), query, &hits, note.as_deref())
+        context::render::render_search_results(
+            &self.graph,
+            Some(&self.symbols),
+            query,
+            &hits,
+            note.as_deref(),
+        )
     }
 
     /// Find callers of `symbol`, rendered as a `## Callers of …`
@@ -383,7 +389,12 @@ impl GraphSession {
                 if start >= end {
                     return None;
                 }
-                Some(lines[start..end].iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                Some(
+                    lines[start..end]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
+                )
             });
 
         let signature = source_lines
@@ -403,16 +414,24 @@ impl GraphSession {
 
         let mut out = String::new();
         out.push_str(&format!("## {} ({})\n\n", node.name, kind_str));
-        out.push_str(&format!("**Location:** {}:{}\n", file_path, node.span.start_line));
+        out.push_str(&format!(
+            "**Location:** {}:{}\n",
+            file_path, node.span.start_line
+        ));
         out.push_str(&format!("**Signature:** `{}`\n", signature));
         out.push_str(&format!("**Visibility:** {}\n", vis_str));
 
         if include_code {
-            let is_container = matches!(node.kind, NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Module);
+            let is_container = matches!(
+                node.kind,
+                NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Module
+            );
             if is_container {
                 // Render a compact outline: list contained members with their line numbers.
                 out.push_str("\n**Members:**\n");
-                let children: Vec<_> = self.graph.get_edges_from(id)
+                let children: Vec<_> = self
+                    .graph
+                    .get_edges_from(id)
                     .iter()
                     .filter(|(_, edge)| matches!(edge.kind, crate::edges::EdgeKind::Contains))
                     .filter_map(|(child_id, _)| self.graph.get_node(child_id))
@@ -430,7 +449,10 @@ impl GraphSession {
                 } else {
                     out.push('\n');
                     for child in &children {
-                        out.push_str(&format!("  - `{}` ({:?}) — line {}\n", child.name, child.kind, child.span.start_line));
+                        out.push_str(&format!(
+                            "  - `{}` ({:?}) — line {}\n",
+                            child.name, child.kind, child.span.start_line
+                        ));
                     }
                 }
             } else if let Some(ref lines) = source_lines {
@@ -483,7 +505,11 @@ impl GraphSession {
 
         let mut out = String::new();
         out.push_str(&format!("## Explore: `{query}`\n\n"));
-        out.push_str(&format!("{} files, {} terms\n\n", file_list.len(), terms.len()));
+        out.push_str(&format!(
+            "{} files, {} terms\n\n",
+            file_list.len(),
+            terms.len()
+        ));
 
         const MAX_OUTPUT: usize = 15000;
 

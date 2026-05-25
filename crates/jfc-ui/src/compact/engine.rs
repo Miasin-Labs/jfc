@@ -4,9 +4,14 @@ use futures::StreamExt;
 use jfc_provider::{Provider, ProviderContent, ProviderMessage, ProviderRole, StreamOptions};
 use tracing::{debug, info, instrument, trace, warn};
 
-use super::{BLOCKED_HEADROOM, CHARS_PER_TOKEN, CIRCUIT_BREAKER_LIMIT, MAX_ATTEMPTS, THRASH_TURN_WINDOW, blocked_override, estimate_tokens};
+use super::{
+    BLOCKED_HEADROOM, CHARS_PER_TOKEN, CIRCUIT_BREAKER_LIMIT, MAX_ATTEMPTS, THRASH_TURN_WINDOW,
+    blocked_override, estimate_tokens,
+};
 #[cfg(test)]
-use super::{CompactLevel, auto_compact_disabled, compact_level, compact_threshold, should_compact};
+use super::{
+    CompactLevel, auto_compact_disabled, compact_level, compact_threshold, should_compact,
+};
 
 struct ConversationGroup {
     messages: Vec<ChatMessage>,

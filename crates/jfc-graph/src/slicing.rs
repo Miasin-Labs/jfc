@@ -28,7 +28,7 @@ use crate::edges::EdgeKind;
 use crate::graph::CodeGraph;
 use crate::ir::IrFunction;
 use crate::nodes::NodeId;
-use crate::points_to::{analyze_interprocedural, PointsToTable};
+use crate::points_to::{PointsToTable, analyze_interprocedural};
 
 /// Pluggable dataflow source: provides def-use and use-def relationships
 /// over [`NodeId`]s.
@@ -475,12 +475,9 @@ mod tests {
         sink_ir.params.push(Var::new("x"));
 
         let (mut graph, ids) = graph_with(&["source", "main", "sink"]);
-        let (source_id, main_id, sink_id) =
-            (ids[0].clone(), ids[1].clone(), ids[2].clone());
+        let (source_id, main_id, sink_id) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
 
-        graph
-            .add_edge(&main_id, &source_id, calls_edge())
-            .unwrap();
+        graph.add_edge(&main_id, &source_id, calls_edge()).unwrap();
         graph.add_edge(&main_id, &sink_id, calls_edge()).unwrap();
 
         let mut ir_map: HashMap<NodeId, IrFunction> = HashMap::new();
@@ -525,12 +522,9 @@ mod tests {
         sink_ir.params.push(Var::new("x"));
 
         let (mut graph, ids) = graph_with(&["source", "main", "sink"]);
-        let (source_id, main_id, sink_id) =
-            (ids[0].clone(), ids[1].clone(), ids[2].clone());
+        let (source_id, main_id, sink_id) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
 
-        graph
-            .add_edge(&main_id, &source_id, calls_edge())
-            .unwrap();
+        graph.add_edge(&main_id, &source_id, calls_edge()).unwrap();
         graph.add_edge(&main_id, &sink_id, calls_edge()).unwrap();
 
         let mut ir_map: HashMap<NodeId, IrFunction> = HashMap::new();

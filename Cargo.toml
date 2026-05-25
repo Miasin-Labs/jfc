@@ -7,8 +7,12 @@ default-members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0"
 publish = false
+repository = "https://github.com/coleleavitt/jfc"
+homepage = "https://github.com/coleleavitt/jfc"
+keywords = ["ai", "agent", "tui", "llm", "coding-assistant"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.86"

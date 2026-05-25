@@ -153,10 +153,8 @@ mod tests {
         // because that needs a fully-initialised repo with at least one
         // commit; instead we approximate the layout: two sibling git
         // repos so each has its own `git rev-parse --show-toplevel`.
-        let base = std::env::temp_dir().join(format!(
-            "jfc-graph-worktree-test-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("jfc-graph-worktree-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).expect("mkdir");
         let a = base.join("a");

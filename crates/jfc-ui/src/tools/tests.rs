@@ -1991,7 +1991,20 @@ fn execute_task_create_with_unknown_dependency_fails_robust() {
 #[test]
 fn execute_task_update_without_store_fails_robust() {
     let r = execute_task_update(
-        None, "t1", None, None, None, None, None, None, None, None, None, vec![], vec![], None,
+        None,
+        "t1",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        vec![],
+        vec![],
+        None,
     );
     assert!(r.is_error());
 }

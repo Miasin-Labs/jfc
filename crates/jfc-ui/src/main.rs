@@ -6,9 +6,9 @@ mod atomic_write;
 mod attachments;
 #[allow(dead_code)]
 mod auth;
-mod auto_mode;
 #[allow(dead_code)]
 mod auto_classifier;
+mod auto_mode;
 #[allow(dead_code)]
 mod autonomous_loop;
 mod bash_processes;
@@ -35,10 +35,10 @@ mod feature_gates;
 mod file_checkpoint;
 mod file_watcher;
 mod git_context;
-#[allow(dead_code)]
-mod headless;
 mod github;
 mod goal;
+#[allow(dead_code)]
+mod headless;
 mod idle_prefetch;
 mod ids;
 mod inline_tools;
@@ -50,6 +50,7 @@ mod lsp_client;
 mod lsp_rpc;
 mod managed_session;
 use jfc_markdown as markdown;
+mod dreamer_scheduler;
 mod mcp;
 mod memory;
 mod memory_recall;
@@ -59,7 +60,6 @@ mod notifications;
 mod output_style;
 #[allow(dead_code)] // Public PlanStore surface — full integration pending streaming/recall wiring.
 mod plan;
-mod dreamer_scheduler;
 mod plan_dreamer;
 #[allow(dead_code)] // Wired by future request-builder integration task.
 mod plan_recall;

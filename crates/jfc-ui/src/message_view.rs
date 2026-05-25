@@ -36,9 +36,9 @@ pub use core::{
     build_render_items_pub, message_view_total_lines, warm_tool_height_cache_for_messages,
 };
 #[allow(unused_imports)]
-pub use task_body::{TASK_VIEW_COLLAPSE_BYTES, TASK_VIEW_COLLAPSE_LINES, task_view_body_lines};
-pub use tool_height::{load_tool_height_cache, persist_tool_height_cache};
-#[allow(unused_imports)]
 pub use outputs::diff_lang;
 #[allow(unused_imports)]
+pub use task_body::{TASK_VIEW_COLLAPSE_BYTES, TASK_VIEW_COLLAPSE_LINES, task_view_body_lines};
+#[allow(unused_imports)]
 pub use tool_blocks::{tool_kind_color, tool_status_icon_animated};
+pub use tool_height::{load_tool_height_cache, persist_tool_height_cache};

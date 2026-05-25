@@ -187,9 +187,7 @@ pub(super) fn produce_grep_output_lines(
                 ));
 
                 let body_style = Style::default().fg(body_color);
-                let match_style = Style::default()
-                    .fg(t.warning)
-                    .add_modifier(Modifier::BOLD);
+                let match_style = Style::default().fg(t.warning).add_modifier(Modifier::BOLD);
                 push_grep_body_spans(
                     &mut spans,
                     body,

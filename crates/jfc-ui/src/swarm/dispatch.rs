@@ -11,7 +11,9 @@ use tokio::sync::mpsc;
 use crate::agents::AgentDef;
 use crate::ids::{TaskId, ToolId};
 use crate::runtime::{AppEvent, ExecutionResult, TaskEvent, TeamEvent, ToolEvent, send_critical};
-use crate::swarm::runner::{TeammateEvent, TeammateRunnerConfig, assign_teammate_color, start_teammate, teammate_task_id};
+use crate::swarm::runner::{
+    TeammateEvent, TeammateRunnerConfig, assign_teammate_color, start_teammate, teammate_task_id,
+};
 use crate::swarm::types::{BackendType, TeamMember, TeammateIdentity, make_agent_id};
 use jfc_core::TaskInput;
 use jfc_provider::{ModelId, Provider};

@@ -136,16 +136,9 @@ fn walk_py(
         // inside functions / classes (handled separately for classes; ignored
         // for function locals).
         "expression_statement" => {
-            if scope.is_empty()
-                && node
-                    .parent()
-                    .map(|p| p.kind() == "module")
-                    .unwrap_or(false)
-            {
+            if scope.is_empty() && node.parent().map(|p| p.kind() == "module").unwrap_or(false) {
                 if let Some(assign) = node.named_child(0) {
-                    if let Some((name, name_node)) =
-                        py_constant_assignment_name(assign, source)
-                    {
+                    if let Some((name, name_node)) = py_constant_assignment_name(assign, source) {
                         let qn = qualified(scope, &name);
                         let mut nd =
                             build_nd(&name, NodeKind::Constant, assign, path, path_str, &qn);
@@ -403,15 +396,21 @@ mod tests {
         let parsed = a.parse_file(Path::new("t.py"), src).unwrap();
         let nodes = a.extract_nodes(&parsed);
         assert!(
-            nodes.iter().any(|n| n.name == "MAX" && n.kind == NodeKind::Constant),
+            nodes
+                .iter()
+                .any(|n| n.name == "MAX" && n.kind == NodeKind::Constant),
             "expected Constant for MAX"
         );
         assert!(
-            nodes.iter().any(|n| n.name == "PI" && n.kind == NodeKind::Constant),
+            nodes
+                .iter()
+                .any(|n| n.name == "PI" && n.kind == NodeKind::Constant),
             "expected Constant for PI"
         );
         assert!(
-            nodes.iter().any(|n| n.name == "NAME" && n.kind == NodeKind::Constant),
+            nodes
+                .iter()
+                .any(|n| n.name == "NAME" && n.kind == NodeKind::Constant),
             "expected Constant for NAME"
         );
     }
@@ -439,21 +438,36 @@ mod tests {
         let parsed = a.parse_file(Path::new("t.py"), src).unwrap();
         let nodes = a.extract_nodes(&parsed);
         assert!(
-            nodes.iter().any(|n| n.name == "name" && n.kind == NodeKind::Field),
+            nodes
+                .iter()
+                .any(|n| n.name == "name" && n.kind == NodeKind::Field),
             "expected Field 'name', got: {:?}",
-            nodes.iter().filter(|n| n.kind == NodeKind::Field).collect::<Vec<_>>()
+            nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Field)
+                .collect::<Vec<_>>()
         );
         assert!(
-            nodes.iter().any(|n| n.name == "count" && n.kind == NodeKind::Field),
+            nodes
+                .iter()
+                .any(|n| n.name == "count" && n.kind == NodeKind::Field),
             "expected Field 'count'"
         );
         // method bodies should not contribute additional Field nodes.
         let field_count = nodes.iter().filter(|n| n.kind == NodeKind::Field).count();
         assert_eq!(field_count, 2, "unexpected extra Field nodes: {nodes:?}");
         // class itself should still be a Struct.
-        assert!(nodes.iter().any(|n| n.name == "Widget" && n.kind == NodeKind::Struct));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Widget" && n.kind == NodeKind::Struct)
+        );
         // Method should still be a Function.
-        assert!(nodes.iter().any(|n| n.name == "render" && n.kind == NodeKind::Function));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "render" && n.kind == NodeKind::Function)
+        );
     }
 
     #[test]

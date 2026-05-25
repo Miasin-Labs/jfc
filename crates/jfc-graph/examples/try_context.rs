@@ -78,9 +78,9 @@ fn main() {
     };
     let result = session.context("add a new caching layer", opts);
     println!("intent       = {:?}", result.intent);
-    println!("budget       = max_chars={}, default_max_files={}",
-        result.budget.max_output_chars,
-        result.budget.default_max_files,
+    println!(
+        "budget       = max_chars={}, default_max_files={}",
+        result.budget.max_output_chars, result.budget.default_max_files,
     );
     println!("--- markdown ---");
     println!("{}", result.markdown);
@@ -96,7 +96,8 @@ fn main() {
     println!("...");
 
     divider("schema — published JSON Schema for QueryResult");
-    let schema_text = jfc_graph::schema::json_schema_for(jfc_graph::schema::PayloadKind::QueryResult);
+    let schema_text =
+        jfc_graph::schema::json_schema_for(jfc_graph::schema::PayloadKind::QueryResult);
     println!("{schema_text}");
 
     divider("overlay — save base snapshot and reload");

@@ -332,7 +332,10 @@ pub(super) fn execute_graph_files(path_filter: Option<&str>, cwd: &Path) -> Exec
         out.push('\n');
     }
     if total > shown {
-        out.push_str(&format!("... and {} more (narrow with `path` filter)\n", total - shown));
+        out.push_str(&format!(
+            "... and {} more (narrow with `path` filter)\n",
+            total - shown
+        ));
     }
     ExecutionResult::success(out)
 }

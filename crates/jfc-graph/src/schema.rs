@@ -122,7 +122,10 @@ impl From<&ContextResult> for ContextResultSchema {
 
 /// Wrap a [`ContextResult`] in its versioned envelope.
 pub fn wrap_context_result(result: &ContextResult) -> Envelope<ContextResultSchema> {
-    Envelope::new(PayloadKind::ContextResult, ContextResultSchema::from(result))
+    Envelope::new(
+        PayloadKind::ContextResult,
+        ContextResultSchema::from(result),
+    )
 }
 
 /// Wrap a [`FormattedOutput`] in a versioned envelope. `FormattedOutput`

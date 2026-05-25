@@ -99,7 +99,9 @@ pub fn checkpoint_file(path: &Path) -> io::Result<PathBuf> {
 
     let (ext, body): (&str, Option<Vec<u8>>) = match fs::read(&absolute) {
         Ok(bytes) => (BACKUP_EXT, Some(bytes)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => (ABSENT_MARKER.trim_start_matches('.'), None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            (ABSENT_MARKER.trim_start_matches('.'), None)
+        }
         Err(e) => return Err(e),
     };
 

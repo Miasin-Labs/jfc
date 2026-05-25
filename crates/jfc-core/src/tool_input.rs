@@ -117,14 +117,22 @@ macro_rules! ti_parse {
     ($obj:ident, $tool:ident, str_vec, $k:literal) => {
         $obj.and_then(|m| m.get($k))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     // str_vec with a fallback alias key — tries $k first, falls back to $alias
     ($obj:ident, $tool:ident, str_vec_alias, $k:literal, $alias:literal) => {
         $obj.and_then(|m| m.get($k).or_else(|| m.get($alias)))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     ($obj:ident, $tool:ident, opt_u8, $k:literal) => {
@@ -628,12 +636,30 @@ pub enum ToolInput {
         #[serde(default, rename = "dispatch_cascade")]
         dispatch_cascade: bool,
     },
-    PlanCreate { title: String, #[serde(default)] body: Option<String> },
-    PlanList { #[serde(default)] status: Option<String> },
-    PlanShow { slug: String },
-    PlanAdvance { slug: String, summary: String },
-    PlanArchive { slug: String, #[serde(default)] reason: Option<String> },
-    PlanMaterialize { slug: String },
+    PlanCreate {
+        title: String,
+        #[serde(default)]
+        body: Option<String>,
+    },
+    PlanList {
+        #[serde(default)]
+        status: Option<String>,
+    },
+    PlanShow {
+        slug: String,
+    },
+    PlanAdvance {
+        slug: String,
+        summary: String,
+    },
+    PlanArchive {
+        slug: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    PlanMaterialize {
+        slug: String,
+    },
     LearnStatus {},
     LearnHistorize {},
     LearnDream {},
@@ -999,7 +1025,11 @@ impl ToolInput {
             }
             Self::Generic { summary } => summary.clone(),
             Self::SendUserMessage { message, .. } => {
-                let preview = if message.len() > 60 { &message[..message.floor_char_boundary(60)] } else { message.as_str() };
+                let preview = if message.len() > 60 {
+                    &message[..message.floor_char_boundary(60)]
+                } else {
+                    message.as_str()
+                };
                 format!("message: {preview}")
             }
             Self::SendUserFile { caption, .. } => {
@@ -1306,13 +1336,22 @@ impl ToolInput {
                 Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
                 Ok(_) | Err(_) => json!({ "input": summary }),
             },
-            Self::SendUserMessage { message, summary, attachments, status } => json!({
+            Self::SendUserMessage {
+                message,
+                summary,
+                attachments,
+                status,
+            } => json!({
                 "message": message,
                 "summary": summary,
                 "attachments": attachments,
                 "status": status,
             }),
-            Self::SendUserFile { files, caption, status } => json!({
+            Self::SendUserFile {
+                files,
+                caption,
+                status,
+            } => json!({
                 "files": files,
                 "caption": caption,
                 "status": status,

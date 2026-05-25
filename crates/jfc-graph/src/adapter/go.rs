@@ -148,9 +148,7 @@ fn walk_go(node: TsNode<'_>, source: &str, path: &Path, path_str: &str, out: &mu
                                     // TypeAlias so callers can find it.
                                     _ => NodeKind::TypeAlias,
                                 };
-                                out.push(build_nd(
-                                    &name, kind, child, path, path_str, &name,
-                                ));
+                                out.push(build_nd(&name, kind, child, path, path_str, &name));
                                 // Emit Field nodes for struct members so
                                 // we don't lose them between the type and
                                 // the field_declaration_list child.
@@ -258,8 +256,7 @@ fn extract_go_struct_fields(
             if child.kind() == "field_identifier" {
                 let name = text(child, source);
                 let qn = format!("{struct_name}::{name}");
-                let mut nd =
-                    build_nd(&name, NodeKind::Field, child, path, path_str, &qn);
+                let mut nd = build_nd(&name, NodeKind::Field, child, path, path_str, &qn);
                 // Use the field_declaration span so go-to-def shows the
                 // whole `X int` line rather than just the identifier.
                 nd.span = build_span(field, path);
@@ -432,15 +429,30 @@ mod tests {
         let parsed = a.parse_file(Path::new("t.go"), src).unwrap();
         let nodes = a.extract_nodes(&parsed);
         assert!(
-            nodes.iter().any(|n| n.name == "X" && n.kind == NodeKind::Field),
+            nodes
+                .iter()
+                .any(|n| n.name == "X" && n.kind == NodeKind::Field),
             "expected Field 'X', got: {:?}",
-            nodes.iter().filter(|n| n.kind == NodeKind::Field).collect::<Vec<_>>()
+            nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Field)
+                .collect::<Vec<_>>()
         );
-        assert!(nodes.iter().any(|n| n.name == "Y" && n.kind == NodeKind::Field));
-        assert!(nodes.iter().any(|n| n.name == "Name" && n.kind == NodeKind::Field));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Y" && n.kind == NodeKind::Field)
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Name" && n.kind == NodeKind::Field)
+        );
         // qualified naming should namespace under the struct.
         assert!(
-            nodes.iter().any(|n| n.qualified_name == "Point::X" && n.kind == NodeKind::Field),
+            nodes
+                .iter()
+                .any(|n| n.qualified_name == "Point::X" && n.kind == NodeKind::Field),
             "Field qualified name should be Point::X"
         );
     }
@@ -453,7 +465,9 @@ mod tests {
         let nodes = a.extract_nodes(&parsed);
         for name in &["MaxSize", "Pi", "A", "B"] {
             assert!(
-                nodes.iter().any(|n| n.name == *name && n.kind == NodeKind::Constant),
+                nodes
+                    .iter()
+                    .any(|n| n.name == *name && n.kind == NodeKind::Constant),
                 "expected Constant '{name}'"
             );
         }
@@ -468,11 +482,15 @@ mod tests {
         let parsed = a.parse_file(Path::new("t.go"), src).unwrap();
         let nodes = a.extract_nodes(&parsed);
         assert!(
-            nodes.iter().any(|n| n.name == "ID" && n.kind == NodeKind::TypeAlias),
+            nodes
+                .iter()
+                .any(|n| n.name == "ID" && n.kind == NodeKind::TypeAlias),
             "expected TypeAlias 'ID'"
         );
         assert!(
-            nodes.iter().any(|n| n.name == "Distance" && n.kind == NodeKind::TypeAlias),
+            nodes
+                .iter()
+                .any(|n| n.name == "Distance" && n.kind == NodeKind::TypeAlias),
             "expected TypeAlias 'Distance' (named type)"
         );
     }

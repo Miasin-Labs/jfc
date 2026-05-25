@@ -241,16 +241,14 @@ pub(crate) async fn run(
                     let cache_path = std::env::current_dir()
                         .unwrap_or_default()
                         .join(".jfc/tool-height-cache.json");
-                    let loaded =
-                        crate::message_view::load_tool_height_cache(&cache_path);
+                    let loaded = crate::message_view::load_tool_height_cache(&cache_path);
 
                     // Also load the highlight line-count cache so syntect
                     // doesn't need to run for known code blocks.
                     let hl_cache_path = std::env::current_dir()
                         .unwrap_or_default()
                         .join(".jfc/highlight-heights.json");
-                    let hl_loaded =
-                        jfc_markdown::load_highlight_line_counts(&hl_cache_path);
+                    let hl_loaded = jfc_markdown::load_highlight_line_counts(&hl_cache_path);
 
                     tracing::info!(
                         target: "jfc::session",
@@ -352,13 +350,11 @@ pub(crate) async fn run(
                     let cache_path = std::env::current_dir()
                         .unwrap_or_default()
                         .join(".jfc/tool-height-cache.json");
-                    let loaded =
-                        crate::message_view::load_tool_height_cache(&cache_path);
+                    let loaded = crate::message_view::load_tool_height_cache(&cache_path);
                     let hl_cache_path = std::env::current_dir()
                         .unwrap_or_default()
                         .join(".jfc/highlight-heights.json");
-                    let hl_loaded =
-                        jfc_markdown::load_highlight_line_counts(&hl_cache_path);
+                    let hl_loaded = jfc_markdown::load_highlight_line_counts(&hl_cache_path);
                     if loaded > 0 || hl_loaded > 0 {
                         tracing::debug!(
                             target: "jfc::session",
@@ -399,19 +395,20 @@ pub(crate) async fn run(
                 app.recompute_token_estimate();
             } else {
                 // Try loading from teleport export
-                let export_path = std::path::Path::new(".jfc/teleport")
-                    .join(format!("{source_id}.json"));
+                let export_path =
+                    std::path::Path::new(".jfc/teleport").join(format!("{source_id}.json"));
                 if export_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&export_path) {
                         if let Ok(export) = serde_json::from_str::<serde_json::Value>(&content) {
-                            let new_id = crate::ids::SessionId::new(
-                                uuid::Uuid::new_v4().to_string(),
-                            );
+                            let new_id =
+                                crate::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
                             // Load messages from the export
                             if let Some(msgs) = export.get("messages").and_then(|m| m.as_array()) {
                                 for msg in msgs {
-                                    let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-                                    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                                    let role =
+                                        msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                                    let content =
+                                        msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
                                     let chat_msg = if role == "assistant" {
                                         crate::types::ChatMessage::assistant(content.to_owned())
                                     } else {
@@ -910,7 +907,8 @@ pub(crate) async fn run(
                     handlers::ui_actions::handle_exit_plan_mode(&mut app, plan);
                 }
                 AppEvent::Ui(UiEvent::AdvisorToolRequested { tool_use_id }) => {
-                    handlers::ui_actions::handle_advisor_tool_requested(&mut app, tool_use_id).await;
+                    handlers::ui_actions::handle_advisor_tool_requested(&mut app, tool_use_id)
+                        .await;
                 }
 
                 // ── Task (subagent) events ──────────────────────────────

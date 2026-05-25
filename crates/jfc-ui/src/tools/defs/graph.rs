@@ -119,7 +119,8 @@ fn graph_context_def() -> ToolDef {
             optional source blocks for entry points, and a feature/UX reminder when the task \
             description looks like a new-feature request. Prefer this over chaining graph_search \
             + graph_query. NOTE: surfaces CODE context, not product requirements — for new \
-            features still clarify UX/edge cases with the user.".into(),
+            features still clarify UX/edge cases with the user."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -154,7 +155,8 @@ fn graph_search_def() -> ToolDef {
             and `/`-qualified (`stage_apply/run`) lookups. Rust prefixes `crate::`, `super::`, \
             `self::` are stripped automatically. Returns kind, location, signature, visibility, \
             and a chainable handle for each match. Use this when you want the symbol's *shape* \
-            — for code structure use graph_context.".into(),
+            — for code structure use graph_context."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -183,7 +185,8 @@ fn graph_callers_def() -> ToolDef {
         description: "Find every function that calls `symbol`. Aggregates across all matching \
             symbols when the name is ambiguous (multiple `execute` methods, etc.) and notes the \
             aggregation in the result. Output is file-grouped with signatures inline. Use to \
-            understand usage patterns or estimate change impact (combined with graph_impact).".into(),
+            understand usage patterns or estimate change impact (combined with graph_impact)."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -211,7 +214,8 @@ fn graph_callees_def() -> ToolDef {
         name: "graph_callees".into(),
         description: "Find every function that `symbol` calls. Symmetric to graph_callers. \
             Use to understand dependencies, derive a dataflow trace, or check whether a fn \
-            touches a sensitive subsystem (e.g. `graph_callees on auth_handler`).".into(),
+            touches a sensitive subsystem (e.g. `graph_callees on auth_handler`)."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -241,7 +245,8 @@ fn graph_impact_def() -> ToolDef {
             behaviour might shift if `symbol` changes. Output is grouped by file with \
             `name:line` inline lists — scannable at a glance. The depth controls reach: 1 = \
             direct callers, 2 = callers of callers (default), 3+ = full ripple. Use BEFORE \
-            touching a public-API symbol to scope the blast radius.".into(),
+            touching a public-API symbol to scope the blast radius."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -273,7 +278,8 @@ fn graph_node_def() -> ToolDef {
             signatures + line numbers), not every method body — Read or graph_node a specific \
             member for its body. Keep includeCode=false to minimize context. For SEVERAL \
             related symbols, make ONE graph_explore call instead of many node calls — repeated \
-            node calls each re-read the whole context and cost far more.".into(),
+            node calls each re-read the whole context and cost far more."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -299,7 +305,8 @@ fn graph_explore_def() -> ToolDef {
             related symbols at once — strongly prefer it over a series of graph_node or Read \
             calls (each separate call re-reads the whole context, so 8 node calls cost far \
             more than 1 explore). Query with specific symbol/file/code terms, NOT \
-            natural-language sentences — run graph_search first to find names.".into(),
+            natural-language sentences — run graph_search first to find names."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -337,7 +344,8 @@ fn graph_files_def() -> ToolDef {
         name: "graph_files".into(),
         description: "List files indexed in the code graph. Optionally filter by a path \
             substring. Returns file paths sorted alphabetically. Use this to discover what \
-            source files are available before querying symbols.".into(),
+            source files are available before querying symbols."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -388,7 +396,8 @@ fn symbol_edit_def() -> ToolDef {
             signature-compatibility checks against all callers first and refuses \
             edits that would break call sites. Prefer this over Edit when \
             changing signatures, since it surfaces affected callers automatically. \
-            If the handle isn't found, the error suggests up to 5 fuzzy matches.".into(),
+            If the handle isn't found, the error suggests up to 5 fuzzy matches."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

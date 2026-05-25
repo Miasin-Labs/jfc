@@ -622,8 +622,16 @@ impl TaskStore {
             let pa = a.priority.unwrap_or(5);
             let pb = b.priority.unwrap_or(5);
             pa.cmp(&pb).then_with(|| {
-                let id_a = a.id.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-                let id_b = b.id.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                let id_a =
+                    a.id.as_str()
+                        .strip_prefix('t')
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .unwrap_or(0);
+                let id_b =
+                    b.id.as_str()
+                        .strip_prefix('t')
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .unwrap_or(0);
                 id_a.cmp(&id_b)
             })
         });
@@ -653,8 +661,16 @@ impl TaskStore {
             let pa = task_a.and_then(|t| t.priority).unwrap_or(5);
             let pb = task_b.and_then(|t| t.priority).unwrap_or(5);
             pa.cmp(&pb).then_with(|| {
-                let id_a = a.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-                let id_b = b.as_str().strip_prefix('t').and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                let id_a = a
+                    .as_str()
+                    .strip_prefix('t')
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let id_b = b
+                    .as_str()
+                    .strip_prefix('t')
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
                 id_a.cmp(&id_b)
             })
         });

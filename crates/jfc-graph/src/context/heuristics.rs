@@ -132,10 +132,7 @@ mod tests {
 
     #[test]
     fn unknown_when_no_keywords_match() {
-        assert_eq!(
-            classify_intent("alpha bravo charlie"),
-            TaskIntent::Unknown
-        );
+        assert_eq!(classify_intent("alpha bravo charlie"), TaskIntent::Unknown);
     }
 
     #[test]

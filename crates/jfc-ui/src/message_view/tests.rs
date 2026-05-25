@@ -570,10 +570,7 @@ mod grep_pattern_extraction_tests {
 
     #[test]
     fn grep_search_pattern_positional_normal() {
-        assert_eq!(
-            grep_search_pattern("grep -rn foo src/"),
-            Some("foo".into())
-        );
+        assert_eq!(grep_search_pattern("grep -rn foo src/"), Some("foo".into()));
     }
 
     #[test]
@@ -615,10 +612,7 @@ mod grep_pattern_extraction_tests {
 
     #[test]
     fn grep_search_pattern_rg_no_target_normal() {
-        assert_eq!(
-            grep_search_pattern("rg \"open(\""),
-            Some("open(".into())
-        );
+        assert_eq!(grep_search_pattern("rg \"open(\""), Some("open(".into()));
     }
 
     #[test]
@@ -646,18 +640,20 @@ mod grep_body_highlight_tests {
         let stdout = "src/main.rs:10:fn parse_file(&self) {\n\
                       src/main.rs:20:    parse_file(path)\n";
         let t = Theme::dark();
-        let lines = produce_grep_output_lines(stdout, "", Some(0), t, false, "grep -rn parse_file src/");
+        let lines =
+            produce_grep_output_lines(stdout, "", Some(0), t, false, "grep -rn parse_file src/");
         let mut found_bold_match = false;
         for line in &lines {
             for span in &line.spans {
-                if span.content.as_ref() == "parse_file"
-                    && span.style.fg == Some(t.warning)
-                {
+                if span.content.as_ref() == "parse_file" && span.style.fg == Some(t.warning) {
                     found_bold_match = true;
                 }
             }
         }
-        assert!(found_bold_match, "expected pattern 'parse_file' highlighted in warning color");
+        assert!(
+            found_bold_match,
+            "expected pattern 'parse_file' highlighted in warning color"
+        );
     }
 
     #[test]
@@ -667,7 +663,8 @@ mod grep_body_highlight_tests {
         // the body is split into plain text + pattern match only.
         let stdout = "src/graph.rs:50:    fn extract_edges(\n";
         let t = Theme::dark();
-        let lines = produce_grep_output_lines(stdout, "", Some(0), t, false, "rg extract_edges src/");
+        let lines =
+            produce_grep_output_lines(stdout, "", Some(0), t, false, "rg extract_edges src/");
         // The body spans should include the pattern match and surrounding text,
         // but NOT syntect-generated keyword tokens.
         let body_spans: Vec<&str> = lines
@@ -689,7 +686,14 @@ mod grep_body_highlight_tests {
                       src/main.rs:10:fn parse_file() {\n\
                       src/main.rs-11-    }\n";
         let t = Theme::dark();
-        let lines = produce_grep_output_lines(stdout, "", Some(0), t, false, "grep -n -A1 -B1 parse_file src/main.rs");
+        let lines = produce_grep_output_lines(
+            stdout,
+            "",
+            Some(0),
+            t,
+            false,
+            "grep -n -A1 -B1 parse_file src/main.rs",
+        );
         // Check that context line bodies use text_muted
         let context_body = lines
             .iter()

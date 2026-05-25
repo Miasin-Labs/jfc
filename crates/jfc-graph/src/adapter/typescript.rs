@@ -210,8 +210,7 @@ fn walk_ts_node(
                         let qn = qualified(scope, &name);
                         if let Some(value) = child.child_by_field_name("value") {
                             if matches!(value.kind(), "arrow_function" | "function") {
-                                let mut nd =
-                                    build_fn_nd(&name, value, path, path_str, &qn, source);
+                                let mut nd = build_fn_nd(&name, value, path, path_str, &qn, source);
                                 if let Some(gp) = extract_ts_type_params(value, source) {
                                     nd.metadata.insert("generic_params".into(), gp);
                                 }
@@ -401,14 +400,13 @@ fn extract_ts_type_params(node: TsNode<'_>, source: &str) -> Option<String> {
 /// Returns a JSON object string, or `None` if no type-arg calls found.
 fn extract_ts_callee_type_args(func_node: TsNode<'_>, source: &str) -> Option<String> {
     // Look for a body/statement_block child
-    let body = func_node
-        .child_by_field_name("body")
-        .or_else(|| {
-            func_node
-                .children(&mut func_node.walk())
-                .find(|c| c.kind() == "statement_block")
-        })?;
-    let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let body = func_node.child_by_field_name("body").or_else(|| {
+        func_node
+            .children(&mut func_node.walk())
+            .find(|c| c.kind() == "statement_block")
+    })?;
+    let mut map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     collect_ts_type_arg_calls(body, source, &mut map);
     if map.is_empty() {
         return None;
@@ -689,10 +687,16 @@ function callee() {}
         let src = "enum Direction { Up, Down, Left, Right }";
         let parsed = adapter.parse_file(path, src).unwrap();
         let nodes = adapter.extract_nodes(&parsed);
-        assert!(nodes.iter().any(|n| n.name == "Direction" && n.kind == NodeKind::Enum));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Direction" && n.kind == NodeKind::Enum)
+        );
         for v in &["Up", "Down", "Left", "Right"] {
             assert!(
-                nodes.iter().any(|n| n.name == *v && n.kind == NodeKind::EnumVariant),
+                nodes
+                    .iter()
+                    .any(|n| n.name == *v && n.kind == NodeKind::EnumVariant),
                 "missing EnumVariant node for {v}"
             );
         }
@@ -705,8 +709,16 @@ function callee() {}
         let src = r#"enum Color { Red = "RED", Green = "GREEN" }"#;
         let parsed = adapter.parse_file(path, src).unwrap();
         let nodes = adapter.extract_nodes(&parsed);
-        assert!(nodes.iter().any(|n| n.name == "Red" && n.kind == NodeKind::EnumVariant));
-        assert!(nodes.iter().any(|n| n.name == "Green" && n.kind == NodeKind::EnumVariant));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Red" && n.kind == NodeKind::EnumVariant)
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "Green" && n.kind == NodeKind::EnumVariant)
+        );
     }
 
     #[test]
@@ -717,13 +729,26 @@ function callee() {}
         let parsed = adapter.parse_file(path, src).unwrap();
         let nodes = adapter.extract_nodes(&parsed);
         assert!(
-            nodes.iter().any(|n| n.name == "name" && n.kind == NodeKind::Field),
+            nodes
+                .iter()
+                .any(|n| n.name == "name" && n.kind == NodeKind::Field),
             "expected Field node for 'name', got: {:?}",
-            nodes.iter().filter(|n| n.kind == NodeKind::Field).collect::<Vec<_>>()
+            nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Field)
+                .collect::<Vec<_>>()
         );
-        assert!(nodes.iter().any(|n| n.name == "count" && n.kind == NodeKind::Field));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "count" && n.kind == NodeKind::Field)
+        );
         // render should still be a Function, not a Field.
-        assert!(nodes.iter().any(|n| n.name == "render" && n.kind == NodeKind::Function));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "render" && n.kind == NodeKind::Function)
+        );
     }
 
     #[test]
@@ -733,8 +758,16 @@ function callee() {}
         let src = "interface Config {\n  host: string;\n  port: number;\n}";
         let parsed = adapter.parse_file(path, src).unwrap();
         let nodes = adapter.extract_nodes(&parsed);
-        assert!(nodes.iter().any(|n| n.name == "host" && n.kind == NodeKind::Field));
-        assert!(nodes.iter().any(|n| n.name == "port" && n.kind == NodeKind::Field));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "host" && n.kind == NodeKind::Field)
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "port" && n.kind == NodeKind::Field)
+        );
     }
 
     #[test]
@@ -745,11 +778,15 @@ function callee() {}
         let parsed = adapter.parse_file(path, src).unwrap();
         let nodes = adapter.extract_nodes(&parsed);
         assert!(
-            nodes.iter().any(|n| n.name == "ID" && n.kind == NodeKind::TypeAlias),
+            nodes
+                .iter()
+                .any(|n| n.name == "ID" && n.kind == NodeKind::TypeAlias),
             "expected TypeAlias for ID"
         );
         assert!(
-            nodes.iter().any(|n| n.name == "Result" && n.kind == NodeKind::TypeAlias),
+            nodes
+                .iter()
+                .any(|n| n.name == "Result" && n.kind == NodeKind::TypeAlias),
             "expected TypeAlias for Result"
         );
     }
@@ -762,12 +799,16 @@ function callee() {}
         let parsed = adapter.parse_file(path, src).unwrap();
         let nodes = adapter.extract_nodes(&parsed);
         assert!(
-            nodes.iter().any(|n| n.name == "MAX_SIZE" && n.kind == NodeKind::Constant),
+            nodes
+                .iter()
+                .any(|n| n.name == "MAX_SIZE" && n.kind == NodeKind::Constant),
             "expected Constant for MAX_SIZE"
         );
         // greet should still be a Function, not a Constant.
         assert!(
-            nodes.iter().any(|n| n.name == "greet" && n.kind == NodeKind::Function),
+            nodes
+                .iter()
+                .any(|n| n.name == "greet" && n.kind == NodeKind::Function),
             "expected Function for greet (arrow fn)"
         );
     }

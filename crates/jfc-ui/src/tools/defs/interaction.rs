@@ -22,7 +22,8 @@ fn ask_user_question_def() -> ToolDef {
             preferences, clarify ambiguity, or offer choices. Use sparingly — \
             only when context genuinely requires user input. Each option is \
             a `{label, description}` object. Returns the user's selected \
-            label(s) as the tool result.".into(),
+            label(s) as the tool result."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -57,7 +58,8 @@ fn web_fetch_def() -> ToolDef {
             text, JSON pretty-printed, plain text passed through). Optional \
             `prompt` argument tells the model what aspect of the page to \
             focus on; useful for long pages where you want a summary rather \
-            than the full body.".into(),
+            than the full body."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -80,7 +82,8 @@ fn web_search_def() -> ToolDef {
             `scholar: <query>` searches Semantic Scholar (optional API key, falls back to BFF); \
             `papers: <query>` queries arXiv + Semantic Scholar in parallel and \
             deduplicates results by arXiv ID / DOI / title; \
-            no prefix uses Google Custom Search Engine.".into(),
+            no prefix uses Google Custom Search Engine."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -104,7 +107,8 @@ fn exit_plan_mode_def() -> ToolDef {
             irreversible. After this tool returns success, you may \
             proceed with Write/Edit/destructive Bash calls — the user \
             has approved by virtue of you reaching this point. Mirrors \
-            Claude Code v2.1.132's ExitPlanMode tool contract.".into(),
+            Claude Code v2.1.132's ExitPlanMode tool contract."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -166,7 +170,8 @@ fn enter_worktree_def() -> ToolDef {
         description: "Create (if needed) and switch into a git worktree at \
             `.jfc-worktrees/<name>` checking out branch `jfc/<name>` (or a \
             caller-provided branch). Subsequent tool calls run in that \
-            worktree's directory until `ExitWorktree` is invoked.".into(),
+            worktree's directory until `ExitWorktree` is invoked."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -188,7 +193,8 @@ fn exit_worktree_def() -> ToolDef {
     ToolDef {
         name: "ExitWorktree".into(),
         description: "Leave the current worktree. The worktree is left intact \
-            on disk; only the agent's effective cwd resets to the repo root.".into(),
+            on disk; only the agent's effective cwd resets to the repo root."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {},
@@ -207,7 +213,8 @@ fn send_user_message_def() -> ToolDef {
             (absolute or cwd-relative). `status` labels intent: 'normal' when \
             replying to what they just asked; 'proactive' when you're initiating — \
             a scheduled task finished, a blocker surfaced during background work, \
-            you need input on something they haven't asked about.".into(),
+            you need input on something they haven't asked about."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -239,7 +246,8 @@ fn send_user_file_def() -> ToolDef {
             Add a `caption` when a one-liner of context helps. Skip it if the file \
             speaks for itself.\n\n\
             Set `status` on every call. Use `proactive` when you're initiating — \
-            the user is away. Use `normal` when replying.".into(),
+            the user is away. Use `normal` when replying."
+            .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

@@ -44,16 +44,50 @@ pub enum ClassifierDecision {
 /// of string or space char) so `cargo` doesn't accidentally match
 /// `cargox`.
 const SAFE_BASH_PREFIXES: &[&str] = &[
-    "ls", "pwd", "echo", "cat", "head", "tail", "wc", "true", "false",
-    "date", "uname", "whoami", "id", "env", "which", "type",
-    "git status", "git diff", "git log", "git show", "git branch",
-    "git remote", "git stash list", "git rev-parse",
-    "cargo check", "cargo build", "cargo test", "cargo clippy",
-    "cargo fmt --check", "cargo metadata", "cargo tree", "cargo doc",
-    "rustc --version", "rustup show",
-    "go vet", "go test", "go build",
-    "npm test", "npm run lint", "npm run build",
-    "python -V", "python --version", "python3 -V", "python3 --version",
+    "ls",
+    "pwd",
+    "echo",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "true",
+    "false",
+    "date",
+    "uname",
+    "whoami",
+    "id",
+    "env",
+    "which",
+    "type",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git branch",
+    "git remote",
+    "git stash list",
+    "git rev-parse",
+    "cargo check",
+    "cargo build",
+    "cargo test",
+    "cargo clippy",
+    "cargo fmt --check",
+    "cargo metadata",
+    "cargo tree",
+    "cargo doc",
+    "rustc --version",
+    "rustup show",
+    "go vet",
+    "go test",
+    "go build",
+    "npm test",
+    "npm run lint",
+    "npm run build",
+    "python -V",
+    "python --version",
+    "python3 -V",
+    "python3 --version",
 ];
 
 /// Bash patterns that are *always* denied even if the allow-rules
@@ -150,7 +184,9 @@ fn is_explicitly_allowed(kind: &ToolKind, input: &ToolInput, allow_rules: &[Stri
             return true;
         }
         // Scoped Bash rule: `Bash(git status*)`.
-        if let Some(rest) = trimmed.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')'))
+        if let Some(rest) = trimmed
+            .strip_prefix("Bash(")
+            .and_then(|s| s.strip_suffix(')'))
             && matches!(kind, ToolKind::Bash)
             && let ToolInput::Bash { command, .. } = input
             && glob_prefix_match(rest, command.trim())
@@ -197,8 +233,8 @@ fn matches_safe_prefix(command: &str, prefix: &str) -> bool {
         return false;
     }
     match command.as_bytes().get(prefix.len()) {
-        None => true,             // exact match
-        Some(b' ') => true,       // followed by args
+        None => true,       // exact match
+        Some(b' ') => true, // followed by args
         Some(b'\t') => true,
         _ => false,
     }

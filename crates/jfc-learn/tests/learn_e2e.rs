@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::fs;
 
+use jfc_learn::LearnError;
 use jfc_learn::auto_hints::run_pre_turn_hint_with;
 use jfc_learn::dreamer::{Dreamer, DreamerTask, MemoryRecord};
 use jfc_learn::historian::{
@@ -14,7 +15,6 @@ use jfc_learn::key_files::{KeyFileStore, ReadEvent};
 use jfc_learn::normalize_hash::normalize_and_hash;
 use jfc_learn::user_memory::{UserMemoryPipeline, UserObservation};
 use jfc_learn::verifier::{LlmVerifier, PromotionVerifier, VerifierVerdict};
-use jfc_learn::LearnError;
 
 use tempfile::TempDir;
 
@@ -157,7 +157,11 @@ fn learn_e2e_three_session_lifecycle() {
     // Create the target file so key-file pinning can hash it.
     let types_path = project_root.join("crates/jfc-graph/src/types.rs");
     fs::create_dir_all(types_path.parent().unwrap()).unwrap();
-    fs::write(&types_path, "pub struct FunctionNode { pub name: String }\n").unwrap();
+    fs::write(
+        &types_path,
+        "pub struct FunctionNode { pub name: String }\n",
+    )
+    .unwrap();
 
     let store = std::cell::RefCell::new(InMemoryStore::new());
     let verifier = PromotionVerifier::with_default_contracts();
@@ -328,13 +332,14 @@ fn learn_e2e_three_session_lifecycle() {
 
         // ─── Check user profile promotion ───────────────────────────────
         let candidates = UserMemoryPipeline::load_candidates(project_root).unwrap();
-        assert!(candidates.len() >= 3, "expected ≥3 candidates across sessions");
+        assert!(
+            candidates.len() >= 3,
+            "expected ≥3 candidates across sessions"
+        );
 
         let promoted = UserMemoryPipeline::check_promotion(&candidates);
         assert!(
-            promoted
-                .iter()
-                .any(|p| p.facet == "communication_style"),
+            promoted.iter().any(|p| p.facet == "communication_style"),
             "communication_style should be promoted after 3 sessions"
         );
 
@@ -372,10 +377,12 @@ fn learn_e2e_three_session_lifecycle() {
                 category: Some("USER_PREFERENCES".into()),
                 normalized_hash: Some(hash.clone()),
                 content: format!("fact-{}", i),
-                last_seen_at: Some(std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64),
+                last_seen_at: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                ),
                 memory_status: Some("active".into()),
             })
             .collect();
@@ -393,7 +400,10 @@ fn learn_e2e_three_session_lifecycle() {
 
         // MaintainDocs should have written ARCHITECTURE.md
         let arch_path = project_root.join(".jfc/ARCHITECTURE.md");
-        assert!(arch_path.exists(), "ARCHITECTURE.md should have been written by dreamer");
+        assert!(
+            arch_path.exists(),
+            "ARCHITECTURE.md should have been written by dreamer"
+        );
         let arch_content = fs::read_to_string(&arch_path).unwrap();
         assert!(arch_content.contains("# Architecture Overview"));
 

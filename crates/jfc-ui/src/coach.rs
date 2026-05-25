@@ -60,7 +60,9 @@ pub fn generate_coaching_tips(stats: &SessionStats) -> String {
     }
 
     // Tip: error rate
-    if stats.error_count > 5 && stats.error_count as f64 / stats.total_tool_calls.max(1) as f64 > 0.3 {
+    if stats.error_count > 5
+        && stats.error_count as f64 / stats.total_tool_calls.max(1) as f64 > 0.3
+    {
         tips.push(
             "High error rate in tool calls. Double-check file paths and command \
              syntax before invoking tools."

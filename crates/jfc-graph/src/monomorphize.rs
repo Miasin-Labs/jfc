@@ -235,12 +235,10 @@ mod tests {
 
         // Caller node carries callee_type_args.
         let mut cm: HashMap<String, String> = HashMap::new();
-        cm.insert(
-            "callee_type_args".into(),
-            r#"{"new": ["String"]}"#.into(),
-        );
+        cm.insert("callee_type_args".into(), r#"{"new": ["String"]}"#.into());
         g.add_node(make_node("main", NodeKind::Function, cm));
-        g.add_edge(&caller_id, &vec_new_id, edge(EdgeKind::Calls)).unwrap();
+        g.add_edge(&caller_id, &vec_new_id, edge(EdgeKind::Calls))
+            .unwrap();
 
         let insts = find_instantiations(&g);
         assert_eq!(insts.len(), 1);
@@ -258,12 +256,10 @@ mod tests {
         g.add_node(make_node("identity", NodeKind::Function, gp));
 
         let mut cm: HashMap<String, String> = HashMap::new();
-        cm.insert(
-            "callee_type_args".into(),
-            r#"{"identity": ["i32"]}"#.into(),
-        );
+        cm.insert("callee_type_args".into(), r#"{"identity": ["i32"]}"#.into());
         g.add_node(make_node("user_code", NodeKind::Function, cm));
-        g.add_edge(&caller_id, &gfn_id, edge(EdgeKind::Calls)).unwrap();
+        g.add_edge(&caller_id, &gfn_id, edge(EdgeKind::Calls))
+            .unwrap();
 
         let count = annotate(&mut g);
         assert_eq!(count, 1);
@@ -282,7 +278,8 @@ mod tests {
         g.add_node(make_node("identity", NodeKind::Function, gp));
         // Caller has NO callee_type_args.
         g.add_node(make_node("caller", NodeKind::Function, HashMap::new()));
-        g.add_edge(&caller_id, &gfn_id, edge(EdgeKind::Calls)).unwrap();
+        g.add_edge(&caller_id, &gfn_id, edge(EdgeKind::Calls))
+            .unwrap();
 
         let insts = find_instantiations(&g);
         assert!(insts.is_empty());
@@ -292,8 +289,8 @@ mod tests {
     /// via the adapter + resolver, then run `find_instantiations`.
     #[test]
     fn integration_rust_adapter_turbofish() {
-        use crate::adapter::rust::RustAdapter;
         use crate::adapter::LanguageAdapter;
+        use crate::adapter::rust::RustAdapter;
         use crate::resolver::ReferenceResolver;
         use std::path::PathBuf;
 

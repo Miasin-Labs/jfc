@@ -129,7 +129,11 @@ pub(super) fn execute_task_update(
         risk: risk.as_deref().and_then(parse_risk),
         parent_id: parent_id.map(jfc_session::TaskId::from),
         kind: kind.as_deref().and_then(parse_kind),
-        blocked_by: if blocked_by.is_empty() { None } else { Some(blocked_by) },
+        blocked_by: if blocked_by.is_empty() {
+            None
+        } else {
+            Some(blocked_by)
+        },
         tags: if tags.is_empty() { None } else { Some(tags) },
         priority,
         ..Default::default()

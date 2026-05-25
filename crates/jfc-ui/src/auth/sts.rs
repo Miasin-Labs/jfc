@@ -127,10 +127,7 @@ pub async fn assume_role_with_web_identity_opts(
 
 /// Convenience: read the web identity token from the file path specified
 /// by `AWS_WEB_IDENTITY_TOKEN_FILE` env var, then call assume_role.
-pub async fn assume_role_from_env(
-    role_arn: &str,
-    session_name: &str,
-) -> Result<Credentials> {
+pub async fn assume_role_from_env(role_arn: &str, session_name: &str) -> Result<Credentials> {
     let token_file = std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE")
         .context("AWS_WEB_IDENTITY_TOKEN_FILE not set")?;
     let token = tokio::fs::read_to_string(&token_file)
@@ -156,14 +153,14 @@ pub async fn assume_role_from_env(
 /// ```
 fn parse_assume_role_response(xml: &str) -> Result<Credentials> {
     // Minimal XML extraction — avoids pulling in a full XML parser dep.
-    let access_key_id = extract_xml_value(xml, "AccessKeyId")
-        .context("missing AccessKeyId in STS response")?;
+    let access_key_id =
+        extract_xml_value(xml, "AccessKeyId").context("missing AccessKeyId in STS response")?;
     let secret_access_key = extract_xml_value(xml, "SecretAccessKey")
         .context("missing SecretAccessKey in STS response")?;
-    let session_token = extract_xml_value(xml, "SessionToken")
-        .context("missing SessionToken in STS response")?;
-    let expiration_str = extract_xml_value(xml, "Expiration")
-        .context("missing Expiration in STS response")?;
+    let session_token =
+        extract_xml_value(xml, "SessionToken").context("missing SessionToken in STS response")?;
+    let expiration_str =
+        extract_xml_value(xml, "Expiration").context("missing Expiration in STS response")?;
 
     let expiration = expiration_str
         .parse::<DateTime<Utc>>()

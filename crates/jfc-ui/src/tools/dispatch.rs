@@ -415,13 +415,9 @@ pub async fn execute_tool(
                 include_code,
             },
         ) => dispatch_heavy::execute_graph_node(symbol, include_code, &cwd),
-        (
-            ToolKind::GraphExplore,
-            ToolInput::GraphExplore {
-                query,
-                max_files,
-            },
-        ) => dispatch_heavy::execute_graph_explore(query, max_files, &cwd),
+        (ToolKind::GraphExplore, ToolInput::GraphExplore { query, max_files }) => {
+            dispatch_heavy::execute_graph_explore(query, max_files, &cwd)
+        }
         (ToolKind::GraphStatus, ToolInput::GraphStatus {}) => {
             dispatch_heavy::execute_graph_status(&cwd)
         }
@@ -804,9 +800,10 @@ pub async fn execute_tool(
             // and teleport the plan back to the parent rather than entering
             // the standard plan-mode UI flow.
             let active = crate::ultraplan::list_sessions();
-            if let Some(s) = active.iter().find(|s|
-                matches!(s.phase, crate::ultraplan::UltraplanPhase::Exploring)
-            ) {
+            if let Some(s) = active
+                .iter()
+                .find(|s| matches!(s.phase, crate::ultraplan::UltraplanPhase::Exploring))
+            {
                 crate::ultraplan::complete_session(&s.id, plan.clone());
                 return ExecutionResult::success(format!(
                     "Ultraplan session `{}` complete. Plan ready ({} bytes).\n\n{plan}",
@@ -938,7 +935,15 @@ pub async fn execute_tool(
                 })
         }
         // ─── New tools (Phase 2-7 port from Claude Code 2.1.150) ───
-        (ToolKind::SendUserMessage, ToolInput::SendUserMessage { message, summary, status, .. }) => {
+        (
+            ToolKind::SendUserMessage,
+            ToolInput::SendUserMessage {
+                message,
+                summary,
+                status,
+                ..
+            },
+        ) => {
             let _label = summary.as_deref().unwrap_or("message");
             let status_str = status.as_deref().unwrap_or("normal");
             // In brief mode, this is the ONLY output the user sees.
@@ -946,17 +951,23 @@ pub async fn execute_tool(
             // can distinguish it from normal tool output.
             // Push notification for proactive messages when user may be away.
             if status_str == "proactive" {
-                let push_text = summary.as_deref().unwrap_or(
-                    &message[..message.len().min(100)]
-                );
-                let _ = crate::tools::notifications::execute_push_notification(
-                    push_text, Some("jfc"),
-                );
+                let push_text = summary
+                    .as_deref()
+                    .unwrap_or(&message[..message.len().min(100)]);
+                let _ =
+                    crate::tools::notifications::execute_push_notification(push_text, Some("jfc"));
             }
             // The message itself — rendered as markdown to the user.
             ExecutionResult::success(message)
         }
-        (ToolKind::SendUserFile, ToolInput::SendUserFile { files, caption, status }) => {
+        (
+            ToolKind::SendUserFile,
+            ToolInput::SendUserFile {
+                files,
+                caption,
+                status,
+            },
+        ) => {
             let status_str = status.as_deref().unwrap_or("normal");
             let cap = caption.as_deref().unwrap_or("");
             // Extract file path list from the value (accepts array of strings).
@@ -999,12 +1010,11 @@ pub async fn execute_tool(
                         format!("{}: {} file(s)", cap, delivered.len())
                     };
                     let _ = crate::tools::notifications::execute_push_notification(
-                        &body, Some("jfc — files ready"),
+                        &body,
+                        Some("jfc — files ready"),
                     );
                 }
-                let mut out = format!(
-                    "[SendUserFile status={status_str}]"
-                );
+                let mut out = format!("[SendUserFile status={status_str}]");
                 if !cap.is_empty() {
                     out.push_str(&format!(" {cap}"));
                 }
@@ -1052,9 +1062,7 @@ pub async fn execute_tool(
                 Some(r) => {
                     let all_servers = r.list().await;
                     if all_servers.is_empty() {
-                        return ExecutionResult::success(
-                            "No MCP servers configured.".to_string(),
-                        );
+                        return ExecutionResult::success("No MCP servers configured.".to_string());
                     }
                     let total = all_servers.len();
                     let all_names: Vec<String> =
@@ -1064,8 +1072,7 @@ pub async fn execute_tool(
                     loop {
                         let active = r.list_active().await;
                         if active.len() >= total {
-                            let names: Vec<&str> =
-                                active.iter().map(|s| s.name.as_str()).collect();
+                            let names: Vec<&str> = active.iter().map(|s| s.name.as_str()).collect();
                             break ExecutionResult::success(format!(
                                 "All {} MCP servers ready: {}",
                                 total,
@@ -1080,8 +1087,7 @@ pub async fn execute_tool(
                                 .filter(|n| !active_names.contains(n.as_str()))
                                 .map(|n| n.as_str())
                                 .collect();
-                            let ready: Vec<&str> =
-                                active.iter().map(|s| s.name.as_str()).collect();
+                            let ready: Vec<&str> = active.iter().map(|s| s.name.as_str()).collect();
                             break ExecutionResult::success(format!(
                                 "Timeout after {}ms. Ready: [{}]. Timed out: [{}]",
                                 timeout.as_millis(),
@@ -1092,16 +1098,12 @@ pub async fn execute_tool(
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }
                 }
-                None => ExecutionResult::success(
-                    "No MCP registry available.".to_string(),
-                ),
+                None => ExecutionResult::success("No MCP registry available.".to_string()),
             }
         }
         (ToolKind::ListMcpResources, ToolInput::ListMcpResources { server }) => {
             let Some(registry) = snapshot_mcp_registry() else {
-                return ExecutionResult::failure(
-                    "MCP registry not initialized.".to_string(),
-                );
+                return ExecutionResult::failure("MCP registry not initialized.".to_string());
             };
             let servers = registry.list().await;
             let mut result = String::new();
@@ -1124,9 +1126,7 @@ pub async fn execute_tool(
         }
         (ToolKind::ReadMcpResource, ToolInput::ReadMcpResource { server, uri }) => {
             let Some(registry) = snapshot_mcp_registry() else {
-                return ExecutionResult::failure(
-                    "MCP registry not initialized.".to_string(),
-                );
+                return ExecutionResult::failure("MCP registry not initialized.".to_string());
             };
             match registry.read_resource(&server, &uri).await {
                 Ok(content) => ExecutionResult::success(content),
@@ -1162,13 +1162,11 @@ pub async fn execute_tool(
                 )
             }
         }
-        (ToolKind::ConnectGitHub, ToolInput::ConnectGitHub {}) => {
-            ExecutionResult::failure(
-                "ConnectGitHub is not supported in this environment. \
+        (ToolKind::ConnectGitHub, ToolInput::ConnectGitHub {}) => ExecutionResult::failure(
+            "ConnectGitHub is not supported in this environment. \
                  Use `gh auth login` via the Bash tool instead."
-                    .to_string(),
-            )
-        }
+                .to_string(),
+        ),
         (kind, input) => ExecutionResult::failure(format!(
             "tool input mismatch: {kind:?} was paired with an incompatible \
              ToolInput variant ({}). This is a routing bug — the tool's \

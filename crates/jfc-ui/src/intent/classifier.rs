@@ -350,4 +350,3 @@ pub fn classify_auto_plan_mode(lower: &str) -> bool {
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| haystack.contains(n))
 }
-

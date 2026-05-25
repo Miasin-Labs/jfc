@@ -78,7 +78,8 @@ pub fn extract_mentions(query: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for raw in query.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';' | '"' | '\''))
+    for raw in
+        query.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';' | '"' | '\''))
     {
         let token = raw.trim_matches(|c: char| c == '.' || c == ':' || c == '`');
         if token.is_empty() {
@@ -121,7 +122,11 @@ pub fn extract_mentions(query: &str) -> Vec<String> {
         };
         let is_qualified = token.contains("::") && token.chars().any(|c| c.is_alphabetic());
         let is_camel = token.len() >= 4
-            && token.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+            && token
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_uppercase())
+                .unwrap_or(false)
             && token.chars().skip(1).any(|c| c.is_ascii_lowercase())
             && token.chars().all(|c| c.is_alphanumeric() || c == '_');
 
@@ -136,11 +141,7 @@ pub fn extract_mentions(query: &str) -> Vec<String> {
 /// Walk a directory of `.md` memory files looking for any that mention any of
 /// `needles` (case-insensitive substring match). Returns `RecallHint`s built
 /// from the first matching line of each file. Caps at `max_hints`.
-pub fn scan_memory_dir(
-    dir: &Path,
-    needles: &[String],
-    max_hints: usize,
-) -> Vec<RecallHint> {
+pub fn scan_memory_dir(dir: &Path, needles: &[String], max_hints: usize) -> Vec<RecallHint> {
     let mut out = Vec::new();
     if needles.is_empty() {
         return out;

@@ -22,7 +22,9 @@ pub fn generate_onboarding_guide(project_root: &Path) -> String {
         guide.push_str("✓ `CLAUDE.md` is present — the assistant loads project-specific instructions automatically.\n\n");
     } else {
         guide.push_str("## Project Context\n\n");
-        guide.push_str("⚠ No `CLAUDE.md` found. Run `/init` to scaffold one with project conventions.\n\n");
+        guide.push_str(
+            "⚠ No `CLAUDE.md` found. Run `/init` to scaffold one with project conventions.\n\n",
+        );
     }
 
     // Check MCP servers

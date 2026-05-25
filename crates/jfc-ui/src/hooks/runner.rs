@@ -79,9 +79,7 @@ impl From<WireDecision> for HookDecision {
                     reason
                 },
             },
-            WireDecision::Modify { modified_input } => {
-                HookDecision::Modify { modified_input }
-            }
+            WireDecision::Modify { modified_input } => HookDecision::Modify { modified_input },
         }
     }
 }
@@ -121,11 +119,7 @@ pub fn run_hook(root: &Path, event: &HookEvent) -> HookDecision {
 }
 
 /// Same as [`run_hook`] but with a caller-supplied timeout.
-pub fn run_hook_with_timeout(
-    root: &Path,
-    event: &HookEvent,
-    timeout: Duration,
-) -> HookDecision {
+pub fn run_hook_with_timeout(root: &Path, event: &HookEvent, timeout: Duration) -> HookDecision {
     let Some(hook) = discover_hook(root, event) else {
         return HookDecision::Allow;
     };
@@ -321,11 +315,7 @@ mod tests {
         perm.set_mode(0o755);
         fs::set_permissions(&script, perm).unwrap();
 
-        let d = run_hook_with_timeout(
-            tmp.path(),
-            &make_event(),
-            Duration::from_millis(150),
-        );
+        let d = run_hook_with_timeout(tmp.path(), &make_event(), Duration::from_millis(150));
         match d {
             HookDecision::Deny { reason } => assert!(reason.contains("timed out")),
             other => panic!("expected Deny, got {other:?}"),

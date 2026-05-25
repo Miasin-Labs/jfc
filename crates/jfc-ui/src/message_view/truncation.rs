@@ -171,9 +171,25 @@ pub(super) fn grep_search_pattern(cmd: &str) -> Option<String> {
         return None;
     }
     const VALUE_FLAGS: &[&str] = &[
-        "-A", "-B", "-C", "-m", "--max-count", "--type", "-t", "--type-not", "-T", "--color",
-        "--colour", "-g", "--glob", "--iglob", "--include", "--exclude", "--exclude-dir",
-        "--threads", "-j",
+        "-A",
+        "-B",
+        "-C",
+        "-m",
+        "--max-count",
+        "--type",
+        "-t",
+        "--type-not",
+        "-T",
+        "--color",
+        "--colour",
+        "-g",
+        "--glob",
+        "--iglob",
+        "--include",
+        "--exclude",
+        "--exclude-dir",
+        "--threads",
+        "-j",
     ];
     const PATTERN_FLAGS: &[&str] = &["-e", "--regexp"];
     // `-f FILE` supplies pattern from a *file* — we can't extract a
@@ -240,11 +256,7 @@ pub(super) fn grep_is_case_insensitive(cmd: &str) -> bool {
             return true;
         }
         // Bundled short flags: `-inr`, `-rni`, etc.
-        if tok.starts_with('-')
-            && !tok.starts_with("--")
-            && tok.len() > 1
-            && tok.contains('i')
-        {
+        if tok.starts_with('-') && !tok.starts_with("--") && tok.len() > 1 && tok.contains('i') {
             return true;
         }
     }
@@ -255,7 +267,10 @@ pub(super) fn grep_is_case_insensitive(cmd: &str) -> bool {
 fn unquote(s: &str) -> String {
     s.strip_prefix('\'')
         .and_then(|inner| inner.strip_suffix('\''))
-        .or_else(|| s.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')))
+        .or_else(|| {
+            s.strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+        })
         .unwrap_or(s)
         .to_string()
 }

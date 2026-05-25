@@ -47,7 +47,11 @@ pub fn validate_output(data: &Value) -> Result<(), String> {
             .iter_errors(data)
             .map(|e| {
                 let path = e.instance_path().to_string();
-                let loc = if path.is_empty() { "root".to_string() } else { path };
+                let loc = if path.is_empty() {
+                    "root".to_string()
+                } else {
+                    path
+                };
                 format!("{loc}: {e}")
             })
             .collect();

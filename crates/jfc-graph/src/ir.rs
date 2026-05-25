@@ -282,10 +282,7 @@ impl RustIrLowering {
     ) -> Operand {
         match node.kind() {
             "identifier" => Operand::var(Self::text(node, source)),
-            "integer_literal"
-            | "float_literal"
-            | "string_literal"
-            | "char_literal"
+            "integer_literal" | "float_literal" | "string_literal" | "char_literal"
             | "boolean_literal" => Operand::constant(Self::text(node, source)),
             "call_expression" => Self::lower_call(node, source, func, next_label, next_temp),
             "binary_expression" => Self::lower_binop(node, source, func, next_label, next_temp),
@@ -523,7 +520,9 @@ impl RustIrLowering {
         next_temp: &mut usize,
     ) {
         if let Some(iter_expr) = node.child_by_field_name("value") {
-            drop(Self::lower_expr(iter_expr, source, func, next_label, next_temp));
+            drop(Self::lower_expr(
+                iter_expr, source, func, next_label, next_temp,
+            ));
         }
         let pat_name = node
             .child_by_field_name("pattern")
@@ -600,71 +599,146 @@ impl IrLowering for RustIrLowering {
 pub struct PythonIrLowering;
 
 impl PythonIrLowering {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
-    fn fresh_label(next: &mut u32) -> Label { let l = Label(*next); *next += 1; l }
-    fn fresh_temp(next: &mut usize) -> usize { let t = *next; *next += 1; t }
-    fn text<'a>(node: Node<'a>, source: &'a str) -> &'a str { node.utf8_text(source.as_bytes()).unwrap_or("") }
+    fn fresh_label(next: &mut u32) -> Label {
+        let l = Label(*next);
+        *next += 1;
+        l
+    }
+    fn fresh_temp(next: &mut usize) -> usize {
+        let t = *next;
+        *next += 1;
+        t
+    }
+    fn text<'a>(node: Node<'a>, source: &'a str) -> &'a str {
+        node.utf8_text(source.as_bytes()).unwrap_or("")
+    }
 
     fn lower_block(block: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
         let mut cursor = block.walk();
-        for child in block.named_children(&mut cursor) { Self::lower_stmt(child, source, func, nl, nt); }
+        for child in block.named_children(&mut cursor) {
+            Self::lower_stmt(child, source, func, nl, nt);
+        }
     }
 
     fn lower_stmt(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
         match node.kind() {
-            "expression_statement" => { if let Some(inner) = node.named_child(0) { Self::lower_stmt(inner, source, func, nl, nt); } }
+            "expression_statement" => {
+                if let Some(inner) = node.named_child(0) {
+                    Self::lower_stmt(inner, source, func, nl, nt);
+                }
+            }
             "assignment" => {
                 let left = node.child_by_field_name("left");
                 let right = node.child_by_field_name("right");
                 if let (Some(l), Some(r)) = (left, right) {
                     let src = Self::lower_expr(r, source, func, nl, nt);
                     if l.kind() == "attribute" {
-                        let base = l.child_by_field_name("object").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                        let field = l.child_by_field_name("attribute").map(|n| Self::text(n, source).to_string()).unwrap_or_default();
+                        let base = l
+                            .child_by_field_name("object")
+                            .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                            .unwrap_or(Operand::Const(String::new()));
+                        let field = l
+                            .child_by_field_name("attribute")
+                            .map(|n| Self::text(n, source).to_string())
+                            .unwrap_or_default();
                         func.push(IrOp::FieldWrite { base, field, src });
                     } else {
-                        func.push(IrOp::Assign { dst: Var::new(Self::text(l, source)), src });
+                        func.push(IrOp::Assign {
+                            dst: Var::new(Self::text(l, source)),
+                            src,
+                        });
                     }
                 }
             }
-            "return_statement" => { let value = node.named_child(0).map(|c| Self::lower_expr(c, source, func, nl, nt)); func.push(IrOp::Return { value }); }
+            "return_statement" => {
+                let value = node
+                    .named_child(0)
+                    .map(|c| Self::lower_expr(c, source, func, nl, nt));
+                func.push(IrOp::Return { value });
+            }
             "if_statement" => Self::lower_if(node, source, func, nl, nt),
             "while_statement" => Self::lower_while(node, source, func, nl, nt),
             "for_statement" => Self::lower_for(node, source, func, nl, nt),
             "block" => Self::lower_block(node, source, func, nl, nt),
-            _ => { Self::lower_expr(node, source, func, nl, nt); }
+            _ => {
+                Self::lower_expr(node, source, func, nl, nt);
+            }
         }
     }
 
-    fn lower_expr(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) -> Operand {
+    fn lower_expr(
+        node: Node,
+        source: &str,
+        func: &mut IrFunction,
+        nl: &mut u32,
+        nt: &mut usize,
+    ) -> Operand {
         match node.kind() {
             "identifier" => Operand::var(Self::text(node, source)),
-            "integer" | "float" | "string" | "true" | "false" | "none" => Operand::constant(Self::text(node, source)),
+            "integer" | "float" | "string" | "true" | "false" | "none" => {
+                Operand::constant(Self::text(node, source))
+            }
             "call" => {
-                let callee = node.child_by_field_name("function").map(|n| Self::text(n, source).to_string()).unwrap_or_default();
+                let callee = node
+                    .child_by_field_name("function")
+                    .map(|n| Self::text(n, source).to_string())
+                    .unwrap_or_default();
                 let mut args = Vec::new();
                 if let Some(al) = node.child_by_field_name("arguments") {
                     let mut c = al.walk();
-                    for a in al.named_children(&mut c) { args.push(Self::lower_expr(a, source, func, nl, nt)); }
+                    for a in al.named_children(&mut c) {
+                        args.push(Self::lower_expr(a, source, func, nl, nt));
+                    }
                 }
                 let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-                func.push(IrOp::Call { dst: Some(dst.clone()), callee, args });
+                func.push(IrOp::Call {
+                    dst: Some(dst.clone()),
+                    callee,
+                    args,
+                });
                 Operand::Var(dst)
             }
             "binary_operator" => {
-                let lhs = node.child_by_field_name("left").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                let rhs = node.child_by_field_name("right").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                let op = node.child_by_field_name("operator").and_then(|n| BinOpKind::from_source(Self::text(n, source))).unwrap_or(BinOpKind::Add);
+                let lhs = node
+                    .child_by_field_name("left")
+                    .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                    .unwrap_or(Operand::Const(String::new()));
+                let rhs = node
+                    .child_by_field_name("right")
+                    .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                    .unwrap_or(Operand::Const(String::new()));
+                let op = node
+                    .child_by_field_name("operator")
+                    .and_then(|n| BinOpKind::from_source(Self::text(n, source)))
+                    .unwrap_or(BinOpKind::Add);
                 let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-                func.push(IrOp::BinOp { dst: dst.clone(), lhs, op, rhs });
+                func.push(IrOp::BinOp {
+                    dst: dst.clone(),
+                    lhs,
+                    op,
+                    rhs,
+                });
                 Operand::Var(dst)
             }
             "attribute" => {
-                let base = node.child_by_field_name("object").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                let field = node.child_by_field_name("attribute").map(|n| Self::text(n, source).to_string()).unwrap_or_default();
+                let base = node
+                    .child_by_field_name("object")
+                    .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                    .unwrap_or(Operand::Const(String::new()));
+                let field = node
+                    .child_by_field_name("attribute")
+                    .map(|n| Self::text(n, source).to_string())
+                    .unwrap_or_default();
                 let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-                func.push(IrOp::FieldRead { dst: dst.clone(), base, field });
+                func.push(IrOp::FieldRead {
+                    dst: dst.clone(),
+                    base,
+                    field,
+                });
                 Operand::Var(dst)
             }
             _ => Operand::Const(Self::text(node, source).to_string()),
@@ -672,60 +746,112 @@ impl PythonIrLowering {
     }
 
     fn lower_if(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        let cond = node.child_by_field_name("condition").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const("True".into()));
+        let cond = node
+            .child_by_field_name("condition")
+            .map(|n| Self::lower_expr(n, source, func, nl, nt))
+            .unwrap_or(Operand::Const("True".into()));
         let then_l = Self::fresh_label(nl);
         let end_l = Self::fresh_label(nl);
-        func.push(IrOp::Branch { cond, target: then_l });
-        if let Some(el) = node.child_by_field_name("alternative") { let mut c = el.walk(); for ch in el.named_children(&mut c) { Self::lower_stmt(ch, source, func, nl, nt); } }
+        func.push(IrOp::Branch {
+            cond,
+            target: then_l,
+        });
+        if let Some(el) = node.child_by_field_name("alternative") {
+            let mut c = el.walk();
+            for ch in el.named_children(&mut c) {
+                Self::lower_stmt(ch, source, func, nl, nt);
+            }
+        }
         func.push(IrOp::Jump { target: end_l });
         func.push(IrOp::Label(then_l));
-        if let Some(body) = node.child_by_field_name("consequence") { Self::lower_block(body, source, func, nl, nt); }
+        if let Some(body) = node.child_by_field_name("consequence") {
+            Self::lower_block(body, source, func, nl, nt);
+        }
         func.push(IrOp::Label(end_l));
     }
 
     fn lower_while(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        let header = Self::fresh_label(nl); let body_l = Self::fresh_label(nl); let end = Self::fresh_label(nl);
+        let header = Self::fresh_label(nl);
+        let body_l = Self::fresh_label(nl);
+        let end = Self::fresh_label(nl);
         func.push(IrOp::Label(header));
-        let cond = node.child_by_field_name("condition").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const("True".into()));
-        func.push(IrOp::Branch { cond, target: body_l });
+        let cond = node
+            .child_by_field_name("condition")
+            .map(|n| Self::lower_expr(n, source, func, nl, nt))
+            .unwrap_or(Operand::Const("True".into()));
+        func.push(IrOp::Branch {
+            cond,
+            target: body_l,
+        });
         func.push(IrOp::Jump { target: end });
         func.push(IrOp::Label(body_l));
-        if let Some(b) = node.child_by_field_name("body") { Self::lower_block(b, source, func, nl, nt); }
+        if let Some(b) = node.child_by_field_name("body") {
+            Self::lower_block(b, source, func, nl, nt);
+        }
         func.push(IrOp::Jump { target: header });
         func.push(IrOp::Label(end));
     }
 
     fn lower_for(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        if let Some(iter_expr) = node.child_by_field_name("right") { Self::lower_expr(iter_expr, source, func, nl, nt); }
-        let pat = node.child_by_field_name("left").map(|n| Self::text(n, source).trim().to_string()).unwrap_or_else(|| format!("__iter{}", Self::fresh_temp(nt)));
-        let header = Self::fresh_label(nl); let body_l = Self::fresh_label(nl); let end = Self::fresh_label(nl);
+        if let Some(iter_expr) = node.child_by_field_name("right") {
+            Self::lower_expr(iter_expr, source, func, nl, nt);
+        }
+        let pat = node
+            .child_by_field_name("left")
+            .map(|n| Self::text(n, source).trim().to_string())
+            .unwrap_or_else(|| format!("__iter{}", Self::fresh_temp(nt)));
+        let header = Self::fresh_label(nl);
+        let body_l = Self::fresh_label(nl);
+        let end = Self::fresh_label(nl);
         func.push(IrOp::Label(header));
-        func.push(IrOp::Call { dst: Some(Var::new(pat)), callee: "<iter::next>".into(), args: Vec::new() });
-        func.push(IrOp::Branch { cond: Operand::Const("true".into()), target: body_l });
+        func.push(IrOp::Call {
+            dst: Some(Var::new(pat)),
+            callee: "<iter::next>".into(),
+            args: Vec::new(),
+        });
+        func.push(IrOp::Branch {
+            cond: Operand::Const("true".into()),
+            target: body_l,
+        });
         func.push(IrOp::Jump { target: end });
         func.push(IrOp::Label(body_l));
-        if let Some(b) = node.child_by_field_name("body") { Self::lower_block(b, source, func, nl, nt); }
+        if let Some(b) = node.child_by_field_name("body") {
+            Self::lower_block(b, source, func, nl, nt);
+        }
         func.push(IrOp::Jump { target: header });
         func.push(IrOp::Label(end));
     }
 }
 
-impl Default for PythonIrLowering { fn default() -> Self { Self::new() } }
+impl Default for PythonIrLowering {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl IrLowering for PythonIrLowering {
     fn lower_function(&self, node: Node, source: &str) -> Option<IrFunction> {
-        if node.kind() != "function_definition" { return None; }
-        let name = node.child_by_field_name("name").map(|n| Self::text(n, source).to_string()).unwrap_or_else(|| "<anon>".into());
+        if node.kind() != "function_definition" {
+            return None;
+        }
+        let name = node
+            .child_by_field_name("name")
+            .map(|n| Self::text(n, source).to_string())
+            .unwrap_or_else(|| "<anon>".into());
         let mut func = IrFunction::new(name);
         if let Some(params) = node.child_by_field_name("parameters") {
             let mut cursor = params.walk();
             for param in params.named_children(&mut cursor) {
                 let raw = Self::text(param, source).trim();
-                if !raw.is_empty() && raw != "self" { func.params.push(Var::new(raw)); }
+                if !raw.is_empty() && raw != "self" {
+                    func.params.push(Var::new(raw));
+                }
             }
         }
         let (mut nl, mut nt) = (0u32, 0usize);
-        if let Some(body) = node.child_by_field_name("body") { Self::lower_block(body, source, &mut func, &mut nl, &mut nt); }
+        if let Some(body) = node.child_by_field_name("body") {
+            Self::lower_block(body, source, &mut func, &mut nl, &mut nt);
+        }
         Some(func)
     }
 }
@@ -735,14 +861,28 @@ impl IrLowering for PythonIrLowering {
 pub struct TypeScriptIrLowering;
 
 impl TypeScriptIrLowering {
-    pub fn new() -> Self { Self }
-    fn fresh_label(next: &mut u32) -> Label { let l = Label(*next); *next += 1; l }
-    fn fresh_temp(next: &mut usize) -> usize { let t = *next; *next += 1; t }
-    fn text<'a>(node: Node<'a>, source: &'a str) -> &'a str { node.utf8_text(source.as_bytes()).unwrap_or("") }
+    pub fn new() -> Self {
+        Self
+    }
+    fn fresh_label(next: &mut u32) -> Label {
+        let l = Label(*next);
+        *next += 1;
+        l
+    }
+    fn fresh_temp(next: &mut usize) -> usize {
+        let t = *next;
+        *next += 1;
+        t
+    }
+    fn text<'a>(node: Node<'a>, source: &'a str) -> &'a str {
+        node.utf8_text(source.as_bytes()).unwrap_or("")
+    }
 
     fn lower_block(block: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
         let mut cursor = block.walk();
-        for child in block.named_children(&mut cursor) { Self::lower_stmt(child, source, func, nl, nt); }
+        for child in block.named_children(&mut cursor) {
+            Self::lower_stmt(child, source, func, nl, nt);
+        }
     }
 
     fn lower_stmt(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
@@ -753,62 +893,140 @@ impl TypeScriptIrLowering {
                     if child.kind() == "variable_declarator" {
                         if let Some(n) = child.child_by_field_name("name") {
                             let dst = Var::new(Self::text(n, source));
-                            let src = child.child_by_field_name("value").map(|v| Self::lower_expr(v, source, func, nl, nt)).unwrap_or(Operand::Const("undefined".into()));
+                            let src = child
+                                .child_by_field_name("value")
+                                .map(|v| Self::lower_expr(v, source, func, nl, nt))
+                                .unwrap_or(Operand::Const("undefined".into()));
                             func.push(IrOp::Assign { dst, src });
                         }
                     }
                 }
             }
-            "expression_statement" => { if let Some(inner) = node.named_child(0) { Self::lower_expr(inner, source, func, nl, nt); } }
-            "return_statement" => { let value = node.named_child(0).map(|c| Self::lower_expr(c, source, func, nl, nt)); func.push(IrOp::Return { value }); }
+            "expression_statement" => {
+                if let Some(inner) = node.named_child(0) {
+                    Self::lower_expr(inner, source, func, nl, nt);
+                }
+            }
+            "return_statement" => {
+                let value = node
+                    .named_child(0)
+                    .map(|c| Self::lower_expr(c, source, func, nl, nt));
+                func.push(IrOp::Return { value });
+            }
             "if_statement" => Self::lower_if(node, source, func, nl, nt),
             "while_statement" => Self::lower_while(node, source, func, nl, nt),
             "for_statement" => Self::lower_for_c(node, source, func, nl, nt),
-            "for_in_statement" | "for_of_statement" => Self::lower_for_in(node, source, func, nl, nt),
+            "for_in_statement" | "for_of_statement" => {
+                Self::lower_for_in(node, source, func, nl, nt)
+            }
             "statement_block" => Self::lower_block(node, source, func, nl, nt),
-            _ => { Self::lower_expr(node, source, func, nl, nt); }
+            _ => {
+                Self::lower_expr(node, source, func, nl, nt);
+            }
         }
     }
 
-    fn lower_expr(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) -> Operand {
+    fn lower_expr(
+        node: Node,
+        source: &str,
+        func: &mut IrFunction,
+        nl: &mut u32,
+        nt: &mut usize,
+    ) -> Operand {
         match node.kind() {
-            "identifier" | "shorthand_property_identifier" => Operand::var(Self::text(node, source)),
-            "number" | "string" | "template_string" | "true" | "false" | "null" | "undefined" => Operand::constant(Self::text(node, source)),
+            "identifier" | "shorthand_property_identifier" => {
+                Operand::var(Self::text(node, source))
+            }
+            "number" | "string" | "template_string" | "true" | "false" | "null" | "undefined" => {
+                Operand::constant(Self::text(node, source))
+            }
             "call_expression" => {
-                let callee = node.child_by_field_name("function").map(|n| Self::text(n, source).to_string()).unwrap_or_default();
+                let callee = node
+                    .child_by_field_name("function")
+                    .map(|n| Self::text(n, source).to_string())
+                    .unwrap_or_default();
                 let mut args = Vec::new();
-                if let Some(al) = node.child_by_field_name("arguments") { let mut c = al.walk(); for a in al.named_children(&mut c) { args.push(Self::lower_expr(a, source, func, nl, nt)); } }
+                if let Some(al) = node.child_by_field_name("arguments") {
+                    let mut c = al.walk();
+                    for a in al.named_children(&mut c) {
+                        args.push(Self::lower_expr(a, source, func, nl, nt));
+                    }
+                }
                 let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-                func.push(IrOp::Call { dst: Some(dst.clone()), callee, args });
+                func.push(IrOp::Call {
+                    dst: Some(dst.clone()),
+                    callee,
+                    args,
+                });
                 Operand::Var(dst)
             }
             "binary_expression" => {
-                let lhs = node.child_by_field_name("left").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                let rhs = node.child_by_field_name("right").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                let op = node.child_by_field_name("operator").and_then(|n| BinOpKind::from_source(Self::text(n, source))).unwrap_or(BinOpKind::Add);
+                let lhs = node
+                    .child_by_field_name("left")
+                    .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                    .unwrap_or(Operand::Const(String::new()));
+                let rhs = node
+                    .child_by_field_name("right")
+                    .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                    .unwrap_or(Operand::Const(String::new()));
+                let op = node
+                    .child_by_field_name("operator")
+                    .and_then(|n| BinOpKind::from_source(Self::text(n, source)))
+                    .unwrap_or(BinOpKind::Add);
                 let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-                func.push(IrOp::BinOp { dst: dst.clone(), lhs, op, rhs });
+                func.push(IrOp::BinOp {
+                    dst: dst.clone(),
+                    lhs,
+                    op,
+                    rhs,
+                });
                 Operand::Var(dst)
             }
             "assignment_expression" => {
                 let left = node.child_by_field_name("left");
-                let src = node.child_by_field_name("right").map(|r| Self::lower_expr(r, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
+                let src = node
+                    .child_by_field_name("right")
+                    .map(|r| Self::lower_expr(r, source, func, nl, nt))
+                    .unwrap_or(Operand::Const(String::new()));
                 if let Some(l) = left {
                     if l.kind() == "member_expression" {
-                        let base = l.child_by_field_name("object").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                        let field = l.child_by_field_name("property").map(|n| Self::text(n, source).to_string()).unwrap_or_default();
-                        func.push(IrOp::FieldWrite { base, field, src: src.clone() });
+                        let base = l
+                            .child_by_field_name("object")
+                            .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                            .unwrap_or(Operand::Const(String::new()));
+                        let field = l
+                            .child_by_field_name("property")
+                            .map(|n| Self::text(n, source).to_string())
+                            .unwrap_or_default();
+                        func.push(IrOp::FieldWrite {
+                            base,
+                            field,
+                            src: src.clone(),
+                        });
                     } else {
-                        func.push(IrOp::Assign { dst: Var::new(Self::text(l, source)), src: src.clone() });
+                        func.push(IrOp::Assign {
+                            dst: Var::new(Self::text(l, source)),
+                            src: src.clone(),
+                        });
                     }
                 }
                 src
             }
             "member_expression" => {
-                let base = node.child_by_field_name("object").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const(String::new()));
-                let field = node.child_by_field_name("property").map(|n| Self::text(n, source).to_string()).unwrap_or_default();
+                let base = node
+                    .child_by_field_name("object")
+                    .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                    .unwrap_or(Operand::Const(String::new()));
+                let field = node
+                    .child_by_field_name("property")
+                    .map(|n| Self::text(n, source).to_string())
+                    .unwrap_or_default();
                 let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-                func.push(IrOp::FieldRead { dst: dst.clone(), base, field });
+                func.push(IrOp::FieldRead {
+                    dst: dst.clone(),
+                    base,
+                    field,
+                });
                 Operand::Var(dst)
             }
             _ => Operand::Const(Self::text(node, source).to_string()),
@@ -816,65 +1034,134 @@ impl TypeScriptIrLowering {
     }
 
     fn lower_if(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        let cond = node.child_by_field_name("condition").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const("true".into()));
-        let then_l = Self::fresh_label(nl); let end_l = Self::fresh_label(nl);
-        func.push(IrOp::Branch { cond, target: then_l });
-        if let Some(el) = node.child_by_field_name("alternative") { Self::lower_stmt(el, source, func, nl, nt); }
+        let cond = node
+            .child_by_field_name("condition")
+            .map(|n| Self::lower_expr(n, source, func, nl, nt))
+            .unwrap_or(Operand::Const("true".into()));
+        let then_l = Self::fresh_label(nl);
+        let end_l = Self::fresh_label(nl);
+        func.push(IrOp::Branch {
+            cond,
+            target: then_l,
+        });
+        if let Some(el) = node.child_by_field_name("alternative") {
+            Self::lower_stmt(el, source, func, nl, nt);
+        }
         func.push(IrOp::Jump { target: end_l });
         func.push(IrOp::Label(then_l));
-        if let Some(b) = node.child_by_field_name("consequence") { Self::lower_stmt(b, source, func, nl, nt); }
+        if let Some(b) = node.child_by_field_name("consequence") {
+            Self::lower_stmt(b, source, func, nl, nt);
+        }
         func.push(IrOp::Label(end_l));
     }
 
     fn lower_while(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        let header = Self::fresh_label(nl); let body_l = Self::fresh_label(nl); let end = Self::fresh_label(nl);
+        let header = Self::fresh_label(nl);
+        let body_l = Self::fresh_label(nl);
+        let end = Self::fresh_label(nl);
         func.push(IrOp::Label(header));
-        let cond = node.child_by_field_name("condition").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const("true".into()));
-        func.push(IrOp::Branch { cond, target: body_l });
+        let cond = node
+            .child_by_field_name("condition")
+            .map(|n| Self::lower_expr(n, source, func, nl, nt))
+            .unwrap_or(Operand::Const("true".into()));
+        func.push(IrOp::Branch {
+            cond,
+            target: body_l,
+        });
         func.push(IrOp::Jump { target: end });
         func.push(IrOp::Label(body_l));
-        if let Some(b) = node.child_by_field_name("body") { Self::lower_stmt(b, source, func, nl, nt); }
+        if let Some(b) = node.child_by_field_name("body") {
+            Self::lower_stmt(b, source, func, nl, nt);
+        }
         func.push(IrOp::Jump { target: header });
         func.push(IrOp::Label(end));
     }
 
     fn lower_for_c(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        if let Some(init) = node.child_by_field_name("initializer") { Self::lower_stmt(init, source, func, nl, nt); }
-        let header = Self::fresh_label(nl); let body_l = Self::fresh_label(nl); let end = Self::fresh_label(nl);
+        if let Some(init) = node.child_by_field_name("initializer") {
+            Self::lower_stmt(init, source, func, nl, nt);
+        }
+        let header = Self::fresh_label(nl);
+        let body_l = Self::fresh_label(nl);
+        let end = Self::fresh_label(nl);
         func.push(IrOp::Label(header));
-        let cond = node.child_by_field_name("condition").map(|n| Self::lower_expr(n, source, func, nl, nt)).unwrap_or(Operand::Const("true".into()));
-        func.push(IrOp::Branch { cond, target: body_l });
+        let cond = node
+            .child_by_field_name("condition")
+            .map(|n| Self::lower_expr(n, source, func, nl, nt))
+            .unwrap_or(Operand::Const("true".into()));
+        func.push(IrOp::Branch {
+            cond,
+            target: body_l,
+        });
         func.push(IrOp::Jump { target: end });
         func.push(IrOp::Label(body_l));
-        if let Some(b) = node.child_by_field_name("body") { Self::lower_stmt(b, source, func, nl, nt); }
-        if let Some(upd) = node.child_by_field_name("increment") { Self::lower_expr(upd, source, func, nl, nt); }
+        if let Some(b) = node.child_by_field_name("body") {
+            Self::lower_stmt(b, source, func, nl, nt);
+        }
+        if let Some(upd) = node.child_by_field_name("increment") {
+            Self::lower_expr(upd, source, func, nl, nt);
+        }
         func.push(IrOp::Jump { target: header });
         func.push(IrOp::Label(end));
     }
 
     fn lower_for_in(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        if let Some(iter_expr) = node.child_by_field_name("right") { Self::lower_expr(iter_expr, source, func, nl, nt); }
-        let pat = node.child_by_field_name("left").map(|n| Self::text(n, source).trim().to_string()).unwrap_or_else(|| format!("__iter{}", Self::fresh_temp(nt)));
-        let header = Self::fresh_label(nl); let body_l = Self::fresh_label(nl); let end = Self::fresh_label(nl);
+        if let Some(iter_expr) = node.child_by_field_name("right") {
+            Self::lower_expr(iter_expr, source, func, nl, nt);
+        }
+        let pat = node
+            .child_by_field_name("left")
+            .map(|n| Self::text(n, source).trim().to_string())
+            .unwrap_or_else(|| format!("__iter{}", Self::fresh_temp(nt)));
+        let header = Self::fresh_label(nl);
+        let body_l = Self::fresh_label(nl);
+        let end = Self::fresh_label(nl);
         func.push(IrOp::Label(header));
-        func.push(IrOp::Call { dst: Some(Var::new(pat)), callee: "<iter::next>".into(), args: Vec::new() });
-        func.push(IrOp::Branch { cond: Operand::Const("true".into()), target: body_l });
+        func.push(IrOp::Call {
+            dst: Some(Var::new(pat)),
+            callee: "<iter::next>".into(),
+            args: Vec::new(),
+        });
+        func.push(IrOp::Branch {
+            cond: Operand::Const("true".into()),
+            target: body_l,
+        });
         func.push(IrOp::Jump { target: end });
         func.push(IrOp::Label(body_l));
-        if let Some(b) = node.child_by_field_name("body") { Self::lower_stmt(b, source, func, nl, nt); }
+        if let Some(b) = node.child_by_field_name("body") {
+            Self::lower_stmt(b, source, func, nl, nt);
+        }
         func.push(IrOp::Jump { target: header });
         func.push(IrOp::Label(end));
     }
 }
 
-impl Default for TypeScriptIrLowering { fn default() -> Self { Self::new() } }
+impl Default for TypeScriptIrLowering {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl IrLowering for TypeScriptIrLowering {
     fn lower_function(&self, node: Node, source: &str) -> Option<IrFunction> {
-        if !matches!(node.kind(), "function_declaration" | "function" | "arrow_function" | "method_definition" | "generator_function_declaration") { return None; }
-        let name = node.child_by_field_name("name").map(|n| Self::text(n, source).to_string()).unwrap_or_else(|| "<anon>".into());
+        if !matches!(
+            node.kind(),
+            "function_declaration"
+                | "function"
+                | "arrow_function"
+                | "method_definition"
+                | "generator_function_declaration"
+        ) {
+            return None;
+        }
+        let name = node
+            .child_by_field_name("name")
+            .map(|n| Self::text(n, source).to_string())
+            .unwrap_or_else(|| "<anon>".into());
         let mut func = IrFunction::new(name);
-        let params_node = node.child_by_field_name("parameters").or_else(|| node.child_by_field_name("parameter"));
+        let params_node = node
+            .child_by_field_name("parameters")
+            .or_else(|| node.child_by_field_name("parameter"));
         if let Some(params) = params_node {
             if params.kind() == "formal_parameters" {
                 let mut cursor = params.walk();
@@ -887,13 +1174,19 @@ impl IrLowering for TypeScriptIrLowering {
                 }
             } else {
                 let raw = Self::text(params, source).trim();
-                if !raw.is_empty() { func.params.push(Var::new(raw)); }
+                if !raw.is_empty() {
+                    func.params.push(Var::new(raw));
+                }
             }
         }
         let (mut nl, mut nt) = (0u32, 0usize);
         if let Some(body) = node.child_by_field_name("body") {
-            if body.kind() == "statement_block" { Self::lower_block(body, source, &mut func, &mut nl, &mut nt); }
-            else { let val = Self::lower_expr(body, source, &mut func, &mut nl, &mut nt); func.push(IrOp::Return { value: Some(val) }); }
+            if body.kind() == "statement_block" {
+                Self::lower_block(body, source, &mut func, &mut nl, &mut nt);
+            } else {
+                let val = Self::lower_expr(body, source, &mut func, &mut nl, &mut nt);
+                func.push(IrOp::Return { value: Some(val) });
+            }
         }
         Some(func)
     }
@@ -904,14 +1197,27 @@ impl IrLowering for TypeScriptIrLowering {
 pub struct GoIrLowering;
 
 impl GoIrLowering {
-    pub fn new() -> Self { Self }
-    fn fresh_label(next: &mut u32) -> Label { let l = Label(*next); *next += 1; l }
-    fn fresh_temp(next: &mut usize) -> usize { let t = *next; *next += 1; t }
-    fn text<'a>(node: Node<'a>, source: &'a str) -> &'a str { node.utf8_text(source.as_bytes()).unwrap_or("") }
+    pub fn new() -> Self {
+        Self
+    }
+    fn fresh_label(next: &mut u32) -> Label {
+        let l = Label(*next);
+        *next += 1;
+        l
+    }
+    fn fresh_temp(next: &mut usize) -> usize {
+        let t = *next;
+        *next += 1;
+        t
+    }
+    fn text<'a>(node: Node<'a>, source: &'a str) -> &'a str {
+        node.utf8_text(source.as_bytes()).unwrap_or("")
+    }
 
     fn lower_block(block: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
         // Go blocks contain a `statement_list` wrapper; descend into it.
-        let stmts = block.named_children(&mut block.walk())
+        let stmts = block
+            .named_children(&mut block.walk())
             .find(|c| c.kind() == "statement_list")
             .unwrap_or(block);
         let mut cursor = stmts.walk();
@@ -931,10 +1237,22 @@ impl GoIrLowering {
                 // `i++` / `i--` — treat as assign i = i +/- 1
                 if let Some(operand) = node.named_child(0) {
                     let name = Self::text(operand, source).to_string();
-                    let op = if node.kind() == "inc_statement" { BinOpKind::Add } else { BinOpKind::Sub };
+                    let op = if node.kind() == "inc_statement" {
+                        BinOpKind::Add
+                    } else {
+                        BinOpKind::Sub
+                    };
                     let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-                    func.push(IrOp::BinOp { dst: dst.clone(), lhs: Operand::var(&name), op, rhs: Operand::constant("1") });
-                    func.push(IrOp::Assign { dst: Var::new(name), src: Operand::Var(dst) });
+                    func.push(IrOp::BinOp {
+                        dst: dst.clone(),
+                        lhs: Operand::var(&name),
+                        op,
+                        rhs: Operand::constant("1"),
+                    });
+                    func.push(IrOp::Assign {
+                        dst: Var::new(name),
+                        src: Operand::Var(dst),
+                    });
                 }
             }
             "expression_statement" => {
@@ -943,11 +1261,19 @@ impl GoIrLowering {
                 }
             }
             "block" => Self::lower_block(node, source, func, nl, nt),
-            _ => { drop(Self::lower_expr(node, source, func, nl, nt)); }
+            _ => {
+                drop(Self::lower_expr(node, source, func, nl, nt));
+            }
         }
     }
 
-    fn lower_short_var(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
+    fn lower_short_var(
+        node: Node,
+        source: &str,
+        func: &mut IrFunction,
+        nl: &mut u32,
+        nt: &mut usize,
+    ) {
         // `left` and `right` are `expression_list` wrappers.
         let left = node.child_by_field_name("left");
         let right = node.child_by_field_name("right");
@@ -959,7 +1285,10 @@ impl GoIrLowering {
             .and_then(|n| n.named_child(0))
             .map(|n| Self::lower_expr(n, source, func, nl, nt))
             .unwrap_or(Operand::Const(String::new()));
-        func.push(IrOp::Assign { dst: Var::new(dst_name), src });
+        func.push(IrOp::Assign {
+            dst: Var::new(dst_name),
+            src,
+        });
     }
 
     fn lower_assign(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
@@ -970,35 +1299,53 @@ impl GoIrLowering {
             .and_then(|n| n.named_child(0))
             .map(|n| Self::lower_expr(n, source, func, nl, nt))
             .unwrap_or(Operand::Const(String::new()));
-        let Some(l) = left.and_then(|n| n.named_child(0)) else { return };
+        let Some(l) = left.and_then(|n| n.named_child(0)) else {
+            return;
+        };
         if l.kind() == "selector_expression" {
-            let base = l.child_by_field_name("operand")
+            let base = l
+                .child_by_field_name("operand")
                 .map(|n| Self::lower_expr(n, source, func, nl, nt))
                 .unwrap_or(Operand::Const(String::new()));
-            let field = l.child_by_field_name("field")
+            let field = l
+                .child_by_field_name("field")
                 .map(|n| Self::text(n, source).to_string())
                 .unwrap_or_default();
             func.push(IrOp::FieldWrite { base, field, src });
         } else {
-            func.push(IrOp::Assign { dst: Var::new(Self::text(l, source)), src });
+            func.push(IrOp::Assign {
+                dst: Var::new(Self::text(l, source)),
+                src,
+            });
         }
     }
 
     fn lower_return(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
         // Go return: `return expr_list?` — the expression_list holds the value(s).
-        let value = node.named_child(0)
-            .and_then(|list| if list.kind() == "expression_list" { list.named_child(0) } else { Some(list) })
+        let value = node
+            .named_child(0)
+            .and_then(|list| {
+                if list.kind() == "expression_list" {
+                    list.named_child(0)
+                } else {
+                    Some(list)
+                }
+            })
             .map(|c| Self::lower_expr(c, source, func, nl, nt));
         func.push(IrOp::Return { value });
     }
 
     fn lower_if(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
-        let cond = node.child_by_field_name("condition")
+        let cond = node
+            .child_by_field_name("condition")
             .map(|n| Self::lower_expr(n, source, func, nl, nt))
             .unwrap_or(Operand::Const("true".into()));
         let then_l = Self::fresh_label(nl);
         let end_l = Self::fresh_label(nl);
-        func.push(IrOp::Branch { cond, target: then_l });
+        func.push(IrOp::Branch {
+            cond,
+            target: then_l,
+        });
         if let Some(el) = node.child_by_field_name("alternative") {
             Self::lower_block(el, source, func, nl, nt);
         }
@@ -1012,7 +1359,8 @@ impl GoIrLowering {
 
     fn lower_for(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) {
         // Go for-statement wraps init/cond/update in a `for_clause` child.
-        let clause = node.named_children(&mut node.walk())
+        let clause = node
+            .named_children(&mut node.walk())
             .find(|c| c.kind() == "for_clause");
         if let Some(init) = clause.and_then(|c| c.child_by_field_name("initializer")) {
             Self::lower_stmt(init, source, func, nl, nt);
@@ -1025,7 +1373,10 @@ impl GoIrLowering {
             .and_then(|c| c.child_by_field_name("condition"))
             .map(|n| Self::lower_expr(n, source, func, nl, nt))
             .unwrap_or(Operand::Const("true".into()));
-        func.push(IrOp::Branch { cond, target: body_l });
+        func.push(IrOp::Branch {
+            cond,
+            target: body_l,
+        });
         func.push(IrOp::Jump { target: end });
         func.push(IrOp::Label(body_l));
         if let Some(b) = node.child_by_field_name("body") {
@@ -1038,26 +1389,42 @@ impl GoIrLowering {
         func.push(IrOp::Label(end));
     }
 
-    fn lower_expr(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) -> Operand {
+    fn lower_expr(
+        node: Node,
+        source: &str,
+        func: &mut IrFunction,
+        nl: &mut u32,
+        nt: &mut usize,
+    ) -> Operand {
         match node.kind() {
             "identifier" => Operand::var(Self::text(node, source)),
-            "int_literal" | "float_literal" | "rune_literal"
-            | "raw_string_literal" | "interpreted_string_literal"
-            | "true" | "false" => Operand::constant(Self::text(node, source)),
+            "int_literal"
+            | "float_literal"
+            | "rune_literal"
+            | "raw_string_literal"
+            | "interpreted_string_literal"
+            | "true"
+            | "false" => Operand::constant(Self::text(node, source)),
             "call_expression" => Self::lower_call(node, source, func, nl, nt),
             "binary_expression" => Self::lower_binop(node, source, func, nl, nt),
             "selector_expression" => Self::lower_selector(node, source, func, nl, nt),
-            "parenthesized_expression" => {
-                node.named_child(0)
-                    .map(|n| Self::lower_expr(n, source, func, nl, nt))
-                    .unwrap_or(Operand::Const(String::new()))
-            }
+            "parenthesized_expression" => node
+                .named_child(0)
+                .map(|n| Self::lower_expr(n, source, func, nl, nt))
+                .unwrap_or(Operand::Const(String::new())),
             _ => Operand::Const(Self::text(node, source).to_string()),
         }
     }
 
-    fn lower_call(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) -> Operand {
-        let callee = node.child_by_field_name("function")
+    fn lower_call(
+        node: Node,
+        source: &str,
+        func: &mut IrFunction,
+        nl: &mut u32,
+        nt: &mut usize,
+    ) -> Operand {
+        let callee = node
+            .child_by_field_name("function")
             .map(|n| Self::text(n, source).to_string())
             .unwrap_or_default();
         let mut args = Vec::new();
@@ -1068,46 +1435,81 @@ impl GoIrLowering {
             }
         }
         let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-        func.push(IrOp::Call { dst: Some(dst.clone()), callee, args });
+        func.push(IrOp::Call {
+            dst: Some(dst.clone()),
+            callee,
+            args,
+        });
         Operand::Var(dst)
     }
 
-    fn lower_binop(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) -> Operand {
-        let lhs = node.child_by_field_name("left")
+    fn lower_binop(
+        node: Node,
+        source: &str,
+        func: &mut IrFunction,
+        nl: &mut u32,
+        nt: &mut usize,
+    ) -> Operand {
+        let lhs = node
+            .child_by_field_name("left")
             .map(|n| Self::lower_expr(n, source, func, nl, nt))
             .unwrap_or(Operand::Const(String::new()));
-        let rhs = node.child_by_field_name("right")
+        let rhs = node
+            .child_by_field_name("right")
             .map(|n| Self::lower_expr(n, source, func, nl, nt))
             .unwrap_or(Operand::Const(String::new()));
-        let op = node.child_by_field_name("operator")
+        let op = node
+            .child_by_field_name("operator")
             .and_then(|n| BinOpKind::from_source(Self::text(n, source)))
             .unwrap_or(BinOpKind::Add);
         let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-        func.push(IrOp::BinOp { dst: dst.clone(), lhs, op, rhs });
+        func.push(IrOp::BinOp {
+            dst: dst.clone(),
+            lhs,
+            op,
+            rhs,
+        });
         Operand::Var(dst)
     }
 
-    fn lower_selector(node: Node, source: &str, func: &mut IrFunction, nl: &mut u32, nt: &mut usize) -> Operand {
-        let base = node.child_by_field_name("operand")
+    fn lower_selector(
+        node: Node,
+        source: &str,
+        func: &mut IrFunction,
+        nl: &mut u32,
+        nt: &mut usize,
+    ) -> Operand {
+        let base = node
+            .child_by_field_name("operand")
             .map(|n| Self::lower_expr(n, source, func, nl, nt))
             .unwrap_or(Operand::Const(String::new()));
-        let field = node.child_by_field_name("field")
+        let field = node
+            .child_by_field_name("field")
             .map(|n| Self::text(n, source).to_string())
             .unwrap_or_default();
         let dst = Var::new(format!("__t{}", Self::fresh_temp(nt)));
-        func.push(IrOp::FieldRead { dst: dst.clone(), base, field });
+        func.push(IrOp::FieldRead {
+            dst: dst.clone(),
+            base,
+            field,
+        });
         Operand::Var(dst)
     }
 }
 
-impl Default for GoIrLowering { fn default() -> Self { Self::new() } }
+impl Default for GoIrLowering {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl IrLowering for GoIrLowering {
     fn lower_function(&self, node: Node, source: &str) -> Option<IrFunction> {
         if !matches!(node.kind(), "function_declaration" | "method_declaration") {
             return None;
         }
-        let name = node.child_by_field_name("name")
+        let name = node
+            .child_by_field_name("name")
             .map(|n| Self::text(n, source).to_string())
             .unwrap_or_else(|| "<anon>".into());
         let mut func = IrFunction::new(name);
@@ -1115,7 +1517,8 @@ impl IrLowering for GoIrLowering {
             let mut cursor = params.walk();
             for param in params.named_children(&mut cursor) {
                 if param.kind() == "parameter_declaration" {
-                    let binding = param.child_by_field_name("name")
+                    let binding = param
+                        .child_by_field_name("name")
                         .map(|n| Self::text(n, source).trim().to_string())
                         .unwrap_or_default();
                     if !binding.is_empty() {
@@ -1190,10 +1593,15 @@ mod tests {
         assert_eq!(ir.params.len(), 1, "expected 1 param, got {:?}", ir.params);
 
         // We expect at least: a BinOp for `x + 1`, an Assign into `y`, and a Return.
-        let has_binop = ir
-            .body
-            .iter()
-            .any(|op| matches!(op, IrOp::BinOp { op: BinOpKind::Add, .. }));
+        let has_binop = ir.body.iter().any(|op| {
+            matches!(
+                op,
+                IrOp::BinOp {
+                    op: BinOpKind::Add,
+                    ..
+                }
+            )
+        });
         let has_assign_y = ir.body.iter().any(|op| match op {
             IrOp::Assign { dst, .. } => dst.as_str() == "y",
             _ => false,
@@ -1245,7 +1653,13 @@ mod tests {
         let label_positions: Vec<Label> = ir
             .body
             .iter()
-            .filter_map(|op| if let IrOp::Label(l) = op { Some(*l) } else { None })
+            .filter_map(|op| {
+                if let IrOp::Label(l) = op {
+                    Some(*l)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert!(
             label_positions.len() >= 3,
@@ -1253,15 +1667,17 @@ mod tests {
             label_positions
         );
 
-        let has_back_edge = ir.body.iter().any(|op| {
-            matches!(op, IrOp::Jump { target } if *target == label_positions[0])
-        });
+        let has_back_edge = ir
+            .body
+            .iter()
+            .any(|op| matches!(op, IrOp::Jump { target } if *target == label_positions[0]));
         assert!(has_back_edge, "expected a Jump back to the header label");
     }
 
     fn parse_python(src: &str) -> tree_sitter::Tree {
         let mut p = Parser::new();
-        p.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+        p.set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
         p.parse(src, None).expect("parse failed")
     }
 
@@ -1315,7 +1731,11 @@ def set_name(obj, n):
             IrOp::FieldWrite { field, .. } => field == "name",
             _ => false,
         });
-        assert!(has_fw, "missing FieldWrite for obj.name = n: {:#?}", ir.body);
+        assert!(
+            has_fw,
+            "missing FieldWrite for obj.name = n: {:#?}",
+            ir.body
+        );
     }
 
     fn parse_ts(src: &str) -> tree_sitter::Tree {
@@ -1412,12 +1832,23 @@ func add(a int, b int) int {
         assert_eq!(ir.name, "add");
         assert_eq!(ir.params.len(), 2, "expected 2 params, got {:?}", ir.params);
 
-        let has_binop = ir.body.iter().any(|op| matches!(op, IrOp::BinOp { op: BinOpKind::Add, .. }));
+        let has_binop = ir.body.iter().any(|op| {
+            matches!(
+                op,
+                IrOp::BinOp {
+                    op: BinOpKind::Add,
+                    ..
+                }
+            )
+        });
         let has_assign_c = ir.body.iter().any(|op| match op {
             IrOp::Assign { dst, .. } => dst.as_str() == "c",
             _ => false,
         });
-        let has_return = ir.body.iter().any(|op| matches!(op, IrOp::Return { value: Some(_) }));
+        let has_return = ir
+            .body
+            .iter()
+            .any(|op| matches!(op, IrOp::Return { value: Some(_) }));
 
         assert!(has_binop, "missing BinOp::Add in {:#?}", ir.body);
         assert!(has_assign_c, "missing Assign to c in {:#?}", ir.body);
@@ -1438,8 +1869,16 @@ func count() {
         let f = find_go_function(tree.root_node()).expect("go fn");
         let ir = GoIrLowering::new().lower_function(f, src).expect("lowered");
 
-        let label_positions: Vec<Label> = ir.body.iter()
-            .filter_map(|op| if let IrOp::Label(l) = op { Some(*l) } else { None })
+        let label_positions: Vec<Label> = ir
+            .body
+            .iter()
+            .filter_map(|op| {
+                if let IrOp::Label(l) = op {
+                    Some(*l)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert!(
             label_positions.len() >= 3,
@@ -1447,9 +1886,10 @@ func count() {
             label_positions
         );
 
-        let has_back_edge = ir.body.iter().any(|op| {
-            matches!(op, IrOp::Jump { target } if *target == label_positions[0])
-        });
+        let has_back_edge = ir
+            .body
+            .iter()
+            .any(|op| matches!(op, IrOp::Jump { target } if *target == label_positions[0]));
         assert!(has_back_edge, "expected a Jump back to the header label");
     }
 

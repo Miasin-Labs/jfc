@@ -14,5 +14,15 @@ profiling-results/
 .antigravitycli/
 .codegraph/
 .idea/
-.jfc/scratchpad/
 *.bak
+
+# jfc runtime state (caches, task store, pending learning) — keep project
+# config (.jfc/agents, .jfc/memory, .jfc/workflows, .jfc/plans) tracked.
+.jfc/scratchpad/
+.jfc/tasks.json
+.jfc/learn/
+.jfc/teleport/
+.jfc/*-cache.json
+.jfc/*-heights.json
+# Per-crate runtime state dirs created when running jfc from a subdir.
+crates/**/.jfc/

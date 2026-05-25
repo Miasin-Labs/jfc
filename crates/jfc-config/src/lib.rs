@@ -63,10 +63,18 @@ pub struct Config {
     pub hooks: Option<ShellHooksConfig>,
 }
 
-fn default_memory_recall_enabled() -> bool { true }
-fn default_plan_recall_enabled() -> bool { true }
-fn default_auto_compact_enabled() -> bool { true }
-fn default_true() -> bool { true }
+fn default_memory_recall_enabled() -> bool {
+    true
+}
+fn default_plan_recall_enabled() -> bool {
+    true
+}
+fn default_auto_compact_enabled() -> bool {
+    true
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -183,8 +191,12 @@ pub struct BackgroundTaskConfig {
     pub model_concurrency: usize,
 }
 
-fn default_provider_concurrency() -> usize { 3 }
-fn default_model_concurrency() -> usize { 5 }
+fn default_provider_concurrency() -> usize {
+    3
+}
+fn default_model_concurrency() -> usize {
+    5
+}
 
 impl Default for BackgroundTaskConfig {
     fn default() -> Self {
@@ -630,36 +642,48 @@ model = "openai/gpt-5"
 
     #[test]
     fn parse_minimal_config_normal() {
-        let cfg = parse(r#"
+        let cfg = parse(
+            r#"
 [default]
 model = "x"
-"#);
+"#,
+        );
         assert_eq!(cfg.default.model.as_deref(), Some("x"));
         assert!(cfg.agents.is_empty());
     }
 
     #[test]
     fn resolve_model_uses_agent_override_normal() {
-        let cfg = parse(r#"
+        let cfg = parse(
+            r#"
 [default]
 model = "B"
 
 [agents.code-reviewer]
 model = "A"
-"#);
-        assert_eq!(resolve_model(&cfg, Some("code-reviewer")), Some("A".to_owned()));
+"#,
+        );
+        assert_eq!(
+            resolve_model(&cfg, Some("code-reviewer")),
+            Some("A".to_owned())
+        );
     }
 
     #[test]
     fn resolve_model_falls_through_to_default_normal() {
-        let cfg = parse(r#"
+        let cfg = parse(
+            r#"
 [default]
 model = "B"
 
 [agents.code-reviewer]
 temperature = 0.1
-"#);
-        assert_eq!(resolve_model(&cfg, Some("code-reviewer")), Some("B".to_owned()));
+"#,
+        );
+        assert_eq!(
+            resolve_model(&cfg, Some("code-reviewer")),
+            Some("B".to_owned())
+        );
     }
 
     #[test]
@@ -671,10 +695,12 @@ temperature = 0.1
 
     #[test]
     fn agent_disallowed_returns_list_normal() {
-        let cfg = parse(r#"
+        let cfg = parse(
+            r#"
 [agents.code-reviewer]
 disallowed_tools = ["Bash", "Write"]
-"#);
+"#,
+        );
         assert_eq!(
             agent_disallowed(&cfg, "code-reviewer"),
             &["Bash".to_owned(), "Write".to_owned()]
@@ -723,7 +749,10 @@ disallowed_tools = ["Bash", "Write"]
         let second = load_cached(&path);
         let third = load_cached(&path);
 
-        assert_eq!(first.default.model.as_deref(), Some("anthropic/claude-opus-4-7"));
+        assert_eq!(
+            first.default.model.as_deref(),
+            Some("anthropic/claude-opus-4-7")
+        );
         assert_eq!(first, second);
         assert_eq!(second, third);
         assert_eq!(read_count() - before, 1);
@@ -745,7 +774,10 @@ disallowed_tools = ["Bash", "Write"]
 
         std::fs::write(&path, b"[default]\nmodel = \"b/two\"\n").unwrap();
         let future = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
-        let f = std::fs::OpenOptions::new().write(true).open(&path).expect("reopen");
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopen");
         let times = std::fs::FileTimes::new().set_modified(future);
         f.set_times(times).expect("bump mtime");
         drop(f);

@@ -66,7 +66,11 @@ pub fn teleport(id: &str) -> Option<String> {
 
 /// List active sessions for status display.
 pub fn list_sessions() -> Vec<UltraplanSession> {
-    ACTIVE_SESSIONS.lock().ok().map(|g| g.clone()).unwrap_or_default()
+    ACTIVE_SESSIONS
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default()
 }
 
 fn uuid_short() -> String {

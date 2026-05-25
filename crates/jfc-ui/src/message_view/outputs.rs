@@ -121,8 +121,7 @@ pub(super) fn produce_diff_view_lines(
             // Span composition: keep syntect's foreground, force the
             // diff bg tint over it, and dim removed lines so deletions
             // read as fading out.
-            let extra_mod =
-                matches!(dl.kind, DiffLineKind::Removed).then_some(Modifier::DIM);
+            let extra_mod = matches!(dl.kind, DiffLineKind::Removed).then_some(Modifier::DIM);
             let push_hl_spans = |target: &mut Vec<Span<'static>>, hl_spans: &[Span<'static>]| {
                 for sp in hl_spans {
                     let mut style = sp.style;

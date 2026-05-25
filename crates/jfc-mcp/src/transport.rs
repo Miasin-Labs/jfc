@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Implementation, Tool,
-    ReadResourceRequestParams, ReadResourceResult, Resource,
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Implementation,
+    ReadResourceRequestParams, ReadResourceResult, Resource, Tool,
 };
 use rmcp::service::{NotificationContext, RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};

@@ -315,10 +315,7 @@ impl<P: HistorianProvider, M: MemoryLookup> Historian<P, M> {
 /// Append one JSONL line per quarantined record. Creates parent directories
 /// and the file itself if missing. Each line is a serialized
 /// [`QuarantineRecord`].
-fn append_quarantine_records(
-    path: &Path,
-    records: &[QuarantineRecord],
-) -> Result<(), LearnError> {
+fn append_quarantine_records(path: &Path, records: &[QuarantineRecord]) -> Result<(), LearnError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -482,7 +479,10 @@ mod tests {
         // Quarantine file exists and has exactly one JSONL line.
         let contents = std::fs::read_to_string(&q_path).expect("quarantine file written");
         let line_count = contents.lines().count();
-        assert_eq!(line_count, 1, "exactly one quarantine line, got: {contents}");
+        assert_eq!(
+            line_count, 1,
+            "exactly one quarantine line, got: {contents}"
+        );
 
         // The line round-trips as a QuarantineRecord and references the bad fact.
         let line = contents.lines().next().unwrap();

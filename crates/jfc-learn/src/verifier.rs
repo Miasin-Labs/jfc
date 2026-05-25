@@ -271,7 +271,9 @@ mod tests {
             &self,
             _fact: &CandidateFact,
         ) -> Result<VerifierVerdict, crate::error::LearnError> {
-            panic!("LLM verifier should not have been called — contracts should have short-circuited");
+            panic!(
+                "LLM verifier should not have been called — contracts should have short-circuited"
+            );
         }
     }
 

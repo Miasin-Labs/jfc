@@ -8,11 +8,9 @@
 use crate::agents::{Agent, AgentCreateParams, AgentService};
 use crate::beta;
 use crate::client::Client;
-use crate::error::Result;
 use crate::environments::{Environment, EnvironmentCreateParams, EnvironmentService};
-use crate::sessions::{
-    Session, SessionCreateParams, SessionEvent, SessionService, SessionState,
-};
+use crate::error::Result;
+use crate::sessions::{Session, SessionCreateParams, SessionEvent, SessionService, SessionState};
 use futures::stream::Stream;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -166,11 +164,7 @@ impl ManagedAgentsClient {
     }
 
     /// Send events (user message / tool results) into a session.
-    pub async fn send_events(
-        &self,
-        session_id: &str,
-        params: SendEventsParams,
-    ) -> Result<()> {
+    pub async fn send_events(&self, session_id: &str, params: SendEventsParams) -> Result<()> {
         self.session_service
             .send_user_message(session_id, params.content)
             .await

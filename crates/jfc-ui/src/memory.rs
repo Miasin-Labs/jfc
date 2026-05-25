@@ -4,6 +4,6 @@
 //! continue to compile without modification.
 
 pub use jfc_memory::{
-    MemoryLevel, MemoryScope, MemoryType, create_memory, delete_memory,
-    format_existing_memories, load_all_memories, render_memories_section,
+    MemoryLevel, MemoryScope, MemoryType, create_memory, delete_memory, format_existing_memories,
+    load_all_memories, render_memories_section,
 };

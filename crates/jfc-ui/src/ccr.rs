@@ -35,10 +35,7 @@ pub enum CcrStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CcrEvent {
     /// A text message from the agent.
-    Message {
-        content: String,
-        timestamp: String,
-    },
+    Message { content: String, timestamp: String },
     /// The agent is invoking a tool.
     ToolUse {
         tool_name: String,

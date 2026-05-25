@@ -1066,7 +1066,6 @@ pub struct App {
     // callers that *consume* these values (stream builder, permission
     // gate, session save, …) are wired in follow-on work — marking
     // `#[allow(dead_code)]` until then keeps the build clean.
-
     /// `--max-turns`: ceiling on agentic-loop iterations per user turn.
     #[allow(dead_code)]
     pub max_turns: Option<u32>,
