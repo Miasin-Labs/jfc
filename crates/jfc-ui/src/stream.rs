@@ -13,7 +13,8 @@ pub(crate) use compaction::{
     SUBAGENT_HISTORY_BUDGET_BYTES, auto_compact_subagent_history, cap_messages_for_budget,
 };
 pub(crate) use continuation::{
-    continue_after_pause_turn, continue_agentic_loop, should_continue_loop,
+    assistant_text_stalls, auto_continue_enabled, continue_after_pause_turn, continue_agentic_loop,
+    max_self_continuations, should_continue_loop,
 };
 pub(crate) use messages::build_provider_messages;
 pub use orchestrator::stream_response;

@@ -573,4 +573,91 @@ pub(crate) async fn handle_stream_done(
         app.current_stream_request = None;
         app.scroll_to_bottom();
     }
+
+    // ── Self-continuation guard ──────────────────────────────────────────
+    // The turn genuinely concluded (EndTurn, nothing pending). If
+    // auto-continue is on and the model either (a) stalled on a
+    // permission-asking question ("Want me to …?") or (b) left unfinished
+    // queued tasks, drive the next step instead of waiting for the user to
+    // type "continue". This is the behavioral half of the "factory": the
+    // stopping condition is *scope exhausted*, not *finished a sub-step*.
+    maybe_self_continue(app, tx).await;
+}
+
+/// Auto-drive the next in-scope step when the model stalls or leaves work
+/// queued, instead of forcing a manual "continue". Gated on `auto_continue`
+/// (env/config/factory), disabled in plan mode, and capped by
+/// `max_self_continuations` to prevent runaway loops.
+async fn maybe_self_continue(app: &mut App, tx: &EventSender) {
+    // Only fire when the turn is fully settled and idle.
+    if app.is_streaming
+        || app.pending_approval.is_some()
+        || !app.approval_queue.is_empty()
+        || !app.pending_tool_calls.is_empty()
+        || !app.queued_prompts.is_empty()
+        || app.pending_classifications > 0
+    {
+        return;
+    }
+    // Plan mode is read-only by contract — never auto-act.
+    if matches!(app.permission_mode, app::PermissionMode::Plan) {
+        return;
+    }
+    if !stream::auto_continue_enabled() {
+        return;
+    }
+
+    // Is there a reason to continue? Either unfinished queued tasks, or the
+    // model ended on a permission-asking stall.
+    let counts = app.task_store.counts();
+    let tasks_remain = counts.pending > 0 || counts.in_progress > 0;
+    let stalled = stream::assistant_text_stalls(&app.messages);
+    if !tasks_remain && !stalled {
+        return;
+    }
+
+    // Cap consecutive self-continuations.
+    let max = stream::max_self_continuations();
+    if app.self_continuation_count >= max {
+        tracing::info!(
+            target: "jfc::stream",
+            count = app.self_continuation_count,
+            max,
+            "self-continuation cap reached — waiting for user"
+        );
+        return;
+    }
+    app.self_continuation_count += 1;
+
+    tracing::info!(
+        target: "jfc::stream",
+        count = app.self_continuation_count,
+        tasks_remain,
+        stalled,
+        pending_tasks = counts.pending,
+        in_progress = counts.in_progress,
+        "self-continuing without user nudge"
+    );
+
+    // Inject a system-reminder nudge as a fresh user turn. Phrased to match
+    // the operating rule: finish the scope, don't ask permission for the next
+    // in-scope step.
+    let reason = if tasks_remain {
+        format!(
+            "Continue the remaining work. There are {} pending and {} in-progress task(s) — \
+             work through them. Do NOT stop to ask permission for the next in-scope step; \
+             only pause for genuine forks (incompatible interpretations, irreversible actions, \
+             or missing external input). When the whole scope is done, verify (build/test/commit) \
+             and report.",
+            counts.pending, counts.in_progress
+        )
+    } else {
+        "Continue — do the next step you just proposed instead of asking whether to. \
+         Only pause for genuine forks (incompatible interpretations, irreversible actions, \
+         or missing external input). When the full scope is done, verify and report."
+            .to_string()
+    };
+    let body = crate::system_reminder::format(&reason);
+    app.messages.push(types::ChatMessage::user(body));
+    stream::continue_agentic_loop(app, tx).await;
 }

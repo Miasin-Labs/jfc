@@ -598,6 +598,9 @@ pub(super) async fn handle_submit(
     app.turn_start_cost = crate::cost::total_cost(&app.usage_by_model);
     app.pending_classifications = 0;
     app.agentic_turn_count = 0;
+    // A genuine user submit resets the self-continuation budget — the human
+    // is back in the loop, so the auto-driver starts fresh.
+    app.self_continuation_count = 0;
     // Reset thinking-state for the new turn so the spinner doesn't carry
     app.pre_dispatched_tool_ids.clear();
     app.in_flight_eager_dispatches = 0;

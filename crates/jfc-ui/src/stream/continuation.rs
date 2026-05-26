@@ -63,6 +63,103 @@ fn is_incomplete_provider_tool_input(tc: &ToolCall) -> bool {
     text.contains("The provider stream finished before sending a complete `input` object")
 }
 
+/// Detect a "permission-asking stall": the assistant finished a chunk of work
+/// and ended the turn by *asking whether to do the next obvious step* instead
+/// of doing it. Corpus analysis of 133 turns where the user had to type
+/// "continue" showed ~41% ended this way ("Want me to …?", a trailing
+/// question, "shall I", "let me know", "next steps:"). In factory /
+/// auto-continue mode this is the signal to self-continue rather than wait.
+///
+/// Operates on the tail of the last assistant message's plain text. Returns
+/// `false` for genuine completions ("Done. Pushed `abc123`.") so we never
+/// loop on finished work.
+pub(crate) fn assistant_text_stalls(messages: &[ChatMessage]) -> bool {
+    let Some(last) = messages.iter().rev().find(|m| m.role == Role::Assistant) else {
+        return false;
+    };
+    // Tool-bearing turns are handled by `should_continue_loop`; this guard is
+    // only for text-only conversational stalls.
+    if last.parts.iter().any(|p| matches!(p, MessagePart::Tool(_))) {
+        return false;
+    }
+    let text = last
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Inspect the closing window (last ~240 chars) — stalls live at the end.
+    let tail_start = trimmed.len().saturating_sub(240);
+    let tail = trimmed[tail_start..].to_lowercase();
+
+    // Strong phrase signals anywhere in the tail.
+    const STALL_PHRASES: &[&str] = &[
+        "want me to",
+        "shall i ",
+        "should i ",
+        "would you like",
+        "do you want",
+        "let me know",
+        "if you want",
+        "if you'd like",
+        "ready to proceed",
+        "ready to implement",
+        "want to pick",
+        "any changes before",
+        "or call this a stable checkpoint",
+    ];
+    if STALL_PHRASES.iter().any(|p| tail.contains(p)) {
+        return true;
+    }
+
+    // A trailing question mark is a weaker but real signal: the turn ended on
+    // a question, which in a factory context is a request for direction.
+    trimmed.ends_with('?')
+}
+
+/// Whether self-continuation (auto-driving the next in-scope step without a
+/// user "continue") is enabled. Sources, in order: the `JFC_AUTO_CONTINUE`
+/// env var, then `[continuation] auto_continue` in config, then factory mode
+/// (which implies it). Plan mode disables it unconditionally — the caller is
+/// responsible for that check since config has no view of permission mode.
+pub(crate) fn auto_continue_enabled() -> bool {
+    if let Ok(v) = std::env::var("JFC_AUTO_CONTINUE") {
+        let v = v.trim().to_ascii_lowercase();
+        if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+            return true;
+        }
+        if matches!(v.as_str(), "0" | "false" | "no" | "off") {
+            return false;
+        }
+    }
+    let cfg = crate::config::load();
+    if let Some(c) = cfg.continuation.as_ref()
+        && c.auto_continue
+    {
+        return true;
+    }
+    crate::runtime::factory_mode_enabled()
+}
+
+/// Max consecutive self-continuations before we stop and wait for the user —
+/// prevents a runaway loop if the model keeps stalling. Configurable via
+/// `[continuation] max_self_continuations` (default 25).
+pub(crate) fn max_self_continuations() -> u32 {
+    crate::config::load()
+        .continuation
+        .as_ref()
+        .map(|c| c.max_self_continuations)
+        .unwrap_or(25)
+}
+
 /// Stage a fresh assistant message slot to stream the next sub-stream's
 /// output into. Common setup shared by `continue_agentic_loop` (post-
 /// tool-result continuation) and `continue_after_pause_turn` (Anthropic
@@ -1107,6 +1204,103 @@ mod pause_turn_end_to_end_tests {
         assert!(
             !app.pending_pause_turn_resume,
             "pending_pause_turn_resume must default to false on a fresh App"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stall_detection_tests {
+    use super::*;
+
+    fn assistant_text(s: &str) -> ChatMessage {
+        ChatMessage::assistant(s.to_string())
+    }
+
+    // Verbatim stalls from the session corpus — all must be detected.
+    #[test]
+    fn detects_corpus_stall_phrases() {
+        let stalls = [
+            "Want me to start implementing any of these?",
+            "Want me to take a closer look and propose an exact patch?",
+            "Want me to fire another round of 30 agents covering the remaining 165 tasks?",
+            "Does this plan look right? Any changes before I start coding?",
+            "Want me to dive deeper into a specific section of either file?",
+            "Shall I proceed with the refactor?",
+            "Should I wire that in next?",
+            "Let me know which direction you'd prefer.",
+            "I can do that next if you want.",
+        ];
+        for s in stalls {
+            assert!(
+                assistant_text_stalls(&[assistant_text(s)]),
+                "should detect stall: {s:?}"
+            );
+        }
+    }
+
+    // Genuine completions must NOT be flagged — otherwise we'd loop forever.
+    #[test]
+    fn ignores_genuine_completions() {
+        let done = [
+            "Done. Pushed `abc1234`.",
+            "All 6 gaps shipped and the release binary is rebuilt.",
+            "Fixed the bug and committed. Tests pass.",
+            "The cache now serves 5.5x faster on warm reads.",
+        ];
+        for s in done {
+            assert!(
+                !assistant_text_stalls(&[assistant_text(s)]),
+                "should NOT flag completion: {s:?}"
+            );
+        }
+    }
+
+    // A trailing question is a weak-but-real stall signal.
+    #[test]
+    fn detects_trailing_question() {
+        assert!(assistant_text_stalls(&[assistant_text(
+            "I found three candidates. Which one should we tackle first?"
+        )]));
+    }
+
+    // A turn whose last assistant carries tool calls is handled by
+    // should_continue_loop, not this guard.
+    #[test]
+    fn skips_tool_bearing_turns() {
+        let msg = ChatMessage::assistant_parts(vec![MessagePart::Tool(ToolCall {
+            id: "toolu_x".into(),
+            kind: ToolKind::Bash,
+            status: ToolStatus::Completed,
+            input: ToolInput::Generic {
+                summary: "x".into(),
+            },
+            output: ToolOutput::Empty,
+            display: crate::types::ToolDisplayState::DEFAULT,
+            elapsed_ms: None,
+            started_at: None,
+            thought_signature: None,
+        })]);
+        assert!(!assistant_text_stalls(&[msg]));
+    }
+
+    #[test]
+    fn empty_or_no_assistant_does_not_stall() {
+        assert!(!assistant_text_stalls(&[]));
+        assert!(!assistant_text_stalls(&[assistant_text("")]));
+        assert!(!assistant_text_stalls(&[ChatMessage::user("hi".into())]));
+    }
+
+    // The stall phrase must be near the END — a "want me to" buried in the
+    // middle of a long completion report shouldn't trip it.
+    #[test]
+    fn only_checks_the_tail() {
+        let long = format!(
+            "Earlier I asked want me to do X — you said yes, so I did it.\n\n{}",
+            "Done. All tasks complete, committed, and pushed. ".repeat(8)
+        );
+        assert!(
+            !assistant_text_stalls(&[assistant_text(&long)]),
+            "a stall phrase far from the tail should not trip"
         );
     }
 }

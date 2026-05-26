@@ -63,6 +63,30 @@ pub struct Config {
     pub hooks: Option<ShellHooksConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_control: Option<RemoteControlConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<ContinuationConfig>,
+}
+
+/// `[continuation]` section in config.toml — controls self-continuation
+/// (auto-driving the next in-scope step without a user "continue").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ContinuationConfig {
+    /// Auto-continue when the model stalls on a permission-asking question
+    /// ("Want me to …?") or leaves queued tasks unfinished. Off by default;
+    /// factory mode (`JFC_FACTORY_MODE`) implies it.
+    pub auto_continue: bool,
+    /// Maximum consecutive self-continuations before stopping for the user.
+    pub max_self_continuations: u32,
+}
+
+impl Default for ContinuationConfig {
+    fn default() -> Self {
+        Self {
+            auto_continue: false,
+            max_self_continuations: 25,
+        }
+    }
 }
 
 /// `[remote_control]` section in config.toml.
@@ -131,6 +155,7 @@ impl Default for Config {
             compact_instructions: None,
             hooks: None,
             remote_control: None,
+            continuation: None,
         }
     }
 }

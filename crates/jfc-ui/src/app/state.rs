@@ -402,6 +402,11 @@ pub struct App {
     /// 2.1.144's `maxTurns`). Without this, a model stuck in a retry loop
     /// runs indefinitely, burning unlimited API credits.
     pub agentic_turn_count: u32,
+    /// Consecutive self-continuations (auto-driving the next step without a
+    /// user "continue") since the last real user submit. Capped by
+    /// `max_self_continuations` to prevent a runaway loop when the model keeps
+    /// stalling. Reset to 0 on every genuine user submit.
+    pub self_continuation_count: u32,
     /// Text saved by Esc-clear so Up-arrow can recall it. Single slot —
     /// each Esc-clear overwrites. None when no text has been cleared.
     #[allow(dead_code)]
@@ -1172,6 +1177,7 @@ impl App {
             turn_started_at: None,
             turn_start_cost: 0.0,
             agentic_turn_count: 0,
+            self_continuation_count: 0,
             esc_saved_text: None,
             history_cursor: None,
             is_streaming: false,
