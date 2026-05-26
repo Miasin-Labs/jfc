@@ -1,30 +1,36 @@
 //! Host-side remote control bridge.
 //!
-//! `RemoteHost` manages the WebSocket server + per-client transport and
+//! `RemoteHost` manages the WebSocket server + connected clients and
 //! provides two integrations:
 //!
 //! 1. **Mirror**: the event loop calls [`RemoteHost::mirror`] for each
 //!    relevant `AppEvent`, translating it into a `RemoteEnvelope` and
-//!    sending to the connected client. Non-blocking (`try_send`) so a
-//!    slow or disconnected client never stalls the host.
+//!    broadcasting to all connected clients via a `tokio::broadcast`
+//!    channel. Non-blocking — a slow or disconnected client never stalls
+//!    the host, and multiple clients fan out from one send.
 //!
-//! 2. **Inject**: a spawned task reads inbound envelopes from the client
-//!    and translates them into `AppEvent`s injected via the existing
+//! 2. **Inject**: each client has a spawned task that reads inbound
+//!    envelopes and translates them into `AppEvent`s injected via the
 //!    event-loop `tx: EventSender`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use jfc_remote::auth;
-use jfc_remote::protocol::{RemoteEnvelope, SessionState};
-use jfc_remote::transport::TransportReceiver;
+use jfc_remote::protocol::{RemoteEnvelope, RemoteFrame, SessionState};
+use jfc_remote::transport::{TransportReceiver, TransportSender};
 use jfc_remote::ws::WsServer;
 
 use crate::runtime::{AppEvent, EventSender, UiEvent};
+
+/// Broadcast backlog. Frames buffer here until each client's forwarder
+/// drains them; a client that lags by more than this many frames drops the
+/// oldest (acceptable for a live mirror — the next full status re-syncs).
+const BROADCAST_BACKLOG: usize = 1024;
 
 /// State for the remote-control host side.
 pub struct RemoteHost {
@@ -32,18 +38,21 @@ pub struct RemoteHost {
     server: WsServer,
     /// The pairing token for this session.
     pub token: String,
-    /// Next outbound sequence number (monotonically increasing).
+    /// Next outbound sequence number (monotonically increasing across all
+    /// clients — every client shares the same ordered frame stream).
     out_seq: AtomicU64,
-    /// Outbound mirror channel — frames sent here are forwarded to the
-    /// connected client by a bridge task.
-    mirror_tx: mpsc::Sender<jfc_remote::protocol::RemoteFrame>,
+    /// Broadcast sender; each connected client subscribes a receiver.
+    mirror_tx: broadcast::Sender<RemoteFrame>,
     /// Number of connected clients.
     pub client_count: Arc<AtomicUsize>,
+    /// Tool-use id of the most recently mirrored permission request, so the
+    /// event loop doesn't re-mirror the same pending approval every burst.
+    last_mirrored_approval: std::sync::Mutex<Option<String>>,
 }
 
 impl RemoteHost {
-    /// Start the remote-control server. Spawns the client acceptor
-    /// and returns the host handle.
+    /// Start the remote-control server. Spawns the client acceptor and a
+    /// heartbeat task, and returns the host handle.
     pub async fn start(port: u16, event_tx: EventSender) -> std::io::Result<Arc<Self>> {
         let token = auth::generate_token();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -51,41 +60,84 @@ impl RemoteHost {
 
         info!(target: "jfc::remote", addr = %server.addr, "remote-control server started");
 
-        // Mirror channel: host mirror() → bridge task → client WS.
-        let (mirror_tx, mirror_rx) = mpsc::channel(512);
+        let (mirror_tx, _) = broadcast::channel(BROADCAST_BACKLOG);
         let client_count = Arc::new(AtomicUsize::new(0));
 
         let host = Arc::new(Self {
             server,
             token: token.clone(),
             out_seq: AtomicU64::new(1),
-            mirror_tx,
+            mirror_tx: mirror_tx.clone(),
             client_count: Arc::clone(&client_count),
+            last_mirrored_approval: std::sync::Mutex::new(None),
         });
 
-        // Spawn the client-acceptor: handles one client at a time (MVP).
+        // Accept clients: each gets a broadcast subscription (outbound) and an
+        // inbound forwarder task.
         tokio::spawn(accept_clients(
             client_rx,
-            mirror_rx,
+            mirror_tx.clone(),
             event_tx,
             token,
             client_count,
         ));
 
+        // Heartbeat: keep idle connections + NAT mappings alive.
+        let host_for_hb = Arc::downgrade(&host);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+            tick.tick().await; // skip the immediate first tick
+            loop {
+                tick.tick().await;
+                match host_for_hb.upgrade() {
+                    Some(h) => h.mirror(RemoteEnvelope::Heartbeat),
+                    None => break, // host dropped — stop the heartbeat
+                }
+            }
+        });
+
         Ok(host)
     }
 
-    /// Mirror an envelope to the connected client. Non-blocking — silently
-    /// drops if the channel is full or no client is connected.
+    /// Mirror an envelope to all connected clients. Non-blocking — silently
+    /// drops if no client is subscribed.
     pub fn mirror(&self, envelope: RemoteEnvelope) {
         if self.client_count.load(Ordering::Relaxed) == 0 {
             return;
         }
         let seq = self.out_seq.fetch_add(1, Ordering::Relaxed);
         let frame = auth::build_signed_frame(&self.token, seq, envelope);
-        if self.mirror_tx.try_send(frame).is_err() {
-            debug!(target: "jfc::remote", "mirror channel full or closed — dropping frame");
+        // `send` only errors when there are zero receivers, which races the
+        // client_count guard above (a client disconnecting mid-mirror). That's
+        // benign — the frame simply has no audience.
+        if self.mirror_tx.send(frame).is_err() {
+            debug!(target: "jfc::remote", "mirror: no subscribers (client disconnected mid-send)");
         }
+    }
+
+    /// Mirror a `PermissionRequest` for the app's current pending approval,
+    /// at most once per distinct tool. Called from the event loop after each
+    /// burst so a remote client learns a tool is awaiting approval.
+    pub fn mirror_pending_approval(&self, tool_use_id: &str, tool_name: &str, summary: String) {
+        {
+            let mut last = self.last_mirrored_approval.lock().unwrap();
+            if last.as_deref() == Some(tool_use_id) {
+                return; // already mirrored this one
+            }
+            *last = Some(tool_use_id.to_string());
+        }
+        self.mirror(RemoteEnvelope::PermissionRequest {
+            tool_use_id: tool_use_id.to_string(),
+            tool_name: tool_name.to_string(),
+            summary,
+            diff: None,
+        });
+    }
+
+    /// Clear the mirrored-approval marker when the pending approval resolves,
+    /// so a future approval of the same tool id re-mirrors.
+    pub fn clear_pending_approval(&self) {
+        *self.last_mirrored_approval.lock().unwrap() = None;
     }
 
     /// Shut down the WS server.
@@ -101,40 +153,68 @@ impl RemoteHost {
 
 // ─── Client acceptor ─────────────────────────────────────────────────────────
 
-/// Accept incoming client connections. For the MVP, supports one client at a
-/// time — a new connection replaces the previous one.
+/// Accept incoming client connections. Each client subscribes to the
+/// broadcast for outbound frames and runs an inbound forwarder. Supports
+/// multiple simultaneous clients.
 async fn accept_clients(
-    mut client_rx: mpsc::Receiver<(
-        jfc_remote::transport::TransportSender,
-        jfc_remote::transport::TransportReceiver,
-    )>,
-    mut mirror_rx: mpsc::Receiver<jfc_remote::protocol::RemoteFrame>,
+    mut client_rx: tokio::sync::mpsc::Receiver<(TransportSender, TransportReceiver)>,
+    mirror_tx: broadcast::Sender<RemoteFrame>,
     event_tx: EventSender,
     token: String,
     client_count: Arc<AtomicUsize>,
 ) {
-    while let Some((client_out_tx, mut client_in_rx)) = client_rx.recv().await {
+    while let Some((client_out_tx, client_in_rx)) = client_rx.recv().await {
         let n = client_count.fetch_add(1, Ordering::Relaxed) + 1;
         info!(target: "jfc::remote", clients = n, "client connected");
 
-        // Spawn inbound forwarder: client → host event bus.
+        let mirror_rx = mirror_tx.subscribe();
+        let cc = Arc::clone(&client_count);
         let etx = event_tx.clone();
         let tok = token.clone();
-        let cc = Arc::clone(&client_count);
-        tokio::spawn(async move {
-            client_inbound_loop(&mut client_in_rx, &etx, &tok).await;
-            let remaining = cc.fetch_sub(1, Ordering::Relaxed) - 1;
-            info!(target: "jfc::remote", clients = remaining, "client disconnected");
-        });
 
-        // Bridge mirror channel → this client's WS sender.
-        while let Some(frame) = mirror_rx.recv().await {
-            if client_out_tx.send(frame).await.is_err() {
-                debug!(target: "jfc::remote", "client WS send failed — client disconnected");
-                break;
+        tokio::spawn(run_client_bridge(
+            client_out_tx,
+            client_in_rx,
+            mirror_rx,
+            etx,
+            tok,
+            cc,
+        ));
+    }
+}
+
+/// Per-client bridge: outbound broadcast → WS, inbound WS → event bus.
+async fn run_client_bridge(
+    client_out_tx: TransportSender,
+    mut client_in_rx: TransportReceiver,
+    mut mirror_rx: broadcast::Receiver<RemoteFrame>,
+    event_tx: EventSender,
+    token: String,
+    client_count: Arc<AtomicUsize>,
+) {
+    // Outbound forwarder: broadcast → this client's WS.
+    let out_task = tokio::spawn(async move {
+        loop {
+            match mirror_rx.recv().await {
+                Ok(frame) => {
+                    if client_out_tx.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(target: "jfc::remote", skipped, "client lagged — dropping frames");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
-    }
+    });
+
+    // Inbound forwarder: client WS → event bus.
+    client_inbound_loop(&mut client_in_rx, &event_tx, &token).await;
+    out_task.abort();
+
+    let remaining = client_count.fetch_sub(1, Ordering::Relaxed) - 1;
+    info!(target: "jfc::remote", clients = remaining, "client disconnected");
 }
 
 /// Inbound loop for one client: reads frames, verifies HMAC + seq,
@@ -169,35 +249,25 @@ fn translate_inbound(envelope: &RemoteEnvelope) -> Option<AppEvent> {
         }
         RemoteEnvelope::Interrupt => {
             debug!(target: "jfc::remote", "remote interrupt");
-            let esc = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            Some(AppEvent::Ui(UiEvent::Term(key_event(
                 crossterm::event::KeyCode::Esc,
-                crossterm::event::KeyModifiers::NONE,
-            ));
-            Some(AppEvent::Ui(UiEvent::Term(esc)))
+            ))))
         }
         RemoteEnvelope::ApprovalResponse { approved, .. } => {
-            let key = if *approved {
+            let code = if *approved {
                 crossterm::event::KeyCode::Char('y')
             } else {
                 crossterm::event::KeyCode::Char('n')
             };
-            let ev = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                key,
-                crossterm::event::KeyModifiers::NONE,
-            ));
-            Some(AppEvent::Ui(UiEvent::Term(ev)))
+            Some(AppEvent::Ui(UiEvent::Term(key_event(code))))
         }
         RemoteEnvelope::PlanApprovalResponse { approve, .. } => {
-            let key = if *approve {
+            let code = if *approve {
                 crossterm::event::KeyCode::Char('y')
             } else {
                 crossterm::event::KeyCode::Char('n')
             };
-            let ev = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                key,
-                crossterm::event::KeyModifiers::NONE,
-            ));
-            Some(AppEvent::Ui(UiEvent::Term(ev)))
+            Some(AppEvent::Ui(UiEvent::Term(key_event(code))))
         }
         RemoteEnvelope::Ping => None,
         other => {
@@ -205,6 +275,14 @@ fn translate_inbound(envelope: &RemoteEnvelope) -> Option<AppEvent> {
             None
         }
     }
+}
+
+/// Build a `crossterm` key event with no modifiers.
+fn key_event(code: crossterm::event::KeyCode) -> crossterm::event::Event {
+    crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+        code,
+        crossterm::event::KeyModifiers::NONE,
+    ))
 }
 
 // ─── AppEvent → RemoteEnvelope conversion ────────────────────────────────────

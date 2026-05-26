@@ -136,13 +136,15 @@ Each frame: `RemoteFrame { version, seq, ts_ms, payload, hmac }`.
 | `jfc rc connect <url> --token <tok>` | Connect as a client |
 | `jfc rc status <url> --token <tok>` | Probe a server's reachability |
 
-## Limitations (MVP)
+## Limitations
 
-- **Single client**: only one client can receive mirrored events at a
-  time. A second connection replaces the first.
 - **Line-oriented client**: `jfc rc connect` is a simple stdin/stdout
   bridge, not a full TUI mirror. Full ratatui-rendered client is a
   future enhancement.
-- **No daemon auto-start**: `/remote-control` enables RC on the current
-  interactive session only. Daemon integration (auto-start on session
-  launch, spawn mode) is planned.
+- **No daemon spawn mode**: `/remote-control` mirrors a *running*
+  session; it can't yet *launch* new sessions from a client (Claude
+  Code's "spawn mode"). Daemon-hosted RC is a future enhancement.
+
+Multiple clients are supported — every connected device receives the
+same mirrored event stream (fan-out via `tokio::broadcast`), and any
+client can send prompts / approvals.

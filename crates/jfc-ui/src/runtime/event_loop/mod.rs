@@ -1015,6 +1015,20 @@ pub(crate) async fn run(
             }
         }
 
+        // After processing all events in this burst, mirror any pending
+        // approval to remote-control clients so they can approve/reject.
+        if let Some(ref rc) = app.remote_host {
+            if let Some(ref approval) = app.pending_approval {
+                rc.mirror_pending_approval(
+                    &approval.tool.id.to_string(),
+                    approval.tool.kind.label(),
+                    approval.tool.input.summary(),
+                );
+            } else {
+                rc.clear_pending_approval();
+            }
+        }
+
         if should_quit {
             break 'main_loop;
         }
