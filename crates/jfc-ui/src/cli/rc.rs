@@ -2,15 +2,14 @@
 //!
 //! - `jfc rc connect <url> --token <tok>` — connect to a running host's
 //!   remote-control server and mirror its session to this terminal. Type a
-//!   line to send a prompt; Ctrl-C to disconnect.
+//!   line to send a prompt; Ctrl-C to disconnect. When a permission or
+//!   plan-approval prompt arrives, `y`/`n` sends the appropriate
+//!   `ApprovalResponse`/`PlanApprovalResponse` instead of a `UserPrompt`.
 //! - `jfc rc status` — report whether a local RC server appears reachable.
-//!
-//! `jfc rc serve` is *not* a separate process — remote control is enabled on
-//! a live session via the `/remote-control` slash command or the
-//! `--remote-control` launch flag (see `cli::mod`). This subcommand group is
-//! the client side plus diagnostics.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use clap::Subcommand;
 
@@ -45,8 +44,25 @@ pub(super) async fn run_rc_subcommand(sub: RcSubcommand) -> anyhow::Result<()> {
     }
 }
 
-/// Connect and run a line-oriented client: print mirrored events to stdout,
-/// read prompts from stdin, send them to the host.
+/// Shared state between the stdin-reader and the event renderer so the
+/// reader knows whether to interpret `y`/`n` as an approval or a prompt.
+#[derive(Clone)]
+struct ClientState {
+    awaiting_approval: Arc<AtomicBool>,
+    awaiting_plan: Arc<AtomicBool>,
+    pending_tool_use_id: Arc<Mutex<String>>,
+}
+
+impl ClientState {
+    fn new() -> Self {
+        Self {
+            awaiting_approval: Arc::new(AtomicBool::new(false)),
+            awaiting_plan: Arc::new(AtomicBool::new(false)),
+            pending_tool_use_id: Arc::new(Mutex::new(String::new())),
+        }
+    }
+}
+
 async fn connect_client(url: &str, token: &str) -> anyhow::Result<()> {
     let (tx, mut rx) = jfc_remote::ws::connect(url, token)
         .await
@@ -55,25 +71,45 @@ async fn connect_client(url: &str, token: &str) -> anyhow::Result<()> {
     println!("● connected to {url}");
     println!("  type a message + Enter to send · Ctrl-C to disconnect\n");
 
-    // Outbound: stdin lines → UserPrompt frames.
+    let state = ClientState::new();
+
+    // Outbound: stdin lines → envelopes.
     let token_out = token.to_string();
+    let state_for_input = state.clone();
     tokio::spawn(async move {
         let mut out_seq: u64 = 1;
         let stdin = tokio::io::BufReader::new(tokio::io::stdin());
         use tokio::io::AsyncBufReadExt;
         let mut lines = stdin.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim();
+            let line = line.trim().to_string();
             if line.is_empty() {
                 continue;
             }
+
             let envelope = if line == "/interrupt" {
                 RemoteEnvelope::Interrupt
-            } else {
-                RemoteEnvelope::UserPrompt {
-                    text: line.to_string(),
+            } else if state_for_input.awaiting_plan.load(Ordering::Relaxed) {
+                state_for_input
+                    .awaiting_plan
+                    .store(false, Ordering::Relaxed);
+                let approve = line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes");
+                let feedback = if approve { None } else { Some(line.clone()) };
+                RemoteEnvelope::PlanApprovalResponse { approve, feedback }
+            } else if state_for_input.awaiting_approval.load(Ordering::Relaxed) {
+                state_for_input
+                    .awaiting_approval
+                    .store(false, Ordering::Relaxed);
+                let approved = line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes");
+                let tool_use_id = state_for_input.pending_tool_use_id.lock().unwrap().clone();
+                RemoteEnvelope::ApprovalResponse {
+                    tool_use_id,
+                    approved,
                 }
+            } else {
+                RemoteEnvelope::UserPrompt { text: line }
             };
+
             let frame = auth::build_signed_frame(&token_out, out_seq, envelope);
             out_seq += 1;
             if tx.send(frame).await.is_err() {
@@ -92,15 +128,15 @@ async fn connect_client(url: &str, token: &str) -> anyhow::Result<()> {
         if !seq_tracker.accept(frame.seq) {
             continue;
         }
-        render_envelope(&frame.payload);
+        render_envelope(&frame.payload, &state);
     }
 
     println!("\n● disconnected");
     Ok(())
 }
 
-/// Render one inbound envelope to stdout in a human-readable form.
-fn render_envelope(env: &RemoteEnvelope) {
+/// Render one inbound envelope to stdout.
+fn render_envelope(env: &RemoteEnvelope, state: &ClientState) {
     match env {
         RemoteEnvelope::AssistantDelta { text, .. } => {
             if let Some(t) = text {
@@ -140,14 +176,18 @@ fn render_envelope(env: &RemoteEnvelope) {
             }
         }
         RemoteEnvelope::PermissionRequest {
-            tool_name, summary, ..
-        } => {
-            println!("\n🔒 permission: {tool_name} — {summary}");
-            println!("   reply 'y' to approve, 'n' to reject (then Enter)");
-        }
+            tool_use_id,
+            tool_name,
+            summary,
+            diff,
+        } => render_permission(state, tool_use_id, tool_name, summary, diff.as_deref()),
         RemoteEnvelope::PlanApprovalRequest { plan } => {
-            println!("\n📋 plan approval requested:\n{plan}");
-            println!("   reply 'y' to approve, 'n' to reject (then Enter)");
+            println!("\n📋 plan approval requested:");
+            for line in plan.lines().take(40) {
+                println!("  {line}");
+            }
+            println!("   → y to approve, n to reject (then Enter)");
+            state.awaiting_plan.store(true, Ordering::Relaxed);
         }
         RemoteEnvelope::Toast { kind, text } => {
             println!("\n[{kind}] {text}");
@@ -157,6 +197,28 @@ fn render_envelope(env: &RemoteEnvelope) {
             tracing::debug!(target: "jfc::remote", ?other, "client ignoring host-bound envelope");
         }
     }
+}
+
+fn render_permission(
+    state: &ClientState,
+    tool_use_id: &str,
+    tool_name: &str,
+    summary: &str,
+    diff: Option<&str>,
+) {
+    println!("\n🔒 permission: {tool_name} — {summary}");
+    if let Some(d) = diff {
+        for line in d.lines().take(20) {
+            println!("  {line}");
+        }
+        let total = d.lines().count();
+        if total > 20 {
+            println!("  … {total} lines total");
+        }
+    }
+    println!("   → y to approve, n to reject (then Enter)");
+    state.awaiting_approval.store(true, Ordering::Relaxed);
+    *state.pending_tool_use_id.lock().unwrap() = tool_use_id.to_string();
 }
 
 /// Probe a remote-control server: attempt to connect and report success.

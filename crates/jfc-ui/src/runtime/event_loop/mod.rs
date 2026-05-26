@@ -1015,14 +1015,27 @@ pub(crate) async fn run(
             }
         }
 
-        // After processing all events in this burst, mirror any pending
-        // approval to remote-control clients so they can approve/reject.
+        // After processing all events in this burst, mirror derived state
+        // to remote-control clients.
         if let Some(ref rc) = app.remote_host {
+            // Session status (transition-only).
+            let status = if app.is_streaming {
+                jfc_remote::protocol::SessionState::Running
+            } else if app.pending_approval.is_some() {
+                jfc_remote::protocol::SessionState::WaitingApproval
+            } else {
+                jfc_remote::protocol::SessionState::Idle
+            };
+            rc.mirror_status(status);
+
+            // Pending approval → PermissionRequest with diff preview.
             if let Some(ref approval) = app.pending_approval {
+                let diff = crate::remote_host::tool_diff_preview(&approval.tool);
                 rc.mirror_pending_approval(
                     &approval.tool.id.to_string(),
                     approval.tool.kind.label(),
                     approval.tool.input.summary(),
+                    diff,
                 );
             } else {
                 rc.clear_pending_approval();

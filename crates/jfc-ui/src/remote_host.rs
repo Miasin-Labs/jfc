@@ -48,6 +48,8 @@ pub struct RemoteHost {
     /// Tool-use id of the most recently mirrored permission request, so the
     /// event loop doesn't re-mirror the same pending approval every burst.
     last_mirrored_approval: std::sync::Mutex<Option<String>>,
+    /// Last mirrored session status, so we only emit on transitions.
+    last_status: std::sync::Mutex<Option<SessionState>>,
 }
 
 impl RemoteHost {
@@ -70,6 +72,7 @@ impl RemoteHost {
             mirror_tx: mirror_tx.clone(),
             client_count: Arc::clone(&client_count),
             last_mirrored_approval: std::sync::Mutex::new(None),
+            last_status: std::sync::Mutex::new(None),
         });
 
         // Accept clients: each gets a broadcast subscription (outbound) and an
@@ -117,8 +120,15 @@ impl RemoteHost {
 
     /// Mirror a `PermissionRequest` for the app's current pending approval,
     /// at most once per distinct tool. Called from the event loop after each
-    /// burst so a remote client learns a tool is awaiting approval.
-    pub fn mirror_pending_approval(&self, tool_use_id: &str, tool_name: &str, summary: String) {
+    /// burst so a remote client learns a tool is awaiting approval. `diff` is
+    /// a plain-text preview of the pending change (Edit/Write/patch/Bash).
+    pub fn mirror_pending_approval(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        summary: String,
+        diff: Option<String>,
+    ) {
         {
             let mut last = self.last_mirrored_approval.lock().unwrap();
             if last.as_deref() == Some(tool_use_id) {
@@ -130,7 +140,23 @@ impl RemoteHost {
             tool_use_id: tool_use_id.to_string(),
             tool_name: tool_name.to_string(),
             summary,
-            diff: None,
+            diff,
+        });
+    }
+
+    /// Mirror a session status, but only when it differs from the last one
+    /// sent (so we don't flood Running on every chunk). Called post-burst.
+    pub fn mirror_status(&self, status: SessionState) {
+        {
+            let mut last = self.last_status.lock().unwrap();
+            if *last == Some(status) {
+                return;
+            }
+            *last = Some(status);
+        }
+        self.mirror(RemoteEnvelope::SessionStatus {
+            status,
+            message: None,
         });
     }
 
@@ -310,10 +336,9 @@ pub fn mirror_event(ev: &AppEvent) -> Option<RemoteEnvelope> {
             output_preview: Some(result.output.chars().take(500).collect()),
             is_error: result.is_error(),
         }),
-        AppEvent::Stream(StreamEvent::Done(_)) => Some(RemoteEnvelope::SessionStatus {
-            status: SessionState::Idle,
-            message: None,
-        }),
+        // Done/Idle transitions are derived post-burst from `app.is_streaming`
+        // in the event loop (see `mirror_status`). Errors carry a message, so
+        // they're mirrored directly here.
         AppEvent::Stream(StreamEvent::Error(e)) => Some(RemoteEnvelope::SessionStatus {
             status: SessionState::Error,
             message: Some(e.clone()),
@@ -325,6 +350,64 @@ pub fn mirror_event(ev: &AppEvent) -> Option<RemoteEnvelope> {
         AppEvent::Ui(UiEvent::ExitPlanModeRequested { plan }) => {
             Some(RemoteEnvelope::PlanApprovalRequest { plan: plan.clone() })
         }
+        _ => None,
+    }
+}
+
+/// Build a plain-text diff preview for a pending tool (the same content the
+/// approval modal shows, but as a string for the RC wire). Returns `None`
+/// for tools with nothing to preview (Read, Grep, etc.).
+pub fn tool_diff_preview(tool: &crate::types::ToolCall) -> Option<String> {
+    use jfc_core::ToolInput;
+    match &tool.input {
+        ToolInput::Edit {
+            file_path,
+            old_string,
+            new_string,
+            ..
+        } => {
+            let mut s = format!("--- {file_path}\n+++ {file_path}\n");
+            for ln in old_string.lines().take(30) {
+                s.push_str(&format!("- {ln}\n"));
+            }
+            for ln in new_string.lines().take(30) {
+                s.push_str(&format!("+ {ln}\n"));
+            }
+            Some(s)
+        }
+        ToolInput::Write { file_path, content } => {
+            let mut s = format!("+++ {file_path} ({} bytes)\n", content.len());
+            for ln in content.lines().take(40) {
+                s.push_str(&format!("+ {ln}\n"));
+            }
+            Some(s)
+        }
+        ToolInput::ApplyPatch { patch } => Some(patch.chars().take(2000).collect()),
+        ToolInput::MultiEdit { file_path, edits } => {
+            let count = edits.as_array().map(|a| a.len()).unwrap_or(0);
+            let mut s = format!("MultiEdit {file_path} ({count} edits)\n");
+            if let Some(arr) = edits.as_array() {
+                for (i, edit) in arr.iter().take(5).enumerate() {
+                    let old = edit
+                        .get("old_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let new = edit
+                        .get("new_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    s.push_str(&format!("@@ edit {}/{count} @@\n", i + 1));
+                    for ln in old.lines().take(8) {
+                        s.push_str(&format!("- {ln}\n"));
+                    }
+                    for ln in new.lines().take(8) {
+                        s.push_str(&format!("+ {ln}\n"));
+                    }
+                }
+            }
+            Some(s)
+        }
+        ToolInput::Bash { command, .. } => Some(format!("$ {command}")),
         _ => None,
     }
 }

@@ -136,11 +136,30 @@ Each frame: `RemoteFrame { version, seq, ts_ms, payload, hmac }`.
 | `jfc rc connect <url> --token <tok>` | Connect as a client |
 | `jfc rc status <url> --token <tok>` | Probe a server's reachability |
 
+## Approving tools remotely
+
+When the host hits a tool that needs approval, every connected client
+receives a `PermissionRequest` with a diff preview (the same +/- lines
+the host's approval modal shows). Reply `y` or `n` on the next line:
+
+```
+🔒 permission: Edit — src/main.rs
+  --- src/main.rs
+  +++ src/main.rs
+  - let x = 1;
+  + let x = 2;
+   → y to approve, n to reject (then Enter)
+y
+```
+
+Plan-mode approvals (`📋 plan approval requested`) work the same way;
+a non-`y` reply is sent as rejection feedback.
+
 ## Limitations
 
 - **Line-oriented client**: `jfc rc connect` is a simple stdin/stdout
-  bridge, not a full TUI mirror. Full ratatui-rendered client is a
-  future enhancement.
+  bridge, not a full ratatui mirror of the host TUI. Functional, not
+  pixel-perfect.
 - **No daemon spawn mode**: `/remote-control` mirrors a *running*
   session; it can't yet *launch* new sessions from a client (Claude
   Code's "spawn mode"). Daemon-hosted RC is a future enhancement.
