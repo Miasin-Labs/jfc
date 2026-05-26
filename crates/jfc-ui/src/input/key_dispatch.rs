@@ -195,7 +195,8 @@ pub async fn handle_key(
         let cursor = app.textarea.cursor();
         let (row, col) = (cursor.0, cursor.1);
         if let Some(line) = app.textarea.lines().get(row) {
-            let before_cursor = &line[..col.min(line.len())];
+            let byte_col = line.char_indices().nth(col).map_or(line.len(), |(i, _)| i);
+            let before_cursor = &line[..byte_col];
             if let Some(start) = before_cursor.rfind("[Image #") {
                 let chip = &before_cursor[start..];
                 if chip.ends_with(']') {
