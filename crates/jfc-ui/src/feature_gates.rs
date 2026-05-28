@@ -94,6 +94,10 @@ pub enum FeatureGate {
     /// When enabled, on session start check if `~/.config/jfc/auto_nudge_seen`
     /// exists. If not, display a notice and create the marker file.
     AutoDefaultNudge,
+    /// Claude Code 2.1.153 server-side advisor rollout gate
+    /// (`tengu_sage_compass2`). Enables the Anthropic `advisor` server tool
+    /// when the active model supports it.
+    TenguSageCompass2,
 }
 
 impl FeatureGate {
@@ -116,6 +120,7 @@ impl FeatureGate {
         FeatureGate::StreamingToolExec,
         FeatureGate::DestructiveWarn,
         FeatureGate::AutoDefaultNudge,
+        FeatureGate::TenguSageCompass2,
     ];
 
     pub fn codename(self) -> &'static str {
@@ -138,6 +143,7 @@ impl FeatureGate {
             Self::StreamingToolExec => "streaming-tool-exec",
             Self::DestructiveWarn => "destructive-warn",
             Self::AutoDefaultNudge => "auto-default-nudge",
+            Self::TenguSageCompass2 => "tengu_sage_compass2",
         }
     }
 
@@ -167,6 +173,7 @@ impl FeatureGate {
             Self::StreamingToolExec => false,
             Self::DestructiveWarn => true,
             Self::AutoDefaultNudge => false,
+            Self::TenguSageCompass2 => false,
         }
     }
 
@@ -190,7 +197,10 @@ impl FeatureGate {
             Self::PorchBell => "Dynamic server notification banner",
             Self::StreamingToolExec => "Begin tool execution before model finishes streaming",
             Self::DestructiveWarn => "Show ⚠ DESTRUCTIVE warning before dangerous commands",
-            Self::AutoDefaultNudge => "Show one-time notice that auto is the default permission mode",
+            Self::AutoDefaultNudge => {
+                "Show one-time notice that auto is the default permission mode"
+            }
+            Self::TenguSageCompass2 => "Enable the Anthropic server-side advisor tool",
         }
     }
 }

@@ -1,11 +1,11 @@
 //! `BetaUserProfileService` — multi-user enrollment.
 //!
 //! Endpoints (`anthropic-beta: user-profiles-2026-03-24`):
-//! - `POST /v1/beta/user-profiles` — create
-//! - `GET /v1/beta/user-profiles` — list
-//! - `GET /v1/beta/user-profiles/{id}` — retrieve
-//! - `PATCH /v1/beta/user-profiles/{id}` — update
-//! - `POST /v1/beta/user-profiles/{id}/enrollment` — create enrollment URL
+//! - `POST /v1/user_profiles?beta=true` — create
+//! - `GET /v1/user_profiles?beta=true` — list
+//! - `GET /v1/user_profiles/{id}?beta=true` — retrieve
+//! - `POST /v1/user_profiles/{id}?beta=true` — update
+//! - `POST /v1/user_profiles/{id}/enrollment_url?beta=true` — create enrollment URL
 
 use crate::beta;
 use crate::client::Client;
@@ -60,7 +60,7 @@ impl UserProfileService {
                 self.client
                     .request(
                         Method::POST,
-                        "/v1/beta/user-profiles",
+                        "/v1/user_profiles?beta=true",
                         Some(beta::USER_PROFILES),
                     )
                     .json(&params)
@@ -80,7 +80,7 @@ impl UserProfileService {
                 self.client
                     .request(
                         Method::GET,
-                        "/v1/beta/user-profiles",
+                        "/v1/user_profiles?beta=true",
                         Some(beta::USER_PROFILES),
                     )
                     .query(params)
@@ -90,7 +90,7 @@ impl UserProfileService {
     }
 
     pub async fn get(&self, user_profile_id: &str) -> Result<UserProfile> {
-        let path = format!("/v1/beta/user-profiles/{user_profile_id}");
+        let path = format!("/v1/user_profiles/{user_profile_id}?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| {
@@ -106,12 +106,12 @@ impl UserProfileService {
         user_profile_id: &str,
         params: UserProfileUpdateParams,
     ) -> Result<UserProfile> {
-        let path = format!("/v1/beta/user-profiles/{user_profile_id}");
+        let path = format!("/v1/user_profiles/{user_profile_id}?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| {
                 self.client
-                    .request(Method::PATCH, &path, Some(beta::USER_PROFILES))
+                    .request(Method::POST, &path, Some(beta::USER_PROFILES))
                     .json(&params)
             })
             .await?;
@@ -119,7 +119,7 @@ impl UserProfileService {
     }
 
     pub async fn create_enrollment_url(&self, user_profile_id: &str) -> Result<EnrollmentUrl> {
-        let path = format!("/v1/beta/user-profiles/{user_profile_id}/enrollment");
+        let path = format!("/v1/user_profiles/{user_profile_id}/enrollment_url?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| {

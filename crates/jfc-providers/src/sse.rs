@@ -1,14 +1,13 @@
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, de::Error as DeError};
 use serde_json::{Value, json};
 
 use jfc_provider::{
-    EventStream, ProviderContent, ProviderMessage, ProviderRole, ServerToolResultKind, StopReason,
-    StreamEvent, ToolDef,
+    EventStream, ModelId, ProviderContent, ProviderMessage, ProviderRole, ServerToolResultKind,
+    StopReason, StreamEvent, ToolDef,
 };
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug)]
 pub enum SseEvent {
     MessageStart {
         message: MessageStart,
@@ -26,10 +25,8 @@ pub enum SseEvent {
     },
     MessageDelta {
         delta: MessageDeltaData,
-        #[serde(default)]
         usage: Option<MessageUsage>,
         /// Present when Anthropic server-side context management is active.
-        #[serde(default)]
         context_management: Option<ContextManagement>,
     },
     MessageStop,
@@ -37,6 +34,102 @@ pub enum SseEvent {
     Error {
         error: ErrorBody,
     },
+    Unknown {
+        kind: String,
+        raw: Value,
+    },
+}
+
+impl<'de> Deserialize<'de> for SseEvent {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| D::Error::missing_field("type"))?
+            .to_owned();
+
+        macro_rules! frame {
+            ($ty:ty) => {
+                serde_json::from_value::<$ty>(value).map_err(D::Error::custom)?
+            };
+        }
+
+        match kind.as_str() {
+            "message_start" => {
+                #[derive(Deserialize)]
+                struct Frame {
+                    message: MessageStart,
+                }
+                let frame = frame!(Frame);
+                Ok(Self::MessageStart {
+                    message: frame.message,
+                })
+            }
+            "content_block_start" => {
+                #[derive(Deserialize)]
+                struct Frame {
+                    index: usize,
+                    content_block: ContentBlock,
+                }
+                let frame = frame!(Frame);
+                Ok(Self::ContentBlockStart {
+                    index: frame.index,
+                    content_block: frame.content_block,
+                })
+            }
+            "content_block_delta" => {
+                #[derive(Deserialize)]
+                struct Frame {
+                    index: usize,
+                    delta: Delta,
+                }
+                let frame = frame!(Frame);
+                Ok(Self::ContentBlockDelta {
+                    index: frame.index,
+                    delta: frame.delta,
+                })
+            }
+            "content_block_stop" => {
+                #[derive(Deserialize)]
+                struct Frame {
+                    index: usize,
+                }
+                let frame = frame!(Frame);
+                Ok(Self::ContentBlockStop { index: frame.index })
+            }
+            "message_delta" => {
+                #[derive(Deserialize)]
+                struct Frame {
+                    delta: MessageDeltaData,
+                    #[serde(default)]
+                    usage: Option<MessageUsage>,
+                    #[serde(default)]
+                    context_management: Option<ContextManagement>,
+                }
+                let frame = frame!(Frame);
+                Ok(Self::MessageDelta {
+                    delta: frame.delta,
+                    usage: frame.usage,
+                    context_management: frame.context_management,
+                })
+            }
+            "message_stop" => Ok(Self::MessageStop),
+            "ping" => Ok(Self::Ping),
+            "error" => {
+                #[derive(Deserialize)]
+                struct Frame {
+                    error: ErrorBody,
+                }
+                let frame = frame!(Frame);
+                Ok(Self::Error { error: frame.error })
+            }
+            _ => Ok(Self::Unknown { kind, raw: value }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,8 +161,7 @@ impl MessageUsage {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug)]
 pub enum ContentBlock {
     Text {
         #[allow(dead_code)]
@@ -96,27 +188,133 @@ pub enum ContentBlock {
         name: String,
         input: Value,
     },
-    /// Server-side tool result for `web_search`. Wire shape per cli.js
-    /// v142:394261:
-    ///
-    ///   { "type": "web_search_tool_result",
-    ///     "tool_use_id": "srvtoolu_...",
-    ///     "content": [ { "title": "...", "url": "..." }, ... ]   // OR
-    ///                  { "error_code": "..." } }
-    ///
-    /// We keep `content` as `Value` so the error variant and any
-    /// future field additions round-trip without parse loss.
-    WebSearchToolResult { tool_use_id: String, content: Value },
-    /// Server-side tool result for `code_execution`. Wire type
-    /// `code_execution_tool_result` per cli.js v142:246154.
-    CodeExecutionToolResult { tool_use_id: String, content: Value },
-    /// Server-side tool result for `web_fetch`. Wire type
-    /// `web_fetch_tool_result` per cli.js v142:246159.
-    WebFetchToolResult { tool_use_id: String, content: Value },
+    /// Server-side tool result blocks (`web_search_tool_result`,
+    /// `code_execution_tool_result`, `tool_search_tool_result`, ...).
+    /// `tool_kind` preserves the original wire type so future Anthropic
+    /// result blocks can round-trip without a parser release.
+    ServerToolResult {
+        tool_use_id: String,
+        tool_kind: ServerToolResultKind,
+        content: Value,
+    },
+    /// Forward-compatible catch-all for new content block types. Unknown
+    /// blocks are ignored unless they carry `tool_use_id` + `content`, in
+    /// which case they are promoted to `ServerToolResult` above.
+    Unknown { kind: String, raw: Value },
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+impl<'de> Deserialize<'de> for ContentBlock {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| D::Error::missing_field("type"))?
+            .to_owned();
+
+        macro_rules! block {
+            ($ty:ty) => {
+                serde_json::from_value::<$ty>(value.clone()).map_err(D::Error::custom)?
+            };
+        }
+
+        match kind.as_str() {
+            "text" => {
+                #[derive(Deserialize)]
+                struct Block {
+                    #[serde(default)]
+                    text: String,
+                }
+                let block = block!(Block);
+                Ok(Self::Text { text: block.text })
+            }
+            "thinking" => {
+                #[derive(Deserialize)]
+                struct Block {
+                    #[serde(default)]
+                    thinking: String,
+                }
+                let block = block!(Block);
+                Ok(Self::Thinking {
+                    thinking: block.thinking,
+                })
+            }
+            "redacted_thinking" => {
+                #[derive(Deserialize)]
+                struct Block {
+                    data: String,
+                }
+                let block = block!(Block);
+                Ok(Self::RedactedThinking { data: block.data })
+            }
+            "tool_use" => {
+                #[derive(Deserialize)]
+                struct Block {
+                    id: String,
+                    name: String,
+                    #[serde(default)]
+                    input: Value,
+                }
+                let block = block!(Block);
+                Ok(Self::ToolUse {
+                    id: block.id,
+                    name: block.name,
+                    input: block.input,
+                })
+            }
+            "server_tool_use" => {
+                #[derive(Deserialize)]
+                struct Block {
+                    id: String,
+                    name: String,
+                    #[serde(default)]
+                    input: Value,
+                }
+                let block = block!(Block);
+                Ok(Self::ServerToolUse {
+                    id: block.id,
+                    name: block.name,
+                    input: block.input,
+                })
+            }
+            "web_search_tool_result"
+            | "code_execution_tool_result"
+            | "web_fetch_tool_result"
+            | "advisor_tool_result"
+            | "bash_code_execution_tool_result"
+            | "text_editor_code_execution_tool_result"
+            | "tool_search_tool_result" => {
+                #[derive(Deserialize)]
+                struct Block {
+                    tool_use_id: String,
+                    #[serde(default)]
+                    content: Value,
+                }
+                let block = block!(Block);
+                Ok(Self::ServerToolResult {
+                    tool_use_id: block.tool_use_id,
+                    tool_kind: ServerToolResultKind::from_wire_type(&kind),
+                    content: block.content,
+                })
+            }
+            _ => {
+                if let Some(tool_use_id) = value.get("tool_use_id").and_then(Value::as_str) {
+                    return Ok(Self::ServerToolResult {
+                        tool_use_id: tool_use_id.to_owned(),
+                        tool_kind: ServerToolResultKind::from_wire_type(&kind),
+                        content: value.get("content").cloned().unwrap_or(Value::Null),
+                    });
+                }
+                Ok(Self::Unknown { kind, raw: value })
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum Delta {
     TextDelta { text: String },
     ThinkingDelta { thinking: String },
@@ -124,6 +322,53 @@ pub enum Delta {
     SignatureDelta { signature: String },
     CitationsDelta {},
     ConnectorTextDelta { connector_text: String },
+    CompactionContentBlockDelta { content: String },
+    Unknown { kind: String, raw: Value },
+}
+
+impl<'de> Deserialize<'de> for Delta {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| D::Error::missing_field("type"))?
+            .to_owned();
+
+        let field = |name: &str| -> String {
+            value
+                .get(name)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+
+        Ok(match kind.as_str() {
+            "text_delta" => Self::TextDelta {
+                text: field("text"),
+            },
+            "thinking_delta" => Self::ThinkingDelta {
+                thinking: field("thinking"),
+            },
+            "input_json_delta" => Self::InputJsonDelta {
+                partial_json: field("partial_json"),
+            },
+            "signature_delta" => Self::SignatureDelta {
+                signature: field("signature"),
+            },
+            "citations_delta" => Self::CitationsDelta {},
+            "connector_text_delta" => Self::ConnectorTextDelta {
+                connector_text: field("connector_text"),
+            },
+            "compaction_content_block_delta" => Self::CompactionContentBlockDelta {
+                content: field("content"),
+            },
+            _ => Self::Unknown { kind, raw: value },
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +434,27 @@ pub enum BlockState {
         tool_kind: ServerToolResultKind,
         content: Value,
     },
+    Ignored {
+        kind: String,
+    },
+}
+
+fn initial_input_json(input: Value) -> String {
+    match input {
+        Value::Null => String::new(),
+        Value::Object(map) if map.is_empty() => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn append_input_delta(input: &mut String, partial_json: &str) {
+    if partial_json.is_empty() {
+        return;
+    }
+    if input == "{}" {
+        input.clear();
+    }
+    input.push_str(partial_json);
 }
 
 pub fn parse_stop_reason(s: Option<&str>) -> StopReason {
@@ -266,50 +532,41 @@ pub fn translate(
                     accumulated: String::new(),
                 },
                 ContentBlock::RedactedThinking { data } => BlockState::RedactedThinking { data },
-                ContentBlock::ToolUse { id, name, .. } => BlockState::ToolUse {
+                ContentBlock::ToolUse { id, name, input } => BlockState::ToolUse {
                     id,
                     name,
-                    input: String::new(),
+                    input: initial_input_json(input),
                 },
                 ContentBlock::ServerToolUse { id, name, input } => {
-                    // Server-side tools send their full input in the start
-                    // block rather than streaming it via InputJsonDelta. We
-                    // pre-populate the input string so it's available at stop.
-                    let input_str = if input.is_null() {
-                        String::new()
-                    } else {
-                        input.to_string()
-                    };
+                    // Server-side tools may send full input in the start
+                    // block, or stream it via input_json_delta when the
+                    // fine-grained tool streaming beta is active. Treat `{}` as
+                    // "not started yet" so later deltas produce valid JSON.
+                    let input_str = initial_input_json(input);
                     BlockState::ServerToolUse {
                         id,
                         name,
                         input: input_str,
                     }
                 }
-                ContentBlock::WebSearchToolResult {
+                ContentBlock::ServerToolResult {
                     tool_use_id,
+                    tool_kind,
                     content,
                 } => BlockState::ServerToolResult {
                     tool_use_id,
-                    tool_kind: ServerToolResultKind::WebSearch,
+                    tool_kind,
                     content,
                 },
-                ContentBlock::CodeExecutionToolResult {
-                    tool_use_id,
-                    content,
-                } => BlockState::ServerToolResult {
-                    tool_use_id,
-                    tool_kind: ServerToolResultKind::CodeExecution,
-                    content,
-                },
-                ContentBlock::WebFetchToolResult {
-                    tool_use_id,
-                    content,
-                } => BlockState::ServerToolResult {
-                    tool_use_id,
-                    tool_kind: ServerToolResultKind::WebFetch,
-                    content,
-                },
+                ContentBlock::Unknown { kind, raw } => {
+                    tracing::warn!(
+                        target: "jfc::provider::anthropic_sse",
+                        kind = %kind,
+                        raw_preview = %raw.to_string().chars().take(200).collect::<String>(),
+                        "unknown content_block type ignored"
+                    );
+                    BlockState::Ignored { kind }
+                }
             });
             None
         }
@@ -330,8 +587,11 @@ pub fn translate(
                 })
             }
             Delta::InputJsonDelta { partial_json } => {
-                if let Some(Some(BlockState::ToolUse { input, .. })) = blocks.get_mut(index) {
-                    input.push_str(&partial_json);
+                if let Some(Some(
+                    BlockState::ToolUse { input, .. } | BlockState::ServerToolUse { input, .. },
+                )) = blocks.get_mut(index)
+                {
+                    append_input_delta(input, &partial_json);
                 }
                 Some(StreamEvent::ToolDelta {
                     index,
@@ -340,7 +600,18 @@ pub fn translate(
             }
             Delta::SignatureDelta { .. }
             | Delta::CitationsDelta {}
-            | Delta::ConnectorTextDelta { .. } => None,
+            | Delta::ConnectorTextDelta { .. }
+            | Delta::CompactionContentBlockDelta { .. } => None,
+            Delta::Unknown { kind, raw } => {
+                tracing::warn!(
+                    target: "jfc::provider::anthropic_sse",
+                    index,
+                    kind = %kind,
+                    raw_preview = %raw.to_string().chars().take(200).collect::<String>(),
+                    "unknown content_block_delta type ignored"
+                );
+                None
+            }
         },
         SseEvent::ContentBlockStop { index } => {
             match blocks.get_mut(index).and_then(|b| b.take()) {
@@ -406,6 +677,15 @@ pub fn translate(
                         tool_kind,
                         content,
                     })
+                }
+                Some(BlockState::Ignored { kind }) => {
+                    tracing::debug!(
+                        target: "jfc::provider::anthropic_sse",
+                        index,
+                        kind = %kind,
+                        "ignored content block stopped"
+                    );
+                    None
                 }
                 None => None,
             }
@@ -479,6 +759,15 @@ pub fn translate(
                 .map(|t| t as u64),
         }),
         SseEvent::Ping => None,
+        SseEvent::Unknown { kind, raw } => {
+            tracing::warn!(
+                target: "jfc::provider::anthropic_sse",
+                kind = %kind,
+                raw_preview = %raw.to_string().chars().take(200).collect::<String>(),
+                "unknown SSE event type ignored"
+            );
+            None
+        }
     }
 }
 
@@ -679,12 +968,17 @@ pub fn build_messages(messages: &[ProviderMessage]) -> Value {
 }
 
 pub fn build_tools(tools: &[ToolDef]) -> Value {
+    build_tools_with_advisor(tools, None)
+}
+
+pub fn build_tools_with_advisor(tools: &[ToolDef], advisor_model: Option<&ModelId>) -> Value {
     tracing::trace!(
         target: "jfc::provider::sse",
         tool_count = tools.len(),
+        advisor_model = ?advisor_model.map(|m| m.as_str()),
         "build_tools"
     );
-    tools
+    let mut out = tools
         .iter()
         .map(|t| {
             json!({
@@ -693,8 +987,108 @@ pub fn build_tools(tools: &[ToolDef]) -> Value {
                 "input_schema": t.input_schema,
             })
         })
-        .collect::<Vec<_>>()
-        .into()
+        .collect::<Vec<_>>();
+    if let Some(model) = advisor_model {
+        out.push(json!({
+            "type": "advisor_20260301",
+            "name": "advisor",
+            "model": model.as_str(),
+        }));
+    }
+    out.into()
+}
+
+/// Apply Anthropic-native per-tool schema controls to local tool definitions.
+/// Server tools such as `advisor_20260301` have their own wire shape and must
+/// not receive local-tool-only fields.
+pub fn apply_anthropic_tool_schema_controls(
+    tools: &mut Value,
+    eager_input_streaming: bool,
+    strict_tool_schemas: bool,
+) {
+    if !eager_input_streaming && !strict_tool_schemas {
+        return;
+    }
+    let Some(arr) = tools.as_array_mut() else {
+        return;
+    };
+    for tool in arr {
+        let Some(obj) = tool.as_object_mut() else {
+            continue;
+        };
+        if obj.contains_key("type") {
+            continue;
+        }
+        if eager_input_streaming {
+            obj.insert("eager_input_streaming".to_owned(), json!(true));
+        }
+        if strict_tool_schemas {
+            obj.insert("strict".to_owned(), json!(true));
+        }
+    }
+}
+
+pub(crate) fn cap_cache_control_breakpoints(body: &mut Value, max: usize) {
+    let mut total = count_cache_control_breakpoints(body);
+    if total <= max {
+        return;
+    }
+
+    let mut removed = 0usize;
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages {
+            if total <= max {
+                break;
+            }
+            let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for block in content {
+                if total <= max {
+                    break;
+                }
+                if let Some(obj) = block.as_object_mut()
+                    && obj.remove("cache_control").is_some()
+                {
+                    total -= 1;
+                    removed += 1;
+                }
+            }
+        }
+    }
+
+    if removed > 0 {
+        tracing::debug!(
+            target: "jfc::provider::cache",
+            removed,
+            remaining = total,
+            max,
+            "trimmed message cache_control breakpoints to provider limit"
+        );
+    }
+
+    if total > max {
+        tracing::warn!(
+            target: "jfc::provider::cache",
+            remaining = total,
+            max,
+            "cache_control breakpoint count still exceeds provider limit"
+        );
+    }
+}
+
+pub(crate) fn count_cache_control_breakpoints(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            usize::from(map.contains_key("cache_control"))
+                + map
+                    .values()
+                    .map(count_cache_control_breakpoints)
+                    .sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(count_cache_control_breakpoints).sum(),
+        _ => 0,
+    }
 }
 
 pub fn into_event_stream(resp: reqwest::Response) -> EventStream {
@@ -702,13 +1096,79 @@ pub fn into_event_stream(resp: reqwest::Response) -> EventStream {
     // log every parsed event type at DEBUG, log finish_reason / errors at INFO.
     // Flip `RUST_LOG=jfc::provider::anthropic_sse=trace` to see raw chunks
     // when debugging upstream SSE weirdness.
-    let event_stream = jfc_anthropic_sdk::sse::response_event_stream(resp)
+    let body_started_at = std::time::Instant::now();
+    let mut first_body_chunk_seen = false;
+    let mut body_bytes_seen = 0usize;
+    let mut body_chunks_seen = 0u64;
+    let byte_stream = resp.bytes_stream().map(move |result| {
+        match &result {
+            Ok(chunk) => {
+                body_chunks_seen += 1;
+                body_bytes_seen += chunk.len();
+                if !first_body_chunk_seen {
+                    first_body_chunk_seen = true;
+                    tracing::info!(
+                        target: "jfc::provider::anthropic_sse",
+                        latency_ms = body_started_at.elapsed().as_millis() as u64,
+                        chunk_bytes = chunk.len(),
+                        "first SSE body bytes received"
+                    );
+                }
+                tracing::trace!(
+                    target: "jfc::provider::anthropic_sse",
+                    chunk_bytes = chunk.len(),
+                    body_bytes_seen,
+                    body_chunks_seen,
+                    "sse raw body chunk"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "jfc::provider::anthropic_sse",
+                    error = %e,
+                    body_bytes_seen,
+                    body_chunks_seen,
+                    first_body_chunk_seen,
+                    "SSE body byte stream error"
+                );
+            }
+        }
+        result
+    });
+    let event_stream = jfc_anthropic_sdk::sse::byte_stream_events(byte_stream)
         .scan(
-            (Vec::<Option<BlockState>>::new(), None::<StopReason>),
+            (
+                Vec::<Option<BlockState>>::new(),
+                None::<StopReason>,
+                std::time::Instant::now(),
+                false,
+                0usize,
+                0u64,
+            ),
             |state, result| {
-                let (blocks, stop_reason) = state;
+                let (
+                    blocks,
+                    stop_reason,
+                    stream_started_at,
+                    first_payload_seen,
+                    bytes_seen,
+                    events_seen,
+                ) = state;
                 let out = match result {
                     Ok(ev) => {
+                        *events_seen += 1;
+                        *bytes_seen += ev.data.len();
+                        if !*first_payload_seen && ev.event != "ping" && !ev.data.is_empty() {
+                            *first_payload_seen = true;
+                            tracing::info!(
+                                target: "jfc::provider::anthropic_sse",
+                                latency_ms = stream_started_at.elapsed().as_millis() as u64,
+                                event = %ev.event,
+                                bytes_seen = *bytes_seen,
+                                events_seen = *events_seen,
+                                "first SSE payload received"
+                            );
+                        }
                         tracing::trace!(
                             target: "jfc::provider::anthropic_sse",
                             event = %ev.event,
@@ -757,7 +1217,14 @@ pub fn into_event_stream(resp: reqwest::Response) -> EventStream {
                             }
                         }
                     }
-                    Err(e) => Some(Err(anyhow::anyhow!("SSE stream parse error: {e}"))),
+                    Err(e) => {
+                        let prefix = if *first_payload_seen {
+                            "SSE stream parse error"
+                        } else {
+                            "SSE stream failed before first event"
+                        };
+                        Some(Err(anyhow::anyhow!("{prefix}: {e}")))
+                    }
                 };
                 futures::future::ready(Some(out))
             },
@@ -789,9 +1256,8 @@ fn log_parsed_event(event: &SseEvent) {
                 ContentBlock::RedactedThinking { .. } => "redacted_thinking",
                 ContentBlock::ToolUse { .. } => "tool_use",
                 ContentBlock::ServerToolUse { .. } => "server_tool_use",
-                ContentBlock::WebSearchToolResult { .. } => "web_search_tool_result",
-                ContentBlock::CodeExecutionToolResult { .. } => "code_execution_tool_result",
-                ContentBlock::WebFetchToolResult { .. } => "web_fetch_tool_result",
+                ContentBlock::ServerToolResult { tool_kind, .. } => tool_kind.wire_type(),
+                ContentBlock::Unknown { kind, .. } => kind.as_str(),
             };
             match content_block {
                 ContentBlock::ToolUse { id, name, .. } => {
@@ -812,15 +1278,22 @@ fn log_parsed_event(event: &SseEvent) {
                         "content_block_start server_tool_use"
                     );
                 }
-                ContentBlock::WebSearchToolResult { tool_use_id, .. }
-                | ContentBlock::CodeExecutionToolResult { tool_use_id, .. }
-                | ContentBlock::WebFetchToolResult { tool_use_id, .. } => {
+                ContentBlock::ServerToolResult { tool_use_id, .. } => {
                     tracing::info!(
                         target: "jfc::provider::anthropic_sse",
                         index,
                         kind,
                         tool_use_id = %tool_use_id,
                         "content_block_start server_tool_result"
+                    );
+                }
+                ContentBlock::Unknown { raw, .. } => {
+                    tracing::warn!(
+                        target: "jfc::provider::anthropic_sse",
+                        index,
+                        kind,
+                        raw_preview = %raw.to_string().chars().take(200).collect::<String>(),
+                        "content_block_start unknown"
                     );
                 }
                 _ => {
@@ -843,6 +1316,8 @@ fn log_parsed_event(event: &SseEvent) {
                 Delta::ConnectorTextDelta { connector_text } => {
                     ("connector_text", connector_text.len())
                 }
+                Delta::CompactionContentBlockDelta { content } => ("compaction", content.len()),
+                Delta::Unknown { kind, raw } => (kind.as_str(), raw.to_string().len()),
             };
             tracing::trace!(
                 target: "jfc::provider::anthropic_sse",
@@ -885,6 +1360,14 @@ fn log_parsed_event(event: &SseEvent) {
             );
         }
         SseEvent::Ping => {} // already filtered above by ev.event == "ping"
+        SseEvent::Unknown { kind, raw } => {
+            tracing::warn!(
+                target: "jfc::provider::anthropic_sse",
+                kind = %kind,
+                raw_preview = %raw.to_string().chars().take(200).collect::<String>(),
+                "unknown SSE event"
+            );
+        }
     }
 }
 
@@ -1329,9 +1812,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_delta_type_fails_to_parse() {
+    fn unknown_delta_type_parses_and_ignored() {
         let json = r#"{"type":"content_block_delta","index":0,"delta":{"type":"totally_new_delta","data":"x"}}"#;
-        assert!(serde_json::from_str::<SseEvent>(json).is_err());
+        let event: SseEvent = serde_json::from_str(json).expect("unknown delta should parse");
+        let (mut blocks, mut sr) = empty_state();
+        assert!(translate(event, &mut blocks, &mut sr).is_none());
     }
 
     #[test]
@@ -1399,6 +1884,23 @@ mod tests {
         let v = build_tools(&tools);
         let arr = v.as_array().unwrap();
         assert_eq!(arr[0]["name"], "bash");
+    }
+
+    #[test]
+    fn apply_anthropic_tool_schema_controls_skips_server_tools() {
+        let tools = vec![ToolDef {
+            name: "bash".into(),
+            description: "Execute bash".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let model = ModelId::from("claude-opus-4-7");
+        let mut v = build_tools_with_advisor(&tools, Some(&model));
+        apply_anthropic_tool_schema_controls(&mut v, true, true);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0]["eager_input_streaming"], true);
+        assert_eq!(arr[0]["strict"], true);
+        assert!(arr[1].get("eager_input_streaming").is_none());
+        assert!(arr[1].get("strict").is_none());
     }
 
     #[test]
@@ -1501,7 +2003,6 @@ mod tests {
             &mut blocks,
             &mut sr,
         );
-        // Server tools pre-populate input at start, not via deltas
         assert!(matches!(blocks[0], Some(BlockState::ServerToolUse { .. })));
 
         let out = translate(
@@ -1517,6 +2018,54 @@ mod tests {
             "expected ToolDone with server_tool_use: prefix, got: {out:?}"
         );
         assert!(blocks[0].is_none());
+    }
+
+    #[test]
+    fn server_tool_use_streamed_input_json_accumulates() {
+        let (mut blocks, mut sr) = empty_state();
+        translate(
+            SseEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::ServerToolUse {
+                    id: "srvtool_1".into(),
+                    name: "web_search".into(),
+                    input: serde_json::json!({}),
+                },
+            },
+            &mut blocks,
+            &mut sr,
+        );
+        translate(
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::InputJsonDelta {
+                    partial_json: r#"{"query":"weat"#.into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
+        );
+        translate(
+            SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::InputJsonDelta {
+                    partial_json: r#"her"}"#.into(),
+                },
+            },
+            &mut blocks,
+            &mut sr,
+        );
+        let out = translate(
+            SseEvent::ContentBlockStop { index: 0 },
+            &mut blocks,
+            &mut sr,
+        );
+
+        assert!(
+            matches!(out, Some(StreamEvent::ToolDone { ref input_json, .. })
+                if input_json == r#"{"query":"weather"}"#),
+            "expected accumulated server tool input, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1560,10 +2109,45 @@ mod tests {
         );
         assert!(
             matches!(
+                ToolKind::from_name("server_tool_use:advisor"),
+                ToolKind::ServerAdvisor
+            ),
+            "server_tool_use:advisor should map to ServerAdvisor"
+        );
+        assert!(
+            matches!(
                 ToolKind::from_name("server_tool_use:unknown_future_tool"),
                 ToolKind::Generic(_)
             ),
             "unknown server tool should fall through to Generic"
+        );
+    }
+
+    #[test]
+    fn advisor_tool_result_block_emits_server_result() {
+        let (mut blocks, mut sr) = empty_state();
+        translate(
+            SseEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::ServerToolResult {
+                    tool_use_id: "srvtool_advisor".into(),
+                    tool_kind: ServerToolResultKind::Advisor,
+                    content: serde_json::json!({"type":"advisor_result","text":"check edge cases"}),
+                },
+            },
+            &mut blocks,
+            &mut sr,
+        );
+        let out = translate(
+            SseEvent::ContentBlockStop { index: 0 },
+            &mut blocks,
+            &mut sr,
+        );
+        assert!(
+            matches!(out, Some(StreamEvent::ServerToolResult { ref tool_use_id, ref tool_kind, .. })
+                if tool_use_id == "srvtool_advisor"
+                    && *tool_kind == ServerToolResultKind::Advisor),
+            "expected advisor ServerToolResult, got: {out:?}"
         );
     }
 }

@@ -424,6 +424,16 @@ pub(crate) async fn handle_stream_done(
                 "stream_done dispatching auto-routed batch"
             );
             crate::runtime::update_task_activities(app, &calls);
+            app.in_flight_tool_batches += 1;
+            let _ = tx.try_send(AppEvent::Tool(
+                crate::runtime::ToolEvent::SetInProgressToolUseIds {
+                    action: "add".to_owned(),
+                    ids: calls
+                        .iter()
+                        .map(|tool| tool.id.as_str().to_owned())
+                        .collect(),
+                },
+            ));
             stream::dispatch_tools_batched(
                 calls,
                 tx,
@@ -436,6 +446,7 @@ pub(crate) async fn handle_stream_done(
                 std::sync::Arc::clone(&app.provider),
                 app.model.clone(),
                 app.teammate_event_tx.clone(),
+                stream::LocalAdvisorDispatchContext::from_app(app),
                 app.cancel_token.clone(),
             );
         }

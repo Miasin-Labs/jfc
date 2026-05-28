@@ -26,6 +26,25 @@ fn maybe_show_sandbox_toast(app: &mut App) {
     }
 }
 
+fn emit_in_progress(tx: &EventSender, action: &str, ids: Vec<String>) {
+    if ids.is_empty() {
+        return;
+    }
+    let _ = tx.try_send(AppEvent::Tool(ToolEvent::SetInProgressToolUseIds {
+        action: action.to_owned(),
+        ids,
+    }));
+}
+
+fn emit_deferred_tool_use(tx: &EventSender, tool: &ToolCall, reason: &str) {
+    let _ = tx.try_send(AppEvent::Tool(ToolEvent::DeferredToolUse {
+        id: tool.id.as_str().to_owned(),
+        name: tool.kind.label().to_owned(),
+        input_preview: tool.input.summary(),
+        reason: reason.to_owned(),
+    }));
+}
+
 /// Handle a new tool announced by the stream layer.
 pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: ToolCall) {
     app.record_stream_activity();
@@ -62,6 +81,24 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
         if let Some(msg) = streaming_assistant_mut(app) {
             msg.parts.push(MessagePart::Tool(tool));
         }
+    } else if matches!(
+        tool.kind,
+        ToolKind::ServerWebSearch | ToolKind::ServerCodeExecution | ToolKind::ServerAdvisor
+    ) {
+        // Anthropic server-side tools already executed inside the provider's
+        // sampling loop. Record the server_tool_use block and wait for the
+        // paired server_tool_result event; do not run approval/classifier/local
+        // dispatch paths.
+        tracing::info!(
+            target: "jfc::ui::tool",
+            tool_kind = tool.kind.label(),
+            tool_id = %tool.id,
+            "route=server_side_tool (no local dispatch)"
+        );
+        emit_in_progress(tx, "add", vec![tool.id.as_str().to_owned()]);
+        if let Some(msg) = streaming_assistant_mut(app) {
+            msg.parts.push(MessagePart::Tool(tool));
+        }
     } else if let Some(reason) = app.tool_denied_by_mode(&tool) {
         // Guard 2: the active permission mode auto-denies this
         // tool (e.g. Plan mode blocking a Write, or an
@@ -92,6 +129,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
             tool_id = %tool.id,
             "route=auto_mode_classifier"
         );
+        emit_deferred_tool_use(tx, &tool, "awaiting_classifier");
         // Mark a classifier verdict as in-flight so stream_done holds the
         // turn open until it lands (see App::pending_classifications). The
         // matching decrement is in handle_classifier_decision; the verdict is
@@ -140,6 +178,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
         if let Some(msg) = streaming_assistant_mut(app) {
             msg.parts.push(MessagePart::Tool(tool.clone()));
         }
+        emit_deferred_tool_use(tx, &tool, "awaiting_approval");
         // First approvable tool fills `pending_approval`; every
         // subsequent one queues behind it. The decide-handlers in
         // input.rs pop the next from `approval_queue` after each
@@ -194,6 +233,8 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 .insert(tool.id.as_str().to_owned());
             app.pending_tool_calls.push(tool.clone());
             app.in_flight_eager_dispatches += 1;
+            app.in_flight_tool_batches += 1;
+            emit_in_progress(tx, "add", vec![tool.id.as_str().to_owned()]);
             let calls = vec![tool];
             crate::runtime::update_task_activities(app, &calls);
             crate::stream::dispatch_tools_batched(
@@ -208,6 +249,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 Arc::clone(&app.provider),
                 app.model.clone(),
                 app.teammate_event_tx.clone(),
+                crate::stream::LocalAdvisorDispatchContext::from_app(app),
                 app.cancel_token.clone(),
             );
         } else {
@@ -218,6 +260,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 pending_total = app.pending_tool_calls.len() + 1,
                 "route=deferred_dispatch (streaming-tool-exec OFF, no approval needed)"
             );
+            emit_deferred_tool_use(tx, &tool, "queued_for_stream_done");
             app.pending_tool_calls.push(tool);
         }
     }
@@ -233,6 +276,7 @@ pub(crate) async fn handle_classifier_decision(
 ) {
     app.pending_classifications = app.pending_classifications.saturating_sub(1);
     if blocked {
+        emit_in_progress(tx, "remove", vec![tool.id.as_str().to_owned()]);
         tool.status = ToolStatus::Failed;
         tool.output = ToolOutput::Text(format!(
             "Auto-mode classifier blocked this tool call.\n\nReason: {reason}"
@@ -244,6 +288,7 @@ pub(crate) async fn handle_classifier_decision(
         if let Some(msg) = streaming_assistant_mut(app) {
             msg.parts.push(MessagePart::Tool(tool.clone()));
         }
+        emit_deferred_tool_use(tx, &tool, "queued_for_stream_done");
         app.pending_tool_calls.push(tool);
     }
 
@@ -263,6 +308,15 @@ pub(crate) async fn handle_classifier_decision(
     if !app.pending_tool_calls.is_empty() {
         let calls = std::mem::take(&mut app.pending_tool_calls);
         crate::runtime::update_task_activities(app, &calls);
+        app.in_flight_tool_batches += 1;
+        emit_in_progress(
+            tx,
+            "add",
+            calls
+                .iter()
+                .map(|tool| tool.id.as_str().to_owned())
+                .collect(),
+        );
         crate::stream::dispatch_tools_batched(
             calls,
             tx,
@@ -275,6 +329,7 @@ pub(crate) async fn handle_classifier_decision(
             Arc::clone(&app.provider),
             app.model.clone(),
             app.teammate_event_tx.clone(),
+            crate::stream::LocalAdvisorDispatchContext::from_app(app),
             app.cancel_token.clone(),
         );
     } else {
@@ -287,6 +342,7 @@ pub(crate) async fn handle_classifier_decision(
 /// Handle a server-side tool result (e.g. web_search_tool_result).
 pub(crate) fn handle_server_tool_result(
     app: &mut App,
+    tx: &EventSender,
     tool_use_id: crate::ids::ToolId,
     tool_kind: jfc_provider::ServerToolResultKind,
     content: serde_json::Value,
@@ -301,6 +357,15 @@ pub(crate) fn handle_server_tool_result(
     // `ToolOutput::ServerToolResult` for byte-faithful
     // round-trip on resend.
     app.record_stream_activity();
+    emit_in_progress(tx, "remove", vec![tool_use_id.as_str().to_owned()]);
+    if matches!(tool_kind, jfc_provider::ServerToolResultKind::Advisor) {
+        tracing::info!(
+            target: "jfc::advisor",
+            tool_use_id = %tool_use_id,
+            content_preview = %content.to_string().chars().take(200).collect::<String>(),
+            "tengu_advisor_tool_result"
+        );
+    }
     let mut applied = false;
     if let Some(idx) = app.streaming_assistant_idx
         && let Some(msg) = app.messages.get_mut(idx)

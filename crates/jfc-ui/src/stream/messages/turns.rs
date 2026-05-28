@@ -1,5 +1,12 @@
 use crate::types::{ChatMessage, MessagePart, Role};
 use jfc_provider::{ProviderContent, ProviderMessage, ProviderRole};
+use std::collections::HashSet;
+
+const INTERRUPTED_TOOL_RESULT: &str =
+    "Tool was interrupted before it could run. No output was produced.";
+const ORPHANED_TOOL_RESULT_REMOVED: &str =
+    "[Orphaned tool result removed due to conversation resume]";
+const TOOL_USE_INTERRUPTED_TEXT: &str = "[Tool use interrupted]";
 
 pub(super) fn provider_role(role: Role) -> ProviderRole {
     match role {
@@ -109,6 +116,278 @@ pub(super) fn prepare_for_pause_turn_resume(msgs: Vec<ProviderMessage>) -> Vec<P
     // Note: NO synthetic-user step here. The trailing assistant is the
     // resume cue per Anthropic spec.
     merge_consecutive_same_role(msgs)
+}
+
+/// Upstream-style pre-send repair for `tool_use` / `tool_result` pairing.
+///
+/// Claude Code runs an `ensureToolResultPairing` pass immediately before an API
+/// request. It repairs resumptions and interrupted turns that would otherwise
+/// 400:
+///
+/// * orphaned `tool_result` user blocks are stripped;
+/// * duplicate local `tool_use` IDs are dropped;
+/// * local `tool_use` blocks missing a next-user `tool_result` get a synthetic
+///   error result;
+/// * duplicate/extra `tool_result` blocks are removed;
+/// * unpaired server-side tool uses are stripped from normal sends.
+///
+/// Pause-turn resume deliberately skips this pass: the trailing
+/// `server_tool_use` without a result is the resume signal for Anthropic's
+/// server-side sampling loop.
+pub(super) fn repair_tool_result_pairing(msgs: Vec<ProviderMessage>) -> Vec<ProviderMessage> {
+    let original_len = msgs.len();
+    let mut out = Vec::with_capacity(original_len);
+    let mut repaired = false;
+    let mut seen_tool_use_ids: HashSet<String> = HashSet::new();
+    let mut idx = 0usize;
+
+    while idx < msgs.len() {
+        let msg = msgs[idx].clone();
+        if msg.role != ProviderRole::Assistant {
+            if msg.role == ProviderRole::User
+                && contains_tool_result(&msg)
+                && !out
+                    .last()
+                    .is_some_and(|prev: &ProviderMessage| prev.role == ProviderRole::Assistant)
+            {
+                let filtered: Vec<_> = msg
+                    .content
+                    .into_iter()
+                    .filter(|content| !matches!(content, ProviderContent::ToolResult { .. }))
+                    .collect();
+                if filtered.is_empty() {
+                    if out.is_empty() {
+                        out.push(ProviderMessage {
+                            role: ProviderRole::User,
+                            content: vec![ProviderContent::Text(
+                                ORPHANED_TOOL_RESULT_REMOVED.to_owned(),
+                            )],
+                        });
+                    }
+                } else {
+                    out.push(ProviderMessage {
+                        role: ProviderRole::User,
+                        content: filtered,
+                    });
+                }
+                repaired = true;
+                idx += 1;
+                continue;
+            }
+            out.push(msg);
+            idx += 1;
+            continue;
+        }
+
+        let same_message_server_results: HashSet<String> = msg
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ProviderContent::ServerToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut local_tool_use_ids = Vec::new();
+        let mut assistant_content = Vec::with_capacity(msg.content.len());
+        for content in msg.content {
+            match &content {
+                ProviderContent::ToolUse { id, .. } => {
+                    if seen_tool_use_ids.contains(id) {
+                        repaired = true;
+                        continue;
+                    }
+                    seen_tool_use_ids.insert(id.clone());
+                    local_tool_use_ids.push(id.clone());
+                    assistant_content.push(content);
+                }
+                ProviderContent::ServerToolUse { id, .. } => {
+                    if same_message_server_results.contains(id) {
+                        assistant_content.push(content);
+                    } else {
+                        repaired = true;
+                    }
+                }
+                _ => assistant_content.push(content),
+            }
+        }
+        if assistant_content.is_empty() {
+            assistant_content.push(ProviderContent::Text(TOOL_USE_INTERRUPTED_TEXT.to_owned()));
+        }
+        out.push(ProviderMessage {
+            role: ProviderRole::Assistant,
+            content: assistant_content,
+        });
+
+        if local_tool_use_ids.is_empty() {
+            idx += 1;
+            continue;
+        }
+
+        let next_user = msgs.get(idx + 1).filter(|m| m.role == ProviderRole::User);
+        let next_result_ids = next_user
+            .map(tool_result_ids_with_duplicate_flag)
+            .unwrap_or_default();
+        let local_id_set: HashSet<_> = local_tool_use_ids.iter().cloned().collect();
+        let missing_ids: Vec<String> = local_tool_use_ids
+            .iter()
+            .filter(|id| !next_result_ids.ids.contains(*id))
+            .cloned()
+            .collect();
+        let extra_ids: HashSet<String> = next_result_ids
+            .ids
+            .iter()
+            .filter(|id| !local_id_set.contains(*id))
+            .cloned()
+            .collect();
+
+        if missing_ids.is_empty() && extra_ids.is_empty() && !next_result_ids.has_duplicate {
+            idx += 1;
+            continue;
+        }
+        repaired = true;
+
+        let synthetic_results =
+            missing_ids
+                .into_iter()
+                .map(|tool_use_id| ProviderContent::ToolResult {
+                    tool_use_id,
+                    content: INTERRUPTED_TOOL_RESULT.to_owned(),
+                    is_error: true,
+                });
+
+        if let Some(next) = next_user {
+            let mut seen_results = HashSet::new();
+            let filtered_next = next.content.iter().filter_map(|content| match content {
+                ProviderContent::ToolResult { tool_use_id, .. } => {
+                    if extra_ids.contains(tool_use_id) || !seen_results.insert(tool_use_id.clone())
+                    {
+                        None
+                    } else {
+                        Some(content.clone())
+                    }
+                }
+                _ => Some(content.clone()),
+            });
+            let content: Vec<_> = synthetic_results.chain(filtered_next).collect();
+            if content.is_empty() {
+                out.push(ProviderMessage {
+                    role: ProviderRole::User,
+                    content: vec![ProviderContent::Text(INTERRUPTED_TOOL_RESULT.to_owned())],
+                });
+            } else {
+                out.push(ProviderMessage {
+                    role: ProviderRole::User,
+                    content,
+                });
+            }
+            idx += 2;
+        } else {
+            out.push(ProviderMessage {
+                role: ProviderRole::User,
+                content: synthetic_results.collect(),
+            });
+            idx += 1;
+        }
+    }
+
+    let (out, reminder_count) = fold_system_reminders_into_tool_results(out);
+    if reminder_count > 0 {
+        tracing::warn!(
+            target: "jfc::stream::invariants",
+            reminder_count,
+            "moved top-level system-reminder text into adjacent tool_result content before send"
+        );
+    }
+
+    if repaired {
+        tracing::error!(
+            target: "jfc::stream::invariants",
+            original_message_count = original_len,
+            repaired_message_count = out.len(),
+            "ensure_tool_result_pairing repaired provider message history before send"
+        );
+    }
+    out
+}
+
+fn fold_system_reminders_into_tool_results(
+    msgs: Vec<ProviderMessage>,
+) -> (Vec<ProviderMessage>, usize) {
+    let mut moved = 0usize;
+    let msgs = msgs
+        .into_iter()
+        .map(|msg| {
+            if msg.role != ProviderRole::User || !contains_tool_result(&msg) {
+                return msg;
+            }
+
+            let mut reminders = Vec::new();
+            let mut content = Vec::with_capacity(msg.content.len());
+            for block in msg.content {
+                match block {
+                    ProviderContent::Text(text) if is_system_reminder_text(&text) => {
+                        moved += 1;
+                        reminders.push(text);
+                    }
+                    other => content.push(other),
+                }
+            }
+            if reminders.is_empty() {
+                return ProviderMessage {
+                    role: ProviderRole::User,
+                    content,
+                };
+            }
+
+            if let Some(ProviderContent::ToolResult {
+                content: tool_content,
+                ..
+            }) = content
+                .iter_mut()
+                .rev()
+                .find(|block| matches!(block, ProviderContent::ToolResult { .. }))
+            {
+                for reminder in reminders {
+                    let reminder = reminder.trim();
+                    if reminder.is_empty() {
+                        continue;
+                    }
+                    if !tool_content.trim().is_empty() {
+                        tool_content.push_str("\n\n");
+                    }
+                    tool_content.push_str(reminder);
+                }
+            }
+
+            ProviderMessage {
+                role: ProviderRole::User,
+                content,
+            }
+        })
+        .collect();
+    (msgs, moved)
+}
+
+fn is_system_reminder_text(text: &str) -> bool {
+    text.trim_start().starts_with("<system-reminder>")
+}
+
+#[derive(Default)]
+struct ToolResultIds {
+    ids: HashSet<String>,
+    has_duplicate: bool,
+}
+
+fn tool_result_ids_with_duplicate_flag(msg: &ProviderMessage) -> ToolResultIds {
+    let mut out = ToolResultIds::default();
+    for content in &msg.content {
+        if let ProviderContent::ToolResult { tool_use_id, .. } = content
+            && !out.ids.insert(tool_use_id.clone())
+        {
+            out.has_duplicate = true;
+        }
+    }
+    out
 }
 
 fn strip_trailing_empty_assistants(mut msgs: Vec<ProviderMessage>) -> Vec<ProviderMessage> {
@@ -342,6 +621,26 @@ mod tests {
         }
     }
 
+    fn assistant_tool_use(id: &str) -> ProviderMessage {
+        ProviderMessage {
+            role: ProviderRole::Assistant,
+            content: vec![ProviderContent::ToolUse {
+                id: id.to_owned(),
+                name: "Bash".to_owned(),
+                input: serde_json::json!({"command": "true"}),
+                thought_signature: None,
+            }],
+        }
+    }
+
+    fn user_tool_result(id: &str, content: &str) -> ProviderContent {
+        ProviderContent::ToolResult {
+            tool_use_id: id.to_owned(),
+            content: content.to_owned(),
+            is_error: false,
+        }
+    }
+
     // Normal: the exact bug from the screenshot — `continue_agentic_loop`
     // pushes an empty assistant placeholder, the builder echoes it, Bedrock
     // explodes. After the strip, the conversation ends on the user turn.
@@ -410,6 +709,100 @@ mod tests {
     fn no_op_on_empty_input_robust() {
         let out = ensure_user_last(Vec::<ProviderMessage>::new());
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn repair_injects_missing_tool_result_robust() {
+        let out = repair_tool_result_pairing(vec![user_text("hi"), assistant_tool_use("toolu_1")]);
+        assert_eq!(out.len(), 3);
+        let user = out.last().expect("synthetic tool result user message");
+        assert_eq!(user.role, ProviderRole::User);
+        assert!(matches!(
+            &user.content[0],
+            ProviderContent::ToolResult { tool_use_id, is_error: true, .. }
+                if tool_use_id == "toolu_1"
+        ));
+    }
+
+    #[test]
+    fn repair_removes_leading_orphan_tool_result_robust() {
+        let out = repair_tool_result_pairing(vec![ProviderMessage {
+            role: ProviderRole::User,
+            content: vec![user_tool_result("toolu_orphan", "stale")],
+        }]);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0].content[0],
+            ProviderContent::Text(text) if text.contains("Orphaned tool result removed")
+        ));
+    }
+
+    #[test]
+    fn repair_dedupes_and_removes_extra_tool_results_robust() {
+        let out = repair_tool_result_pairing(vec![
+            user_text("hi"),
+            assistant_tool_use("toolu_ok"),
+            ProviderMessage {
+                role: ProviderRole::User,
+                content: vec![
+                    user_tool_result("toolu_ok", "first"),
+                    user_tool_result("toolu_ok", "duplicate"),
+                    user_tool_result("toolu_extra", "extra"),
+                ],
+            },
+        ]);
+        let user = out.last().expect("tool result user message");
+        let result_ids: Vec<_> = user
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ProviderContent::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(result_ids, vec!["toolu_ok"]);
+    }
+
+    #[test]
+    fn repair_folds_system_reminder_text_into_last_tool_result_normal() {
+        let out = repair_tool_result_pairing(vec![
+            user_text("hi"),
+            assistant_tool_use("toolu_ok"),
+            ProviderMessage {
+                role: ProviderRole::User,
+                content: vec![
+                    user_tool_result("toolu_ok", "first"),
+                    ProviderContent::Text(
+                        "<system-reminder>files changed</system-reminder>".to_owned(),
+                    ),
+                ],
+            },
+        ]);
+        let user = out.last().expect("tool result user message");
+        assert_eq!(user.content.len(), 1);
+        assert!(matches!(
+            &user.content[0],
+            ProviderContent::ToolResult { content, .. }
+                if content.contains("first")
+                    && content.contains("<system-reminder>files changed</system-reminder>")
+        ));
+    }
+
+    #[test]
+    fn repair_strips_unpaired_server_tool_use_from_normal_send_robust() {
+        let out = repair_tool_result_pairing(vec![ProviderMessage {
+            role: ProviderRole::Assistant,
+            content: vec![ProviderContent::ServerToolUse {
+                id: "srvtoolu_1".to_owned(),
+                name: "web_search".to_owned(),
+                input: serde_json::json!({"query": "rust"}),
+            }],
+        }]);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0].content[0],
+            ProviderContent::Text(text) if text == TOOL_USE_INTERRUPTED_TEXT
+        ));
     }
 
     // Normal: multiple trailing empty assistants are ALL stripped.

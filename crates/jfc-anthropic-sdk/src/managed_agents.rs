@@ -30,13 +30,21 @@ pub struct ManagedAgent {
 
 impl From<Agent> for ManagedAgent {
     fn from(a: Agent) -> Self {
+        let model = match a.model {
+            serde_json::Value::String(model) => model,
+            other => other
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_owned(),
+        };
         Self {
             id: a.id,
             name: a.name,
-            model: a.model,
-            system: a.system_prompt,
+            model,
+            system: a.system,
             tools: Vec::new(), // tools are stored separately in AgentCreateParams
-            version: a.version,
+            version: a.version as u32,
         }
     }
 }
@@ -83,6 +91,7 @@ impl From<SessionState> for ManagedSessionStatus {
             SessionState::Idle => Self::Idle,
             SessionState::Running => Self::Running,
             SessionState::Terminated => Self::Terminated,
+            SessionState::Rescheduling => Self::Running,
             SessionState::Rescheduled => Self::Running,
             SessionState::RequiresAction => Self::Idle,
         }
@@ -149,15 +158,30 @@ impl ManagedAgentsClient {
 
     /// Create a new session for an agent.
     pub async fn create_session(&self, agent_id: String) -> Result<ManagedSession> {
-        let params = SessionCreateParams {
-            agent_id,
-            resources: Vec::new(),
-        };
+        let params = SessionCreateParams::for_agent(agent_id);
         let session = self.session_service.create(params).await?;
         Ok(ManagedSession {
             id: session.id,
             agent_id: session.agent_id,
-            environment_id: None,
+            environment_id: session.environment_id,
+            status: session.state.into(),
+            usage: SessionUsage::default(),
+        })
+    }
+
+    /// Create a new session in a self-hosted/managed environment.
+    pub async fn create_session_in_environment(
+        &self,
+        agent_id: String,
+        environment_id: String,
+    ) -> Result<ManagedSession> {
+        let mut params = SessionCreateParams::for_agent(agent_id);
+        params.environment_id = Some(environment_id);
+        let session = self.session_service.create(params).await?;
+        Ok(ManagedSession {
+            id: session.id,
+            agent_id: session.agent_id,
+            environment_id: session.environment_id,
             status: session.state.into(),
             usage: SessionUsage::default(),
         })
@@ -182,8 +206,8 @@ impl ManagedAgentsClient {
     pub async fn list_sessions(&self, agent_id: Option<&str>) -> Result<Vec<ManagedSession>> {
         // Use the sessions list endpoint with optional agent_id filter
         let path = match agent_id {
-            Some(aid) => format!("/v1/beta/sessions?agent_id={aid}"),
-            None => "/v1/beta/sessions".to_string(),
+            Some(aid) => format!("/v1/sessions?beta=true&agent_id={aid}"),
+            None => "/v1/sessions?beta=true".to_string(),
         };
         let resp = self
             .client
@@ -207,7 +231,7 @@ impl ManagedAgentsClient {
             .map(|s| ManagedSession {
                 id: s.id,
                 agent_id: s.agent_id,
-                environment_id: None,
+                environment_id: s.environment_id,
                 status: s.state.into(),
                 usage: SessionUsage::default(),
             })

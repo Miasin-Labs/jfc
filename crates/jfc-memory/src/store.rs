@@ -40,6 +40,8 @@ pub enum MemoryLevel {
     /// write here too. Merge near-duplicates within `team/`. DO NOT
     /// delete a team memory just because you don't recognize it."
     Team,
+    /// Extra memory directories supplied by `JFC_MEMORY_DIRS`.
+    External,
 }
 
 impl fmt::Display for MemoryLevel {
@@ -48,6 +50,7 @@ impl fmt::Display for MemoryLevel {
             Self::User => write!(f, "user"),
             Self::Project => write!(f, "project"),
             Self::Team => write!(f, "team"),
+            Self::External => write!(f, "external"),
         }
     }
 }
@@ -221,6 +224,27 @@ pub struct MemoryEntry {
     pub body: String,
 }
 
+/// Summary of a local team-memory sync between `<project>/.jfc/memory/team`
+/// and another local directory. This intentionally stays filesystem-only:
+/// cloud/team-server sync can be layered above it without changing the
+/// conflict behavior users see in the repo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamMemorySyncReport {
+    pub local_dir: PathBuf,
+    pub remote_dir: PathBuf,
+    pub pushed: usize,
+    pub pulled: usize,
+    pub conflicts: Vec<TeamMemoryConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamMemoryConflict {
+    pub file_name: String,
+    pub local_path: PathBuf,
+    pub remote_path: PathBuf,
+    pub conflict_path: PathBuf,
+}
+
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
 /// Returns the user-level memory directory: `~/.config/jfc/memory/`
@@ -256,6 +280,13 @@ pub fn is_memory_path(path: &Path) -> bool {
         return true;
     }
 
+    for dir in extra_memory_dirs() {
+        let canon = dir.canonicalize().unwrap_or(dir);
+        if normalized.starts_with(&canon) {
+            return true;
+        }
+    }
+
     // Check against current working directory's project memory
     if let Ok(cwd) = std::env::current_dir() {
         let proj_dir = project_memory_dir(&cwd);
@@ -289,14 +320,24 @@ pub fn load_all_memories(project_root: &Path) -> Vec<MemoryEntry> {
         MemoryLevel::Team,
         &mut entries,
     );
+    for dir in extra_memory_dirs() {
+        load_from_dir(&dir, MemoryLevel::External, &mut entries);
+    }
     tracing::info!(
         target: "jfc::memory",
         user_dir = %user_memory_dir().display(),
         project_dir = %project_memory_dir(project_root).display(),
+        extra_dirs = extra_memory_dirs().len(),
         total_entries = entries.len(),
         "loaded all memories"
     );
     entries
+}
+
+fn extra_memory_dirs() -> Vec<PathBuf> {
+    std::env::var_os("JFC_MEMORY_DIRS")
+        .map(|raw| std::env::split_paths(&raw).collect())
+        .unwrap_or_default()
 }
 
 /// Load memory entries from a single directory.
@@ -378,6 +419,7 @@ pub fn create_memory(
         MemoryLevel::User => user_memory_dir(),
         MemoryLevel::Project => project_memory_dir(project_root),
         MemoryLevel::Team => team_memory_dir(project_root),
+        MemoryLevel::External => project_memory_dir(project_root),
     };
 
     // Ensure directory exists
@@ -432,6 +474,76 @@ pub fn delete_memory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Synchronize team memory with another local directory.
+///
+/// Missing files are copied in both directions. Divergent files are never
+/// overwritten; the remote copy is written into the local team directory as
+/// `<stem>.conflict-<timestamp>.md` so the next normal memory load exposes it
+/// for manual reconciliation.
+pub fn sync_team_memory(
+    project_root: &Path,
+    remote_dir: &Path,
+) -> Result<TeamMemorySyncReport, String> {
+    let local_dir = team_memory_dir(project_root);
+    std::fs::create_dir_all(&local_dir)
+        .map_err(|e| format!("failed to create local team memory dir: {e}"))?;
+    std::fs::create_dir_all(remote_dir)
+        .map_err(|e| format!("failed to create remote team memory dir: {e}"))?;
+
+    let mut names = std::collections::BTreeSet::new();
+    collect_md_file_names(&local_dir, &mut names)?;
+    collect_md_file_names(remote_dir, &mut names)?;
+
+    let mut report = TeamMemorySyncReport {
+        local_dir: local_dir.clone(),
+        remote_dir: remote_dir.to_path_buf(),
+        pushed: 0,
+        pulled: 0,
+        conflicts: Vec::new(),
+    };
+
+    for name in names {
+        let local_path = local_dir.join(&name);
+        let remote_path = remote_dir.join(&name);
+        match (local_path.exists(), remote_path.exists()) {
+            (true, false) => {
+                let bytes = std::fs::read(&local_path)
+                    .map_err(|e| format!("failed to read {}: {e}", local_path.display()))?;
+                write_atomic_sync(&remote_path, &bytes)
+                    .map_err(|e| format!("failed to write {}: {e}", remote_path.display()))?;
+                report.pushed += 1;
+            }
+            (false, true) => {
+                let bytes = std::fs::read(&remote_path)
+                    .map_err(|e| format!("failed to read {}: {e}", remote_path.display()))?;
+                write_atomic_sync(&local_path, &bytes)
+                    .map_err(|e| format!("failed to write {}: {e}", local_path.display()))?;
+                report.pulled += 1;
+            }
+            (true, true) => {
+                let local_bytes = std::fs::read(&local_path)
+                    .map_err(|e| format!("failed to read {}: {e}", local_path.display()))?;
+                let remote_bytes = std::fs::read(&remote_path)
+                    .map_err(|e| format!("failed to read {}: {e}", remote_path.display()))?;
+                if local_bytes != remote_bytes {
+                    let conflict_path = conflict_path_for(&local_dir, &name);
+                    write_atomic_sync(&conflict_path, &remote_bytes)
+                        .map_err(|e| format!("failed to write {}: {e}", conflict_path.display()))?;
+                    report.conflicts.push(TeamMemoryConflict {
+                        file_name: name,
+                        local_path,
+                        remote_path,
+                        conflict_path,
+                    });
+                }
+            }
+            (false, false) => {}
+        }
+    }
+
+    Ok(report)
+}
+
 // ─── Rendering into system prompt ───────────────────────────────────────────
 
 /// Render all loaded memories into a system-prompt-ready block.
@@ -456,6 +568,10 @@ pub fn render_memories_section(memories: &[MemoryEntry]) -> Option<String> {
     let team_memories: Vec<_> = memories
         .iter()
         .filter(|m| m.level == MemoryLevel::Team)
+        .collect();
+    let external_memories: Vec<_> = memories
+        .iter()
+        .filter(|m| m.level == MemoryLevel::External)
         .collect();
 
     if !user_memories.is_empty() {
@@ -484,6 +600,13 @@ pub fn render_memories_section(memories: &[MemoryEntry]) -> Option<String> {
         }
     }
 
+    if !external_memories.is_empty() {
+        out.push_str("\n## External memory directories\n\n");
+        for mem in &external_memories {
+            render_memory_entry(mem, &mut out);
+        }
+    }
+
     out.push_str(MEMORY_USAGE_SECTIONS);
 
     tracing::debug!(
@@ -491,6 +614,7 @@ pub fn render_memories_section(memories: &[MemoryEntry]) -> Option<String> {
         user_count = user_memories.len(),
         project_count = project_memories.len(),
         team_count = team_memories.len(),
+        external_count = external_memories.len(),
         output_len = out.len(),
         "rendered memories section"
     );
@@ -604,6 +728,34 @@ fn slugify(text: &str, max_len: usize) -> String {
     result.trim_end_matches('-').to_string()
 }
 
+fn collect_md_file_names(
+    dir: &Path,
+    out: &mut std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    for entry in
+        std::fs::read_dir(dir).map_err(|e| format!("failed to read {}: {e}", dir.display()))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read entry in {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            out.insert(name.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn conflict_path_for(local_dir: &Path, file_name: &str) -> PathBuf {
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let stamp = now.format("%Y%m%d-%H%M%S");
+    match file_name.strip_suffix(".md") {
+        Some(stem) => local_dir.join(format!("{stem}.conflict-{stamp}.md")),
+        None => local_dir.join(format!("{file_name}.conflict-{stamp}.md")),
+    }
+}
+
 // ─── Atomic write (inlined from jfc-ui/atomic_write.rs) ─────────────────────
 
 fn write_atomic_sync(path: &Path, content: &[u8]) -> std::io::Result<()> {
@@ -696,14 +848,13 @@ mod tests {
 
         // Load it back
         let memories = load_all_memories(&project);
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].frontmatter.memory_type, MemoryType::Feedback);
-        assert_eq!(memories[0].frontmatter.scope, MemoryScope::Team);
-        assert!(
-            memories[0]
-                .body
-                .contains("Always run tests before committing.")
-        );
+        let created = memories
+            .iter()
+            .find(|mem| mem.path == path)
+            .expect("created memory should be loaded");
+        assert_eq!(created.frontmatter.memory_type, MemoryType::Feedback);
+        assert_eq!(created.frontmatter.scope, MemoryScope::Team);
+        assert!(created.body.contains("Always run tests before committing."));
     }
 
     #[test]

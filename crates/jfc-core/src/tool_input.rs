@@ -1106,11 +1106,44 @@ impl ToolInput {
             obj.and_then(|map| map.get(key))
                 .and_then(|value| value.as_u64())
         };
+        let opt_u64_loose_field = |key: &str| -> Option<u64> {
+            obj.and_then(|map| map.get(key)).and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            })
+        };
         let bool_field = |key: &str| -> bool {
             obj.and_then(|map| map.get(key))
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false)
         };
+        let req_str_one_of =
+            |primary: &'static str, aliases: &[&'static str]| -> Result<String, ToolInputError> {
+                let Some(map) = obj else {
+                    return Err(ToolInputError::InvalidShape {
+                        tool: tool(),
+                        reason: "tool input was not a JSON object".into(),
+                    });
+                };
+                let key = std::iter::once(primary)
+                    .chain(aliases.iter().copied())
+                    .find(|key| map.contains_key(*key))
+                    .unwrap_or(primary);
+                match map.get(key) {
+                    None | Some(serde_json::Value::Null) => Err(ToolInputError::MissingField {
+                        tool: tool(),
+                        field: primary,
+                    }),
+                    Some(serde_json::Value::String(s)) => Ok(s.clone()),
+                    Some(other) => Err(ToolInputError::WrongType {
+                        tool: tool(),
+                        field: key,
+                        expected: "string",
+                        got: json_type_name(other),
+                    }),
+                }
+            };
         let kind = ToolKind::from_name(tool_name);
         let needs_object = !matches!(
             kind,
@@ -1119,6 +1152,7 @@ impl ToolInput {
                 | ToolKind::UnknownTool { .. }
                 | ToolKind::ServerWebSearch
                 | ToolKind::ServerCodeExecution
+                | ToolKind::ServerAdvisor
         );
         if needs_object && obj.is_none() {
             return Err(ToolInputError::InvalidShape {
@@ -1131,6 +1165,17 @@ impl ToolInput {
         }
         let parsed = match kind {
             // ─── Bespoke arms: irregular parsing kept hand-written ───
+            ToolKind::Edit => Self::Edit {
+                file_path: req_str("file_path")?,
+                old_string: req_str_one_of("old_string", &["old_str"])?,
+                new_string: req_str_one_of("new_string", &["new_str"])?,
+                replacement: ReplacementMode::from_replace_all(bool_field("replace_all")),
+            },
+            ToolKind::Read => Self::Read {
+                file_path: req_str("file_path")?,
+                offset: opt_u64_loose_field("offset"),
+                limit: opt_u64_loose_field("limit"),
+            },
             ToolKind::Bash => {
                 let command = req_str("command")?;
                 if command.is_empty() {
@@ -1195,6 +1240,15 @@ impl ToolInput {
                     priority,
                 }
             }
+            ToolKind::TaskStop => Self::TaskStop {
+                task_id: opt_str_field("task_id")
+                    .or_else(|| opt_str_field("agentId"))
+                    .or_else(|| opt_str_field("bash_id"))
+                    .ok_or_else(|| ToolInputError::MissingField {
+                        tool: tool(),
+                        field: "task_id",
+                    })?,
+            },
             ToolKind::TaskValidate => Self::TaskValidate,
             ToolKind::Task => Self::Task(TaskInput {
                 description: req_str("description")?,
@@ -1261,6 +1315,14 @@ impl ToolInput {
                         format!("\u{26a1} {preview}")
                     })
                     .unwrap_or_else(|| value.to_string()),
+            },
+            ToolKind::ServerAdvisor => Self::Generic {
+                summary: if value.is_object() && value.as_object().is_some_and(|map| map.is_empty())
+                {
+                    "advisor".to_owned()
+                } else {
+                    value.to_string()
+                },
             },
             ToolKind::Generic(_) | ToolKind::UnknownTool { .. } => Self::Generic {
                 summary: value.to_string(),
@@ -1550,8 +1612,46 @@ mod macro_equivalence_tests {
             snapshot.trim(),
             expected.trim(),
             "tool_input behavior changed. If intentional, regenerate \
-             tool_input_snapshot.txt by temporarily swapping this assert for \
+            tool_input_snapshot.txt by temporarily swapping this assert for \
              a std::fs::write of `snapshot.trim()`."
         );
+    }
+
+    #[test]
+    fn claude_code_compat_aliases_parse_normal() {
+        assert!(matches!(
+            ToolInput::from_value(
+                "Edit",
+                json!({"file_path":"a.rs","old_str":"old","new_str":"new"})
+            )
+            .unwrap(),
+            ToolInput::Edit {
+                old_string,
+                new_string,
+                ..
+            } if old_string == "old" && new_string == "new"
+        ));
+
+        assert!(matches!(
+            ToolInput::from_value(
+                "Read",
+                json!({"file_path":"a.rs","offset":"12","limit":"34"})
+            )
+            .unwrap(),
+            ToolInput::Read {
+                offset: Some(12),
+                limit: Some(34),
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            ToolInput::from_value("TaskStop", json!({"agentId":"agent-1"})).unwrap(),
+            ToolInput::TaskStop { task_id } if task_id == "agent-1"
+        ));
+        assert!(matches!(
+            ToolInput::from_value("TaskStop", json!({"bash_id":"bash-1"})).unwrap(),
+            ToolInput::TaskStop { task_id } if task_id == "bash-1"
+        ));
     }
 }

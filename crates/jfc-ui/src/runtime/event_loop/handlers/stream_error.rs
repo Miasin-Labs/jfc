@@ -200,6 +200,11 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
         app.turn_started_at = None;
     }
     app.pending_tool_calls.clear();
+    app.pre_dispatched_tool_ids.clear();
+    app.deferred_tool_uses.clear();
+    app.in_progress_tool_use_ids.clear();
+    app.in_flight_eager_dispatches = 0;
+    app.in_flight_tool_batches = 0;
     // Reset the interrupt flag so background tasks or the
     // next auto-retry don't see a stale `true`. Also mint
     // a fresh cancel token — the previous one may already

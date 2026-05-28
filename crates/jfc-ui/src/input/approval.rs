@@ -4,6 +4,7 @@ use crossterm::event::{self, KeyCode};
 use tokio::sync::mpsc;
 
 use crate::app::{App, AppEvent, ApprovalChoice};
+use crate::runtime::ToolEvent;
 use crate::stream;
 use crate::types::{MessagePart, ToolCall, ToolOutput, ToolStatus};
 
@@ -15,7 +16,24 @@ fn insert_tool_into_message(_app: &mut App, _tool: &ToolCall) {
     // intentionally empty — the tool is already in `messages` from StreamTool.
 }
 
-fn dispatch_approved_tools(app: &App, tools: Vec<ToolCall>, tx: &mpsc::Sender<AppEvent>) {
+fn send_set_in_progress(tx: &mpsc::Sender<AppEvent>, action: &str, ids: Vec<String>) {
+    if ids.is_empty() {
+        return;
+    }
+    let _ = tx.try_send(AppEvent::Tool(ToolEvent::SetInProgressToolUseIds {
+        action: action.to_owned(),
+        ids,
+    }));
+}
+
+fn tool_ids(tools: &[ToolCall]) -> Vec<String> {
+    tools
+        .iter()
+        .map(|tool| tool.id.as_str().to_owned())
+        .collect()
+}
+
+fn dispatch_approved_tools(app: &mut App, tools: Vec<ToolCall>, tx: &mpsc::Sender<AppEvent>) {
     if tools.is_empty() {
         return;
     }
@@ -28,6 +46,8 @@ fn dispatch_approved_tools(app: &App, tools: Vec<ToolCall>, tx: &mpsc::Sender<Ap
             "approved → dispatch"
         );
     }
+    send_set_in_progress(tx, "add", tool_ids(&tools));
+    app.in_flight_tool_batches += 1;
     stream::dispatch_tools_batched(
         tools,
         tx,
@@ -40,6 +60,7 @@ fn dispatch_approved_tools(app: &App, tools: Vec<ToolCall>, tx: &mpsc::Sender<Ap
         Arc::clone(&app.provider),
         app.model.clone(),
         app.teammate_event_tx.clone(),
+        stream::LocalAdvisorDispatchContext::from_app(app),
         app.cancel_token.clone(),
     );
 }
@@ -100,17 +121,126 @@ fn finish_approval_decision(
 /// rather than appending a duplicate. The agentic loop's
 /// `should_continue_loop` then sees a Failed entry and continues normally.
 fn deny_tool(app: &mut App, tool: ToolCall) {
-    if let Some(idx) = app.streaming_assistant_idx
-        && let Some(msg) = app.messages.get_mut(idx)
-    {
+    let id = tool.id.as_str().to_owned();
+    app.set_in_progress_tool_use_ids("remove", std::slice::from_ref(&id));
+    let mark_denied = |msg: &mut crate::types::ChatMessage| {
         for part in &mut msg.parts {
             if let MessagePart::Tool(tc) = part
                 && tc.id == tool.id
             {
                 tc.status = ToolStatus::Failed;
                 tc.output = ToolOutput::Text("Denied by user".into());
-                return;
+                return true;
             }
+        }
+        false
+    };
+    if let Some(idx) = app.streaming_assistant_idx
+        && let Some(msg) = app.messages.get_mut(idx)
+        && mark_denied(msg)
+    {
+        return;
+    }
+    for msg in &mut app.messages {
+        if mark_denied(msg) {
+            return;
+        }
+    }
+}
+
+fn take_queued_approval(app: &mut App, tool_use_id: &str) -> Option<ToolCall> {
+    let pos = app
+        .approval_queue
+        .iter()
+        .position(|tool| tool.id.as_str() == tool_use_id)?;
+    app.approval_queue.remove(pos)
+}
+
+fn find_unresolved_tool_call(app: &App, tool_use_id: &str) -> Option<ToolCall> {
+    app.messages.iter().rev().find_map(|msg| {
+        msg.parts.iter().find_map(|part| {
+            let MessagePart::Tool(tool) = part else {
+                return None;
+            };
+            if tool.id.as_str() == tool_use_id && !tool.status.is_terminal() {
+                Some(tool.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+pub(crate) fn handle_remote_approval_response(
+    app: &mut App,
+    tx: &mpsc::Sender<AppEvent>,
+    tool_use_id: String,
+    approved: bool,
+) {
+    tracing::info!(
+        target: "jfc::remote",
+        tool_use_id = %tool_use_id,
+        approved,
+        "remote approval response"
+    );
+
+    if app
+        .pending_approval
+        .as_ref()
+        .is_some_and(|pending| pending.tool.id.as_str() == tool_use_id)
+    {
+        let tool = app.pending_approval.take().expect("checked above").tool;
+        if approved {
+            insert_tool_into_message(app, &tool);
+            finish_approval_decision(app, tx, vec![tool]);
+        } else {
+            deny_tool(app, tool);
+            finish_approval_decision(app, tx, Vec::new());
+        }
+        return;
+    }
+
+    if let Some(tool) = take_queued_approval(app, &tool_use_id) {
+        if approved {
+            insert_tool_into_message(app, &tool);
+            dispatch_approved_tools(app, vec![tool], tx);
+        } else {
+            deny_tool(app, tool);
+            if app.pending_approval.is_none() && app.approval_queue.is_empty() {
+                crate::runtime::send_critical(
+                    tx,
+                    AppEvent::Tool(crate::runtime::ToolEvent::AllComplete),
+                );
+            }
+        }
+        return;
+    }
+
+    let Some(tool) = find_unresolved_tool_call(app, &tool_use_id) else {
+        tracing::warn!(
+            target: "jfc::remote",
+            tool_use_id = %tool_use_id,
+            approved,
+            "dropping orphaned remote approval response: no unresolved tool_use found"
+        );
+        return;
+    };
+
+    tracing::warn!(
+        target: "jfc::remote",
+        tool_use_id = %tool_use_id,
+        approved,
+        "recovering orphaned remote approval response against unresolved transcript tool_use"
+    );
+    if approved {
+        dispatch_approved_tools(app, vec![tool], tx);
+    } else {
+        deny_tool(app, tool);
+        if app.pending_approval.is_none() && app.approval_queue.is_empty() {
+            crate::runtime::send_critical(
+                tx,
+                AppEvent::Tool(crate::runtime::ToolEvent::AllComplete),
+            );
         }
     }
 }

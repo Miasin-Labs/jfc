@@ -41,6 +41,26 @@ pub(crate) fn restart_stream_in_place_with_overrides(
     overrides
         .background_reminders
         .extend(app.take_background_reminders());
+    if overrides.disallowed_tools.is_empty() {
+        overrides.disallowed_tools = app.effective_disallowed_tools();
+    }
+    if overrides.allowed_tools.is_empty() {
+        overrides.allowed_tools = app.allowed_tools.clone();
+    }
+    if overrides.custom_betas.is_empty() {
+        overrides.custom_betas = app.custom_betas.clone();
+    }
+    overrides.fine_grained_tool_streaming |= app.fine_grained_tool_streaming;
+    overrides.strict_tool_schemas |= app.strict_tool_schemas;
+    if overrides.task_budget.is_none() {
+        overrides.task_budget = app.cli_task_budget;
+    }
+    if overrides.max_thinking_tokens.is_none() {
+        overrides.max_thinking_tokens = app.cli_max_thinking_tokens;
+    }
+    if overrides.thinking_display.is_none() {
+        overrides.thinking_display = app.cli_thinking_display.clone();
+    }
 
     let msg = app
         .messages

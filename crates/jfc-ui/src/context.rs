@@ -40,11 +40,9 @@ pub fn parse_claudemd_frontmatter(content: &str) -> (ClaudeMdFrontmatter, &str) 
     // Find the closing `---` delimiter (must be on its own line after the opening).
     let after_opening = &trimmed[3..];
     // Skip optional trailing whitespace/newline on the opening `---` line
-    let after_opening = after_opening.strip_prefix('\n').unwrap_or(
-        after_opening
-            .strip_prefix("\r\n")
-            .unwrap_or(after_opening),
-    );
+    let after_opening = after_opening
+        .strip_prefix('\n')
+        .unwrap_or(after_opening.strip_prefix("\r\n").unwrap_or(after_opening));
 
     // Find the closing `---` on its own line
     let closing_pos = find_closing_frontmatter(after_opening);
@@ -64,11 +62,7 @@ pub fn parse_claudemd_frontmatter(content: &str) -> (ClaudeMdFrontmatter, &str) 
                 .strip_prefix("---")
                 .unwrap_or(body_start)
                 .strip_prefix("\r\n")
-                .unwrap_or(
-                    body_start
-                        .strip_prefix("---")
-                        .unwrap_or(body_start),
-                ),
+                .unwrap_or(body_start.strip_prefix("---").unwrap_or(body_start)),
         );
 
     let raw: RawFrontmatter = match serde_yaml::from_str(yaml_block) {
@@ -103,7 +97,11 @@ pub fn parse_claudemd_frontmatter(content: &str) -> (ClaudeMdFrontmatter, &str) 
 /// start of a line.
 fn find_closing_frontmatter(s: &str) -> Option<usize> {
     // Check if it starts right at position 0
-    if s.starts_with("---") && (s.len() == 3 || s.as_bytes().get(3) == Some(&b'\n') || s.as_bytes().get(3) == Some(&b'\r')) {
+    if s.starts_with("---")
+        && (s.len() == 3
+            || s.as_bytes().get(3) == Some(&b'\n')
+            || s.as_bytes().get(3) == Some(&b'\r'))
+    {
         return Some(0);
     }
     // Search for `\n---` pattern
@@ -308,11 +306,7 @@ impl ClaudeMdHierarchy {
                 if !out.is_empty() {
                     out.push_str("\n\n");
                 }
-                out.push_str(&format!(
-                    "# {label} ({})\n\n{}",
-                    path.display(),
-                    body
-                ));
+                out.push_str(&format!("# {label} ({})\n\n{}", path.display(), body));
             }
         };
         push("Managed policy", &self.managed);

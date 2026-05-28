@@ -15,20 +15,32 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod auth;
+mod bridge;
 mod daemon;
 mod headless;
 mod logging;
+mod memory;
+mod plugin;
+mod policy;
 mod provider_bootstrap;
 mod rc;
 mod terminal;
 
-pub(crate) use provider_bootstrap::{build_providers, provider_for_model};
+pub(crate) use provider_bootstrap::{
+    build_providers, provider_for_model, qualified_model_id, resolve_provider_model,
+};
 
 use auth::{AuthSubcommand, run_auth_subcommand};
+use bridge::{BridgeSubcommand, run_bridge_subcommand};
 use daemon::{DaemonSubcommand, compact_terminal_agents_on_startup, run_daemon_subcommand};
-use headless::{run_print_mode, run_remote_session};
+use headless::{
+    HeadlessInputFormat, HeadlessOutputFormat, PrintModeConfig, run_print_mode, run_remote_session,
+};
 use jfc_provider::ModelId;
 use logging::init_tracing;
+use memory::{MemorySubcommand, run_memory_subcommand};
+use plugin::{PluginSubcommand, run_plugin_subcommand};
+use policy::{PolicySubcommand, run_policy_subcommand};
 use rc::{RcSubcommand, run_rc_subcommand};
 use terminal::{enable_keyboard_enhancement, install_terminal_panic_hook};
 
@@ -55,6 +67,37 @@ pub(crate) struct Cli {
     #[arg(long = "print", short = 'P')]
     print_mode: bool,
 
+    /// Headless output format for `--print`: `text`, `json`, or `stream-json`.
+    #[arg(long = "output-format", value_enum, default_value = "text")]
+    output_format: HeadlessOutputFormat,
+
+    /// Headless input format for `--print`: `text` or `stream-json`.
+    #[arg(long = "input-format", value_enum, default_value = "text")]
+    input_format: HeadlessInputFormat,
+
+    /// Include hook lifecycle events in `--output-format stream-json`.
+    #[arg(long = "include-hook-events")]
+    include_hook_events: bool,
+
+    /// Include cumulative partial assistant messages in `stream-json` output.
+    #[arg(long = "include-partial-messages")]
+    include_partial_messages: bool,
+
+    /// Write a JSON mirror of the headless session transcript to this path.
+    #[arg(long = "session-mirror", value_name = "PATH")]
+    session_mirror: Option<PathBuf>,
+
+    /// Tool name an SDK host uses for permission prompts in headless mode.
+    /// Parsed for Claude Code SDK flag parity; local JFC permission handling
+    /// still uses its native permission modes.
+    #[arg(long = "permission-prompt-tool", value_name = "TOOL")]
+    permission_prompt_tool: Option<String>,
+
+    /// SDK control URL for hosted integrations. Parsed for flag parity; JFC's
+    /// local runtime does not require it for normal TUI/headless operation.
+    #[arg(long = "sdk-url", value_name = "URL")]
+    sdk_url: Option<String>,
+
     /// Connect to a remote managed-agent session by ID. Streams the
     /// session's events into the TUI transcript and forwards user
     /// input via the Sessions API. Pairs with the SDK's
@@ -65,6 +108,31 @@ pub(crate) struct Cli {
     /// Model to use (overrides ANTHROPIC_MODEL env var)
     #[arg(long, short = 'm', value_name = "MODEL")]
     model: Option<String>,
+
+    /// Set JFC's local/client-side advisor model. Optional value accepts `opus`,
+    /// `sonnet`, `haiku`, a full model id, or uses the active model when omitted.
+    #[arg(
+        long = "advisor",
+        value_name = "MODEL",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with = "no_advisor"
+    )]
+    advisor: Option<String>,
+
+    /// Disable JFC's local/client-side advisor for this launch.
+    #[arg(long = "no-advisor")]
+    no_advisor: bool,
+
+    /// Enable Anthropic's upstream server-side advisor tool. Optional value
+    /// accepts `opus`, `sonnet`, or a full model id.
+    #[arg(
+        long = "server-advisor",
+        value_name = "MODEL",
+        num_args = 0..=1,
+        default_missing_value = "opus"
+    )]
+    server_advisor: Option<String>,
 
     /// Initial permission mode. Matches Claude Code 2.1.141's
     /// `--permission-mode` flag: lets a caller boot directly into a
@@ -97,24 +165,41 @@ pub(crate) struct Cli {
     /// Comma-separated allowlist of tool names. Anything outside this
     /// list is rejected. Empty / unset = no allowlist (default jfc
     /// behaviour). Example: `--allowed-tools "Read,Glob,Grep"`.
-    #[arg(long = "allowed-tools", value_name = "TOOLS")]
+    #[arg(
+        long = "allowed-tools",
+        alias = "allowedTools",
+        alias = "tools",
+        value_name = "TOOLS"
+    )]
     allowed_tools: Option<String>,
 
     /// Comma-separated denylist of tool names. Names in this list are
     /// rejected regardless of the allowlist.
-    #[arg(long = "disallowed-tools", value_name = "TOOLS")]
+    #[arg(
+        long = "disallowed-tools",
+        alias = "disallowedTools",
+        value_name = "TOOLS"
+    )]
     disallowed_tools: Option<String>,
 
     /// Extra system-prompt text appended after the built-in prompt.
     /// Use for project-specific style, persona, or constraint
     /// reminders. Mutually overrideable with `--system-prompt-file`
     /// (file wins if both are set).
-    #[arg(long = "system-prompt", value_name = "TEXT")]
+    #[arg(
+        long = "system-prompt",
+        alias = "append-system-prompt",
+        value_name = "TEXT"
+    )]
     system_prompt: Option<String>,
 
     /// Read additional system-prompt text from the given file. Takes
     /// precedence over `--system-prompt` when both are supplied.
-    #[arg(long = "system-prompt-file", value_name = "PATH")]
+    #[arg(
+        long = "system-prompt-file",
+        alias = "append-system-prompt-file",
+        value_name = "PATH"
+    )]
     system_prompt_file: Option<PathBuf>,
 
     /// Skip every permission check — every tool runs without prompting.
@@ -165,6 +250,28 @@ pub(crate) struct Cli {
     #[arg(long = "task-budget", value_name = "N")]
     task_budget: Option<u64>,
 
+    /// Additional Anthropic beta tokens to append to native requests.
+    /// Accepts comma-separated values and can be repeated.
+    #[arg(long = "betas", value_name = "BETA", value_delimiter = ',')]
+    betas: Vec<String>,
+
+    /// Add a local plugin directory for this run. The path may point at a
+    /// plugin root containing `.jfc-plugin.toml` or directly at a workflows dir.
+    #[arg(long = "plugin-dir", value_name = "DIR")]
+    plugin_dir: Vec<PathBuf>,
+
+    /// Install/register a git plugin URL for this run.
+    #[arg(long = "plugin-url", value_name = "URL")]
+    plugin_url: Vec<String>,
+
+    /// Attach `eager_input_streaming` to Anthropic native tool schemas.
+    #[arg(long = "fine-grained-tool-streaming")]
+    fine_grained_tool_streaming: bool,
+
+    /// Attach `strict: true` to Anthropic native tool schemas.
+    #[arg(long = "strict-tool-schemas")]
+    strict_tool_schemas: bool,
+
     /// Path to an MCP configuration file. Servers in this file are
     /// merged into the registry at startup before any tool dispatch.
     #[arg(long = "mcp-config", value_name = "PATH")]
@@ -200,6 +307,26 @@ enum Command {
     Rc {
         #[command(subcommand)]
         sub: RcSubcommand,
+    },
+    /// Manage local plugins and workflow bundles.
+    Plugin {
+        #[command(subcommand)]
+        sub: PluginSubcommand,
+    },
+    /// Inspect local managed-settings policy and source precedence.
+    Policy {
+        #[command(subcommand)]
+        sub: PolicySubcommand,
+    },
+    /// Manage local memory files and team-memory sync.
+    Memory {
+        #[command(subcommand)]
+        sub: MemorySubcommand,
+    },
+    /// Run or inspect the self-hosted worker bridge.
+    Bridge {
+        #[command(subcommand)]
+        sub: BridgeSubcommand,
     },
 }
 
@@ -260,6 +387,11 @@ pub(crate) struct CliRuntimeConfig {
     pub task_budget: Option<u64>,
     pub mcp_config_path: Option<PathBuf>,
     pub cowork: bool,
+    pub local_advisor_model: Option<ModelId>,
+    pub server_advisor_model: Option<ModelId>,
+    pub custom_betas: Vec<String>,
+    pub fine_grained_tool_streaming: bool,
+    pub strict_tool_schemas: bool,
     /// Start the remote-control server at launch (from `--remote-control`
     /// or the `[remote_control] auto_start = true` config).
     pub remote_control: bool,
@@ -274,6 +406,18 @@ fn parse_tool_list(raw: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+fn dedup_tool_list(tools: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    tools.retain(|tool| seen.insert(tool.to_ascii_lowercase()));
+}
+
+fn managed_forces_non_bypass(managed: Option<&crate::config::ManagedSettingsConfig>) -> bool {
+    managed
+        .and_then(|m| m.force_permission_mode.as_deref())
+        .and_then(|mode| parse_permission_mode(Some(mode)))
+        .is_some_and(|mode| mode != crate::app::PermissionMode::BypassPermissions)
 }
 
 /// Session to load at startup based on CLI args
@@ -343,6 +487,49 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::file_watcher::install();
     crate::keybindings::load();
 
+    let managed_settings = crate::config::load_managed_settings();
+    let policy_inspection = matches!(cli.command.as_ref(), Some(Command::Policy { .. }));
+    if !policy_inspection {
+        enforce_managed_startup_policy(managed_settings.as_ref())?;
+    }
+
+    if managed_settings
+        .as_ref()
+        .is_some_and(|m| m.disable_plugin_dirs)
+        && !cli.plugin_dir.is_empty()
+    {
+        tracing::warn!(
+            target: "jfc::plugins",
+            "--plugin-dir ignored by managed settings"
+        );
+    } else {
+        for dir in &cli.plugin_dir {
+            crate::workflows::registry::register_extra_plugin_dir(dir.clone());
+        }
+    }
+    if managed_settings
+        .as_ref()
+        .is_some_and(|m| m.disable_plugin_urls)
+        && !cli.plugin_url.is_empty()
+    {
+        tracing::warn!(
+            target: "jfc::plugins",
+            "--plugin-url ignored by managed settings"
+        );
+    } else {
+        for url in &cli.plugin_url {
+            match plugin::ensure_plugin_url(url) {
+                Ok(path) => crate::workflows::registry::register_extra_plugin_dir(path),
+                Err(err) => tracing::warn!(
+                target: "jfc::plugins",
+                url,
+                error = %err,
+                "--plugin-url install/register failed"
+                ),
+            }
+        }
+    }
+
     // One-shot startup compaction of `daemon-state.json`. Long-lived users
     // accumulate hundreds of completed background-agent records here; the
     // UI re-reads the file every second on the render thread, so an
@@ -368,10 +555,100 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let initial_prompt = cli.prompt;
     let print_mode = cli.print_mode;
 
-    // CLI --model overrides env var
-    let model = cli.model.map(ModelId::from).unwrap_or(init.model);
+    // CLI --model overrides env var. Qualified specs (`provider/model`) also
+    // reroute the active provider and are normalized before request dispatch.
+    let mut model = cli.model.map(ModelId::from).unwrap_or(init.model);
     let oauth_handle = init.oauth;
-    let provider = providers[active_idx].clone();
+    let mut provider = providers[active_idx].clone();
+    if let Some(resolved) = crate::resolve_provider_model(&providers, model.as_str()) {
+        provider = resolved.provider;
+        model = resolved.model;
+    }
+    let advisor_cli = cli.advisor.clone();
+    let local_advisor_model = {
+        let cfg = crate::config::load();
+        let configured = advisor_cli
+            .as_deref()
+            .or_else(|| cfg.advisor_model.as_deref());
+        let force = advisor_cli.is_some();
+        let advisor = if cli.no_advisor {
+            None
+        } else {
+            match crate::advisor::resolve_local_advisor_model(
+                &model,
+                configured,
+                force,
+                cfg.advisor_enabled,
+            ) {
+                Ok(model) => model,
+                Err(e) if force => anyhow::bail!("--advisor: {e}"),
+                Err(e) => {
+                    tracing::warn!(target: "jfc::advisor", error = %e, "local advisor disabled");
+                    None
+                }
+            }
+        };
+        crate::advisor::set_active_local_advisor_model(advisor.clone());
+        if cli.no_advisor {
+            tracing::info!(target: "jfc::advisor", "local advisor disabled by --no-advisor");
+        } else if let Some(advisor_model) = &advisor {
+            tracing::info!(
+                target: "jfc::advisor",
+                advisor_model = %advisor_model,
+                "local advisor enabled"
+            );
+        } else {
+            tracing::info!(
+                target: "jfc::advisor",
+                "local advisor disabled"
+            );
+        }
+        advisor
+    };
+    let server_advisor_cli = cli.server_advisor.clone();
+    let advisor_model = {
+        let cfg = crate::config::load();
+        let configured = server_advisor_cli
+            .as_deref()
+            .or_else(|| cfg.server_advisor_model.as_deref());
+        let force = server_advisor_cli.is_some();
+        let resolved =
+            crate::advisor::resolve_server_advisor_model(&model, configured, force, force);
+        let mut advisor = match resolved {
+            Ok(model) => model,
+            Err(e) if force => anyhow::bail!("--server-advisor: {e}"),
+            Err(e) => {
+                tracing::warn!(target: "jfc::advisor", error = %e, "server advisor disabled");
+                None
+            }
+        };
+        let provider_supports_advisor =
+            matches!(
+                provider.stream_convention(),
+                jfc_provider::StreamConvention::AnthropicNative
+            ) && matches!(provider.name(), "anthropic" | "anthropic-oauth");
+        if advisor.is_some() && !provider_supports_advisor {
+            let msg = format!(
+                "advisor requires an Anthropic-native provider; active provider is {}",
+                provider.name()
+            );
+            if force {
+                anyhow::bail!("--server-advisor: {msg}");
+            }
+            tracing::warn!(target: "jfc::advisor", %msg);
+            advisor = None;
+        }
+        crate::advisor::set_active_server_advisor_model(advisor.clone());
+        if let Some(advisor_model) = &advisor {
+            tracing::info!(
+                target: "jfc::advisor",
+                advisor_model = %advisor_model,
+                base_model = %model,
+                "server advisor enabled"
+            );
+        }
+        advisor
+    };
 
     // Collect all flag-derived runtime config in one place so we can
     // thread it into `event_loop::run` without growing the signature
@@ -395,21 +672,56 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         },
         None => cli.system_prompt.clone(),
     };
+    let mut allowed_tools = cli
+        .allowed_tools
+        .as_deref()
+        .map(parse_tool_list)
+        .unwrap_or_default();
+    let mut disallowed_tools = cli
+        .disallowed_tools
+        .as_deref()
+        .map(parse_tool_list)
+        .unwrap_or_default();
+    let mut max_budget_usd = cli.max_budget_usd;
+    let mut remote_control = cli.remote_control;
+    if let Some(managed) = managed_settings.as_ref() {
+        if !managed.allowed_tools.is_empty() {
+            if allowed_tools.is_empty() {
+                allowed_tools = managed.allowed_tools.clone();
+            } else {
+                let managed_allowed: std::collections::HashSet<String> = managed
+                    .allowed_tools
+                    .iter()
+                    .map(|tool| tool.to_ascii_lowercase())
+                    .collect();
+                allowed_tools.retain(|tool| managed_allowed.contains(&tool.to_ascii_lowercase()));
+            }
+        }
+        disallowed_tools.extend(managed.disallowed_tools.clone());
+        dedup_tool_list(&mut allowed_tools);
+        dedup_tool_list(&mut disallowed_tools);
+        let managed_budget = [managed.max_budget_usd, managed.spend_limit_usd]
+            .into_iter()
+            .flatten()
+            .reduce(f64::min);
+        max_budget_usd = match (max_budget_usd, managed_budget) {
+            (Some(cli_budget), Some(managed_budget)) => Some(cli_budget.min(managed_budget)),
+            (None, Some(managed_budget)) => Some(managed_budget),
+            (other, None) => other,
+        };
+        if managed.disable_remote_control {
+            remote_control = false;
+        }
+    }
+
     let runtime_config = CliRuntimeConfig {
         max_turns: cli.max_turns,
-        max_budget_usd: cli.max_budget_usd,
-        allowed_tools: cli
-            .allowed_tools
-            .as_deref()
-            .map(parse_tool_list)
-            .unwrap_or_default(),
-        disallowed_tools: cli
-            .disallowed_tools
-            .as_deref()
-            .map(parse_tool_list)
-            .unwrap_or_default(),
+        max_budget_usd,
+        allowed_tools,
+        disallowed_tools,
         system_prompt: cli_system_prompt,
-        dangerously_skip_permissions: cli.dangerously_skip_permissions,
+        dangerously_skip_permissions: cli.dangerously_skip_permissions
+            && !managed_forces_non_bypass(managed_settings.as_ref()),
         json_mode: cli.json,
         extra_dirs: cli.add_dir.clone(),
         max_thinking_tokens: cli.max_thinking_tokens,
@@ -418,7 +730,12 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         task_budget: cli.task_budget,
         mcp_config_path: cli.mcp_config.clone(),
         cowork: cli.cowork,
-        remote_control: cli.remote_control,
+        local_advisor_model,
+        server_advisor_model: advisor_model,
+        custom_betas: cli.betas.clone(),
+        fine_grained_tool_streaming: cli.fine_grained_tool_streaming,
+        strict_tool_schemas: cli.strict_tool_schemas,
+        remote_control,
     };
 
     // v132 `-p`/`--print` headless one-shot mode. Skips the TUI
@@ -427,6 +744,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     // "summarize this PR" --print | tee out.md`. When `--print` is
     // set without `--prompt`, read the prompt from stdin.
     if print_mode {
+        crate::tools::register_active_provider(provider.clone(), model.clone());
         let prompt = match initial_prompt {
             Some(p) => p,
             None => {
@@ -439,7 +757,30 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
                 buf
             }
         };
-        return run_print_mode(provider, model, prompt).await;
+        let output_format = if cli.json && cli.output_format == HeadlessOutputFormat::Text {
+            HeadlessOutputFormat::Json
+        } else {
+            cli.output_format
+        };
+        return run_print_mode(
+            provider,
+            model,
+            prompt,
+            PrintModeConfig {
+                output_format,
+                input_format: cli.input_format,
+                include_hook_events: cli.include_hook_events,
+                include_partial_messages: cli.include_partial_messages,
+                session_mirror: cli.session_mirror.clone(),
+                permission_prompt_tool: cli.permission_prompt_tool.clone(),
+                sdk_url: cli.sdk_url.clone(),
+                custom_betas: cli.betas.clone(),
+                fine_grained_tool_streaming: cli.fine_grained_tool_streaming,
+                strict_tool_schemas: cli.strict_tool_schemas,
+                max_turns: cli.max_turns,
+            },
+        )
+        .await;
     }
 
     // v132 `--remote-session <id>` — connect to a managed-agent
@@ -478,8 +819,11 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let initial_permission_mode =
-        parse_permission_mode(cli.permission_mode.as_deref()).or_else(|| {
+    let initial_permission_mode = managed_settings
+        .as_ref()
+        .and_then(|managed| parse_permission_mode(managed.force_permission_mode.as_deref()))
+        .or_else(|| parse_permission_mode(cli.permission_mode.as_deref()))
+        .or_else(|| {
             // If no --permission-mode flag was passed, read the persisted
             // mode from config.toml [default.permission].mode so the user's
             // `/mode` choice survives across sessions.
@@ -524,7 +868,93 @@ async fn run_subcommand(cmd: Command) -> anyhow::Result<()> {
         Command::Daemon { sub } => run_daemon_subcommand(sub).await,
         Command::Auth { sub } => run_auth_subcommand(sub).await,
         Command::Rc { sub } => run_rc_subcommand(sub).await,
+        Command::Plugin { sub } => run_plugin_subcommand(sub).await,
+        Command::Policy { sub } => run_policy_subcommand(sub).await,
+        Command::Memory { sub } => run_memory_subcommand(sub).await,
+        Command::Bridge { sub } => run_bridge_subcommand(sub).await,
     }
+}
+
+fn enforce_managed_startup_policy(
+    managed: Option<&crate::config::ManagedSettingsConfig>,
+) -> anyhow::Result<()> {
+    let Some(managed) = managed else {
+        return Ok(());
+    };
+    if let Some(notice) = managed.security_notice.as_deref().filter(|s| !s.is_empty()) {
+        eprintln!("managed policy notice: {notice}");
+    }
+    if let Some(required_user) = managed.required_user.as_deref().filter(|s| !s.is_empty()) {
+        let current_user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default();
+        if current_user != required_user {
+            anyhow::bail!(
+                "managed policy requires user '{required_user}', current user is '{}'",
+                if current_user.is_empty() {
+                    "(unknown)"
+                } else {
+                    current_user.as_str()
+                }
+            );
+        }
+    }
+    for requirement in &managed.required_env {
+        let requirement = requirement.trim();
+        if requirement.is_empty() {
+            continue;
+        }
+        if let Some((key, expected)) = requirement.split_once('=') {
+            let actual = std::env::var(key).unwrap_or_default();
+            if actual != expected {
+                anyhow::bail!("managed policy requires environment {key}={expected}");
+            }
+        } else if std::env::var_os(requirement).is_none() {
+            anyhow::bail!("managed policy requires environment variable {requirement}");
+        }
+    }
+    if managed.require_elevated_auth
+        && !std::env::var("JFC_ELEVATED_AUTH")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    {
+        anyhow::bail!("managed policy requires elevated auth (set JFC_ELEVATED_AUTH=1)");
+    }
+    if managed.require_oauth && !anthropic_oauth_available() {
+        anyhow::bail!("managed policy requires an Anthropic OAuth account");
+    }
+    Ok(())
+}
+
+fn anthropic_oauth_available() -> bool {
+    if std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some()
+        || std::env::var_os("ANTHROPIC_OAUTH_TOKEN").is_some()
+    {
+        return true;
+    }
+    let path = crate::providers::anthropic_oauth::default_store_path();
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("accounts")
+        .and_then(|v| v.as_array())
+        .is_some_and(|accounts| {
+            accounts.iter().any(|account| {
+                account
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
+                    && account
+                        .get("refresh_token")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|token| !token.is_empty())
+            })
+        })
 }
 
 #[cfg(test)]

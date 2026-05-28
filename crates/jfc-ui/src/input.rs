@@ -64,6 +64,7 @@ use crate::runtime::{AppEvent, UiEvent};
 use crate::types::*;
 
 // Re-export the public functions from sub-modules
+pub(crate) use approval::handle_remote_approval_response;
 pub use key_dispatch::handle_key;
 pub(crate) use slash_commands::SLASH_COMMANDS;
 pub use slash_commands::run_slash_command;

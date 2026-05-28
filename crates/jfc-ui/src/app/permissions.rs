@@ -69,7 +69,9 @@ impl PermissionMode {
                 | ToolKind::Lsp
                 | ToolKind::WebFetch
                 | ToolKind::WebSearch
+                | ToolKind::Advisor
                 | ToolKind::ServerWebSearch
+                | ToolKind::ServerAdvisor
                 | ToolKind::NotebookRead
                 | ToolKind::TaskCreate
                 | ToolKind::TaskUpdate
@@ -135,7 +137,9 @@ impl PermissionMode {
                 | ToolKind::Lsp
                 | ToolKind::WebFetch
                 | ToolKind::WebSearch
+                | ToolKind::Advisor
                 | ToolKind::ServerWebSearch
+                | ToolKind::ServerAdvisor
                 | ToolKind::NotebookRead
                 | ToolKind::NotebookEdit
                 | ToolKind::TaskCreate

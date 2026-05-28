@@ -679,7 +679,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
             items.push(RenderItem::TextLine(label_line));
         }
 
-        let reasoning_expanded = ctx.reasoning_expanded.get(&idx).copied().unwrap_or(false);
+        let reasoning_expanded = ctx.reasoning_expanded.get(&idx).copied().unwrap_or(true);
 
         // Walk parts with peek-ahead so consecutive groupable tools
         // (Read/Glob/Grep) collapse into a single ToolGroup row when
@@ -796,7 +796,23 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                 MessagePart::Advisor(text) => {
                     push_advisor_lines(&mut items, text, &t);
                 }
-                MessagePart::RedactedThinking(_) => {}
+                MessagePart::RedactedThinking(data) => {
+                    items.push(RenderItem::TextLine(Line::from(vec![
+                        Span::styled(
+                            "∴ Redacted thinking",
+                            Style::default()
+                                .fg(t.text_muted)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                        Span::styled(
+                            format!(
+                                " — provider withheld plaintext ({} bytes preserved)",
+                                data.len()
+                            ),
+                            Style::default().fg(t.text_muted),
+                        ),
+                    ])));
+                }
             }
             p += 1;
         }

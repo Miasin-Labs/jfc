@@ -96,6 +96,26 @@ fn format_server_tool_result_text(
     content: &serde_json::Value,
 ) -> String {
     use jfc_provider::ServerToolResultKind;
+    if matches!(tool_kind, ServerToolResultKind::Advisor)
+        && let Some(obj) = content.as_object()
+    {
+        let ty = obj.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        if ty == "advisor_tool_result_error" {
+            let code = obj
+                .get("error_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            return format!("Advisor unavailable ({code})");
+        }
+        if ty == "advisor_result"
+            && let Some(text) = obj.get("text").and_then(|v| v.as_str())
+        {
+            return text.to_owned();
+        }
+        if ty == "advisor_redacted_result" {
+            return "Advisor reviewed the conversation and returned redacted feedback.".to_owned();
+        }
+    }
     // Error variant first — Anthropic wraps failures in
     // `{ "error_code": "..." }` rather than an array.
     if let Some(obj) = content.as_object()
@@ -130,6 +150,7 @@ fn format_server_tool_result_text(
         }
         ServerToolResultKind::CodeExecution
         | ServerToolResultKind::WebFetch
+        | ServerToolResultKind::Advisor
         | ServerToolResultKind::Other(_) => format!(
             "[{wire}]\n{content}",
             wire = tool_kind.wire_type(),

@@ -812,6 +812,7 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         // Server-side tools: cyan-teal to distinguish them from local WebSearch
         ToolKind::ServerWebSearch => Color::Rgb(80, 210, 200),
         ToolKind::ServerCodeExecution => Color::Rgb(200, 160, 80), // amber-gold
+        ToolKind::ServerAdvisor => Color::Rgb(235, 195, 90),       // advisor gold
         ToolKind::Mcp(_) => Color::Rgb(190, 170, 240),
         ToolKind::CronCreate
         | ToolKind::CronList

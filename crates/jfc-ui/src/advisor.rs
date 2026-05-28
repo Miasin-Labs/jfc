@@ -25,14 +25,16 @@
 //! consumes `MessagePart::Advisor(String)` inline. See the follow-up note in
 //! `render.rs` for where a split-pane would hook in.
 
+use std::sync::{OnceLock, RwLock};
+
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::types::{ChatMessage, MessagePart, Role};
+use crate::types::{ChatMessage, MessagePart, Role, ToolCall, ToolOutput};
 use jfc_provider::{
-    CompletionResponse, ModelId, Provider, ProviderContent, ProviderMessage, ProviderRole,
-    StreamEvent, StreamOptions,
+    CompletionResponse, ModelId, ModelSpec, Provider, ProviderContent, ProviderMessage,
+    ProviderRole, StreamEvent, StreamOptions,
 };
 
 /// Default per-session token budget. Conservative — about three round-trips
@@ -45,12 +47,243 @@ pub const DEFAULT_TOKEN_BUDGET: u64 = 50_000;
 /// context window AND eat the entire token budget on the first call.
 const MAX_SNAPSHOT_CHARS: usize = 40_000;
 
+/// Per-tool output preview cap inside the advisor snapshot. The whole snapshot
+/// is capped separately; this prevents one giant Read/Bash result from crowding
+/// out every other turn before the final tail-truncation pass.
+const MAX_TOOL_RESULT_PREVIEW_CHARS: usize = 2_000;
+
 /// System prompt prepended to every advisor query. Spelled out in full so the
 /// model knows it has no tools, no authority to "go do something", and is
 /// expected to be terse.
 pub const ADVISOR_SYSTEM_PROMPT: &str = "You are an advisor. The user's main agent is currently working on a task. \
      Their transcript so far is below. Answer their advisor question concisely. \
      You don't have tools — just give advice.";
+
+/// Claude Code 2.1.153 server-side advisor prompt. When the Anthropic
+/// `advisor_20260301` server tool is enabled this is appended to the main
+/// system prompt so the model knows when to call `advisor()`.
+pub const SERVER_ADVISOR_SYSTEM_PROMPT: &str = r#"# Advisor Tool
+
+You have access to an `advisor` tool backed by a stronger reviewer model. It takes NO parameters -- when you call advisor(), your entire conversation history is automatically forwarded. They see the task, every tool call you've made, every result you've seen.
+
+Call advisor BEFORE substantive work -- before writing, before committing to an interpretation, before building on an assumption. If the task requires orientation first (finding files, fetching a source, seeing what's there), do that, then call advisor. Orientation is not substantive work. Writing, editing, and declaring an answer are.
+
+Also call advisor:
+- When you believe the task is complete. BEFORE this call, make your deliverable durable: write the file, save the result, commit the change. The advisor call takes time; if the session ends during it, a durable result persists and an unwritten one doesn't.
+- When stuck -- errors recurring, approach not converging, results that don't fit.
+- When considering a change of approach.
+
+On tasks longer than a few steps, call advisor at least once before committing to an approach and once before declaring done. On short reactive tasks where the next action is dictated by tool output you just read, you don't need to keep calling -- the advisor adds most of its value on the first call, before the approach crystallizes.
+
+Give the advice serious weight. If you follow a step and it fails empirically, or you have primary-source evidence that contradicts a specific claim (the file says X, the paper states Y), adapt. A passing self-test is not evidence the advice is wrong -- it's evidence your test doesn't check what the advice is checking.
+
+If you've already retrieved data pointing one way and the advisor points another: don't silently switch. Surface the conflict in one more advisor call -- "I found X, you suggest Y, which constraint breaks the tie?" The advisor saw your evidence but may have underweighted it; a reconcile call is cheaper than committing to the wrong branch."#;
+
+static SERVER_ADVISOR_MODEL: OnceLock<RwLock<Option<ModelId>>> = OnceLock::new();
+static LOCAL_ADVISOR_MODEL: OnceLock<RwLock<Option<ModelId>>> = OnceLock::new();
+static LOCAL_ADVISOR_TOOL_SESSION: OnceLock<tokio::sync::Mutex<Option<AdvisorSession>>> =
+    OnceLock::new();
+
+fn server_advisor_slot() -> &'static RwLock<Option<ModelId>> {
+    SERVER_ADVISOR_MODEL.get_or_init(|| RwLock::new(None))
+}
+
+fn local_advisor_slot() -> &'static RwLock<Option<ModelId>> {
+    LOCAL_ADVISOR_MODEL.get_or_init(|| RwLock::new(None))
+}
+
+fn local_advisor_tool_session() -> &'static tokio::sync::Mutex<Option<AdvisorSession>> {
+    LOCAL_ADVISOR_TOOL_SESSION.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+pub fn active_server_advisor_model() -> Option<ModelId> {
+    server_advisor_slot()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+pub fn set_active_server_advisor_model(model: Option<ModelId>) {
+    if let Ok(mut guard) = server_advisor_slot().write() {
+        *guard = model;
+    }
+}
+
+pub fn active_local_advisor_model() -> Option<ModelId> {
+    local_advisor_slot()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+pub fn set_active_local_advisor_model(model: Option<ModelId>) {
+    if let Ok(mut guard) = local_advisor_slot().write() {
+        *guard = model;
+    }
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            let v = v.trim();
+            !(v.is_empty()
+                || v == "0"
+                || v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("no"))
+        })
+        .unwrap_or(false)
+}
+
+pub fn normalize_server_advisor_model(raw: &str) -> Result<ModelId, String> {
+    let trimmed = raw.trim();
+    let model = if trimmed.is_empty() {
+        crate::providers::anthropic_models::ALIAS_OPUS.to_owned()
+    } else {
+        match trimmed.to_ascii_lowercase().as_str() {
+            "opus" => crate::providers::anthropic_models::ALIAS_OPUS.to_owned(),
+            "sonnet" => crate::providers::anthropic_models::ALIAS_SONNET.to_owned(),
+            _ => ModelSpec::parse_lenient(trimmed)
+                .map(|spec| spec.into_model().to_string())
+                .unwrap_or_else(|_| trimmed.to_owned()),
+        }
+    };
+    Ok(ModelId::from(model))
+}
+
+pub fn normalize_local_advisor_model(raw: &str, fallback: &ModelId) -> Result<ModelId, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(fallback.clone());
+    }
+    let model = match trimmed.to_ascii_lowercase().as_str() {
+        "opus" => crate::providers::anthropic_models::ALIAS_OPUS.to_owned(),
+        "sonnet" => crate::providers::anthropic_models::ALIAS_SONNET.to_owned(),
+        "haiku" => crate::providers::anthropic_models::ALIAS_HAIKU.to_owned(),
+        _ => ModelSpec::parse_lenient(trimmed)
+            .map(|spec| spec.into_model().to_string())
+            .unwrap_or_else(|_| trimmed.to_owned()),
+    };
+    Ok(ModelId::from(model))
+}
+
+pub fn resolve_local_advisor_model(
+    base_model: &ModelId,
+    configured: Option<&str>,
+    force_enable: bool,
+    configured_enabled: Option<bool>,
+) -> Result<Option<ModelId>, String> {
+    let env_model = std::env::var("JFC_ADVISOR_MODEL").ok();
+    let env_enabled = env_truthy("JFC_ADVISOR_ENABLED");
+    let env_disabled = env_truthy("JFC_ADVISOR_DISABLED") || env_truthy("JFC_DISABLE_ADVISOR");
+    if env_disabled && !force_enable {
+        return Ok(None);
+    }
+    let raw = configured
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
+        .or(env_model);
+    if matches!(configured_enabled, Some(false)) && !force_enable && raw.is_none() && !env_enabled {
+        return Ok(None);
+    }
+    // Local advisor is default-on. With no explicit model, use the active model
+    // as the side reviewer. `advisor_enabled = false`, `--no-advisor`, or
+    // `JFC_ADVISOR_DISABLED=1` are the opt-out paths.
+    normalize_local_advisor_model(raw.as_deref().unwrap_or(""), base_model).map(Some)
+}
+
+pub fn supports_server_advisor_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.contains("opus-4-7") || lower.contains("opus-4-6") || lower.contains("sonnet-4-6")
+}
+
+pub fn server_advisor_env_enabled() -> bool {
+    if env_truthy("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") {
+        return false;
+    }
+    env_truthy("CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL")
+        || env_truthy("JFC_SERVER_ADVISOR_ENABLED")
+        || crate::feature_gates::is_enabled(crate::feature_gates::FeatureGate::TenguSageCompass2)
+}
+
+pub fn resolve_server_advisor_model(
+    base_model: &ModelId,
+    configured: Option<&str>,
+    force_enable: bool,
+    strict: bool,
+) -> Result<Option<ModelId>, String> {
+    if env_truthy("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") {
+        if strict || force_enable {
+            return Err("advisor is disabled by CLAUDE_CODE_DISABLE_ADVISOR_TOOL".to_owned());
+        }
+        return Ok(None);
+    }
+
+    let env_model = std::env::var("JFC_SERVER_ADVISOR_MODEL")
+        .ok()
+        .or_else(|| std::env::var("CLAUDE_CODE_ADVISOR_MODEL").ok());
+    let raw = configured
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
+        .or(env_model);
+    let should_enable = force_enable || raw.is_some() || server_advisor_env_enabled();
+    if !should_enable {
+        return Ok(None);
+    }
+
+    if !supports_server_advisor_model(base_model.as_str()) {
+        let msg = format!(
+            "advisor requires a base model containing opus-4-7, opus-4-6, or sonnet-4-6; active model is {base_model}"
+        );
+        if strict || force_enable {
+            return Err(msg);
+        }
+        tracing::warn!(target: "jfc::advisor", %msg);
+        return Ok(None);
+    }
+
+    let advisor = normalize_server_advisor_model(raw.as_deref().unwrap_or("opus"))?;
+    if !supports_server_advisor_model(advisor.as_str()) {
+        return Err(format!(
+            "advisor model must contain opus-4-7, opus-4-6, or sonnet-4-6; got {advisor}"
+        ));
+    }
+
+    Ok(Some(advisor))
+}
+
+pub const LOCAL_ADVISOR_TOOL_QUERY: &str = "Review my conversation so far. Flag anything I'm missing, any assumption I should verify, and any risk I'm overlooking. Be specific and terse.";
+
+pub async fn ask_local_advisor_tool(
+    provider: &dyn Provider,
+    advisor_model: ModelId,
+    main_transcript_snapshot: &[ChatMessage],
+) -> Result<String> {
+    let mut guard = local_advisor_tool_session().lock().await;
+    let reset = guard
+        .as_ref()
+        .map(|session| session.model != advisor_model)
+        .unwrap_or(true);
+    if reset {
+        *guard = Some(AdvisorSession::new(advisor_model.clone()));
+    }
+    let session = guard
+        .as_mut()
+        .expect("advisor session should be initialized");
+    let reply = ask_advisor(
+        provider,
+        session,
+        LOCAL_ADVISOR_TOOL_QUERY.to_owned(),
+        main_transcript_snapshot,
+    )
+    .await?;
+    Ok(format!(
+        "{reply}\n\n_(local advisor model: {}; budget: {} of {} tokens remaining)_",
+        session.model,
+        session.tokens_remaining(),
+        session.token_budget
+    ))
+}
 
 /// Per-session advisor state. Owns its own transcript (separate from the main
 /// agent) and tracks token usage for budget enforcement.
@@ -110,8 +343,9 @@ impl AdvisorSession {
 /// can read. Capped at `MAX_SNAPSHOT_CHARS`; older content gets dropped.
 ///
 /// Format mirrors `auto_mode::build_transcript` — role-prefixed plain text, no
-/// JSON. Tool calls collapse to `[Tool: <kind>]` so the advisor sees activity
-/// without the noise of full diff/output bodies.
+/// JSON. Tool calls include their input summary, status, and a capped output
+/// preview so the advisor can evaluate what actually happened without hauling
+/// huge file reads or command logs into the side-call.
 fn render_snapshot(main_transcript: &[ChatMessage]) -> String {
     let mut out = String::new();
     for msg in main_transcript {
@@ -133,12 +367,7 @@ fn render_snapshot(main_transcript: &[ChatMessage]) -> String {
                     out.push_str(s);
                     out.push('\n');
                 }
-                MessagePart::Tool(tc) => {
-                    out.push_str(role_label);
-                    out.push_str(": [Tool: ");
-                    out.push_str(tc.kind.label());
-                    out.push_str("]\n");
-                }
+                MessagePart::Tool(tc) => render_tool_snapshot(&mut out, role_label, tc),
                 MessagePart::Advisor(_) => {
                     // Don't echo prior advisor turns into the snapshot — the
                     // advisor's own transcript handles that. Including them
@@ -168,6 +397,69 @@ fn render_snapshot(main_transcript: &[ChatMessage]) -> String {
         out.push_str(&tail);
     }
     out
+}
+
+fn render_tool_snapshot(out: &mut String, role_label: &str, tc: &ToolCall) {
+    out.push_str(role_label);
+    out.push_str(": [Tool: ");
+    out.push_str(tc.kind.label());
+    let input_summary = tc.input.summary();
+    if !input_summary.is_empty() {
+        out.push_str(" - ");
+        push_preview(out, &input_summary, 300);
+    }
+    out.push_str("; status=");
+    out.push_str(tc.status.label());
+    if let Some(ms) = tc.elapsed_ms {
+        out.push_str("; elapsed=");
+        out.push_str(&format!("{ms}ms"));
+    }
+    out.push_str("]\n");
+
+    let result = tool_output_snapshot_text(&tc.output);
+    let result = result.trim();
+    if !result.is_empty() {
+        out.push_str("Tool result: ");
+        push_preview(out, result, MAX_TOOL_RESULT_PREVIEW_CHARS);
+        out.push('\n');
+    }
+}
+
+fn tool_output_snapshot_text(output: &ToolOutput) -> String {
+    match output {
+        ToolOutput::Text(s) => s.clone(),
+        ToolOutput::LargeText(lt) => lt.content.clone(),
+        ToolOutput::Diff(d) => format!("Applied diff to {}", d.file_path),
+        ToolOutput::FileContent { content, .. } => content.clone(),
+        ToolOutput::Command {
+            stdout,
+            stderr,
+            exit_code,
+        } => format!(
+            "exit: {}\nstdout: {}\nstderr: {}",
+            exit_code.unwrap_or(-1),
+            stdout,
+            stderr
+        ),
+        ToolOutput::FileList(files) => files.join("\n"),
+        ToolOutput::ServerToolResult { tool_kind, content } => {
+            crate::types::format_server_tool_result_text_public(tool_kind, content)
+        }
+        ToolOutput::Empty => String::new(),
+    }
+}
+
+fn push_preview(out: &mut String, text: &str, limit: usize) {
+    if text.len() <= limit {
+        out.push_str(text);
+        return;
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&text[..end]);
+    out.push_str(&format!("... [truncated, {} chars total]", text.len()));
 }
 
 /// Build the messages for one advisor round-trip. The first user message
@@ -330,6 +622,7 @@ async fn stream_to_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{ToolInput, ToolKind};
     use async_trait::async_trait;
     use jfc_provider::{
         EventStream, ModelInfo, ProviderMessage as PMsg, StreamConvention, StreamOptions as SOpts,
@@ -380,8 +673,8 @@ mod tests {
         }
         async fn complete(
             &self,
-            #[allow(dead_code)] messages: Vec<PMsg>,
-            #[allow(dead_code)] options: &SOpts,
+            _messages: Vec<PMsg>,
+            _options: &SOpts,
         ) -> Result<CompletionResponse> {
             self.result
                 .lock()
@@ -481,6 +774,34 @@ mod tests {
         assert!(snap.contains("User: hello"));
         assert!(snap.contains("Assistant: hi back"));
         assert!(snap.contains("Assistant (reasoning): inner thoughts"));
+    }
+
+    /// Normal: local advisor snapshots include tool inputs and result previews,
+    /// not just the tool name. Otherwise the local advisor cannot review the
+    /// actual evidence the main agent saw.
+    #[test]
+    fn render_snapshot_includes_tool_result_preview_normal() {
+        let mut tool = ToolCall::new_pending(
+            "bash-1".into(),
+            ToolKind::Bash,
+            ToolInput::Bash {
+                command: "cargo check".into(),
+                timeout: None,
+                workdir: None,
+            },
+        );
+        tool.mark_completed().expect("mark completed");
+        tool.output = ToolOutput::Command {
+            stdout: "Finished dev profile".into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        };
+
+        let snap = render_snapshot(&[ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)])]);
+
+        assert!(snap.contains("Assistant: [Tool: Bash - cargo check; status=completed]"));
+        assert!(snap.contains("Tool result: exit: 0"));
+        assert!(snap.contains("stdout: Finished dev profile"));
     }
 
     // ─── Robust path ─────────────────────────────────────────────────────

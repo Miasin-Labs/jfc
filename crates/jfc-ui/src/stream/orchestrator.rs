@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
 
 use crate::runtime::{AppEvent, StreamEvent, StreamRequestOverrides};
-use jfc_provider::{ModelId, Provider, ProviderMessage};
+use jfc_provider::{ModelId, Provider, ProviderMessage, StopReason, StreamOptions};
 
 use super::{live_events, open_stream_with_bedrock_retries, prepare_stream_request};
 
@@ -55,7 +55,7 @@ pub async fn stream_response(
     )));
     if tx
         .send(AppEvent::Stream(StreamEvent::RequestMetadata(
-            prepared.metadata,
+            prepared.metadata.clone(),
         )))
         .await
         .is_err()
@@ -81,10 +81,11 @@ pub async fn stream_response(
     // Wrap in Arc so the retry loop and thinking-fallback path share the same
     // allocation instead of cloning the full Vec<ProviderMessage> on each attempt.
     let messages = Arc::new(messages);
-    let stream = match open_stream_with_bedrock_retries(
+    let stream = match open_stream_with_cancel_and_timeout(
         provider.as_ref(),
         Arc::clone(&messages),
         &opts,
+        cancel.clone(),
     )
     .await
     {
@@ -107,15 +108,29 @@ pub async fn stream_response(
                 fallback_opts.adaptive_thinking = false;
                 fallback_opts.thinking_budget = None;
                 fallback_opts.thinking_display = None;
-                match open_stream_with_bedrock_retries(
+                match open_stream_with_cancel_and_timeout(
                     provider.as_ref(),
                     Arc::clone(&messages),
                     &fallback_opts,
+                    cancel.clone(),
                 )
                 .await
                 {
                     Ok(s) => s,
                     Err(e2) => {
+                        if try_nonstreaming_fallback(
+                            provider.as_ref(),
+                            Arc::clone(&messages),
+                            &fallback_opts,
+                            &tx,
+                            &e2.to_string(),
+                            prepared.metadata.advertised_tool_count,
+                            prepared.metadata.action_expected,
+                        )
+                        .await
+                        {
+                            return;
+                        }
                         tracing::error!(target: "jfc::stream", error = %e2, "stream open failed (fallback without thinking)");
                         let _ = tx
                             .send(AppEvent::Stream(StreamEvent::Error(e2.to_string())))
@@ -148,6 +163,19 @@ pub async fn stream_response(
                     .await;
                 return;
             } else {
+                if try_nonstreaming_fallback(
+                    provider.as_ref(),
+                    Arc::clone(&messages),
+                    &opts,
+                    &tx,
+                    &e.to_string(),
+                    prepared.metadata.advertised_tool_count,
+                    prepared.metadata.action_expected,
+                )
+                .await
+                {
+                    return;
+                }
                 tracing::error!(target: "jfc::stream", error = %e, "stream open failed");
                 let _ = tx
                     .send(AppEvent::Stream(StreamEvent::Error(e.to_string())))
@@ -157,9 +185,40 @@ pub async fn stream_response(
         }
     };
 
-    let Some(stop_reason) = live_events::drain_stream_events(stream, &tx, interrupt, cancel).await
-    else {
-        return;
+    let stop_reason = match live_events::drain_stream_events(stream, &tx, interrupt, cancel).await {
+        live_events::DrainOutcome::Done(stop_reason) => stop_reason,
+        live_events::DrainOutcome::Cancelled(message) => {
+            let _ = tx.send(AppEvent::Stream(StreamEvent::Error(message))).await;
+            return;
+        }
+        live_events::DrainOutcome::Error {
+            message,
+            committed_output,
+        } => {
+            if !committed_output {
+                if try_nonstreaming_fallback(
+                    provider.as_ref(),
+                    Arc::clone(&messages),
+                    &opts,
+                    &tx,
+                    &message,
+                    prepared.metadata.advertised_tool_count,
+                    prepared.metadata.action_expected,
+                )
+                .await
+                {
+                    return;
+                }
+            } else {
+                tracing::warn!(
+                    target: "jfc::stream::fallback",
+                    error = %message,
+                    "stream failed after output was committed; skipping non-streaming fallback to avoid duplicate transcript text"
+                );
+            }
+            let _ = tx.send(AppEvent::Stream(StreamEvent::Error(message))).await;
+            return;
+        }
     };
 
     tracing::info!(
@@ -183,4 +242,140 @@ pub async fn stream_response(
     let _ = tx
         .send(AppEvent::Stream(StreamEvent::Done(stop_reason)))
         .await;
+}
+
+async fn open_stream_with_cancel_and_timeout(
+    provider: &dyn Provider,
+    messages: Arc<Vec<ProviderMessage>>,
+    opts: &StreamOptions,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<jfc_provider::EventStream> {
+    let open = open_stream_with_bedrock_retries(provider, messages, opts);
+    let timeout = stream_open_timeout();
+    tokio::pin!(open);
+    if let Some(timeout) = timeout {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("Stream cancelled before connection opened"),
+            result = &mut open => result,
+            _ = tokio::time::sleep(timeout) => anyhow::bail!(
+                "Stream open timed out after {}s before first provider response",
+                timeout.as_secs()
+            ),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("Stream cancelled before connection opened"),
+            result = &mut open => result,
+        }
+    }
+}
+
+fn stream_open_timeout() -> Option<Duration> {
+    match std::env::var("JFC_STREAM_OPEN_TIMEOUT_SECS") {
+        Ok(raw) if matches!(raw.as_str(), "0" | "off" | "false" | "disabled") => None,
+        Ok(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|secs| *secs > 0)
+            .map(Duration::from_secs),
+        Err(_) => Some(Duration::from_secs(45)),
+    }
+}
+
+fn stream_to_nonstreaming_fallback_enabled() -> bool {
+    if std::env::var("JFC_DISABLE_STREAMING_TO_NONSTREAMING_FALLBACK")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    std::env::var("JFC_STREAMING_TO_NONSTREAMING_FALLBACK")
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
+}
+
+fn error_looks_stream_stale_or_idle(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("stream timed out")
+        || lower.contains("stream open timed out")
+        || lower.contains("before first event")
+        || lower.contains("before first byte")
+        || lower.contains("first provider response")
+        || lower.contains("first sse")
+        || lower.contains("idle")
+        || lower.contains("stalled")
+        || lower.contains("connection closed")
+        || lower.contains("unexpected eof")
+        || lower.contains("incomplete")
+        || lower.contains("broken pipe")
+        || lower.contains("connection reset")
+        || lower.contains("body error")
+        || lower.contains("decode")
+}
+
+async fn try_nonstreaming_fallback(
+    provider: &dyn Provider,
+    messages: Arc<Vec<ProviderMessage>>,
+    opts: &StreamOptions,
+    tx: &tokio::sync::mpsc::Sender<AppEvent>,
+    error: &str,
+    advertised_tool_count: usize,
+    action_expected: bool,
+) -> bool {
+    if !stream_to_nonstreaming_fallback_enabled() || !error_looks_stream_stale_or_idle(error) {
+        return false;
+    }
+    if action_expected && advertised_tool_count > 0 {
+        tracing::warn!(
+            target: "jfc::stream::fallback",
+            advertised_tool_count,
+            error = %error,
+            "stream failed but non-streaming fallback skipped because tool execution may be required"
+        );
+        return false;
+    }
+    tracing::warn!(
+        target: "jfc::stream::fallback",
+        error = %error,
+        "stream failed; trying non-streaming completion fallback"
+    );
+    let response = match provider.complete((*messages).clone(), opts).await {
+        Ok(response) => response,
+        Err(fallback_error) => {
+            tracing::warn!(
+                target: "jfc::stream::fallback",
+                error = %error,
+                fallback_error = %fallback_error,
+                "non-streaming completion fallback failed"
+            );
+            return false;
+        }
+    };
+    if !response.content.is_empty() {
+        let _ = tx
+            .send(AppEvent::Stream(StreamEvent::Chunk {
+                text: Some(response.content),
+                reasoning: None,
+            }))
+            .await;
+    }
+    let _ = tx
+        .send(AppEvent::Stream(StreamEvent::Usage {
+            input_tokens: response.usage.input_tokens as u32,
+            output_tokens: response.usage.output_tokens as u32,
+            cache_read_tokens: response.usage.cache_read_tokens as u32,
+            cache_write_tokens: response.usage.cache_creation_tokens as u32,
+        }))
+        .await;
+    crate::hooks::fire(
+        crate::hooks::HookPoint::AfterStream,
+        &crate::hooks::HookContext::for_session("stream")
+            .with_extra("stop_reason", "nonstreaming_fallback".to_owned()),
+    );
+    let _ = tx
+        .send(AppEvent::Stream(StreamEvent::Done(StopReason::EndTurn)))
+        .await;
+    true
 }

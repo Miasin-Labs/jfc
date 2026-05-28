@@ -317,7 +317,6 @@ fn extract_go_calls(
 
 use super::{build_nd, build_span, node_text as text};
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -279,14 +279,13 @@ fn translate_inbound(envelope: &RemoteEnvelope) -> Option<AppEvent> {
                 crossterm::event::KeyCode::Esc,
             ))))
         }
-        RemoteEnvelope::ApprovalResponse { approved, .. } => {
-            let code = if *approved {
-                crossterm::event::KeyCode::Char('y')
-            } else {
-                crossterm::event::KeyCode::Char('n')
-            };
-            Some(AppEvent::Ui(UiEvent::Term(key_event(code))))
-        }
+        RemoteEnvelope::ApprovalResponse {
+            tool_use_id,
+            approved,
+        } => Some(AppEvent::Ui(UiEvent::RemoteApprovalResponse {
+            tool_use_id: tool_use_id.clone(),
+            approved: *approved,
+        })),
         RemoteEnvelope::PlanApprovalResponse { approve, .. } => {
             let code = if *approve {
                 crossterm::event::KeyCode::Char('y')
@@ -335,6 +334,30 @@ pub fn mirror_event(ev: &AppEvent) -> Option<RemoteEnvelope> {
             id: tool_id.to_string(),
             output_preview: Some(result.output.chars().take(500).collect()),
             is_error: result.is_error(),
+        }),
+        AppEvent::Tool(ToolEvent::SetInProgressToolUseIds { action, ids }) => {
+            Some(RemoteEnvelope::SetInProgressToolUseIds {
+                action: action.clone(),
+                ids: ids.clone(),
+            })
+        }
+        AppEvent::Tool(ToolEvent::DeferredToolUse {
+            id,
+            name,
+            input_preview,
+            reason,
+        }) => Some(RemoteEnvelope::DeferredToolUse {
+            id: id.clone(),
+            name: name.clone(),
+            input_preview: input_preview.clone(),
+            reason: reason.clone(),
+        }),
+        AppEvent::Tool(ToolEvent::UseSummary {
+            summary,
+            preceding_tool_use_ids,
+        }) => Some(RemoteEnvelope::ToolUseSummary {
+            summary: summary.clone(),
+            preceding_tool_use_ids: preceding_tool_use_ids.clone(),
         }),
         // Done/Idle transitions are derived post-burst from `app.is_streaming`
         // in the event loop (see `mirror_status`). Errors carry a message, so

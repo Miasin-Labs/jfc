@@ -482,6 +482,8 @@ pub enum ServerToolResultKind {
     CodeExecution,
     /// `web_fetch_tool_result` — see cli.js v142:246159.
     WebFetch,
+    /// `advisor_tool_result` — server-side stronger-model reviewer response.
+    Advisor,
     /// Catch-all for unknown future shapes; preserves the wire `type`
     /// string so resends are still byte-faithful.
     Other(String),
@@ -494,6 +496,7 @@ impl ServerToolResultKind {
             Self::WebSearch => "web_search_tool_result",
             Self::CodeExecution => "code_execution_tool_result",
             Self::WebFetch => "web_fetch_tool_result",
+            Self::Advisor => "advisor_tool_result",
             Self::Other(s) => s.as_str(),
         }
     }
@@ -503,6 +506,7 @@ impl ServerToolResultKind {
             "web_search_tool_result" => Self::WebSearch,
             "code_execution_tool_result" => Self::CodeExecution,
             "web_fetch_tool_result" => Self::WebFetch,
+            "advisor_tool_result" => Self::Advisor,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -525,7 +529,7 @@ pub struct StreamOptions {
     /// When true, use `{"type": "adaptive"}` instead of budget_tokens.
     /// Required for Opus 4.6+ and Sonnet 4.6+ which reject budget_tokens.
     pub adaptive_thinking: bool,
-    /// Optional display mode for adaptive thinking: `"summarized"` or `"omitted"`.
+    /// Optional display mode for thinking: `"summarized"` or `"omitted"`.
     /// When `None`, the field is omitted from the request (Anthropic defaults to `"omitted"`).
     /// Set to `"summarized"` to receive thinking text in the response.
     pub thinking_display: Option<String>,
@@ -537,9 +541,20 @@ pub struct StreamOptions {
     pub reasoning_effort: Option<String>,
     /// Provider-specific options merged into the request body.
     pub provider_options: HashMap<String, serde_json::Value>,
+    /// Extra provider beta tokens appended to the Anthropic beta header.
+    /// This mirrors Claude Code's `--betas` SDK passthrough while keeping the
+    /// common provider abstraction provider-neutral.
+    pub custom_betas: Vec<String>,
     /// When true, adds `fast-mode-2026-02-01` to the `anthropic-beta` header
     /// for lower-latency inference. Mirrors v2.1.139's `/fast` command.
     pub fast_mode: bool,
+    /// When true, Anthropic native requests attach `eager_input_streaming`
+    /// to local tool definitions and send the fine-grained tool streaming
+    /// beta token when it is still required by the target model.
+    pub eager_input_streaming: bool,
+    /// When true, Anthropic native requests attach `strict: true` to local
+    /// tool definitions and opt into structured-output validation.
+    pub strict_tool_schemas: bool,
     /// Optional agentic loop token budget hint (beta: task-budgets-2026-03-13).
     /// Minimum 20_000. The model sees a countdown and self-moderates.
     /// Distinct from max_tokens (which is a hard server-enforced ceiling).
@@ -565,6 +580,10 @@ pub struct StreamOptions {
     pub prompt_caching_scope: bool,
     /// Session ID for server-side request correlation (X-Claude-Code-Session-Id header).
     pub session_id: Option<String>,
+    /// Optional Anthropic server-side advisor model. When set, Anthropic
+    /// providers inject the `advisor_20260301` server tool and the matching
+    /// beta token for this request.
+    pub advisor_model: Option<ModelId>,
 }
 
 impl StreamOptions {
@@ -581,7 +600,10 @@ impl StreamOptions {
             top_p: None,
             reasoning_effort: None,
             provider_options: HashMap::new(),
+            custom_betas: Vec::new(),
             fast_mode: false,
+            eager_input_streaming: false,
+            strict_tool_schemas: false,
             task_budget_tokens: None,
             previous_message_id: None,
             context_hint_tokens_saved: None,
@@ -590,6 +612,7 @@ impl StreamOptions {
             cache_diagnosis: false,
             prompt_caching_scope: true,
             session_id: None,
+            advisor_model: None,
         }
     }
 
@@ -614,7 +637,7 @@ impl StreamOptions {
         self
     }
 
-    /// Set the display mode for adaptive thinking responses.
+    /// Set the display mode for thinking responses.
     /// Use `"summarized"` to receive thinking text; `"omitted"` (the default) suppresses it.
     pub fn thinking_display(mut self, display: impl Into<String>) -> Self {
         self.thinking_display = Some(display.into());
@@ -641,9 +664,35 @@ impl StreamOptions {
         self
     }
 
+    pub fn custom_betas<I, S>(mut self, betas: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.custom_betas = betas
+            .into_iter()
+            .map(Into::into)
+            .map(|beta| beta.trim().to_owned())
+            .filter(|beta| !beta.is_empty())
+            .collect();
+        self
+    }
+
     /// Enable or disable fast mode (lower-latency inference via `fast-mode-2026-02-01` beta).
     pub fn fast_mode(mut self, v: bool) -> Self {
         self.fast_mode = v;
+        self
+    }
+
+    /// Enable or disable Anthropic fine-grained tool input streaming.
+    pub fn eager_input_streaming(mut self, v: bool) -> Self {
+        self.eager_input_streaming = v;
+        self
+    }
+
+    /// Enable or disable strict Anthropic tool schema validation.
+    pub fn strict_tool_schemas(mut self, v: bool) -> Self {
+        self.strict_tool_schemas = v;
         self
     }
 
@@ -656,6 +705,11 @@ impl StreamOptions {
 
     pub fn previous_message_id(mut self, id: impl Into<String>) -> Self {
         self.previous_message_id = Some(id.into());
+        self
+    }
+
+    pub fn advisor_model(mut self, model: impl Into<ModelId>) -> Self {
+        self.advisor_model = Some(model.into());
         self
     }
 }
@@ -729,6 +783,127 @@ impl ModelInfo {
 }
 
 pub type EventStream = Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderErrorKind {
+    Authentication,
+    Permission,
+    RateLimit,
+    Overloaded,
+    NotFound,
+    InvalidRequest,
+    Network,
+    Server,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderError {
+    pub provider: String,
+    pub kind: ProviderErrorKind,
+    pub status: Option<u16>,
+    pub message: String,
+    pub raw: Option<String>,
+}
+
+impl ProviderError {
+    pub fn network(provider: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            kind: ProviderErrorKind::Network,
+            status: None,
+            message: message.into(),
+            raw: None,
+        }
+    }
+
+    pub fn api_status(provider: impl Into<String>, status: u16, raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        let message = extract_provider_error_message(&raw)
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| retry::friendly_error_message(status, &raw));
+        Self {
+            provider: provider.into(),
+            kind: kind_from_status_and_body(status, &raw),
+            status: Some(status),
+            message,
+            raw: Some(raw),
+        }
+    }
+
+    pub fn with_raw(mut self, raw: impl Into<String>) -> Self {
+        self.raw = Some(raw.into());
+        self
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            ProviderErrorKind::RateLimit
+                | ProviderErrorKind::Overloaded
+                | ProviderErrorKind::Network
+                | ProviderErrorKind::Server
+        )
+    }
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.status {
+            Some(status) => write!(f, "{} API error {status}: {}", self.provider, self.message)?,
+            None => write!(f, "{} error: {}", self.provider, self.message)?,
+        }
+        if let Some(raw) = self.raw.as_deref().filter(|raw| !raw.trim().is_empty()) {
+            write!(f, "\n  raw: {raw}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
+fn kind_from_status_and_body(status: u16, raw: &str) -> ProviderErrorKind {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("authentication_error") || matches!(status, 401) {
+        ProviderErrorKind::Authentication
+    } else if lower.contains("permission_error") || matches!(status, 403) {
+        ProviderErrorKind::Permission
+    } else if lower.contains("rate_limit_error") || matches!(status, 429) {
+        ProviderErrorKind::RateLimit
+    } else if lower.contains("overloaded_error") {
+        ProviderErrorKind::Overloaded
+    } else if lower.contains("not_found_error") || matches!(status, 404) {
+        ProviderErrorKind::NotFound
+    } else if lower.contains("invalid_request_error") || matches!(status, 400 | 422) {
+        ProviderErrorKind::InvalidRequest
+    } else if matches!(status, 500..=599) {
+        ProviderErrorKind::Server
+    } else {
+        ProviderErrorKind::Unknown
+    }
+}
+
+fn extract_provider_error_message(raw: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    for pointer in [
+        "/error/message",
+        "/error",
+        "/detail/message",
+        "/detail/error/message",
+        "/detail",
+        "/message",
+    ] {
+        if let Some(value) = value.pointer(pointer) {
+            if let Some(message) = value.as_str() {
+                return Some(message.to_owned());
+            }
+            if value.is_object() || value.is_array() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
 
 /// How a provider's stream encodes tool activity. Used by the renderer to decide
 /// whether assistant text needs post-parsing (some backends interleave tool data
@@ -866,6 +1041,21 @@ mod tests {
         let spec: ModelSpec = "anthropic-oauth/claude-sonnet-4-6".parse().unwrap();
         assert_eq!(spec.provider().unwrap().as_str(), "anthropic-oauth");
         assert_eq!(spec.model().as_str(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn provider_error_extracts_common_json_shapes() {
+        let err = ProviderError::api_status(
+            "openrouter",
+            429,
+            r#"{"error":{"message":"rate limited","type":"rate_limit_error"}}"#,
+        );
+        assert_eq!(err.kind, ProviderErrorKind::RateLimit);
+        assert_eq!(err.message, "rate limited");
+
+        let err = ProviderError::api_status("openwebui", 400, r#"{"detail":"Model not found"}"#);
+        assert_eq!(err.kind, ProviderErrorKind::InvalidRequest);
+        assert_eq!(err.message, "Model not found");
     }
 
     #[test]

@@ -472,7 +472,6 @@ fn strip_template_params(name: &str) -> String {
 
 use super::{build_nd, build_span, node_text as text};
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

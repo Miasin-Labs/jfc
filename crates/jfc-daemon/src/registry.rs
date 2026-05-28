@@ -90,6 +90,9 @@ pub fn record_background_agent_started_at(
                 updated_at: now,
                 completed_at: None,
                 pid,
+                worker_epoch: 0,
+                last_heartbeat_at: pid.map(|_| now),
+                takeover_count: 0,
                 model: model.clone(),
                 worktree_path: worktree_path.clone(),
                 log_path: log_path.clone(),
@@ -124,6 +127,7 @@ pub fn record_background_agent_started_at(
             let is_detached = entry.launch_path.is_some();
             if is_self_write || is_first_write || !is_detached {
                 entry.pid = Some(pid);
+                entry.last_heartbeat_at = Some(now);
             }
         }
         if model.is_some() {
@@ -160,18 +164,29 @@ pub fn record_background_agent_started_at(
 /// The agent record is *created* lazily here if it doesn't exist yet —
 /// covers the edge case where the worker emits a chunk before its own
 /// `record_background_agent_started_at` lands.
+fn worker_epoch_matches(agent: &BackgroundAgentInfo, worker_epoch: u64) -> bool {
+    if worker_epoch == 0 {
+        return agent.worker_epoch == 0 || agent.launch_path.is_none();
+    }
+    agent.worker_epoch == worker_epoch
+}
+
 pub fn record_background_agent_log(id: &str, text: &str) {
+    let _ = record_background_agent_log_at_epoch(id, 0, text);
+}
+
+pub fn record_background_agent_log_at_epoch(id: &str, worker_epoch: u64, text: &str) -> bool {
     let paths = DaemonPaths::default_user();
     let log_path = with_state_lock(&paths, || {
         let mut state = match load_state_for_update(&paths) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(target: "jfc::daemon", error = %e, "refusing to overwrite corrupt daemon state in record_background_agent_log");
-                return background_agent_log_path(&paths, id);
+                return None;
             }
         };
         if let Some(agent) = state.background_agents.get(id) {
-            return agent.log_path.clone();
+            return worker_epoch_matches(agent, worker_epoch).then(|| agent.log_path.clone());
         }
         // First chunk for an unknown id: seed the roster so subsequent
         // queries see the agent. After this initial create, no further
@@ -189,6 +204,9 @@ pub fn record_background_agent_log(id: &str, text: &str) {
                 updated_at: now,
                 completed_at: None,
                 pid: Some(std::process::id()),
+                worker_epoch,
+                last_heartbeat_at: Some(now),
+                takeover_count: 0,
                 model: None,
                 worktree_path: None,
                 log_path: log_path.clone(),
@@ -206,13 +224,18 @@ pub fn record_background_agent_log(id: &str, text: &str) {
             },
         );
         let _ = save_state(&paths, &state);
-        log_path
+        Some(log_path)
     });
     // SSE text deltas arrive in arbitrary chunks ("Let me", " implement",
     // " the full SPIR-V lif", "ter with…"). Writing one `writeln!` per
     // chunk turned the rendered task view into a column of 1-3-word
     // fragments. Append raw so only the model's own `\n` bytes break lines.
-    append_chunk_raw(&log_path, text);
+    if let Some(log_path) = log_path {
+        append_chunk_raw(&log_path, text);
+        true
+    } else {
+        false
+    }
 }
 
 pub fn record_background_agent_progress(
@@ -224,9 +247,56 @@ pub fn record_background_agent_progress(
     latest_cache_write_tokens: Option<u64>,
     output_tokens_delta: Option<u64>,
 ) {
+    let _ = record_background_agent_progress_at_epoch(
+        id,
+        0,
+        last_tool,
+        tool_use_count,
+        latest_input_tokens,
+        latest_cache_read_tokens,
+        latest_cache_write_tokens,
+        output_tokens_delta,
+    );
+}
+
+pub fn record_background_agent_progress_at_epoch(
+    id: &str,
+    worker_epoch: u64,
+    last_tool: Option<&str>,
+    tool_use_count: Option<u32>,
+    latest_input_tokens: Option<u64>,
+    latest_cache_read_tokens: Option<u64>,
+    latest_cache_write_tokens: Option<u64>,
+    output_tokens_delta: Option<u64>,
+) -> bool {
     let paths = DaemonPaths::default_user();
-    let log_path = with_state_lock(&paths, || {
-        let mut state = match load_state_for_update(&paths) {
+    record_background_agent_progress_at_epoch_with_paths(
+        &paths,
+        id,
+        worker_epoch,
+        last_tool,
+        tool_use_count,
+        latest_input_tokens,
+        latest_cache_read_tokens,
+        latest_cache_write_tokens,
+        output_tokens_delta,
+    )
+    .unwrap_or(false)
+}
+
+pub fn record_background_agent_progress_at_epoch_with_paths(
+    paths: &DaemonPaths,
+    id: &str,
+    worker_epoch: u64,
+    last_tool: Option<&str>,
+    tool_use_count: Option<u32>,
+    latest_input_tokens: Option<u64>,
+    latest_cache_read_tokens: Option<u64>,
+    latest_cache_write_tokens: Option<u64>,
+    output_tokens_delta: Option<u64>,
+) -> std::io::Result<bool> {
+    let log_path = with_state_lock(paths, || {
+        let mut state = match load_state_for_update(paths) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(target: "jfc::daemon", error = %e, "refusing to overwrite corrupt daemon state in record_background_agent_progress");
@@ -236,7 +306,12 @@ pub fn record_background_agent_progress(
         let Some(agent) = state.background_agents.get_mut(id) else {
             return None;
         };
-        agent.updated_at = SystemTime::now();
+        if !worker_epoch_matches(agent, worker_epoch) {
+            return None;
+        }
+        let now = SystemTime::now();
+        agent.updated_at = now;
+        agent.last_heartbeat_at = Some(now);
         if let Some(n) = tool_use_count {
             agent.tool_use_count = n;
         }
@@ -256,12 +331,14 @@ pub fn record_background_agent_progress(
             agent.last_tool = Some(tool.to_owned());
         }
         let log_path = agent.log_path.clone();
-        let _ = save_state(&paths, &state);
+        let _ = save_state(paths, &state);
         Some(log_path)
     });
-    if let (Some(log_path), Some(tool)) = (log_path, last_tool) {
-        append_log_line(&log_path, &format!("[tool] {tool}"));
+    let ok = log_path.is_some();
+    if let (Some(log_path), Some(tool)) = (log_path.as_ref(), last_tool) {
+        append_log_line(log_path, &format!("[tool] {tool}"));
     }
+    Ok(ok)
 }
 
 pub fn record_background_agent_finished(
@@ -269,9 +346,35 @@ pub fn record_background_agent_finished(
     status: BackgroundAgentStatus,
     summary_or_error: &str,
 ) {
+    let _ = record_background_agent_finished_at_epoch(id, 0, status, summary_or_error);
+}
+
+pub fn record_background_agent_finished_at_epoch(
+    id: &str,
+    worker_epoch: u64,
+    status: BackgroundAgentStatus,
+    summary_or_error: &str,
+) -> bool {
     let paths = DaemonPaths::default_user();
-    let log_path = with_state_lock(&paths, || {
-        let mut state = match load_state_for_update(&paths) {
+    record_background_agent_finished_at_epoch_with_paths(
+        &paths,
+        id,
+        worker_epoch,
+        status,
+        summary_or_error,
+    )
+    .unwrap_or(false)
+}
+
+pub fn record_background_agent_finished_at_epoch_with_paths(
+    paths: &DaemonPaths,
+    id: &str,
+    worker_epoch: u64,
+    status: BackgroundAgentStatus,
+    summary_or_error: &str,
+) -> std::io::Result<bool> {
+    let log_path = with_state_lock(paths, || {
+        let mut state = match load_state_for_update(paths) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(target: "jfc::daemon", error = %e, "refusing to overwrite corrupt daemon state in record_background_agent_finished");
@@ -282,8 +385,12 @@ pub fn record_background_agent_finished(
         let Some(agent) = state.background_agents.get_mut(id) else {
             return None;
         };
+        if !worker_epoch_matches(agent, worker_epoch) {
+            return None;
+        }
         agent.status = status;
         agent.updated_at = now;
+        agent.last_heartbeat_at = Some(now);
         agent.completed_at = Some(now);
         match status {
             BackgroundAgentStatus::Completed => agent.summary = Some(summary_or_error.to_owned()),
@@ -293,15 +400,47 @@ pub fn record_background_agent_finished(
             BackgroundAgentStatus::Running => {}
         }
         let log_path = agent.log_path.clone();
-        let _ = save_state(&paths, &state);
+        let _ = save_state(paths, &state);
         Some(log_path)
     });
-    if let Some(log_path) = log_path {
+    let ok = log_path.is_some();
+    if let Some(log_path) = log_path.as_ref() {
         append_log_line(
-            &log_path,
+            log_path,
             &format!("[{:?}] {}", status, summary_or_error.replace('\n', " ")),
         );
     }
+    Ok(ok)
+}
+
+pub fn record_background_agent_heartbeat(id: &str, worker_epoch: u64) -> bool {
+    let paths = DaemonPaths::default_user();
+    record_background_agent_heartbeat_at(&paths, id, worker_epoch, std::process::id())
+        .unwrap_or(false)
+}
+
+pub fn record_background_agent_heartbeat_at(
+    paths: &DaemonPaths,
+    id: &str,
+    worker_epoch: u64,
+    pid: u32,
+) -> std::io::Result<bool> {
+    with_state_lock(paths, || -> std::io::Result<bool> {
+        let mut state = load_state_for_update(paths)?;
+        let Some(agent) = state.background_agents.get_mut(id) else {
+            return Ok(false);
+        };
+        if !worker_epoch_matches(agent, worker_epoch) {
+            return Ok(false);
+        }
+        let now = SystemTime::now();
+        agent.pid = Some(pid);
+        agent.status = BackgroundAgentStatus::Running;
+        agent.updated_at = now;
+        agent.last_heartbeat_at = Some(now);
+        save_state(paths, &state)?;
+        Ok(true)
+    })
 }
 
 pub fn background_agent_cancel_requested(id: &str) -> bool {
@@ -368,6 +507,22 @@ pub fn background_agents_string(paths: &DaemonPaths) -> String {
         ));
         if let Some(wt) = &a.worktree_path {
             s.push_str(&format!("    worktree: {}\n", wt.display()));
+        }
+        if a.worker_epoch > 0 || a.takeover_count > 0 || a.last_heartbeat_at.is_some() {
+            let heartbeat_age = a
+                .last_heartbeat_at
+                .and_then(|ts| SystemTime::now().duration_since(ts).ok())
+                .map(|d| format!("{}s ago", d.as_secs()))
+                .unwrap_or_else(|| "never".to_owned());
+            s.push_str(&format!(
+                "    worker: pid={} epoch={} takeovers={} heartbeat={}\n",
+                a.pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "-".to_owned()),
+                a.worker_epoch,
+                a.takeover_count,
+                heartbeat_age
+            ));
         }
         s.push_str(&format!("    log: {}\n", a.log_path.display()));
     }
@@ -467,6 +622,9 @@ pub async fn attach_background_agent_cli(
     let mut offset = std::fs::metadata(&agent.log_path)
         .map(|m| m.len())
         .unwrap_or(0);
+    let stall_after = attach_stall_after();
+    let mut last_progress = Instant::now();
+    let mut stall_reported = false;
     if agent.status.is_terminal() {
         return Ok(());
     }
@@ -491,12 +649,34 @@ pub async fn attach_background_agent_cli(
                 print!("{buf}");
                 std::io::stdout().flush()?;
                 offset = len;
+                last_progress = Instant::now();
+                stall_reported = false;
             }
         }
         if agent.status.is_terminal() {
             println!("[{:?}]", agent.status);
             return Ok(());
         }
+        if let Some(stall_after) = stall_after
+            && !stall_reported
+            && last_progress.elapsed() >= stall_after
+        {
+            println!(
+                "[attach-stall] no new log output for {}ms; worker is still {:?}",
+                stall_after.as_millis(),
+                agent.status
+            );
+            std::io::stdout().flush()?;
+            stall_reported = true;
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn attach_stall_after() -> Option<Duration> {
+    std::env::var("JFC_DAEMON_ATTACH_STALL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
 }

@@ -290,7 +290,11 @@ impl Provider for VertexProvider {
             }
             body["thinking"] = thinking;
         } else if let Some(budget) = options.thinking_budget {
-            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+            let mut thinking = json!({ "type": "enabled", "budget_tokens": budget });
+            if let Some(display) = options.thinking_display.as_deref() {
+                thinking["display"] = json!(display);
+            }
+            body["thinking"] = thinking;
         }
         for (key, value) in &options.provider_options {
             body[key] = value.clone();
@@ -303,19 +307,43 @@ impl Provider for VertexProvider {
             messages = messages.len(),
             "POST streamRawPredict"
         );
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(token)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await?;
+        let resp = match jfc_provider::http::send_with_retry("vertex.streamRawPredict", || {
+            self.client
+                .post(&url)
+                .bearer_auth(&token)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .json(&body)
+                .send()
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let cause = jfc_provider::http::classify_send_error(&e);
+                tracing::warn!(
+                    target: "jfc::provider::vertex",
+                    url = %url,
+                    error = %e,
+                    cause = cause,
+                    "POST streamRawPredict failed before response (after retries)"
+                );
+                return Err(jfc_provider::ProviderError::network(
+                    PROVIDER_ID,
+                    format!("request failed: {cause} ({e})"),
+                )
+                .into());
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Vertex API error {status}: {text}");
+            return Err(jfc_provider::ProviderError::api_status(
+                PROVIDER_ID,
+                status.as_u16(),
+                text,
+            )
+            .into());
         }
         Ok(super::sse::into_event_stream(resp))
     }

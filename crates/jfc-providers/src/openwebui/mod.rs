@@ -3095,17 +3095,39 @@ impl Provider for OpenWebUIProvider {
             base_url,
             "fetching models"
         );
-        let resp: ModelsResponse = self
-            .client
-            .get(format!("{base_url}/api/models"))
-            .header("Authorization", format!("Bearer {}", account.token))
-            .header("Accept", "application/json")
-            .timeout(std::time::Duration::from_secs(8))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let url = format!("{base_url}/api/models");
+        let token = account.token;
+        let resp = match jfc_provider::http::send_with_retry("openwebui.models", || {
+            self.client
+                .get(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Accept", "application/json")
+                .timeout(std::time::Duration::from_secs(8))
+                .send()
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let cause = jfc_provider::http::classify_send_error(&e);
+                return Err(jfc_provider::ProviderError::network(
+                    "openwebui",
+                    format!("request failed: {cause} ({e})"),
+                )
+                .into());
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(jfc_provider::ProviderError::api_status(
+                "openwebui",
+                status.as_u16(),
+                text,
+            )
+            .into());
+        }
+        let resp: ModelsResponse = resp.json().await?;
 
         let models: Vec<ModelInfo> = resp
             .data
@@ -3174,12 +3196,13 @@ impl Provider for OpenWebUIProvider {
                     cause = cause,
                     "POST chat/completions failed before response (after retries)"
                 );
-                anyhow::bail!(
-                    "{AUTO_RETRY_SENTINEL}OpenWebUI request to {url} failed: {cause} ({e}). \
-                     If this happens repeatedly, check the proxy/LiteLLM \
-                     logs and verify ~/.config/jfc/openwebui/accounts.toml \
-                     has a reachable base_url."
+                let error = jfc_provider::ProviderError::network(
+                    "openwebui",
+                    format!(
+                        "request to {url} failed: {cause} ({e}). If this happens repeatedly, check the proxy/LiteLLM logs and verify ~/.config/jfc/openwebui/accounts.toml has a reachable base_url."
+                    ),
                 );
+                anyhow::bail!("{AUTO_RETRY_SENTINEL}{error}");
             }
         };
 
@@ -3227,24 +3250,23 @@ impl Provider for OpenWebUIProvider {
 
             // Friendly translation for non-recoverable errors. Falls back to
             // raw status+body for anything we don't have a recipe for.
-            let friendly = jfc_provider::retry::friendly_error_message(status.as_u16(), &text);
+            let error = jfc_provider::ProviderError::api_status("openwebui", status.as_u16(), text);
 
             // Detect HTML/nginx proxy errors and translate into clean JSON.
             // Mirrors opencode-openwebui-auth/src/plugin/fetch.ts:656.
-            if text.contains("<html") || text.contains("<!DOCTYPE") {
+            let raw = error.raw.as_deref().unwrap_or_default();
+            if raw.contains("<html") || raw.contains("<!DOCTYPE") {
                 anyhow::bail!(
                     "OpenWebUI proxy error {status}: upstream returned HTML (nginx/proxy). \
                      The OWUI base URL or load balancer is misconfigured.\n  body preview: {}",
-                    &text[..text.len().min(400)]
+                    &raw[..raw.len().min(400)]
                 );
             }
 
             if should_retry {
-                anyhow::bail!(
-                    "{AUTO_RETRY_SENTINEL}OpenWebUI API error {status}: {friendly}\n  raw: {text}"
-                );
+                anyhow::bail!("{AUTO_RETRY_SENTINEL}{error}");
             }
-            anyhow::bail!("OpenWebUI API error {status}: {friendly}\n  raw: {text}");
+            return Err(error.into());
         }
 
         Ok(openai_compatible_event_stream(resp))

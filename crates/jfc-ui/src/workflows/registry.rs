@@ -7,6 +7,7 @@
 //! shadows it.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
@@ -37,27 +38,60 @@ struct PluginMeta {
     workflows_dir: String,
 }
 
+static EXTRA_PLUGIN_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+
+/// Register a plugin/workflow directory for the current process. This backs
+/// CLI `--plugin-dir` and the local-first equivalent of upstream `--plugin-url`.
+pub fn register_extra_plugin_dir(path: PathBuf) {
+    let slot = EXTRA_PLUGIN_DIRS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut dirs = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if !dirs.iter().any(|p| p == &path) {
+        dirs.push(path);
+    }
+}
+
+fn extra_plugin_dirs() -> Vec<PathBuf> {
+    EXTRA_PLUGIN_DIRS
+        .get()
+        .and_then(|slot| slot.lock().ok().map(|dirs| dirs.clone()))
+        .unwrap_or_default()
+}
+
+fn workflow_dir_for_plugin_root(path: &Path) -> PathBuf {
+    let manifest_path = path.join(".jfc-plugin.toml");
+    if let Ok(text) = std::fs::read_to_string(&manifest_path)
+        && let Ok(manifest) = toml::from_str::<PluginManifest>(&text)
+    {
+        return path.join(manifest.plugin.workflows_dir);
+    }
+    let workflows = path.join("workflows");
+    if workflows.is_dir() {
+        workflows
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Scan `~/.config/jfc/plugins/*/` for `.jfc-plugin.toml` manifests and
 /// return the resolved `workflows_dir` paths for every valid manifest found.
 pub fn plugin_workflow_dirs() -> Vec<PathBuf> {
-    let Some(plugins_root) = dirs::config_dir().map(|c| c.join("jfc").join("plugins")) else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&plugins_root) else {
-        return Vec::new();
-    };
     let mut dirs = Vec::new();
-    for entry in entries.flatten() {
-        let manifest_path = entry.path().join(".jfc-plugin.toml");
-        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
-            continue;
-        };
-        let Ok(manifest) = toml::from_str::<PluginManifest>(&text) else {
-            continue;
-        };
-        let workflows_dir = entry.path().join(&manifest.plugin.workflows_dir);
-        dirs.push(workflows_dir);
+    let Some(plugins_root) = dirs::config_dir().map(|c| c.join("jfc").join("plugins")) else {
+        return extra_plugin_dirs()
+            .into_iter()
+            .map(|path| workflow_dir_for_plugin_root(&path))
+            .collect();
+    };
+    if let Ok(entries) = std::fs::read_dir(&plugins_root) {
+        for entry in entries.flatten() {
+            dirs.push(workflow_dir_for_plugin_root(&entry.path()));
+        }
     }
+    for path in extra_plugin_dirs() {
+        dirs.push(workflow_dir_for_plugin_root(&path));
+    }
+    dirs.sort();
+    dirs.dedup();
     dirs
 }
 

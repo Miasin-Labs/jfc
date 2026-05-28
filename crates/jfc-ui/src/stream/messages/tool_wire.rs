@@ -30,7 +30,7 @@ pub(super) struct ToolWireCounters {
 pub(super) fn is_server_tool(kind: &ToolKind) -> bool {
     matches!(
         kind,
-        ToolKind::ServerWebSearch | ToolKind::ServerCodeExecution
+        ToolKind::ServerWebSearch | ToolKind::ServerCodeExecution | ToolKind::ServerAdvisor
     )
 }
 
@@ -70,6 +70,7 @@ fn server_tool_wire_name(kind: &ToolKind) -> String {
     match kind {
         ToolKind::ServerWebSearch => "web_search".to_owned(),
         ToolKind::ServerCodeExecution => "code_execution".to_owned(),
+        ToolKind::ServerAdvisor => "advisor".to_owned(),
         // is_server_tool gate above is the source of truth.
         _ => kind.api_name().to_owned(),
     }

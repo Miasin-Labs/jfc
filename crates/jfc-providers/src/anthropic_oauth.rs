@@ -49,7 +49,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// (`context-1m`, `afk-mode`, `fast-mode`, `task-budgets`) are appended
 /// conditionally in `build_beta_header` based on per-account capabilities so
 /// we don't 400 accounts that lack a given feature.
-const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,mid-conversation-system-2026-04-07,redact-thinking-2026-02-12,advisor-tool-2026-03-01,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
+const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,mid-conversation-system-2026-04-07,redact-thinking-2026-02-12,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
 
 /// Subscription-gated beta tokens, paired with the capability flag that
 /// gates them. A capability of `Some(false)` (confirmed unsupported) strips
@@ -84,6 +84,10 @@ fn build_beta_header(
     caps: &super::anthropic_accounts::AccountCapabilities,
     fast_mode: bool,
     task_budget: bool,
+    advisor_tool: bool,
+    eager_input_streaming: bool,
+    strict_tool_schemas: bool,
+    custom_betas: &[String],
 ) -> String {
     let mut header = ANTHROPIC_BETA.to_owned();
     for (token, cap) in GATED_BETAS {
@@ -97,6 +101,23 @@ fn build_beta_header(
     }
     if task_budget && caps.task_budgets != Some(false) {
         header.push_str(",task-budgets-2026-03-13");
+    }
+    if advisor_tool {
+        header.push_str(",advisor-tool-2026-03-01");
+    }
+    if eager_input_streaming {
+        header.push_str(",fine-grained-tool-streaming-2025-05-14");
+    }
+    if strict_tool_schemas && !header.contains("structured-outputs-2025-12-15") {
+        header.push_str(",structured-outputs-2025-12-15");
+    }
+    for beta in custom_betas {
+        let beta = beta.trim();
+        if beta.is_empty() {
+            continue;
+        }
+        header.push(',');
+        header.push_str(beta);
     }
     header
 }
@@ -1238,8 +1259,14 @@ fn build_body(
     if !has_thinking {
         body["temperature"] = json!(1);
     }
-    if !opts.tools.is_empty() {
-        body["tools"] = sse::build_tools(&opts.tools);
+    if !opts.tools.is_empty() || opts.advisor_model.is_some() {
+        let mut tools = sse::build_tools_with_advisor(&opts.tools, opts.advisor_model.as_ref());
+        sse::apply_anthropic_tool_schema_controls(
+            &mut tools,
+            opts.eager_input_streaming,
+            opts.strict_tool_schemas,
+        );
+        body["tools"] = tools;
     }
     if opts.adaptive_thinking {
         let mut thinking = json!({ "type": "adaptive" });
@@ -1248,7 +1275,11 @@ fn build_body(
         }
         body["thinking"] = thinking;
     } else if let Some(budget) = opts.thinking_budget {
-        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        let mut thinking = json!({ "type": "enabled", "budget_tokens": budget });
+        if let Some(display) = opts.thinking_display.as_deref() {
+            thinking["display"] = json!(display);
+        }
+        body["thinking"] = thinking;
     }
     // context_management: clear old thinking blocks from context to save space.
     // Only sent when thinking is enabled (cli.js v143 RI4 function).
@@ -1289,6 +1320,7 @@ fn build_body(
     for (key, value) in &opts.provider_options {
         body[key] = value.clone();
     }
+    sse::cap_cache_control_breakpoints(&mut body, 4);
     body
 }
 
@@ -1377,6 +1409,10 @@ impl Provider for AnthropicOAuthProvider {
         // capability flags persisted to disk.
         let fast_mode = options.fast_mode;
         let want_task_budget = options.task_budget_tokens.is_some();
+        let want_advisor_tool = options.advisor_model.is_some();
+        let want_eager_input_streaming = options.eager_input_streaming;
+        let want_strict_tool_schemas = options.strict_tool_schemas;
+        let custom_betas = options.custom_betas.clone();
 
         // Two nested loops:
         //   - Outer: when every account ends up in cooldown mid-rotation, sleep
@@ -1435,7 +1471,15 @@ impl Provider for AnthropicOAuthProvider {
                     .capabilities_for(&account.name)
                     .await
                     .unwrap_or_default();
-                let beta_header = build_beta_header(&caps, fast_mode, want_task_budget);
+                let beta_header = build_beta_header(
+                    &caps,
+                    fast_mode,
+                    want_task_budget,
+                    want_advisor_tool,
+                    want_eager_input_streaming,
+                    want_strict_tool_schemas,
+                    &custom_betas,
+                );
                 let resp =
                     match jfc_provider::http::send_with_retry("anthropic_oauth.stream", || {
                         self.client
@@ -1788,7 +1832,9 @@ impl Provider for AnthropicOAuthProvider {
         // Force the classifier tool when one was provided — mirrors v126's
         // tool_choice on classify_result.
         if let Some(tools) = body_value.get("tools").and_then(|v| v.as_array())
-            && let Some(first) = tools.first()
+            && let Some(first) = tools
+                .iter()
+                .find(|tool| tool.get("type").and_then(|v| v.as_str()) != Some("advisor_20260301"))
             && let Some(name) = first.get("name").and_then(|v| v.as_str())
         {
             body_value["tool_choice"] = serde_json::json!({
@@ -1810,6 +1856,10 @@ impl Provider for AnthropicOAuthProvider {
         // Built per-account inside the rotation loop (see stream() for why).
         let fast_mode = options.fast_mode;
         let want_task_budget = options.task_budget_tokens.is_some();
+        let want_advisor_tool = options.advisor_model.is_some();
+        let want_eager_input_streaming = options.eager_input_streaming;
+        let want_strict_tool_schemas = options.strict_tool_schemas;
+        let custom_betas = options.custom_betas.clone();
         let mgr = self.account_manager().await?;
         let total_wait_started = std::time::Instant::now();
         let mut last_err: Option<anyhow::Error> = None;
@@ -1853,7 +1903,15 @@ impl Provider for AnthropicOAuthProvider {
                     .capabilities_for(&account.name)
                     .await
                     .unwrap_or_default();
-                let beta_header_complete = build_beta_header(&caps, fast_mode, want_task_budget);
+                let beta_header_complete = build_beta_header(
+                    &caps,
+                    fast_mode,
+                    want_task_budget,
+                    want_advisor_tool,
+                    want_eager_input_streaming,
+                    want_strict_tool_schemas,
+                    &custom_betas,
+                );
                 let resp =
                     match jfc_provider::http::send_with_retry("anthropic_oauth.complete", || {
                         self.client
@@ -2161,6 +2219,17 @@ mod tests {
     }
 
     #[test]
+    fn build_body_advisor_tool_present_when_configured() {
+        let o = opts("m").advisor_model("claude-opus-4-7");
+        let body = build_body(vec![make_user_msg("hi")], &o, TEST_BH);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "advisor_20260301");
+        assert_eq!(tools[0]["name"], "advisor");
+        assert_eq!(tools[0]["model"], "claude-opus-4-7");
+    }
+
+    #[test]
     fn build_body_tools_present_when_non_empty() {
         let o = opts("m").tools(vec![ToolDef {
             name: "bash".into(),
@@ -2376,7 +2445,6 @@ mod tests {
             "prompt-caching-scope-2026-01-05",
             "output-128k-2025-02-19",
             "structured-outputs-2025-12-15",
-            "advisor-tool-2026-03-01",
             "files-api-2025-04-14",
         ] {
             assert!(
@@ -2389,11 +2457,12 @@ mod tests {
     #[test]
     fn build_beta_header_includes_gated_when_capability_unknown() {
         let caps = super::super::anthropic_accounts::AccountCapabilities::default();
-        let header = build_beta_header(&caps, false, false);
+        let header = build_beta_header(&caps, false, false, false, false, false, &[]);
         assert!(header.contains("context-1m-2025-08-07"));
         assert!(header.contains("afk-mode-2026-01-31"));
         assert!(!header.contains("fast-mode"));
         assert!(!header.contains("task-budgets"));
+        assert!(!header.contains("advisor-tool"));
     }
 
     #[test]
@@ -2402,7 +2471,7 @@ mod tests {
             context1m: Some(false),
             ..Default::default()
         };
-        let header = build_beta_header(&caps, true, true);
+        let header = build_beta_header(&caps, true, true, false, false, false, &[]);
         assert!(!header.contains("context-1m"));
         assert!(header.contains("afk-mode-2026-01-31"));
         assert!(header.contains("fast-mode-2026-02-01"));
@@ -2415,8 +2484,38 @@ mod tests {
             fast_mode: Some(false),
             ..Default::default()
         };
-        let header = build_beta_header(&caps, true, false);
+        let header = build_beta_header(&caps, true, false, false, false, false, &[]);
         assert!(!header.contains("fast-mode"));
+    }
+
+    #[test]
+    fn build_beta_header_advisor_is_conditional() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities::default();
+        assert!(
+            !build_beta_header(&caps, false, false, false, false, false, &[])
+                .contains("advisor-tool")
+        );
+        assert!(
+            build_beta_header(&caps, false, false, true, false, false, &[])
+                .contains("advisor-tool-2026-03-01")
+        );
+    }
+
+    #[test]
+    fn build_beta_header_appends_custom_and_tool_schema_betas() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities::default();
+        let header = build_beta_header(
+            &caps,
+            false,
+            false,
+            false,
+            true,
+            true,
+            &["custom-beta-2099-01-01".to_owned()],
+        );
+        assert!(header.contains("fine-grained-tool-streaming-2025-05-14"));
+        assert!(header.contains("structured-outputs-2025-12-15"));
+        assert!(header.contains("custom-beta-2099-01-01"));
     }
 
     #[test]

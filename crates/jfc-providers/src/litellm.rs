@@ -151,17 +151,37 @@ impl Provider for LiteLLMProvider {
             "fetching models"
         );
 
-        let resp: ModelsListResponse = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Accept", "application/json")
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let resp = match jfc_provider::http::send_with_retry("litellm.models", || {
+            self.client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Accept", "application/json")
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let cause = jfc_provider::http::classify_send_error(&e);
+                return Err(jfc_provider::ProviderError::network(
+                    PROVIDER_NAME,
+                    format!("request failed: {cause} ({e})"),
+                )
+                .into());
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(jfc_provider::ProviderError::api_status(
+                PROVIDER_NAME,
+                status.as_u16(),
+                text,
+            )
+            .into());
+        }
+        let resp: ModelsListResponse = resp.json().await?;
 
         let models: Vec<ModelInfo> = resp
             .data
@@ -234,11 +254,14 @@ impl Provider for LiteLLMProvider {
                     cause = cause,
                     "POST chat/completions failed (after retries)"
                 );
-                anyhow::bail!(
-                    "LiteLLM request to {url} failed: {cause} ({e}). \
-                     Check JFC_LITELLM_API ({}) and JFC_LITELLM_API_KEY are correct.",
-                    self.base_url
-                );
+                return Err(jfc_provider::ProviderError::network(
+                    PROVIDER_NAME,
+                    format!(
+                        "request to {url} failed: {cause} ({e}). Check JFC_LITELLM_API ({}) and JFC_LITELLM_API_KEY are correct.",
+                        self.base_url
+                    ),
+                )
+                .into());
             }
         };
 
@@ -257,8 +280,12 @@ impl Provider for LiteLLMProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            let friendly = jfc_provider::retry::friendly_error_message(status.as_u16(), &text);
-            anyhow::bail!("LiteLLM API error {status}: {friendly}\n  raw: {text}");
+            return Err(jfc_provider::ProviderError::api_status(
+                PROVIDER_NAME,
+                status.as_u16(),
+                text,
+            )
+            .into());
         }
 
         Ok(super::openwebui::openai_compatible_event_stream(resp))

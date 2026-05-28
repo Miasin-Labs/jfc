@@ -11,6 +11,15 @@ use jfc_provider::{EventStream, StopReason, StreamEvent};
 const STREAM_INTERRUPT_POLL: Duration = Duration::from_millis(50);
 const TERMINAL_DONE_GRACE: Duration = Duration::from_secs(2);
 
+pub(super) enum DrainOutcome {
+    Done(StopReason),
+    Cancelled(String),
+    Error {
+        message: String,
+        committed_output: bool,
+    },
+}
+
 /// Build the user-facing error text for a cancelled stream. The user-abort
 /// path sets the interrupt flag; the watchdog only cancels the token. Without
 /// this split a watchdog timeout shows up as "Interrupted by user", making a
@@ -30,10 +39,12 @@ pub(super) async fn drain_stream_events(
     tx: &mpsc::Sender<AppEvent>,
     interrupt: Arc<std::sync::atomic::AtomicBool>,
     cancel: CancellationToken,
-) -> Option<StopReason> {
+) -> DrainOutcome {
     let mut stop_reason = StopReason::EndTurn;
     let mut tool_accum: HashMap<usize, (String, String, String)> = HashMap::new();
     let mut terminal_done_deadline: Option<tokio::time::Instant> = None;
+    let mut saw_terminal_done = false;
+    let mut committed_output = false;
 
     loop {
         // Cooperative cancel: the user pressed ESC twice. The legacy atomic
@@ -42,12 +53,7 @@ pub(super) async fn drain_stream_events(
         if interrupt.load(std::sync::atomic::Ordering::SeqCst) || cancel.is_cancelled() {
             let by_user = interrupt.load(std::sync::atomic::Ordering::SeqCst);
             tracing::info!(target: "jfc::stream", by_user, "stream cancelled");
-            let _ = tx
-                .send(AppEvent::Stream(RuntimeStreamEvent::Error(cancel_reason(
-                    by_user,
-                ))))
-                .await;
-            return None;
+            return DrainOutcome::Cancelled(cancel_reason(by_user));
         }
 
         let event = tokio::select! {
@@ -62,12 +68,7 @@ pub(super) async fn drain_stream_events(
                 // interrupts made hard-idle streams look like random ESCs.
                 let by_user = interrupt.load(std::sync::atomic::Ordering::SeqCst);
                 tracing::info!(target: "jfc::stream", by_user, "stream cancelled via token");
-                let _ = tx
-                    .send(AppEvent::Stream(RuntimeStreamEvent::Error(cancel_reason(
-                        by_user,
-                    ))))
-                .await;
-                return None;
+                return DrainOutcome::Cancelled(cancel_reason(by_user));
             }
             _ = async {
                 if let Some(deadline) = terminal_done_deadline {
@@ -89,6 +90,17 @@ pub(super) async fn drain_stream_events(
         };
 
         let Some(event) = event else {
+            if !saw_terminal_done {
+                tracing::error!(
+                    target: "jfc::stream",
+                    committed_output,
+                    "provider stream ended before StreamEvent::Done"
+                );
+                return DrainOutcome::Error {
+                    message: "Provider stream ended before `message_stop`; the response may be incomplete. Press Ctrl+R to retry.".to_owned(),
+                    committed_output,
+                };
+            }
             break;
         };
 
@@ -96,15 +108,16 @@ pub(super) async fn drain_stream_events(
             Ok(e) => e,
             Err(e) => {
                 tracing::error!(target: "jfc::stream", error = %e, "stream event error");
-                let _ = tx
-                    .send(AppEvent::Stream(RuntimeStreamEvent::Error(e.to_string())))
-                    .await;
-                return None;
+                return DrainOutcome::Error {
+                    message: e.to_string(),
+                    committed_output,
+                };
             }
         };
 
         match event {
             StreamEvent::TextDelta { delta, .. } => {
+                committed_output = true;
                 // MUST use blocking send for text — try_send drops data on
                 // backpressure, causing permanent text loss in the assistant
                 // message. Blocking send applies backpressure to the SSE
@@ -118,6 +131,7 @@ pub(super) async fn drain_stream_events(
                     .await;
             }
             StreamEvent::ThinkingDelta { delta, .. } => {
+                committed_output = true;
                 // Same rationale as TextDelta — thinking text is displayed
                 // in the UI and losing chunks creates gaps in the reasoning
                 // trace.
@@ -129,6 +143,7 @@ pub(super) async fn drain_stream_events(
                     .await;
             }
             StreamEvent::ToolDelta { index, delta } => {
+                committed_output = true;
                 let byte_len = delta.len();
                 tool_accum.entry(index).or_default().2.push_str(&delta);
                 // Keep spinner byte estimate and stall timer live while
@@ -149,6 +164,7 @@ pub(super) async fn drain_stream_events(
                 input_json,
                 thought_signature,
             } => {
+                committed_output = true;
                 let assembled = if input_json.is_empty() {
                     tool_accum
                         .get(&index)
@@ -238,7 +254,9 @@ pub(super) async fn drain_stream_events(
                 // server-side sampling loop resumption. See cli.js v142:7057.
                 let tool = if matches!(
                     tool.kind,
-                    ToolKind::ServerWebSearch | ToolKind::ServerCodeExecution
+                    ToolKind::ServerWebSearch
+                        | ToolKind::ServerCodeExecution
+                        | ToolKind::ServerAdvisor
                 ) {
                     let mut t = tool;
                     // Leave output `Empty` — populated by the matching
@@ -258,6 +276,13 @@ pub(super) async fn drain_stream_events(
                         tool_use_id = %tool_use_id,
                         "server-side tool registered (awaiting result block)"
                     );
+                    if matches!(t.kind, ToolKind::ServerAdvisor) {
+                        tracing::info!(
+                            target: "jfc::advisor",
+                            tool_use_id = %tool_use_id,
+                            "tengu_advisor_tool_call"
+                        );
+                    }
                     t
                 } else {
                     tool
@@ -271,6 +296,7 @@ pub(super) async fn drain_stream_events(
                 tool_kind,
                 content,
             } => {
+                committed_output = true;
                 // Anthropic emitted the paired result for a previously-
                 // dispatched server_tool_use block. Forward to the
                 // event_loop, which finds the matching ToolCall on the
@@ -304,6 +330,7 @@ pub(super) async fn drain_stream_events(
                     incoming = ?r, current = ?stop_reason,
                     "StreamEvent::Done"
                 );
+                saw_terminal_done = true;
                 if !matches!(stop_reason, StopReason::ToolUse | StopReason::PauseTurn) {
                     stop_reason = r;
                 }
@@ -361,10 +388,10 @@ pub(super) async fn drain_stream_events(
             }
             StreamEvent::Error { message } => {
                 tracing::error!(target: "jfc::stream", %message, "stream error event");
-                let _ = tx
-                    .send(AppEvent::Stream(RuntimeStreamEvent::Error(message)))
-                    .await;
-                return None;
+                return DrainOutcome::Error {
+                    message,
+                    committed_output,
+                };
             }
             StreamEvent::FallbackTriggered(info) => {
                 tracing::info!(
@@ -385,5 +412,68 @@ pub(super) async fn drain_stream_events(
         }
     }
 
-    Some(stop_reason)
+    DrainOutcome::Done(stop_reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn event_stream(events: Vec<anyhow::Result<StreamEvent>>) -> EventStream {
+        Box::pin(futures::stream::iter(events))
+    }
+
+    #[tokio::test]
+    async fn eof_without_done_is_error() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let outcome = drain_stream_events(
+            event_stream(vec![Ok(StreamEvent::TextDelta {
+                index: 0,
+                delta: "partial".to_owned(),
+            })]),
+            &tx,
+            Arc::new(AtomicBool::new(false)),
+            CancellationToken::new(),
+        )
+        .await;
+
+        match outcome {
+            DrainOutcome::Error {
+                message,
+                committed_output,
+            } => {
+                assert!(committed_output);
+                assert!(message.contains("message_stop"), "{message}");
+            }
+            _ => panic!("expected incomplete EOF to be an error"),
+        }
+
+        match rx.try_recv() {
+            Ok(AppEvent::Stream(RuntimeStreamEvent::Chunk {
+                text: Some(text), ..
+            })) => assert_eq!(text, "partial"),
+            Ok(_) => panic!("expected forwarded text chunk, got different AppEvent"),
+            Err(err) => panic!("expected forwarded text chunk, got receive error: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn eof_after_done_is_clean() {
+        let (tx, _rx) = mpsc::channel(8);
+        let outcome = drain_stream_events(
+            event_stream(vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+            })]),
+            &tx,
+            Arc::new(AtomicBool::new(false)),
+            CancellationToken::new(),
+        )
+        .await;
+
+        match outcome {
+            DrainOutcome::Done(reason) => assert_eq!(reason, StopReason::EndTurn),
+            _ => panic!("expected Done after terminal stream event"),
+        }
+    }
 }

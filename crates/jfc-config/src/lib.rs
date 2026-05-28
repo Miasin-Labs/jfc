@@ -43,6 +43,24 @@ pub struct Config {
     pub theme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_style: Option<String>,
+    #[serde(
+        default,
+        alias = "advisorModel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub advisor_model: Option<String>,
+    #[serde(
+        default,
+        alias = "advisorEnabled",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub advisor_enabled: Option<bool>,
+    #[serde(
+        default,
+        alias = "serverAdvisorModel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub server_advisor_model: Option<String>,
     #[serde(default)]
     pub slate_enabled: bool,
     #[serde(default)]
@@ -65,6 +83,43 @@ pub struct Config {
     pub remote_control: Option<RemoteControlConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_settings: Option<ManagedSettingsConfig>,
+}
+
+/// Admin/managed settings. These may be embedded in `config.toml` or loaded
+/// from a dedicated managed settings file via [`load_managed_settings`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ManagedSettingsConfig {
+    pub disable_remote_control: bool,
+    pub disable_plugin_urls: bool,
+    pub disable_plugin_dirs: bool,
+    pub disable_plugin_updates: bool,
+    pub disable_marketplace: bool,
+    pub require_oauth: bool,
+    pub require_elevated_auth: bool,
+    pub required_user: Option<String>,
+    pub required_env: Vec<String>,
+    pub security_notice: Option<String>,
+    pub policy_tier: Option<String>,
+    pub force_permission_mode: Option<String>,
+    pub max_budget_usd: Option<f64>,
+    pub spend_limit_usd: Option<f64>,
+    pub allowed_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
+}
+
+/// Diagnostic record for `jfc policy status`: every candidate managed-settings
+/// source and whether it contributed a usable policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ManagedSettingsSource {
+    pub label: String,
+    pub path: Option<PathBuf>,
+    pub exists: bool,
+    pub loaded: bool,
+    pub error: Option<String>,
+    pub settings: Option<ManagedSettingsConfig>,
 }
 
 /// `[continuation]` section in config.toml — controls self-continuation
@@ -145,6 +200,9 @@ impl Default for Config {
             experimental: None,
             theme: None,
             output_style: None,
+            advisor_model: None,
+            advisor_enabled: None,
+            server_advisor_model: None,
             slate_enabled: false,
             slate_rules: None,
             memory_recall_enabled: default_memory_recall_enabled(),
@@ -156,6 +214,7 @@ impl Default for Config {
             hooks: None,
             remote_control: None,
             continuation: None,
+            managed_settings: None,
         }
     }
 }
@@ -435,6 +494,99 @@ pub fn load() -> Config {
     load_cached(&config_path())
 }
 
+/// Candidate managed-settings files, from highest to lowest precedence.
+pub fn managed_settings_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(path) = std::env::var("JFC_MANAGED_SETTINGS") {
+        paths.push(PathBuf::from(path));
+    }
+    paths.push(PathBuf::from("/etc/jfc/managed-settings.toml"));
+    paths.push(PathBuf::from("/etc/claude-code/managed-settings.toml"));
+    if let Some(cfg) = dirs::config_dir() {
+        paths.push(cfg.join("jfc").join("managed-settings.toml"));
+    }
+    paths
+}
+
+/// Load the first available managed-settings TOML file. Invalid files are
+/// ignored with a warning so a broken policy file does not brick the CLI.
+pub fn load_managed_settings() -> Option<ManagedSettingsConfig> {
+    for path in managed_settings_paths() {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match toml::from_str::<ManagedSettingsConfig>(&raw) {
+            Ok(settings) => return Some(settings),
+            Err(e) => {
+                tracing::warn!(
+                    target: "jfc::config",
+                    path = %path.display(),
+                    error = %e,
+                    "failed to parse managed settings - ignoring"
+                );
+            }
+        }
+    }
+    load().managed_settings
+}
+
+/// Report all managed-settings sources in precedence order. This is separate
+/// from [`load_managed_settings`] so policy diagnostics can explain why a
+/// higher-precedence file was skipped instead of only showing the final merge.
+pub fn managed_settings_sources() -> Vec<ManagedSettingsSource> {
+    let mut out = Vec::new();
+    for path in managed_settings_paths() {
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => match toml::from_str::<ManagedSettingsConfig>(&raw) {
+                Ok(settings) => out.push(ManagedSettingsSource {
+                    label: "file".to_owned(),
+                    path: Some(path),
+                    exists: true,
+                    loaded: true,
+                    error: None,
+                    settings: Some(settings),
+                }),
+                Err(e) => out.push(ManagedSettingsSource {
+                    label: "file".to_owned(),
+                    path: Some(path),
+                    exists: true,
+                    loaded: false,
+                    error: Some(e.to_string()),
+                    settings: None,
+                }),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                out.push(ManagedSettingsSource {
+                    label: "file".to_owned(),
+                    path: Some(path),
+                    exists: false,
+                    loaded: false,
+                    error: None,
+                    settings: None,
+                });
+            }
+            Err(e) => out.push(ManagedSettingsSource {
+                label: "file".to_owned(),
+                path: Some(path),
+                exists: false,
+                loaded: false,
+                error: Some(e.to_string()),
+                settings: None,
+            }),
+        }
+    }
+    let embedded = load().managed_settings;
+    out.push(ManagedSettingsSource {
+        label: "config.toml [managed_settings]".to_owned(),
+        path: Some(config_path()),
+        exists: true,
+        loaded: embedded.is_some(),
+        error: None,
+        settings: embedded,
+    });
+    out
+}
+
 /// Inner cache-and-load against an arbitrary path.
 pub fn load_cached(path: &Path) -> Config {
     let cur_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
@@ -508,6 +660,119 @@ pub fn save_theme_to(
         path = %path.display(),
         theme = %theme_name,
         "save_theme: persisted theme"
+    );
+    Ok(path.to_path_buf())
+}
+
+/// Persist the local/client-side advisor model. `None` disables the persisted advisor.
+pub fn save_advisor_model(model: Option<&str>) -> Result<std::path::PathBuf, String> {
+    save_advisor_model_to(&config_path(), model)
+}
+
+/// Test-friendly inner helper for `save_advisor_model`.
+pub fn save_advisor_model_to(
+    path: &std::path::Path,
+    model: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(
+            target: "jfc::config",
+            path = %path.display(),
+            error = %e,
+            "save_advisor_model: cannot create parent dir"
+        );
+        return Err(format!("cannot create {}: {e}", parent.display()));
+    }
+    let mut cfg: Config = match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => match toml::from_str(&s) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "jfc::config",
+                    path = %path.display(),
+                    error = %e,
+                    "save_advisor_model: refusing to overwrite unparseable config"
+                );
+                return Err(format!(
+                    "{} is not valid TOML - fix it first ({e})",
+                    path.display()
+                ));
+            }
+        },
+        _ => Config::default(),
+    };
+    cfg.advisor_model = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    cfg.advisor_enabled = Some(cfg.advisor_model.is_some());
+    let serialized = toml::to_string_pretty(&cfg).map_err(|e| format!("serialize failed: {e}"))?;
+    atomic_write::write_atomic_sync(path, serialized.as_bytes())
+        .map_err(|e| format!("write {} failed: {e}", path.display()))?;
+    invalidate_cache();
+    tracing::info!(
+        target: "jfc::config",
+        path = %path.display(),
+        advisor_model = ?cfg.advisor_model,
+        "save_advisor_model: persisted advisor model"
+    );
+    Ok(path.to_path_buf())
+}
+
+/// Persist the Anthropic server-side advisor model. This is separate from
+/// `advisor_model`, which controls JFC's local/client-side Advisor tool.
+pub fn save_server_advisor_model(model: Option<&str>) -> Result<std::path::PathBuf, String> {
+    save_server_advisor_model_to(&config_path(), model)
+}
+
+pub fn save_server_advisor_model_to(
+    path: &std::path::Path,
+    model: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(
+            target: "jfc::config",
+            path = %path.display(),
+            error = %e,
+            "save_server_advisor_model: cannot create parent dir"
+        );
+        return Err(format!("cannot create {}: {e}", parent.display()));
+    }
+    let mut cfg: Config = match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => match toml::from_str(&s) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "jfc::config",
+                    path = %path.display(),
+                    error = %e,
+                    "save_server_advisor_model: refusing to overwrite unparseable config"
+                );
+                return Err(format!(
+                    "{} is not valid TOML - fix it first ({e})",
+                    path.display()
+                ));
+            }
+        },
+        _ => Config::default(),
+    };
+    cfg.server_advisor_model = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let serialized = toml::to_string_pretty(&cfg).map_err(|e| format!("serialize failed: {e}"))?;
+    atomic_write::write_atomic_sync(path, serialized.as_bytes())
+        .map_err(|e| format!("write {} failed: {e}", path.display()))?;
+    invalidate_cache();
+    tracing::info!(
+        target: "jfc::config",
+        path = %path.display(),
+        server_advisor_model = ?cfg.server_advisor_model,
+        "save_server_advisor_model: persisted server advisor model"
     );
     Ok(path.to_path_buf())
 }
@@ -676,6 +941,104 @@ model = "openai/gpt-5"
         save_theme_to(&path, "nord").expect("write");
         let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(cfg.theme.as_deref(), Some("nord"));
+    }
+
+    #[test]
+    fn advisor_model_accepts_camel_case_alias_normal() {
+        let cfg = parse(r#"advisorModel = "opus""#);
+        assert_eq!(cfg.advisor_model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn advisor_enabled_accepts_camel_case_alias_normal() {
+        let cfg = parse(r#"advisorEnabled = false"#);
+        assert_eq!(cfg.advisor_enabled, Some(false));
+    }
+
+    #[test]
+    fn server_advisor_model_accepts_camel_case_alias_normal() {
+        let cfg = parse(r#"serverAdvisorModel = "opus""#);
+        assert_eq!(cfg.server_advisor_model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn managed_settings_embedded_config_parses_normal() {
+        let cfg = parse(
+            r#"
+[managed_settings]
+disable_remote_control = true
+disable_plugin_urls = true
+force_permission_mode = "plan"
+max_budget_usd = 2.5
+allowed_tools = ["Read", "Grep"]
+disallowed_tools = ["Bash"]
+"#,
+        );
+        let managed = cfg.managed_settings.expect("managed settings");
+        assert!(managed.disable_remote_control);
+        assert!(managed.disable_plugin_urls);
+        assert_eq!(managed.force_permission_mode.as_deref(), Some("plan"));
+        assert_eq!(managed.max_budget_usd, Some(2.5));
+        assert_eq!(managed.allowed_tools, vec!["Read", "Grep"]);
+        assert_eq!(managed.disallowed_tools, vec!["Bash"]);
+    }
+
+    #[test]
+    fn save_advisor_model_to_sets_and_clears_normal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+theme = "nord"
+
+[default]
+model = "claude-opus-4-7"
+"#,
+        )
+        .unwrap();
+        save_advisor_model_to(&path, Some("sonnet")).expect("write advisor model");
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.advisor_model.as_deref(), Some("sonnet"));
+        assert_eq!(cfg.advisor_enabled, Some(true));
+        assert_eq!(cfg.theme.as_deref(), Some("nord"));
+        assert_eq!(cfg.default.model.as_deref(), Some("claude-opus-4-7"));
+
+        save_advisor_model_to(&path, None).expect("clear advisor model");
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.advisor_model, None);
+        assert_eq!(cfg.advisor_enabled, Some(false));
+        assert_eq!(cfg.theme.as_deref(), Some("nord"));
+    }
+
+    #[test]
+    fn save_server_advisor_model_to_sets_and_clears_normal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+advisor_model = "sonnet"
+advisor_enabled = true
+theme = "nord"
+
+[default]
+model = "claude-opus-4-7"
+"#,
+        )
+        .unwrap();
+        save_server_advisor_model_to(&path, Some("opus")).expect("write server advisor model");
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.server_advisor_model.as_deref(), Some("opus"));
+        assert_eq!(cfg.advisor_model.as_deref(), Some("sonnet"));
+        assert_eq!(cfg.advisor_enabled, Some(true));
+        assert_eq!(cfg.theme.as_deref(), Some("nord"));
+
+        save_server_advisor_model_to(&path, None).expect("clear server advisor model");
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.server_advisor_model, None);
+        assert_eq!(cfg.advisor_model.as_deref(), Some("sonnet"));
+        assert_eq!(cfg.advisor_enabled, Some(true));
     }
 
     #[test]

@@ -406,7 +406,6 @@ fn has_child_kind(node: TsNode<'_>, kind: &str) -> bool {
 
 use super::{build_nd, build_span, node_text as text};
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

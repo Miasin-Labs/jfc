@@ -60,6 +60,12 @@ pub(crate) async fn run(
     app.cli_task_budget = cli_config.task_budget;
     app.mcp_config_path = cli_config.mcp_config_path;
     app.cowork = cli_config.cowork;
+    app.local_advisor_model = cli_config.local_advisor_model.clone();
+    app.advisor_enabled = app.advisor_enabled || app.local_advisor_model.is_some();
+    app.server_advisor_model = cli_config.server_advisor_model.clone();
+    app.custom_betas = cli_config.custom_betas;
+    app.fine_grained_tool_streaming = cli_config.fine_grained_tool_streaming;
+    app.strict_tool_schemas = cli_config.strict_tool_schemas;
 
     // Remote-control auto-start: from --remote-control flag or config.
     let rc_wanted = cli_config.remote_control
@@ -267,16 +273,19 @@ pub(crate) async fn run(
                     app.goal = Some(goal);
                 }
                 if let Some(model_id) = saved_model {
-                    if let Some(p) = crate::provider_for_model(&app.providers, &model_id) {
+                    if let Some(resolved) = crate::resolve_provider_model(&app.providers, &model_id)
+                    {
                         tracing::info!(
                             target: "jfc::session",
                             model = %model_id,
-                            routed_provider = %p.name(),
+                            routed_provider = %resolved.provider.name(),
                             "rerouting active provider to match saved session model"
                         );
-                        app.provider = p;
+                        app.provider = resolved.provider;
+                        app.model = resolved.model;
+                    } else {
+                        app.model = model_id.into();
                     }
-                    app.model = model_id.into();
                 }
                 app.recompute_token_estimate();
                 let hl_cache_path = std::env::current_dir()
@@ -341,16 +350,19 @@ pub(crate) async fn run(
                     app.goal = Some(goal);
                 }
                 if let Some(model_id) = saved_model {
-                    if let Some(p) = crate::provider_for_model(&app.providers, &model_id) {
+                    if let Some(resolved) = crate::resolve_provider_model(&app.providers, &model_id)
+                    {
                         tracing::info!(
                             target: "jfc::session",
                             model = %model_id,
-                            routed_provider = %p.name(),
+                            routed_provider = %resolved.provider.name(),
                             "rerouting active provider to match saved session model"
                         );
-                        app.provider = p;
+                        app.provider = resolved.provider;
+                        app.model = resolved.model;
+                    } else {
+                        app.model = model_id.into();
                     }
-                    app.model = model_id.into();
                 }
                 app.recompute_token_estimate();
                 let hl_cache_path = std::env::current_dir()
@@ -665,6 +677,13 @@ pub(crate) async fn run(
         let overrides = StreamRequestOverrides {
             background_reminders: app.take_background_reminders(),
             disallowed_tools: app.effective_disallowed_tools(),
+            allowed_tools: app.allowed_tools.clone(),
+            custom_betas: app.custom_betas.clone(),
+            fine_grained_tool_streaming: app.fine_grained_tool_streaming,
+            strict_tool_schemas: app.strict_tool_schemas,
+            task_budget: app.cli_task_budget,
+            max_thinking_tokens: app.cli_max_thinking_tokens,
+            thinking_display: app.cli_thinking_display.clone(),
             ..Default::default()
         };
         let tx_guard = tx.clone();
@@ -810,6 +829,33 @@ pub(crate) async fn run(
                     )
                     .await;
                 }
+                AppEvent::Tool(ToolEvent::SetInProgressToolUseIds { action, ids }) => {
+                    handlers::tools::handle_set_in_progress_tool_use_ids(&mut app, action, ids);
+                }
+                AppEvent::Tool(ToolEvent::DeferredToolUse {
+                    id,
+                    name,
+                    input_preview,
+                    reason,
+                }) => {
+                    handlers::tools::handle_deferred_tool_use(
+                        &mut app,
+                        id,
+                        name,
+                        input_preview,
+                        reason,
+                    );
+                }
+                AppEvent::Tool(ToolEvent::UseSummary {
+                    summary,
+                    preceding_tool_use_ids,
+                }) => {
+                    handlers::tools::handle_tool_use_summary(
+                        &mut app,
+                        summary,
+                        preceding_tool_use_ids,
+                    );
+                }
                 AppEvent::Stream(StreamEvent::ServerToolResult {
                     tool_use_id,
                     tool_kind,
@@ -817,6 +863,7 @@ pub(crate) async fn run(
                 }) => {
                     handlers::stream_tool::handle_server_tool_result(
                         &mut app,
+                        &tx,
                         tool_use_id,
                         tool_kind,
                         content,
@@ -881,7 +928,14 @@ pub(crate) async fn run(
                     handlers::tools::handle_output_chunk(&mut app, tool_id, chunk);
                 }
                 AppEvent::Tool(ToolEvent::Result { tool_id, result }) => {
-                    handlers::tools::handle_tool_result(&mut app, tool_id, result);
+                    handlers::tools::handle_tool_result(&mut app, &tx, tool_id, result);
+                    if handlers::tools::should_recheck_completion_after_tool_result(&app) {
+                        tracing::warn!(
+                            target: "jfc::stream",
+                            "ToolResult completed a turn after its AllComplete signal — rechecking continuation"
+                        );
+                        handlers::tools::handle_all_complete(&mut app, &tx).await;
+                    }
                 }
                 AppEvent::Tool(ToolEvent::AllComplete) => {
                     handlers::tools::handle_all_complete(&mut app, &tx).await;
@@ -913,14 +967,20 @@ pub(crate) async fn run(
                 AppEvent::Ui(UiEvent::WorktreeCountLoaded(count)) => {
                     app.worktree_count = count;
                 }
+                AppEvent::Ui(UiEvent::RemoteApprovalResponse {
+                    tool_use_id,
+                    approved,
+                }) => {
+                    crate::input::handle_remote_approval_response(
+                        &mut app,
+                        &tx,
+                        tool_use_id,
+                        approved,
+                    );
+                }
                 AppEvent::Ui(UiEvent::ExitPlanModeRequested { plan }) => {
                     handlers::ui_actions::handle_exit_plan_mode(&mut app, plan);
                 }
-                AppEvent::Ui(UiEvent::AdvisorToolRequested { tool_use_id }) => {
-                    handlers::ui_actions::handle_advisor_tool_requested(&mut app, tool_use_id)
-                        .await;
-                }
-
                 // ── Task (subagent) events ──────────────────────────────
                 AppEvent::Task(TaskEvent::AgentChunk { task_id, text }) => {
                     handlers::task::handle_agent_chunk(&mut app, task_id, text);

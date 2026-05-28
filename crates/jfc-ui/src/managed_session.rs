@@ -113,6 +113,43 @@ pub fn render_event_line(event: &SessionEvent) -> String {
         SessionEvent::SpanModelRequestEnd { duration_ms, .. } => {
             format!("[span: model request {duration_ms}ms]")
         }
+        SessionEvent::SpanOutcomeEvaluationStart { outcome_id, .. } => {
+            format!(
+                "[outcome evaluation: started{}]",
+                outcome_id
+                    .as_deref()
+                    .map(|id| format!(" {id}"))
+                    .unwrap_or_default()
+            )
+        }
+        SessionEvent::SpanOutcomeEvaluationOngoing { outcome_id, .. } => {
+            format!(
+                "[outcome evaluation: ongoing{}]",
+                outcome_id
+                    .as_deref()
+                    .map(|id| format!(" {id}"))
+                    .unwrap_or_default()
+            )
+        }
+        SessionEvent::SpanOutcomeEvaluationEnd {
+            outcome_id, result, ..
+        } => {
+            format!(
+                "[outcome evaluation: ended{}{}]",
+                outcome_id
+                    .as_deref()
+                    .map(|id| format!(" {id}"))
+                    .unwrap_or_default(),
+                result
+                    .as_deref()
+                    .map(|r| format!(" {r}"))
+                    .unwrap_or_default()
+            )
+        }
+        SessionEvent::UserDefineOutcome { description, .. } => {
+            format!("[outcome defined: {description}]")
+        }
+        SessionEvent::Unknown => "[session event: unknown]".to_owned(),
     }
 }
 

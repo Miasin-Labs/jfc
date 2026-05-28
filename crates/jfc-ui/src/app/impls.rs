@@ -3,6 +3,9 @@ use std::time::Instant;
 use crate::types::{MessagePart, Role, ToolCall, ToolKind};
 use jfc_provider::ModelInfo;
 
+use super::state::{
+    DEFERRED_TOOL_USES_CAP, DeferredToolUse, TOOL_USE_SUMMARIES_CAP, ToolUseSummary,
+};
 use super::{App, PermissionDecision, STREAM_WATCHDOG_TIMEOUT_SECS};
 
 impl App {
@@ -30,13 +33,100 @@ impl App {
         self.last_stream_event_at = Some(Instant::now());
     }
 
+    pub fn record_deferred_tool_use(
+        &mut self,
+        id: String,
+        name: String,
+        input_preview: String,
+        reason: String,
+    ) {
+        if let Some(existing) = self
+            .deferred_tool_uses
+            .iter_mut()
+            .find(|deferred| deferred.id == id)
+        {
+            existing.name = name;
+            existing.input_preview = input_preview;
+            existing.reason = reason;
+            existing.queued_at = Instant::now();
+            return;
+        }
+        if self.deferred_tool_uses.len() >= DEFERRED_TOOL_USES_CAP {
+            self.deferred_tool_uses.pop_front();
+        }
+        self.deferred_tool_uses.push_back(DeferredToolUse {
+            id,
+            name,
+            input_preview,
+            reason,
+            queued_at: Instant::now(),
+        });
+    }
+
+    pub fn clear_deferred_tool_use(&mut self, id: &str) {
+        self.deferred_tool_uses.retain(|deferred| deferred.id != id);
+    }
+
+    pub fn set_in_progress_tool_use_ids(&mut self, action: &str, ids: &[String]) {
+        match action {
+            "set" => {
+                self.in_progress_tool_use_ids.clear();
+                self.in_progress_tool_use_ids.extend(ids.iter().cloned());
+                for id in ids {
+                    self.clear_deferred_tool_use(id);
+                }
+            }
+            "add" => {
+                for id in ids {
+                    self.in_progress_tool_use_ids.insert(id.clone());
+                    self.clear_deferred_tool_use(id);
+                }
+            }
+            "remove" => {
+                for id in ids {
+                    self.in_progress_tool_use_ids.remove(id);
+                    self.clear_deferred_tool_use(id);
+                }
+            }
+            other => {
+                tracing::warn!(
+                    target: "jfc::tool_state",
+                    action = other,
+                    ids = ?ids,
+                    "unknown set_in_progress_tool_use_ids action"
+                );
+            }
+        }
+    }
+
+    pub fn record_tool_use_summary(
+        &mut self,
+        summary: String,
+        preceding_tool_use_ids: Vec<String>,
+    ) {
+        if summary.trim().is_empty() || preceding_tool_use_ids.is_empty() {
+            return;
+        }
+        if self.tool_use_summaries.len() >= TOOL_USE_SUMMARIES_CAP {
+            self.tool_use_summaries.pop_front();
+        }
+        self.tool_use_summaries.push_back(ToolUseSummary {
+            summary,
+            preceding_tool_use_ids,
+            created_at: Instant::now(),
+        });
+    }
+
     pub fn check_stream_watchdog(&mut self) {
         if !self.is_streaming {
             return;
         }
+        let Some(timeout_secs) = stream_watchdog_timeout_secs() else {
+            return;
+        };
         let timed_out = self
             .last_stream_event_at
-            .map(|t| t.elapsed().as_secs() >= STREAM_WATCHDOG_TIMEOUT_SECS)
+            .map(|t| t.elapsed().as_secs() >= timeout_secs)
             .unwrap_or(false);
         if timed_out {
             let streaming_assistant_idx = self.streaming_assistant_idx;
@@ -87,7 +177,10 @@ impl App {
             // context if processed later.
             self.pending_tool_calls.clear();
             self.pre_dispatched_tool_ids.clear();
+            self.deferred_tool_uses.clear();
+            self.in_progress_tool_use_ids.clear();
             self.in_flight_eager_dispatches = 0;
+            self.in_flight_tool_batches = 0;
             if let Some(idx) = streaming_assistant_idx
                 && idx < self.messages.len()
             {
@@ -152,6 +245,9 @@ impl App {
         self.task_panel_detail = false;
         self.viewing_task_id = None;
         self.viewing_task_expanded.clear();
+        self.deferred_tool_uses.clear();
+        self.in_progress_tool_use_ids.clear();
+        self.tool_use_summaries.clear();
         self.compact_suppressed = false;
         self.recompute_token_estimate();
     }
@@ -460,5 +556,22 @@ impl App {
                 .get(id)
                 .is_some_and(|t| t.status == TaskStatus::Completed)
         });
+    }
+}
+
+fn stream_watchdog_timeout_secs() -> Option<u64> {
+    if std::env::var("JFC_DISABLE_STREAM_WATCHDOG")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    match std::env::var("JFC_STREAM_WATCHDOG_TIMEOUT_SECS") {
+        Ok(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|secs| if secs == 0 { None } else { Some(secs) }),
+        Err(_) => Some(STREAM_WATCHDOG_TIMEOUT_SECS),
     }
 }

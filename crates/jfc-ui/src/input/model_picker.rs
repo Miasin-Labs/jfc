@@ -46,7 +46,8 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: crossterm::event::KeyE
                     app.provider = Arc::clone(p);
                 }
                 app.model = chosen_id.clone();
-                crate::app::push_recent_model(&mut app.recent_models, chosen_id.as_str());
+                let recent_model = crate::qualified_model_id(app.provider.as_ref(), &chosen_id);
+                crate::app::push_recent_model(&mut app.recent_models, &recent_model);
                 app.sync_selected_context_window();
                 close_model_picker(app);
             }

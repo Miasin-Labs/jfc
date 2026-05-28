@@ -8,7 +8,7 @@ use super::tool_wire::{
 };
 use super::turns::{
     chat_message_text, ensure_user_last, prepare_for_pause_turn_resume, provider_role,
-    turns_ago_by_message, validate_provider_messages,
+    repair_tool_result_pairing, turns_ago_by_message, validate_provider_messages,
 };
 
 pub(crate) fn build_provider_messages(msgs: &[ChatMessage]) -> Vec<ProviderMessage> {
@@ -40,6 +40,7 @@ pub(crate) fn build_provider_messages_with_tool_results(
     msgs: &[ChatMessage],
 ) -> Vec<ProviderMessage> {
     let out = build_assistant_and_tool_result_messages(msgs);
+    let out = repair_tool_result_pairing(out);
     let out = ensure_user_last(out);
     validate_provider_messages(&out);
     out
@@ -610,11 +611,16 @@ mod tests {
     // suppression separately.)
     #[test]
     fn server_tool_use_emits_server_tool_use_not_plain_tool_use_normal() {
+        use jfc_provider::ServerToolResultKind;
+        use serde_json::json;
         let tool = make_tool_call(
             "srvtoolu_1",
             ToolKind::ServerWebSearch,
             ToolStatus::Completed,
-            ToolOutput::Empty,
+            ToolOutput::ServerToolResult {
+                tool_kind: ServerToolResultKind::WebSearch,
+                content: json!([]),
+            },
         );
         let msgs = vec![
             user_msg("search rust"),
@@ -723,12 +729,43 @@ mod tests {
         assert_eq!(arr[0]["title"], "Rust Programming Language");
     }
 
-    // Robust: when no paired result has arrived yet (e.g. pause_turn
-    // fired mid-loop), the server_tool_use stays on the assistant
-    // message with no fabricated placeholder result. The trailing
-    // server_tool_use IS the resume cue per cli.js v142:622686.
     #[test]
-    fn server_tool_use_without_result_emits_only_server_tool_use_robust() {
+    fn advisor_server_tool_round_trips_with_advisor_result_normal() {
+        use jfc_provider::ServerToolResultKind;
+        use serde_json::json;
+        let tool = make_tool_call(
+            "srvtoolu_advisor",
+            ToolKind::ServerAdvisor,
+            ToolStatus::Completed,
+            ToolOutput::ServerToolResult {
+                tool_kind: ServerToolResultKind::Advisor,
+                content: json!({"type":"advisor_result","text":"check edge cases"}),
+            },
+        );
+        let msgs = vec![
+            user_msg("review this"),
+            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+        ];
+        let out = build_provider_messages_with_tool_results(&msgs);
+        let assistant = out
+            .iter()
+            .find(|m| m.role == ProviderRole::Assistant)
+            .expect("expected assistant message");
+        assert!(assistant.content.iter().any(
+            |c| matches!(c, ProviderContent::ServerToolUse { name, .. } if name == "advisor")
+        ));
+        assert!(assistant.content.iter().any(
+            |c| matches!(c, ProviderContent::ServerToolResult { tool_kind, .. }
+                if *tool_kind == ServerToolResultKind::Advisor)
+        ));
+    }
+
+    // Robust: in the normal send path, an unpaired server_tool_use is
+    // stripped by the upstream-style pairing repair. pause_turn resume has
+    // its own builder that deliberately skips the repair because there the
+    // trailing server_tool_use is the resume cue.
+    #[test]
+    fn normal_send_strips_server_tool_use_without_result_robust() {
         let tool = make_tool_call(
             "srvtoolu_3",
             ToolKind::ServerWebSearch,
@@ -740,28 +777,18 @@ mod tests {
             assistant_with_parts(vec![MessagePart::Tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
-        let assistant = out
-            .iter()
-            .find(|m| m.role == ProviderRole::Assistant)
-            .expect("expected an assistant message");
-        let server_tool_result_count = assistant
-            .content
-            .iter()
-            .filter(|c| matches!(c, ProviderContent::ServerToolResult { .. }))
-            .count();
-        assert_eq!(
-            server_tool_result_count, 0,
-            "no fabricated server_tool_result when the real one hasn't arrived"
-        );
-        // And still no synthetic `tool_result` user message.
-        let has_tool_result = out.iter().any(|m| {
+        let has_server_tool_use = out.iter().any(|m| {
             m.content
                 .iter()
-                .any(|c| matches!(c, ProviderContent::ToolResult { .. }))
+                .any(|c| matches!(c, ProviderContent::ServerToolUse { .. }))
         });
         assert!(
-            !has_tool_result,
-            "abandoned server tools must NOT round-trip as ProviderContent::ToolResult"
+            !has_server_tool_use,
+            "normal send must strip unpaired server_tool_use blocks"
         );
+        assert!(!out.iter().any(|m| m.content.iter().any(|c| matches!(
+            c,
+            ProviderContent::ToolResult { .. } | ProviderContent::ServerToolResult { .. }
+        ))));
     }
 }

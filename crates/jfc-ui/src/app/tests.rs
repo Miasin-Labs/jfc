@@ -406,8 +406,11 @@ fn tool_denied_by_mode_plan_blocks_writes_normal() {
     app.permission_mode = PermissionMode::Plan;
     let edit = make_tool(ToolKind::Edit, "e");
     let read = make_tool(ToolKind::Read, "r");
+    let advisor = make_tool(ToolKind::Advisor, "a");
     assert!(app.tool_denied_by_mode(&edit).is_some());
     assert!(app.tool_denied_by_mode(&read).is_none());
+    assert!(app.tool_denied_by_mode(&advisor).is_none());
+    assert!(!app.tool_needs_approval(&advisor));
 }
 
 // Robust: in Default mode, no tool is denied by mode (it's the prompt

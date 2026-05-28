@@ -9,10 +9,29 @@ use tokio_util::sync::CancellationToken;
 use crate::context::ReadDedupCache;
 use crate::runtime::{AppEvent, TaskEvent, ToolEvent, send_critical};
 use crate::scheduler;
-use crate::types::{ToolCall, ToolInput};
+use crate::types::{ChatMessage, ToolCall, ToolInput, ToolKind};
 use jfc_provider::{ModelId, Provider};
 
-#[tracing::instrument(target = "jfc::stream", skip(tx, dedup, task_store, provider, model, teammate_event_tx), fields(n = tool_calls.len()))]
+#[derive(Clone)]
+pub(crate) struct LocalAdvisorDispatchContext {
+    pub advisor_model: ModelId,
+    pub transcript: Vec<ChatMessage>,
+}
+
+impl LocalAdvisorDispatchContext {
+    pub(crate) fn from_app(app: &crate::app::App) -> Option<Self> {
+        if !app.advisor_enabled {
+            return None;
+        }
+        let advisor_model = app.local_advisor_model.clone()?;
+        Some(Self {
+            advisor_model,
+            transcript: app.messages.clone(),
+        })
+    }
+}
+
+#[tracing::instrument(target = "jfc::stream", skip(tx, dedup, task_store, provider, model, teammate_event_tx, local_advisor), fields(n = tool_calls.len()))]
 pub(crate) fn dispatch_tools_batched(
     tool_calls: Vec<ToolCall>,
     tx: &mpsc::Sender<AppEvent>,
@@ -23,6 +42,7 @@ pub(crate) fn dispatch_tools_batched(
     provider: Arc<dyn Provider>,
     model: ModelId,
     teammate_event_tx: mpsc::UnboundedSender<crate::swarm::runner::TeammateEvent>,
+    local_advisor: Option<LocalAdvisorDispatchContext>,
     // wg-async: tool batches can run for minutes (Bash, subagents). Hand
     // the spawned scheduler a cancel handle so ESC×2 races the batch
     // against `.cancelled()` rather than orphaning the work.
@@ -33,24 +53,27 @@ pub(crate) fn dispatch_tools_batched(
     let mut regular_calls: Vec<ToolCall> = Vec::new();
     let mut task_calls: Vec<ToolCall> = Vec::new();
     let mut workflow_calls: Vec<ToolCall> = Vec::new();
+    let mut advisor_calls: Vec<ToolCall> = Vec::new();
     for tc in tool_calls {
-        match &tc.input {
-            ToolInput::Task(_) => task_calls.push(tc),
-            ToolInput::Workflow { .. } => workflow_calls.push(tc),
+        match (&tc.kind, &tc.input) {
+            (ToolKind::Advisor, ToolInput::Advisor {}) => advisor_calls.push(tc),
+            (_, ToolInput::Task(_)) => task_calls.push(tc),
+            (_, ToolInput::Workflow { .. }) => workflow_calls.push(tc),
             _ => regular_calls.push(tc),
         }
     }
 
     let task_count = task_calls.len();
     let workflow_count = workflow_calls.len();
+    let advisor_count = advisor_calls.len();
     let regular_count = regular_calls.len();
     tracing::info!(
         target: "jfc::stream",
-        task_count, workflow_count, regular_count,
+        task_count, workflow_count, advisor_count, regular_count,
         "dispatch_tools_batched: splitting tool calls"
     );
     let pending = Arc::new(AtomicUsize::new(
-        task_count + workflow_count + usize::from(!regular_calls.is_empty()),
+        task_count + workflow_count + advisor_count + usize::from(!regular_calls.is_empty()),
     ));
     let tx_done = tx.clone();
     let send_all_complete = move || {
@@ -60,6 +83,39 @@ pub(crate) fn dispatch_tools_batched(
             crate::runtime::send_critical(&tx_done, AppEvent::Tool(ToolEvent::AllComplete));
         }
     };
+
+    for tc in advisor_calls {
+        let tx_advisor = tx.clone();
+        let done = send_all_complete.clone();
+        let provider_advisor = provider.clone();
+        let tool_id = tc.id.clone();
+        let context = local_advisor.clone();
+        tokio::spawn(async move {
+            let result = match context {
+                Some(context) => match crate::advisor::ask_local_advisor_tool(
+                    provider_advisor.as_ref(),
+                    context.advisor_model,
+                    &context.transcript,
+                )
+                .await
+                {
+                    Ok(reply) => crate::runtime::ExecutionResult::success(reply),
+                    Err(e) => crate::runtime::ExecutionResult::failure(format!(
+                        "Local advisor error: {e}"
+                    )),
+                },
+                None => crate::runtime::ExecutionResult::failure(
+                    "Local advisor is not configured. Use `/advisor config <model>` or start with `--advisor [MODEL]`."
+                        .to_owned(),
+                ),
+            };
+            send_critical(
+                &tx_advisor,
+                AppEvent::Tool(ToolEvent::Result { tool_id, result }),
+            );
+            done();
+        });
+    }
 
     // Pre-load agent defs once per dispatch so each spawned task can
     // resolve its `subagent_type` without redoing the directory walk.
@@ -168,6 +224,7 @@ pub(crate) fn dispatch_tools_batched(
                 agent_def: agent_def.clone(),
                 cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
                 worker_exe: None,
+                worker_epoch: 0,
                 active_team_name: active_team_name_task.clone(),
                 created_at: std::time::SystemTime::now(),
             };

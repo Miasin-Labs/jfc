@@ -4,7 +4,8 @@
 //! from the daemon's main loop. It walks every `Running` agent and:
 //!
 //! 1. If the owning PID is gone, requests one respawn from the persisted
-//!    `BackgroundAgentLaunch` (capped at `respawn_count < 1`) unless the
+//!    `BackgroundAgentLaunch` (capped by `JFC_DAEMON_WORKER_RESPAWN_LIMIT`)
+//!    unless the
 //!    agent was cancelled.
 //! 2. Otherwise marks the agent `Failed` with an explanatory error.
 //!
@@ -13,17 +14,17 @@
 //! prevents the UI from clobbering the worker's PID in the first place.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use super::logs::{append_log_line, background_agent_log_path};
 use super::pid::process_is_running;
 use super::state::{
-    BackgroundAgentLaunch, BackgroundAgentStatus, DaemonPaths, DaemonState, load_state_for_update,
-    save_state, with_state_lock,
+    BackgroundAgentInfo, BackgroundAgentLaunch, BackgroundAgentStatus, DaemonPaths, DaemonState,
+    load_state_for_update, save_state, with_state_lock,
 };
 use super::worker::{
-    mark_background_agent_spawn_failed, reap_worker_process, record_background_agent_worker_pid,
-    spawn_worker_process,
+    arm_worker_launch_epoch, mark_background_agent_spawn_failed, reap_worker_process,
+    record_background_agent_worker_pid, spawn_worker_process,
 };
 
 pub(super) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Result<DaemonState> {
@@ -43,8 +44,33 @@ pub(super) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Resul
                 continue;
             }
             let previous_pid = agent.pid;
+            if owner_alive {
+                if !agent.cancel_requested
+                    && heartbeat_is_stale(agent, now)
+                    && agent.respawn_count < worker_respawn_limit()
+                    && !low_memory_respawn_blocked()
+                    && let Some(launch_path) = agent.launch_path.clone()
+                    && let Ok(launch_json) = std::fs::read_to_string(&launch_path)
+                    && let Ok(launch) = serde_json::from_str::<BackgroundAgentLaunch>(&launch_json)
+                {
+                    agent.respawn_count = agent.respawn_count.saturating_add(1);
+                    agent.updated_at = now;
+                    agent.pid = None;
+                    stale_logs.push((
+                        agent.log_path.clone(),
+                        format!(
+                            "[takeover-requested] pid {:?} heartbeat stale; starting replacement worker",
+                            previous_pid
+                        ),
+                    ));
+                    respawns.push((agent.id.clone(), launch_path, launch));
+                    changed = true;
+                }
+                continue;
+            }
             if !agent.cancel_requested
-                && agent.respawn_count < 1
+                && agent.respawn_count < worker_respawn_limit()
+                && !low_memory_respawn_blocked()
                 && let Some(launch_path) = agent.launch_path.clone()
                 && let Ok(launch_json) = std::fs::read_to_string(&launch_path)
                 && let Ok(launch) = serde_json::from_str::<BackgroundAgentLaunch>(&launch_json)
@@ -69,7 +95,13 @@ pub(super) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Resul
             agent.cancel_requested = false;
             let reason = match agent.pid {
                 Some(pid) => {
-                    format!("stale: owning process {pid} exited before reporting completion")
+                    if low_memory_respawn_blocked() {
+                        format!(
+                            "stale: owning process {pid} exited before reporting completion; respawn suppressed by low-memory threshold"
+                        )
+                    } else {
+                        format!("stale: owning process {pid} exited before reporting completion")
+                    }
                 }
                 None => "stale: no owning process recorded".to_owned(),
             };
@@ -88,14 +120,27 @@ pub(super) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Resul
         append_log_line(&path, &reason);
     }
     for (id, launch_path, launch) in respawns {
+        let launch = match arm_worker_launch_epoch(paths, &launch_path, launch, true) {
+            Ok(launch) => launch,
+            Err(e) => {
+                mark_background_agent_spawn_failed(paths, &id, &format!("respawn failed: {e}"))?;
+                continue;
+            }
+        };
         match spawn_worker_process(&launch_path, &launch) {
             Ok(child) => {
                 let pid = child.id();
-                record_background_agent_worker_pid(paths, &id, pid, &launch_path)?;
+                record_background_agent_worker_pid(
+                    paths,
+                    &id,
+                    pid,
+                    &launch_path,
+                    launch.worker_epoch,
+                )?;
                 reap_worker_process(child);
                 append_log_line(
                     &background_agent_log_path(paths, &id),
-                    &format!("[respawned] pid={pid}"),
+                    &format!("[respawned] pid={pid} epoch={}", launch.worker_epoch),
                 );
             }
             Err(e) => {
@@ -105,4 +150,60 @@ pub(super) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Resul
     }
 
     Ok(state)
+}
+
+fn worker_respawn_limit() -> u32 {
+    std::env::var("JFC_DAEMON_WORKER_RESPAWN_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
+fn heartbeat_is_stale(agent: &BackgroundAgentInfo, now: SystemTime) -> bool {
+    let Some(last) = agent.last_heartbeat_at else {
+        return false;
+    };
+    let Some(stale_after) = worker_heartbeat_stale_after() else {
+        return false;
+    };
+    now.duration_since(last)
+        .is_ok_and(|elapsed| elapsed >= stale_after)
+}
+
+fn worker_heartbeat_stale_after() -> Option<Duration> {
+    std::env::var("JFC_DAEMON_WORKER_HEARTBEAT_STALE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .or(Some(Duration::from_secs(120)))
+        .filter(|duration| !duration.is_zero())
+}
+
+fn low_memory_respawn_blocked() -> bool {
+    let Some(threshold_mb) = std::env::var("JFC_DAEMON_LOW_MEM_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+    else {
+        return false;
+    };
+    available_memory_mb().is_some_and(|available| available < threshold_mb)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn available_memory_mb() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        let Some(rest) = line.strip_prefix("MemAvailable:") else {
+            continue;
+        };
+        let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+        return Some(kb / 1024);
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn available_memory_mb() -> Option<u64> {
+    None
 }

@@ -357,7 +357,6 @@ fn text<'a>(node: &TsNode, source: &'a str) -> &'a str {
 
 use super::{build_nd, build_span as span_from};
 
-
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

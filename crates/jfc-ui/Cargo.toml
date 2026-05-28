@@ -74,6 +74,7 @@ libc = "0.2.186"
 jfc-config = { path = "../jfc-config" }
 jfc-anthropic-sdk = { path = "../jfc-anthropic-sdk" }
 jfc-auth = { path = "../jfc-auth" }
+jfc-bridge = { path = "../jfc-bridge" }
 jfc-agents = { path = "../jfc-agents" }
 jfc-core = { path = "../jfc-core" }
 jfc-provider = { path = "../jfc-provider" }

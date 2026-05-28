@@ -74,7 +74,12 @@ impl MessagePart {
         match self {
             Self::Text(s) => s.clone(),
             Self::Reasoning(s) => format!("[Reasoning: {}]", s),
-            Self::RedactedThinking(_) => "[Redacted thinking]".into(),
+            Self::RedactedThinking(data) => {
+                format!(
+                    "[Redacted thinking: provider withheld plaintext, {} bytes preserved]",
+                    data.len()
+                )
+            }
             Self::Advisor(s) => format!("[Advisor: {s}]"),
             Self::Tool(tc) => {
                 format!(

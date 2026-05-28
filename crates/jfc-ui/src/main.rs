@@ -129,7 +129,10 @@ pub(crate) fn is_sandbox_active() -> bool {
     false
 }
 
-pub(crate) use cli::{CliRuntimeConfig, StartupSession, build_providers, provider_for_model};
+pub(crate) use cli::{
+    CliRuntimeConfig, StartupSession, build_providers, provider_for_model, qualified_model_id,
+    resolve_provider_model,
+};
 
 use clap::Parser;
 

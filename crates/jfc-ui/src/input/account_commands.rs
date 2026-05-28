@@ -571,6 +571,8 @@ pub(super) async fn cmd_batch(
                     stream: Some(false),
                     thinking: None,
                     reasoning_effort: None,
+                    output_config: None,
+                    context_management: None,
                 },
             })
             .collect();

@@ -529,13 +529,14 @@ pub(super) async fn cmd_skills(
         s.push_str(&"\u{2500}".repeat(pad + 40));
         s.push('\n');
         for sk in &skills {
-            let desc = sk
-                .description
-                .as_deref()
-                .unwrap_or("(no description)");
+            let desc = sk.description.as_deref().unwrap_or("(no description)");
             // Truncate long descriptions for readability
             let desc_trunc: String = desc.chars().take(60).collect();
-            let suffix = if desc.chars().count() > 60 { "\u{2026}" } else { "" };
+            let suffix = if desc.chars().count() > 60 {
+                "\u{2026}"
+            } else {
+                ""
+            };
             s.push_str(&format!(
                 "{:<width$}\u{2014} {}{suffix}\n",
                 sk.name,

@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use crate::providers::{
     AnthropicOAuthProvider, AnthropicProvider, AntigravityOAuthProvider, BedrockProvider,
-    CodexOAuthProvider, GeminiApiProvider, LiteLLMProvider, OpenAIProvider, OpenWebUIProvider,
-    VertexProvider,
+    CodexOAuthProvider, GeminiApiProvider, LiteLLMProvider, OpenAIProvider, OpenRouterProvider,
+    OpenWebUIProvider, VertexProvider,
 };
-use jfc_provider::{ModelId, ModelSpec, Provider};
+use jfc_provider::{ModelId, ModelSpec, Provider, ProviderId};
 
 /// Result of `build_providers()`. We keep a typed `Arc<AnthropicOAuthProvider>` next
 /// to the trait-object list so the OAuth-specific profile fetch can run without
@@ -15,6 +15,11 @@ pub(crate) struct ProvidersInit {
     pub(crate) active_idx: usize,
     pub(crate) model: ModelId,
     pub(crate) oauth: Option<Arc<AnthropicOAuthProvider>>,
+}
+
+pub(crate) struct ProviderModelResolution {
+    pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) model: ModelId,
 }
 
 /// Build every provider that has usable config in this environment, plus pick which one
@@ -35,6 +40,7 @@ pub(crate) fn build_providers() -> ProvidersInit {
     let env_model = std::env::var("ANTHROPIC_MODEL")
         .ok()
         .or_else(|| std::env::var("OPENWEBUI_MODEL").ok())
+        .or_else(|| std::env::var("OPENROUTER_MODEL").ok())
         .or_else(|| std::env::var("JFC_LITELLM_MODEL").ok())
         .filter(|s| !s.is_empty());
     let cfg_model = crate::config::load()
@@ -92,6 +98,11 @@ pub(crate) fn build_providers() -> ProvidersInit {
     if let Some(openai) = OpenAIProvider::from_env() {
         providers.push(Arc::new(openai));
         prefer.get_or_insert("openai");
+    }
+
+    if let Some(openrouter) = OpenRouterProvider::from_env() {
+        providers.push(Arc::new(openrouter));
+        prefer.get_or_insert("openrouter");
     }
 
     if let Some(litellm) = LiteLLMProvider::from_env() {
@@ -222,6 +233,16 @@ pub(crate) fn build_providers() -> ProvidersInit {
                 return Some("openai".to_owned());
             }
 
+            let has_openrouter_config = providers.iter().any(|p| p.name() == "openrouter");
+            if has_openrouter_config && looks_openrouter_model(model_str) {
+                tracing::info!(
+                    target: "jfc::startup",
+                    model = %model_str,
+                    "no static match, model looks OpenRouter-native → openrouter"
+                );
+                return Some("openrouter".to_owned());
+            }
+
             let has_litellm_config = providers.iter().any(|p| p.name() == "litellm");
             let looks_proxy_routed = !model_str.is_empty() && !model_str.starts_with("claude-");
             if has_litellm_config && looks_proxy_routed {
@@ -277,62 +298,113 @@ pub(crate) fn build_providers() -> ProvidersInit {
 ///
 /// Used by `--continue`/`--resume` to re-route when the saved session's model
 /// belongs to a different provider than the env-var precedence picked.
-pub(crate) fn provider_for_model(
+pub(crate) fn resolve_provider_model(
     providers: &[Arc<dyn Provider>],
     model_id: &str,
-) -> Option<Arc<dyn Provider>> {
+) -> Option<ProviderModelResolution> {
     if model_id.is_empty() {
         return None;
     }
     // Try parsing as ModelSpec — if qualified, route directly by provider name
+    // and strip the prefix before the model id is sent to the provider.
     if let Ok(spec) = model_id.parse::<ModelSpec>() {
         if let Some(prefix) = spec.provider() {
             return providers
                 .iter()
                 .find(|p| p.name() == prefix.as_str())
-                .cloned();
+                .cloned()
+                .map(|provider| ProviderModelResolution {
+                    provider,
+                    model: spec.model().clone(),
+                });
         }
     }
+    let model = ModelId::new(model_id);
     // Tier 2: static catalogue lookup
     if let Some(p) = providers.iter().find(|p| {
         p.available_models()
             .iter()
             .any(|m| m.id.as_str() == model_id)
     }) {
-        return Some(Arc::clone(p));
+        return Some(ProviderModelResolution {
+            provider: Arc::clone(p),
+            model,
+        });
     }
     // Tier 3: heuristic — OpenAI-looking ids route to OpenAI first, then
     // non-`claude-` ids route to OpenWebUI proxy.
     let has_codex = providers.iter().any(|p| p.name() == "codex");
     if has_codex && looks_codex_model(model_id) {
-        return providers.iter().find(|p| p.name() == "codex").cloned();
+        return providers
+            .iter()
+            .find(|p| p.name() == "codex")
+            .cloned()
+            .map(|provider| ProviderModelResolution { provider, model });
     }
 
     let has_openai = providers.iter().any(|p| p.name() == "openai");
     if has_openai && looks_openai_model(model_id) {
-        return providers.iter().find(|p| p.name() == "openai").cloned();
+        return providers
+            .iter()
+            .find(|p| p.name() == "openai")
+            .cloned()
+            .map(|provider| ProviderModelResolution { provider, model });
+    }
+
+    let has_openrouter = providers.iter().any(|p| p.name() == "openrouter");
+    if has_openrouter && looks_openrouter_model(model_id) {
+        return providers
+            .iter()
+            .find(|p| p.name() == "openrouter")
+            .cloned()
+            .map(|provider| ProviderModelResolution { provider, model });
     }
 
     let has_litellm = providers.iter().any(|p| p.name() == "litellm");
     if has_litellm && !model_id.starts_with("claude-") {
-        return providers.iter().find(|p| p.name() == "litellm").cloned();
+        return providers
+            .iter()
+            .find(|p| p.name() == "litellm")
+            .cloned()
+            .map(|provider| ProviderModelResolution { provider, model });
     }
 
     let has_openwebui = providers.iter().any(|p| p.name() == "openwebui");
     if has_openwebui && !model_id.starts_with("claude-") && !model_id.starts_with("gemini") {
-        return providers.iter().find(|p| p.name() == "openwebui").cloned();
+        return providers
+            .iter()
+            .find(|p| p.name() == "openwebui")
+            .cloned()
+            .map(|provider| ProviderModelResolution { provider, model });
     }
 
     // Tier 3b: gemini-prefixed ids route to the gemini or antigravity provider.
     if model_id.starts_with("gemini") {
         if let Some(p) = providers.iter().find(|p| p.name() == "antigravity") {
-            return Some(Arc::clone(p));
+            return Some(ProviderModelResolution {
+                provider: Arc::clone(p),
+                model,
+            });
         }
         if let Some(p) = providers.iter().find(|p| p.name() == "gemini") {
-            return Some(Arc::clone(p));
+            return Some(ProviderModelResolution {
+                provider: Arc::clone(p),
+                model,
+            });
         }
     }
     None
+}
+
+pub(crate) fn provider_for_model(
+    providers: &[Arc<dyn Provider>],
+    model_id: &str,
+) -> Option<Arc<dyn Provider>> {
+    resolve_provider_model(providers, model_id).map(|r| r.provider)
+}
+
+pub(crate) fn qualified_model_id(provider: &dyn Provider, model: &ModelId) -> String {
+    ModelSpec::qualified(ProviderId::new(provider.name()), model.clone()).to_string()
 }
 
 fn looks_openai_model(model_id: &str) -> bool {
@@ -349,4 +421,22 @@ fn looks_codex_model(model_id: &str) -> bool {
         .unwrap_or(model_id)
         .to_ascii_lowercase();
     id.contains("codex")
+}
+
+fn looks_openrouter_model(model_id: &str) -> bool {
+    let Some((vendor, routed_model)) = model_id.split_once('/') else {
+        return false;
+    };
+    !routed_model.is_empty()
+        && matches!(
+            vendor,
+            "anthropic"
+                | "openai"
+                | "google"
+                | "meta-llama"
+                | "mistralai"
+                | "qwen"
+                | "deepseek"
+                | "x-ai"
+        )
 }

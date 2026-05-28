@@ -12,7 +12,7 @@ pub struct ListParams {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page<T> {
     pub data: Vec<T>,
     #[serde(default)]

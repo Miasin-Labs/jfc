@@ -1,29 +1,54 @@
 //! `BetaSessionService` — persistent agent sessions, resources, and event stream.
 //!
-//! Endpoints (under `/v1/beta/sessions`, beta `managed-agents-2026-04-01`):
-//! - `POST /v1/beta/sessions` — create
-//! - `GET /v1/beta/sessions` — list
-//! - `GET /v1/beta/sessions/{id}` — retrieve
-//! - `PATCH /v1/beta/sessions/{id}` — update
-//! - `DELETE /v1/beta/sessions/{id}` — delete
-//! - `POST /v1/beta/sessions/{id}/resources` — attach a resource
-//! - `GET /v1/beta/sessions/{id}/events` — list events
-//! - `POST /v1/beta/sessions/{id}/events` — send a user event
-//! - `GET /v1/beta/sessions/{id}/events/stream` — SSE event stream
+//! Endpoints (beta `managed-agents-2026-04-01`):
+//! - `POST /v1/sessions?beta=true` — create
+//! - `GET /v1/sessions?beta=true` — list
+//! - `GET /v1/sessions/{id}?beta=true` — retrieve
+//! - `POST /v1/sessions/{id}?beta=true` — update
+//! - `DELETE /v1/sessions/{id}?beta=true` — delete
+//! - `POST /v1/sessions/{id}/archive?beta=true` — archive
+//! - `POST /v1/sessions/{id}/resources?beta=true` — attach a resource
+//! - `GET /v1/sessions/{id}/events?beta=true` — list events
+//! - `POST /v1/sessions/{id}/events?beta=true` — send a user event
+//! - `GET /v1/sessions/{id}/events/stream?beta=true` — SSE event stream
 
 use crate::beta;
 use crate::client::Client;
 use crate::error::{Error, Result};
+use crate::pagination::{ListParams, Page};
 use futures::stream::{Stream, StreamExt};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::pin::Pin;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SessionCreateParams {
-    pub agent_id: String,
+    /// Upstream accepts an agent id string or `{ id, version }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<serde_json::Value>,
+    /// Legacy JFC compatibility. New callers should use `agent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub resources: Vec<ResourceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub vault_ids: Vec<String>,
+}
+
+impl SessionCreateParams {
+    pub fn for_agent(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent: Some(serde_json::Value::String(agent_id.into())),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,23 +62,70 @@ pub enum ResourceRef {
         repo: String,
         branch: Option<String>,
     },
+    MemoryStore {
+        memory_store_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        access: Option<MemoryStoreAccess>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryStoreAccess {
+    ReadWrite,
+    ReadOnly,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Session {
     pub id: String,
+    #[serde(default)]
     pub agent_id: String,
+    #[serde(default)]
+    pub agent: serde_json::Value,
+    #[serde(default, alias = "state", alias = "status")]
     pub state: SessionState,
-    pub created_at: String,
-    pub updated_at: String,
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub outcome_evaluations: Vec<OutcomeEvaluation>,
+    #[serde(default)]
+    pub vault_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutcomeEvaluation {
+    pub outcome_id: String,
+    pub description: String,
+    pub result: String,
+    #[serde(default)]
+    pub explanation: Option<String>,
+    #[serde(default)]
+    pub iteration: Option<u64>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
+    #[default]
     Idle,
     Running,
     Terminated,
+    Rescheduling,
     Rescheduled,
     RequiresAction,
 }
@@ -144,6 +216,31 @@ pub enum SessionEvent {
         duration_ms: u64,
         timestamp: String,
     },
+    SpanOutcomeEvaluationStart {
+        #[serde(default)]
+        outcome_id: Option<String>,
+        timestamp: String,
+    },
+    SpanOutcomeEvaluationOngoing {
+        #[serde(default)]
+        outcome_id: Option<String>,
+        timestamp: String,
+    },
+    SpanOutcomeEvaluationEnd {
+        #[serde(default)]
+        outcome_id: Option<String>,
+        #[serde(default)]
+        result: Option<String>,
+        timestamp: String,
+    },
+    UserDefineOutcome {
+        description: String,
+        #[serde(default)]
+        rubric: serde_json::Value,
+        timestamp: String,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 /// A Resource attached to a Session (file or git repo). Mirrors v132's
@@ -162,6 +259,15 @@ pub enum SessionResource {
         owner: String,
         repo: String,
         branch: Option<String>,
+        created_at: String,
+    },
+    MemoryStore {
+        id: String,
+        memory_store_id: String,
+        #[serde(default)]
+        instructions: Option<String>,
+        #[serde(default)]
+        access: Option<MemoryStoreAccess>,
         created_at: String,
     },
 }
@@ -192,7 +298,7 @@ impl SessionService {
                 self.client
                     .request(
                         Method::POST,
-                        "/v1/beta/sessions",
+                        "/v1/sessions?beta=true",
                         Some(beta::MANAGED_AGENTS),
                     )
                     .json(&params)
@@ -202,7 +308,7 @@ impl SessionService {
     }
 
     pub async fn get(&self, session_id: &str) -> Result<Session> {
-        let path = format!("/v1/beta/sessions/{session_id}");
+        let path = format!("/v1/sessions/{session_id}?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| {
@@ -213,8 +319,37 @@ impl SessionService {
         Ok(resp.json().await?)
     }
 
+    pub async fn list_page(&self, params: &ListParams) -> Result<Page<Session>> {
+        let resp = self
+            .client
+            .execute_with_retry(|| {
+                self.client
+                    .request(
+                        Method::GET,
+                        "/v1/sessions?beta=true",
+                        Some(beta::MANAGED_AGENTS),
+                    )
+                    .query(params)
+            })
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    pub async fn update(&self, session_id: &str, params: serde_json::Value) -> Result<Session> {
+        let path = format!("/v1/sessions/{session_id}?beta=true");
+        let resp = self
+            .client
+            .execute_with_retry(|| {
+                self.client
+                    .request(Method::POST, &path, Some(beta::MANAGED_AGENTS))
+                    .json(&params)
+            })
+            .await?;
+        Ok(resp.json().await?)
+    }
+
     pub async fn delete(&self, session_id: &str) -> Result<()> {
-        let path = format!("/v1/beta/sessions/{session_id}");
+        let path = format!("/v1/sessions/{session_id}?beta=true");
         self.client
             .execute_with_retry(|| {
                 self.client
@@ -224,13 +359,25 @@ impl SessionService {
         Ok(())
     }
 
+    pub async fn archive(&self, session_id: &str) -> Result<Session> {
+        let path = format!("/v1/sessions/{session_id}/archive?beta=true");
+        let resp = self
+            .client
+            .execute_with_retry(|| {
+                self.client
+                    .request(Method::POST, &path, Some(beta::MANAGED_AGENTS))
+            })
+            .await?;
+        Ok(resp.json().await?)
+    }
+
     /// Attach a Resource (file or repo) to a managed session.
     pub async fn add_resource(
         &self,
         session_id: &str,
         resource: ResourceRef,
     ) -> Result<SessionResource> {
-        let path = format!("/v1/beta/sessions/{session_id}/resources");
+        let path = format!("/v1/sessions/{session_id}/resources?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| {
@@ -244,7 +391,7 @@ impl SessionService {
 
     /// List Resources currently attached to the session.
     pub async fn list_resources(&self, session_id: &str) -> Result<Vec<SessionResource>> {
-        let path = format!("/v1/beta/sessions/{session_id}/resources");
+        let path = format!("/v1/sessions/{session_id}/resources?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| {
@@ -268,7 +415,7 @@ impl SessionService {
         session_id: &str,
         content: serde_json::Value,
     ) -> Result<()> {
-        let path = format!("/v1/beta/sessions/{session_id}/events");
+        let path = format!("/v1/sessions/{session_id}/events?beta=true");
         self.client
             .execute_with_retry(|| {
                 self.client
@@ -290,7 +437,7 @@ impl SessionService {
         &self,
         session_id: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<SessionEvent>> + Send>>> {
-        let path = format!("/v1/beta/sessions/{session_id}/events/stream");
+        let path = format!("/v1/sessions/{session_id}/events/stream?beta=true");
         let resp = self
             .client
             .request(Method::GET, &path, Some(beta::MANAGED_AGENTS))

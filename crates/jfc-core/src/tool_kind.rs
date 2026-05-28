@@ -89,6 +89,7 @@ pub enum ToolKind {
     ConnectGitHub,
     ServerWebSearch,
     ServerCodeExecution,
+    ServerAdvisor,
     Generic(String),
     UnknownTool { advertised_name: String },
 }
@@ -212,6 +213,7 @@ impl ToolKind {
             return_tool_kind!(inner,
                 Self::ServerWebSearch => ["web_search", "web_search_tool"],
                 Self::ServerCodeExecution => ["code_execution"],
+                Self::ServerAdvisor => ["advisor"],
             );
             return Self::Generic(name.to_owned());
         }
@@ -313,6 +315,7 @@ impl ToolKind {
             Self::ConnectGitHub => "ConnectGitHub",
             Self::ServerWebSearch => "ServerWebSearch",
             Self::ServerCodeExecution => "ServerCodeExecution",
+            Self::ServerAdvisor => "ServerAdvisor",
             Self::Generic(name) => name.as_str(),
             Self::UnknownTool { advertised_name } => advertised_name.as_str(),
         }
@@ -406,6 +409,7 @@ impl ToolKind {
             Self::ConnectGitHub => "ConnectGitHub",
             Self::ServerWebSearch => "server_tool_use:web_search",
             Self::ServerCodeExecution => "server_tool_use:code_execution",
+            Self::ServerAdvisor => "server_tool_use:advisor",
             Self::Generic(name) => name.as_str(),
             Self::UnknownTool { advertised_name } => advertised_name.as_str(),
         }

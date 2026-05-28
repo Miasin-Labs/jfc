@@ -388,12 +388,7 @@ mod tests {
         let f3 = g.add_node(n("f3", NodeKind::Function, "src/big.rs"));
 
         let roots: HashSet<NodeId> = vec![s_id.clone()].into_iter().collect();
-        let kept = enforce_file_diversity(
-            &g,
-            vec![s_id.clone(), f1, f2, f3],
-            &roots,
-            2,
-        );
+        let kept = enforce_file_diversity(&g, vec![s_id.clone(), f1, f2, f3], &roots, 2);
         assert_eq!(kept.len(), 2);
         // The struct (root) should always survive.
         assert!(kept.contains(&s_id));
@@ -406,11 +401,7 @@ mod tests {
         let t1 = g.add_node(n("t1", NodeKind::Function, "src/tests/a.rs"));
         let t2 = g.add_node(n("t2", NodeKind::Function, "src/tests/b.rs"));
         let t3 = g.add_node(n("t3", NodeKind::Function, "src/tests/c.rs"));
-        let kept = cap_test_files(
-            &g,
-            vec![prod.clone(), t1, t2, t3],
-            1,
-        );
+        let kept = cap_test_files(&g, vec![prod.clone(), t1, t2, t3], 1);
         assert_eq!(kept.len(), 2);
         assert!(kept.contains(&prod));
     }

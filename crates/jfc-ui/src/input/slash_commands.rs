@@ -185,7 +185,10 @@ pub(super) async fn skill_fallthrough(
         app.agentic_turn_count = 0;
         app.thinking_started_at = None;
         app.pre_dispatched_tool_ids.clear();
+        app.deferred_tool_uses.clear();
+        app.in_progress_tool_use_ids.clear();
         app.in_flight_eager_dispatches = 0;
+        app.in_flight_tool_batches = 0;
         app.thinking_ended_at = None;
         app.last_usage_output = 0;
         app.usage_apply_baseline = (0, 0, 0, 0);
@@ -214,19 +217,24 @@ pub(super) async fn skill_fallthrough(
         interrupt.store(false, std::sync::atomic::Ordering::SeqCst);
         app.cancel_token = tokio_util::sync::CancellationToken::new();
         let cancel = app.cancel_token.clone();
+        let overrides = crate::runtime::StreamRequestOverrides {
+            background_reminders: app.take_background_reminders(),
+            disallowed_tools: app.effective_disallowed_tools(),
+            allowed_tools: app.allowed_tools.clone(),
+            custom_betas: app.custom_betas.clone(),
+            fine_grained_tool_streaming: app.fine_grained_tool_streaming,
+            strict_tool_schemas: app.strict_tool_schemas,
+            task_budget: app.cli_task_budget,
+            max_thinking_tokens: app.cli_max_thinking_tokens,
+            thinking_display: app.cli_thinking_display.clone(),
+            ..Default::default()
+        };
         // wg-async: retry path mints a fresh cancel token for the
         // new stream so the old (possibly cancelled) one can't
         // racially interrupt the retry.
         tokio::spawn(async move {
             crate::stream::stream_response(
-                provider,
-                messages,
-                model,
-                tx_stream,
-                interrupt,
-                cancel,
-                None,
-                crate::runtime::StreamRequestOverrides::default(),
+                provider, messages, model, tx_stream, interrupt, cancel, None, overrides,
             )
             .await;
         });

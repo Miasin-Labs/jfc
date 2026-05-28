@@ -48,6 +48,31 @@ pub(super) enum DaemonSubcommand {
         /// Background agent / Task id.
         id: String,
     },
+    /// List durable worker control-plane records.
+    Controls,
+    /// Resolve and mark a spare worker binary ready.
+    Spare {
+        /// Optional worker executable to pin for future respawns.
+        #[arg(long)]
+        worker_exe: Option<PathBuf>,
+    },
+    /// Take over a stale background worker from its launch spec.
+    Takeover {
+        /// Background agent / Task id.
+        id: String,
+        /// Take over even if the recorded owner PID still appears live.
+        #[arg(long)]
+        force: bool,
+        /// Audit reason recorded in daemon state and the worker log.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Request daemon restart/binary handoff on the next daemon tick.
+    BinaryTakeover {
+        /// Optional replacement worker executable.
+        #[arg(long)]
+        worker_exe: Option<PathBuf>,
+    },
     /// Internal worker entrypoint for durable background agents.
     #[command(hide = true)]
     Worker {
@@ -59,9 +84,10 @@ pub(super) enum DaemonSubcommand {
 
 pub(super) async fn run_daemon_subcommand(sub: DaemonSubcommand) -> anyhow::Result<()> {
     use crate::daemon::{
-        DaemonPaths, attach_background_agent_cli, background_agent_logs_string,
-        background_agents_string, fire_cron_cli, list_string, request_background_agent_cancel,
-        run_daemon, status_string, stop_daemon, wait_background_agent_cli,
+        DaemonPaths, WorkerControlKind, WorkerControlRequest, attach_background_agent_cli,
+        background_agent_logs_string, background_agents_string, fire_cron_cli, list_string,
+        request_background_agent_cancel, request_worker_control, run_daemon, status_string,
+        stop_daemon, wait_background_agent_cli, worker_controls_string,
     };
 
     let paths = DaemonPaths::default_user();
@@ -134,6 +160,58 @@ pub(super) async fn run_daemon_subcommand(sub: DaemonSubcommand) -> anyhow::Resu
             request_background_agent_cancel(&paths, &id)
                 .map_err(|e| anyhow::anyhow!("kill failed: {e}"))?;
             println!("cancel requested for {id}");
+            Ok(())
+        }
+        DaemonSubcommand::Controls => {
+            print!("{}", worker_controls_string(&paths));
+            Ok(())
+        }
+        DaemonSubcommand::Spare { worker_exe } => {
+            let id = request_worker_control(
+                &paths,
+                WorkerControlRequest {
+                    kind: WorkerControlKind::PrepareSpare,
+                    agent_id: None,
+                    target_pid: None,
+                    worker_exe,
+                    force: false,
+                    reason: Some("manual spare preparation".to_owned()),
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("spare request failed: {e}"))?;
+            println!("worker spare request queued: {id}");
+            Ok(())
+        }
+        DaemonSubcommand::Takeover { id, force, reason } => {
+            let control_id = request_worker_control(
+                &paths,
+                WorkerControlRequest {
+                    kind: WorkerControlKind::Takeover,
+                    agent_id: Some(id.clone()),
+                    target_pid: None,
+                    worker_exe: None,
+                    force,
+                    reason: Some(reason.unwrap_or_else(|| "manual takeover".to_owned())),
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("takeover request failed: {e}"))?;
+            println!("worker takeover queued for {id}: {control_id}");
+            Ok(())
+        }
+        DaemonSubcommand::BinaryTakeover { worker_exe } => {
+            let id = request_worker_control(
+                &paths,
+                WorkerControlRequest {
+                    kind: WorkerControlKind::BinaryTakeover,
+                    agent_id: None,
+                    target_pid: None,
+                    worker_exe,
+                    force: false,
+                    reason: Some("manual binary takeover".to_owned()),
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("binary takeover request failed: {e}"))?;
+            println!("binary takeover queued: {id}");
             Ok(())
         }
         DaemonSubcommand::Worker { launch } => crate::daemon::run_background_agent_worker(launch)

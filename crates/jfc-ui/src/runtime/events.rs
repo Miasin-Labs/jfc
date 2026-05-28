@@ -69,6 +69,21 @@ pub struct StreamRequestOverrides {
     /// CLAUDE.md frontmatter. These tools are removed from the
     /// advertised tool catalog before sending to the model.
     pub disallowed_tools: Vec<String>,
+    /// Optional allowlist from CLI/managed settings. When non-empty, only
+    /// matching tool names are advertised to the model.
+    pub allowed_tools: Vec<String>,
+    /// Additional Anthropic beta tokens supplied by `--betas`.
+    pub custom_betas: Vec<String>,
+    /// Request eager local tool input streaming on Anthropic native routes.
+    pub fine_grained_tool_streaming: bool,
+    /// Request strict local tool schema validation on Anthropic native routes.
+    pub strict_tool_schemas: bool,
+    /// Per-request task budget token hint from `--task-budget`.
+    pub task_budget: Option<u64>,
+    /// Optional cap for legacy extended-thinking models.
+    pub max_thinking_tokens: Option<u32>,
+    /// Thinking display mode from `--thinking-display`.
+    pub thinking_display: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,12 +132,13 @@ pub enum UiEvent {
     /// handler spawns that subprocess off-loop so a slow or locked git repo
     /// cannot stall redraw/input processing.
     WorktreeCountLoaded(usize),
-    /// The model called the `Advisor` tool. The event-loop handler runs
-    /// `ask_advisor()` with the current transcript and writes the reply
-    /// back as a `MessagePart::Advisor` on the main transcript. The tool
-    /// result ID is carried so we can correlate the reply with the tool_use.
-    AdvisorToolRequested {
+    /// Remote-control response to a specific pending permission request. Carries
+    /// the tool id so late/orphaned responses can be matched to unresolved
+    /// transcript tool_use blocks instead of blindly pressing y/n on whichever
+    /// modal is currently focused.
+    RemoteApprovalResponse {
         tool_use_id: String,
+        approved: bool,
     },
 }
 
@@ -206,6 +222,26 @@ pub enum ToolEvent {
         tool: ToolCall,
         blocked: bool,
         reason: String,
+    },
+    /// SDK/remote bridge state: update the set of tool_use ids currently
+    /// executing. `action` is "add", "remove", or "set" to match upstream's
+    /// `set_in_progress_tool_use_ids` shape.
+    SetInProgressToolUseIds {
+        action: String,
+        ids: Vec<String>,
+    },
+    /// Tool use has been yielded but not executed yet. This covers approval
+    /// waits, classifier waits, and stream_done batch queues.
+    DeferredToolUse {
+        id: String,
+        name: String,
+        input_preview: String,
+        reason: String,
+    },
+    /// Single-line label for the just-completed tool batch.
+    UseSummary {
+        summary: String,
+        preceding_tool_use_ids: Vec<String>,
     },
 }
 

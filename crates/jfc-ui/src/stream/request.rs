@@ -15,6 +15,35 @@ pub(super) struct PreparedStreamRequest {
     pub(super) metadata: StreamRequestMetadata,
 }
 
+fn normalize_thinking_display(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "show" | "shown" | "visible" | "on" | "true" | "summary" | "summarize" | "summarized" => {
+            Some("summarized")
+        }
+        "hide" | "hidden" | "off" | "false" | "omit" | "omitted" => Some("omitted"),
+        _ => None,
+    }
+}
+
+fn requested_thinking_display(overrides: &StreamRequestOverrides) -> Option<String> {
+    if let Some(value) = overrides.thinking_display.as_deref() {
+        return match normalize_thinking_display(value) {
+            Some(display) => Some(display.to_owned()),
+            None => {
+                tracing::warn!(
+                    target: "jfc::stream",
+                    value,
+                    "ignoring unsupported thinking display mode"
+                );
+                None
+            }
+        };
+    }
+    std::env::var("JFC_THINKING_DISPLAY")
+        .ok()
+        .and_then(|value| normalize_thinking_display(&value).map(str::to_owned))
+}
+
 /// Pull the most recent user-role text out of a provider message vec. Used by
 /// the memory-recall pass to know what query the user actually asked. Returns
 /// `None` when the conversation is empty or the last user turn carried only
@@ -393,6 +422,9 @@ Do not use a colon before tool calls.";
         } else if let Some(memories_section) = crate::memory::render_memories_section(&memories) {
             system_prompt.push_str(&memories_section);
         }
+        if let Some(memory_store_section) = sdk_memory_store_prompt_section().await {
+            system_prompt.push_str(&memory_store_section);
+        }
 
         // Plan recall — parallel to memory recall above. Two-phase LLM call
         // selects relevant plans from `.jfc/plans/` then synthesizes a
@@ -517,6 +549,43 @@ Do not use a colon before tool calls.";
         );
     }
 
+    let server_advisor_model = if matches!(
+        provider.stream_convention(),
+        StreamConvention::AnthropicNative
+    ) && matches!(provider.name(), "anthropic" | "anthropic-oauth")
+    {
+        crate::advisor::active_server_advisor_model()
+    } else {
+        None
+    };
+    if let Some(model) = &server_advisor_model {
+        tracing::info!(
+            target: "jfc::advisor",
+            advisor_model = %model,
+            "injecting server advisor prompt/tool"
+        );
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(crate::advisor::SERVER_ADVISOR_SYSTEM_PROMPT);
+    }
+    let local_advisor_model = crate::advisor::active_local_advisor_model();
+    if let Some(model) = &local_advisor_model {
+        tracing::info!(
+            target: "jfc::advisor",
+            advisor_model = %model,
+            "injecting local advisor prompt"
+        );
+        system_prompt.push_str("\n\n## Local Advisor Tool\n\n");
+        system_prompt.push_str(
+            "You have access to an `Advisor` tool backed by JFC's configured \
+             local/client-side advisor model. It takes no parameters. When you \
+             call it, JFC snapshots the current conversation, sends that \
+             snapshot through the configured advisor provider/model, and returns \
+             the advisor's feedback as this tool's result. Call it before \
+             substantive work on multi-step tasks, when stuck, when considering \
+             a change of approach, and before declaring substantial work done.",
+        );
+    }
+
     // Drain queued background reminders (file watcher / MCP refresh / …)
     // into this request's system prompt. The reminders were posted by
     // FS-event handlers and live wire-only — they never persist in
@@ -615,7 +684,45 @@ Do not use a colon before tool calls.";
         let _ = before;
     }
 
-    // Filter out tools disallowed by CLI flags and/or CLAUDE.md frontmatter.
+    // Hide JFC's local Advisor tool unless a local advisor model is configured.
+    // The upstream server advisor, when active, is injected through
+    // StreamOptions instead of the normal local tool catalog.
+    if local_advisor_model.is_none() {
+        advertised_tools.retain(|t| t.name != "Advisor");
+    }
+
+    if !overrides.allowed_tools.is_empty() {
+        let before = advertised_tools.len();
+        let allowed_lower: Vec<String> = overrides
+            .allowed_tools
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+        let mut suppressed: Vec<String> = Vec::new();
+        advertised_tools.retain(|t| {
+            if allowed_lower.contains(&t.name.to_lowercase()) {
+                true
+            } else {
+                suppressed.push(t.name.clone());
+                false
+            }
+        });
+        if !suppressed.is_empty() {
+            tracing::info!(
+                target: "jfc::stream::tools",
+                removed = suppressed.len(),
+                total_before = before,
+                tools = ?suppressed,
+                "removed tools outside allowlist"
+            );
+            system_prompt.push_str(&format!(
+                "\n\n## Tools suppressed by managed/user allowlist\n\nOnly these tools \
+                 are available this session: {}.\n",
+                overrides.allowed_tools.join(", "),
+            ));
+        }
+    }
+
     if !overrides.disallowed_tools.is_empty() {
         let before = advertised_tools.len();
         let disallowed_lower: Vec<String> = overrides
@@ -681,11 +788,44 @@ Do not use a colon before tool calls.";
     if let Some(effort) = crate::effort::active_global() {
         base = base.reasoning_effort(effort);
     }
+    if let Some(advisor_model) = server_advisor_model {
+        base = base.advisor_model(advisor_model);
+    }
     if crate::effort::active_fast_mode() {
         base = base.fast_mode(true);
     }
+    let thinking_display = requested_thinking_display(&overrides);
+    if !overrides.custom_betas.is_empty() {
+        base = base.custom_betas(overrides.custom_betas);
+    }
+    if overrides.fine_grained_tool_streaming
+        || std::env::var("JFC_FINE_GRAINED_TOOL_STREAMING")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    {
+        base = base.eager_input_streaming(true);
+    }
+    if overrides.strict_tool_schemas
+        || std::env::var("JFC_STRICT_TOOL_SCHEMAS")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    {
+        base = base.strict_tool_schemas(true);
+    }
+    if let Some(tokens) = overrides.task_budget {
+        base = base.task_budget(tokens);
+    }
 
-    let opts = thinking_mode.apply_to(base);
+    let mut opts = thinking_mode.apply_to(base);
+    if let Some(max) = overrides.max_thinking_tokens
+        && let Some(budget) = opts.thinking_budget.as_mut()
+    {
+        *budget = (*budget).min(max);
+    }
+    if opts.adaptive_thinking || opts.thinking_budget.is_some() {
+        let display = thinking_display.unwrap_or_else(|| "summarized".into());
+        opts = opts.thinking_display(display);
+    }
 
     PreparedStreamRequest {
         opts,
@@ -695,6 +835,123 @@ Do not use a colon before tool calls.";
             action_expected,
             tool_choice: overrides.tool_choice,
         },
+    }
+}
+
+async fn sdk_memory_store_prompt_section() -> Option<String> {
+    let ids = configured_memory_store_ids();
+    if ids.is_empty() {
+        return None;
+    }
+    let Some(client) = crate::sdk_bridge::build_client() else {
+        return Some(crate::system_reminder::format(
+            "JFC_MEMORY_STORE_IDS is configured, but no Anthropic SDK API key profile is available. \
+             Remote SDK memory stores were not loaded for this turn.",
+        ));
+    };
+    let service = jfc_anthropic_sdk::memory_stores::MemoryStoreService::new(client);
+    let limit = std::env::var("JFC_MEMORY_STORE_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let timeout = std::env::var("JFC_MEMORY_STORE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(8));
+
+    let mut out = String::from("\n\n## SDK memory stores\n\n");
+    let mut loaded_any = false;
+    for store_id in ids {
+        let params = jfc_anthropic_sdk::pagination::ListParams {
+            limit: Some(limit),
+            ..Default::default()
+        };
+        match tokio::time::timeout(timeout, service.list_memories(&store_id, &params)).await {
+            Ok(Ok(page)) => {
+                loaded_any = true;
+                out.push_str(&format!("### {store_id}\n\n"));
+                if page.data.is_empty() {
+                    out.push_str("(no memories returned)\n\n");
+                } else {
+                    for memory in page.data {
+                        let body = render_sdk_memory_content(&memory);
+                        out.push_str(&format!("- `{}`: {}\n", memory.id, body));
+                    }
+                    out.push('\n');
+                }
+            }
+            Ok(Err(err)) => {
+                out.push_str(&format!(
+                    "### {store_id}\n\n(remote memory load failed: {err})\n\n"
+                ));
+            }
+            Err(_) => {
+                out.push_str(&format!(
+                    "### {store_id}\n\n(remote memory load timed out after {}s)\n\n",
+                    timeout.as_secs()
+                ));
+            }
+        }
+    }
+
+    if loaded_any || !out.trim().is_empty() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn configured_memory_store_ids() -> Vec<String> {
+    let raw = std::env::var("JFC_MEMORY_STORE_IDS")
+        .ok()
+        .or_else(|| std::env::var("JFC_MEMORY_STORE_ID").ok())
+        .unwrap_or_default();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn render_sdk_memory_content(memory: &jfc_anthropic_sdk::memory_stores::Memory) -> String {
+    let content = memory
+        .content
+        .as_ref()
+        .map(memory_value_to_text)
+        .or_else(|| {
+            memory
+                .extra
+                .get("content")
+                .or_else(|| memory.extra.get("text"))
+                .or_else(|| memory.extra.get("body"))
+                .map(memory_value_to_text)
+        })
+        .unwrap_or_else(|| "(empty)".to_owned());
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(1_000)
+        .collect()
+}
+
+fn memory_value_to_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => {
+            for key in ["text", "content", "body", "value"] {
+                if let Some(text) = map.get(key).and_then(|v| v.as_str()) {
+                    return text.to_owned();
+                }
+            }
+            serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+        }
+        _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
     }
 }
 

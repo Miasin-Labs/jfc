@@ -66,36 +66,208 @@ pub(super) async fn cmd_compact(
 pub(super) async fn cmd_advisor(
     app: &mut App,
     parts: &[&str],
-    _text: &str,
+    text: &str,
     _tx: Option<&mpsc::Sender<AppEvent>>,
 ) {
-    // Parallel advisor (see `crate::advisor`). Doesn't touch the main
+    // Manual local advisor query (see `crate::advisor`). Doesn't touch the main
     // agent's stream — runs a separate `provider.complete()` against a
-    // SNAPSHOT of the current transcript and surfaces the reply as a
-    // dedicated `MessagePart::Advisor` part with its own visual style.
+    // SNAPSHOT of the current transcript and surfaces the reply as a dedicated
+    // `MessagePart::Advisor` part with its own visual style. Model-initiated
+    // Advisor tool calls use the stream dispatcher and return as normal tool
+    // results.
     //
     // Default-off per deliverable: gated by `app.advisor_enabled`,
-    // populated from `JFC_ADVISOR_ENABLED=1` on startup. Even when on,
-    // each session has a per-budget ceiling (`DEFAULT_TOKEN_BUDGET`)
-    // so a runaway loop can't drain the user's account.
-    let query = parts.get(1).copied().unwrap_or("").trim().to_owned();
+    // populated from local advisor config or `JFC_ADVISOR_ENABLED=1` on
+    // startup. Even when on, each session has a per-budget ceiling
+    // (`DEFAULT_TOKEN_BUDGET`) so a runaway loop can't drain the user's account.
+    let args = text.trim().strip_prefix("/advisor").unwrap_or("").trim();
+    let first = parts.get(1).copied().unwrap_or("").trim();
     // Echo the user's command into the transcript first so the chat
     // shows what the user asked, even on the error paths below.
-    app.messages
-        .push(ChatMessage::user(format!("/advisor {query}")));
+    app.messages.push(ChatMessage::user(text.to_owned()));
+
+    if args.is_empty() || first.eq_ignore_ascii_case("status") {
+        let server = app
+            .server_advisor_model
+            .as_ref()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "disabled".to_owned());
+        let local = app
+            .local_advisor_model
+            .as_ref()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "disabled".to_owned());
+        app.messages
+            .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                format!(
+                    "Local advisor: `{local}`\nServer advisor: `{server}`\n\nUse `/advisor config <model>` for local, `/advisor server <model>` for Anthropic server-side, or `/advisor off`."
+                ),
+            )]));
+        return;
+    }
+
+    if first.eq_ignore_ascii_case("server") {
+        let raw_model = args.get(first.len()..).unwrap_or("").trim();
+        if matches!(
+            raw_model.to_ascii_lowercase().as_str(),
+            "off" | "disable" | "disabled"
+        ) {
+            match crate::config::save_server_advisor_model(None) {
+                Ok(_) => {
+                    crate::advisor::set_active_server_advisor_model(None);
+                    app.server_advisor_model = None;
+                    app.messages
+                        .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                            "Server advisor disabled.".into(),
+                        )]));
+                }
+                Err(e) => {
+                    app.messages
+                        .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                            format!("Could not persist server advisor setting: {e}"),
+                        )]));
+                }
+            }
+            return;
+        }
+        if raw_model.is_empty() {
+            app.messages
+                .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                    "Usage: `/advisor server opus`, `/advisor server sonnet`, `/advisor server <model-id>`, or `/advisor server off`.".into(),
+                )]));
+            return;
+        }
+        if !matches!(
+            app.provider.stream_convention(),
+            jfc_provider::StreamConvention::AnthropicNative
+        ) || !matches!(app.provider.name(), "anthropic" | "anthropic-oauth")
+        {
+            app.messages
+                .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                    format!(
+                        "Server advisor requires an Anthropic-native provider; active provider is `{}`.",
+                        app.provider.name()
+                    ),
+                )]));
+            return;
+        }
+        match crate::advisor::resolve_server_advisor_model(&app.model, Some(raw_model), true, true)
+        {
+            Ok(Some(model)) => match crate::config::save_server_advisor_model(Some(model.as_str()))
+            {
+                Ok(_) => {
+                    crate::advisor::set_active_server_advisor_model(Some(model.clone()));
+                    app.server_advisor_model = Some(model.clone());
+                    app.messages
+                        .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                            format!("Server advisor set to `{model}`."),
+                        )]));
+                }
+                Err(e) => {
+                    app.messages
+                        .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                            format!("Could not persist server advisor setting: {e}"),
+                        )]));
+                }
+            },
+            Ok(None) => {
+                app.messages
+                    .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                        "Server advisor is not available for the active model/provider.".into(),
+                    )]));
+            }
+            Err(e) => {
+                app.messages
+                    .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                        format!("Server advisor config error: {e}"),
+                    )]));
+            }
+        }
+        return;
+    }
+
+    if matches!(
+        first.to_ascii_lowercase().as_str(),
+        "off" | "disable" | "disabled"
+    ) {
+        match crate::config::save_advisor_model(None) {
+            Ok(_) => {
+                crate::advisor::set_active_local_advisor_model(None);
+                app.local_advisor_model = None;
+                app.advisor_enabled = false;
+                app.advisor_session = None;
+                app.messages
+                    .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                        "Local advisor disabled.".into(),
+                    )]));
+            }
+            Err(e) => {
+                app.messages
+                    .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                        format!("Could not persist advisor setting: {e}"),
+                    )]));
+            }
+        }
+        return;
+    }
+
+    if matches!(
+        first.to_ascii_lowercase().as_str(),
+        "config" | "model" | "set"
+    ) {
+        let raw_model = args.get(first.len()..).unwrap_or("").trim();
+        if raw_model.is_empty() {
+            app.messages
+                .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                    "Usage: `/advisor config opus`, `/advisor config sonnet`, or `/advisor config <model-id>`.".into(),
+                )]));
+            return;
+        }
+        match crate::advisor::resolve_local_advisor_model(
+            &app.model,
+            Some(raw_model),
+            true,
+            Some(true),
+        ) {
+            Ok(Some(model)) => match crate::config::save_advisor_model(Some(model.as_str())) {
+                Ok(_) => {
+                    crate::advisor::set_active_local_advisor_model(Some(model.clone()));
+                    app.local_advisor_model = Some(model.clone());
+                    app.advisor_enabled = true;
+                    app.advisor_session = Some(crate::advisor::AdvisorSession::new(model.clone()));
+                    app.messages
+                        .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                            format!("Local advisor set to `{model}`."),
+                        )]));
+                }
+                Err(e) => {
+                    app.messages
+                        .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                            format!("Could not persist advisor setting: {e}"),
+                        )]));
+                }
+            },
+            Ok(None) => {
+                app.messages
+                    .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                        "Local advisor is not available.".into(),
+                    )]));
+            }
+            Err(e) => {
+                app.messages
+                    .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
+                        format!("Advisor config error: {e}"),
+                    )]));
+            }
+        }
+        return;
+    }
+
+    let query = args.to_owned();
     if !app.advisor_enabled {
         app.messages
             .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
-                "Advisor mode is disabled. Set `JFC_ADVISOR_ENABLED=1` and \
-                         restart jfc to enable parallel advisor queries."
-                    .into(),
-            )]));
-    } else if query.is_empty() {
-        app.messages
-            .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
-                "Usage: `/advisor <question>` — runs a parallel call \
-                         against a snapshot of this transcript and surfaces \
-                         the reply here without disturbing the main agent."
+                "Local advisor queries are disabled. Use `/advisor config <model>` or start with `--advisor [MODEL]`."
                     .into(),
             )]));
     } else {
@@ -103,9 +275,13 @@ pub(super) async fn cmd_advisor(
         // call /advisor pay no allocation cost. The session model
         // tracks the *active* model at first invocation; switching
         // models mid-session keeps the original advisor model.
-        let session = app
-            .advisor_session
-            .get_or_insert_with(|| crate::advisor::AdvisorSession::new(app.model.clone()));
+        let session = app.advisor_session.get_or_insert_with(|| {
+            crate::advisor::AdvisorSession::new(
+                app.local_advisor_model
+                    .clone()
+                    .unwrap_or_else(|| app.model.clone()),
+            )
+        });
         // Snapshot — Vec::clone is fine here, the deliverable
         // explicitly calls for a SNAPSHOT semantic. Without the
         // clone, `ask_advisor` would borrow `app.messages`
@@ -229,19 +405,28 @@ pub(super) async fn cmd_model(
         )));
         return;
     }
-    let new_model = arg.to_string();
+    let requested_model = arg.to_string();
     let old_model = app.model.clone();
-    app.model = jfc_provider::ModelId::new(new_model.clone());
-    crate::app::push_recent_model(&mut app.recent_models, &new_model);
+    let mut recent_model = requested_model.clone();
+    if let Some(resolved) = crate::resolve_provider_model(&app.providers, &requested_model) {
+        app.provider = resolved.provider;
+        app.model = resolved.model;
+        recent_model = crate::qualified_model_id(app.provider.as_ref(), &app.model);
+    } else {
+        app.model = jfc_provider::ModelId::new(requested_model.clone());
+    }
+    crate::app::push_recent_model(&mut app.recent_models, &recent_model);
     app.sync_selected_context_window();
     tracing::info!(
         target: "jfc::input",
         old_model = %old_model,
-        new_model = %new_model,
+        new_model = %app.model,
+        provider = %app.provider.name(),
         "model switch via /model command"
     );
     app.messages.push(ChatMessage::assistant(format!(
-        "Model switched to: {new_model}"
+        "Model switched to: {}",
+        app.model
     )));
 }
 

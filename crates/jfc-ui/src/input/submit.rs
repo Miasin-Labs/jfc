@@ -616,7 +616,10 @@ pub(super) async fn handle_submit(
     app.self_continuation_count = 0;
     // Reset thinking-state for the new turn so the spinner doesn't carry
     app.pre_dispatched_tool_ids.clear();
+    app.deferred_tool_uses.clear();
+    app.in_progress_tool_use_ids.clear();
     app.in_flight_eager_dispatches = 0;
+    app.in_flight_tool_batches = 0;
     // a stale `thought for Ns` from the previous turn.
     app.thinking_started_at = None;
     app.thinking_ended_at = None;
@@ -675,6 +678,18 @@ pub(super) async fn handle_submit(
     // it. wg-async pattern: each unit of work gets its own token.
     app.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = app.cancel_token.clone();
+    let overrides = crate::runtime::StreamRequestOverrides {
+        background_reminders: app.take_background_reminders(),
+        disallowed_tools: app.effective_disallowed_tools(),
+        allowed_tools: app.allowed_tools.clone(),
+        custom_betas: app.custom_betas.clone(),
+        fine_grained_tool_streaming: app.fine_grained_tool_streaming,
+        strict_tool_schemas: app.strict_tool_schemas,
+        task_budget: app.cli_task_budget,
+        max_thinking_tokens: app.cli_max_thinking_tokens,
+        thinking_display: app.cli_thinking_display.clone(),
+        ..Default::default()
+    };
 
     tracing::info!(
         target: "jfc::input",
@@ -695,14 +710,7 @@ pub(super) async fn handle_submit(
     let tx_guard = tx.clone();
     let inner = tokio::spawn(async move {
         crate::stream::stream_response(
-            provider,
-            messages,
-            model,
-            tx,
-            interrupt,
-            cancel,
-            None,
-            crate::runtime::StreamRequestOverrides::default(),
+            provider, messages, model, tx, interrupt, cancel, None, overrides,
         )
         .await;
     });

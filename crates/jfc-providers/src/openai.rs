@@ -33,10 +33,18 @@ impl OpenAIProvider {
             return None;
         }
 
-        Some(Self::new(
-            api_key,
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned()),
-        ))
+        let base_url =
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
+        if is_anthropic_base_url(&base_url) {
+            tracing::warn!(
+                target: "jfc::provider::openai",
+                base_url = %base_url,
+                "OPENAI_BASE_URL points at Anthropic; refusing to register broken OpenAI-compatible provider. Use ANTHROPIC_API_KEY or `anthropic-oauth/...` instead."
+            );
+            return None;
+        }
+
+        Some(Self::new(api_key, base_url))
     }
 
     /// Read the OpenAI API key from `~/.config/jfc/credentials.toml`
@@ -138,13 +146,23 @@ impl Provider for OpenAIProvider {
 
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         // First try to get the model list from OpenAI's own /v1/models endpoint.
-        let resp = self
-            .client
-            .get(self.models_url())
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.models_url();
+        let resp = match jfc_provider::http::send_with_retry("openai.models", || {
+            self.client.get(&url).bearer_auth(&self.api_key).send()
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let cause = jfc_provider::http::classify_send_error(&e);
+                return Err(jfc_provider::ProviderError::network(
+                    PROVIDER_ID,
+                    format!("request failed: {cause} ({e})"),
+                )
+                .into());
+            }
+        };
+        let resp = checked_openai_response(resp).await?;
 
         let body: ModelsResponse = resp.json().await?;
         let mut models: Vec<ModelInfo> = body
@@ -213,7 +231,11 @@ impl Provider for OpenAIProvider {
                         cause = cause,
                         "POST responses failed before response (after retries)"
                     );
-                    anyhow::bail!("OpenAI request failed: {cause} ({e})");
+                    return Err(jfc_provider::ProviderError::network(
+                        PROVIDER_ID,
+                        format!("request failed: {cause} ({e})"),
+                    )
+                    .into());
                 }
             };
             jfc_provider::http::report_first_byte_latency(
@@ -223,8 +245,12 @@ impl Provider for OpenAIProvider {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                let friendly = jfc_provider::retry::friendly_error_message(status.as_u16(), &text);
-                anyhow::bail!("OpenAI API error {status}: {friendly}\n  raw: {text}");
+                return Err(jfc_provider::ProviderError::api_status(
+                    PROVIDER_ID,
+                    status.as_u16(),
+                    text,
+                )
+                .into());
             }
             return Ok(responses_event_stream(resp));
         }
@@ -251,7 +277,11 @@ impl Provider for OpenAIProvider {
                     cause = cause,
                     "POST chat/completions failed before response (after retries)"
                 );
-                anyhow::bail!("OpenAI request failed: {cause} ({e})");
+                return Err(jfc_provider::ProviderError::network(
+                    PROVIDER_ID,
+                    format!("request failed: {cause} ({e})"),
+                )
+                .into());
             }
         };
         jfc_provider::http::report_first_byte_latency(
@@ -261,8 +291,12 @@ impl Provider for OpenAIProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            let friendly = jfc_provider::retry::friendly_error_message(status.as_u16(), &text);
-            anyhow::bail!("OpenAI API error {status}: {friendly}\n  raw: {text}");
+            return Err(jfc_provider::ProviderError::api_status(
+                PROVIDER_ID,
+                status.as_u16(),
+                text,
+            )
+            .into());
         }
         Ok(super::openwebui::openai_compatible_event_stream(resp))
     }
@@ -273,14 +307,29 @@ impl Provider for OpenAIProvider {
         options: &StreamOptions,
     ) -> anyhow::Result<CompletionResponse> {
         if model_uses_responses(options.model.as_str()) {
-            let resp = self
-                .client
-                .post(self.responses_url())
-                .bearer_auth(&self.api_key)
-                .json(&build_responses_body(messages, options, false))
-                .send()
-                .await?
-                .error_for_status()?;
+            let url = self.responses_url();
+            let body = build_responses_body(messages, options, false);
+            let resp =
+                match jfc_provider::http::send_with_retry("openai.responses.complete", || {
+                    self.client
+                        .post(&url)
+                        .bearer_auth(&self.api_key)
+                        .json(&body)
+                        .send()
+                })
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let cause = jfc_provider::http::classify_send_error(&e);
+                        return Err(jfc_provider::ProviderError::network(
+                            PROVIDER_ID,
+                            format!("request failed: {cause} ({e})"),
+                        )
+                        .into());
+                    }
+                };
+            let resp = checked_openai_response(resp).await?;
             let body: Value = resp.json().await?;
 
             return Ok(CompletionResponse {
@@ -294,14 +343,27 @@ impl Provider for OpenAIProvider {
             obj.insert("stream".to_owned(), serde_json::Value::Bool(false));
         }
 
-        let resp = self
-            .client
-            .post(self.chat_url())
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.chat_url();
+        let resp = match jfc_provider::http::send_with_retry("openai.chat.complete", || {
+            self.client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .send()
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let cause = jfc_provider::http::classify_send_error(&e);
+                return Err(jfc_provider::ProviderError::network(
+                    PROVIDER_ID,
+                    format!("request failed: {cause} ({e})"),
+                )
+                .into());
+            }
+        };
+        let resp = checked_openai_response(resp).await?;
         let body: ChatCompletion = resp.json().await?;
 
         Ok(CompletionResponse {
@@ -313,6 +375,15 @@ impl Provider for OpenAIProvider {
             usage: body.usage.unwrap_or_default().into(),
         })
     }
+}
+
+async fn checked_openai_response(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let text = resp.text().await.unwrap_or_default();
+    Err(jfc_provider::ProviderError::api_status(PROVIDER_ID, status.as_u16(), text).into())
 }
 
 /// Returns true if `id` is a known chat-capable model that works with
@@ -352,6 +423,13 @@ fn model_uses_responses(id: &str) -> bool {
         .trim()
         .to_ascii_lowercase();
     id.starts_with("gpt-5") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4")
+}
+
+fn is_anthropic_base_url(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .is_some_and(|host| host == "api.anthropic.com" || host.ends_with(".anthropic.com"))
 }
 
 pub(crate) fn build_responses_body(

@@ -1,5 +1,10 @@
 use indexmap::IndexMap;
-use std::{cell::RefCell, collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+    time::Instant,
+};
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -71,6 +76,23 @@ pub struct QueuedPrompt {
     /// from `app.pasted_images` and pinned to THIS prompt so they
     /// attach atomically when `drain_queued_prompts` promotes the entry.
     pub attachments: Vec<crate::attachments::Attachment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferredToolUse {
+    pub id: String,
+    pub name: String,
+    pub input_preview: String,
+    pub reason: String,
+    pub queued_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ToolUseSummary {
+    pub summary: String,
+    pub preceding_tool_use_ids: Vec<String>,
+    pub created_at: Instant,
 }
 
 /// Priority-based message queue wrapping a VecDeque with priority semantics.
@@ -254,6 +276,8 @@ pub const STREAM_WATCHDOG_TIMEOUT_SECS: u64 = 660;
 /// sparkline. 32 datapoints fit comfortably in a 30-col-wide sidebar
 /// while still showing a meaningful trend.
 pub const TOKEN_HISTORY_CAP: usize = 32;
+pub const DEFERRED_TOOL_USES_CAP: usize = 64;
+pub const TOOL_USE_SUMMARIES_CAP: usize = 32;
 
 /// Maximum number of pending `<system-reminder>` bodies retained between
 /// user turns. Reminders come from filesystem events, MCP changes, and
@@ -465,6 +489,18 @@ pub struct App {
     /// were silently dropped, leaving the conversation with a tool_use that
     /// had no matching tool_result and a stalled agentic loop.
     pub approval_queue: std::collections::VecDeque<ToolCall>,
+    /// Tool calls that have been yielded to the host but are not executing yet:
+    /// waiting for approval, classifier judgment, or stream_done batch
+    /// dispatch. This is the TUI/remote equivalent of upstream's
+    /// `deferred_tool_use` bookkeeping.
+    pub deferred_tool_uses: VecDeque<DeferredToolUse>,
+    /// IDs currently executing locally or server-side. Mirrors upstream's
+    /// `set_in_progress_tool_use_ids` bridge events so remote/headless clients
+    /// can distinguish "waiting for a result" from "idle".
+    pub in_progress_tool_use_ids: HashSet<String>,
+    /// Short labels for completed tool batches, exposed to remote clients as
+    /// `tool_use_summary` events and retained for diagnostics.
+    pub tool_use_summaries: VecDeque<ToolUseSummary>,
     /// FIFO of user prompts the user submitted while the model was streaming.
     /// v126 calls these `queued_command` attachments. They render in the
     /// transcript immediately as user messages (so the user sees their input
@@ -609,6 +645,14 @@ pub struct App {
     /// turn is only truly complete when this reaches 0 AND pending_tool_calls
     /// is empty.
     pub in_flight_eager_dispatches: usize,
+    /// Count of dispatched local tool batches whose batch-level completion
+    /// signal has not been observed yet. `pending_tool_calls` is drained when
+    /// a batch starts, so it cannot distinguish "nothing is running" from
+    /// "tools are running and will report later". This counter is the
+    /// authoritative guard against finalizing or rescuing the turn while a
+    /// regular, approval, classifier, advisor, or eager dispatch batch is
+    /// still expected to emit `ToolEvent::AllComplete`.
+    pub in_flight_tool_batches: usize,
     /// Metadata for the provider request currently streaming or most recently
     /// finished. Set by `StreamEvent::RequestMetadata` before the first byte
     /// arrives; cleared when the turn truly ends. Used to detect narration-only
@@ -987,12 +1031,19 @@ pub struct App {
     /// token budget; budget exhaustion returns Err and the user must
     /// reset (e.g. via `/clear`) to get a fresh budget.
     pub advisor_session: Option<crate::advisor::AdvisorSession>,
-    /// Gate for the `/advisor` slash command. Default OFF per the
-    /// deliverable's "no /advisor command without a config flag" rule.
-    /// Set via the `JFC_ADVISOR_ENABLED=1` env var on startup OR via a
-    /// future config-toml field. When false, the slash command surfaces
-    /// a hint message instead of running.
+    /// Gate for local advisor access. Startup enables it by default through the
+    /// active model unless the user opts out with `advisor_enabled = false`,
+    /// `--no-advisor`, or `JFC_ADVISOR_DISABLED=1`. When false, manual advisor
+    /// queries surface a hint instead of running.
     pub advisor_enabled: bool,
+    /// Active local/client-side advisor model. When set, JFC advertises the
+    /// normal `Advisor` tool and executes it through the local provider path,
+    /// returning the advisor reply as a regular tool result.
+    pub local_advisor_model: Option<ModelId>,
+    /// Active Anthropic server-side advisor model. This is distinct from the
+    /// local parallel `/advisor <query>` session above; when set, outbound
+    /// Anthropic requests advertise the `advisor` server tool.
+    pub server_advisor_model: Option<ModelId>,
     /// Brief mode — when `true`, the renderer hides plain assistant text
     /// from the main view; only `SendUserMessage` tool output and explicit
     /// proactive messages are surfaced. Toggled via `/brief`. Mirrors
@@ -1128,6 +1179,20 @@ pub struct App {
     #[allow(dead_code)]
     pub cli_task_budget: Option<u64>,
 
+    /// `--betas`: custom Anthropic beta tokens appended to native requests.
+    #[allow(dead_code)]
+    pub custom_betas: Vec<String>,
+
+    /// `--fine-grained-tool-streaming`: attach `eager_input_streaming` to
+    /// Anthropic native tool schemas.
+    #[allow(dead_code)]
+    pub fine_grained_tool_streaming: bool,
+
+    /// `--strict-tool-schemas`: attach `strict: true` to Anthropic native
+    /// tool schemas.
+    #[allow(dead_code)]
+    pub strict_tool_schemas: bool,
+
     /// `--mcp-config`: path to an MCP configuration file.
     #[allow(dead_code)]
     pub mcp_config_path: Option<std::path::PathBuf>,
@@ -1205,6 +1270,9 @@ impl App {
             reasoning_expanded: HashMap::new(),
             pending_approval: None,
             approval_queue: std::collections::VecDeque::new(),
+            deferred_tool_uses: VecDeque::with_capacity(DEFERRED_TOOL_USES_CAP),
+            in_progress_tool_use_ids: HashSet::new(),
+            tool_use_summaries: VecDeque::with_capacity(TOOL_USE_SUMMARIES_CAP),
             queued_prompts: MessageQueue::new(),
             worktree_count: 0,
             worktree_count_last_refresh: None,
@@ -1239,6 +1307,7 @@ impl App {
             pending_classifications: 0,
             pre_dispatched_tool_ids: std::collections::HashSet::new(),
             in_flight_eager_dispatches: 0,
+            in_flight_tool_batches: 0,
             current_stream_request: None,
             force_compact_pending: false,
             pending_pause_turn_resume: false,
@@ -1347,6 +1416,8 @@ impl App {
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            local_advisor_model: crate::advisor::active_local_advisor_model(),
+            server_advisor_model: crate::advisor::active_server_advisor_model(),
             brief_mode: false,
             autonomous_loop: None,
             active_speculation_id: None,
@@ -1383,6 +1454,9 @@ impl App {
             cli_thinking_display: None,
             no_session_persistence: false,
             cli_task_budget: None,
+            custom_betas: Vec::new(),
+            fine_grained_tool_streaming: false,
+            strict_tool_schemas: false,
             mcp_config_path: None,
             cowork: false,
             babysit_prs_cron_id: None,

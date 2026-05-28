@@ -235,8 +235,9 @@ pub fn agent_tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "Advisor".into(),
-            description: "Consult a stronger reviewer model for guidance. Takes NO parameters — \
-                your entire conversation history is automatically forwarded. The advisor sees \
+            description: "Consult JFC's configured local/client-side advisor model for guidance. \
+                Takes NO parameters — JFC snapshots your conversation and sends it through the \
+                configured advisor provider/model as a normal local tool call. The advisor sees \
                 the task, every tool call you've made, every result you've seen.\n\n\
                 Call advisor BEFORE substantive work — before writing, before committing to an \
                 interpretation, before building on an assumption. Also call when stuck, when \

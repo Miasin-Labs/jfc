@@ -414,7 +414,6 @@ fn extract_visibility(node: TsNode<'_>, source: &str) -> Visibility {
 
 use super::{build_nd, build_span, node_text as text};
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

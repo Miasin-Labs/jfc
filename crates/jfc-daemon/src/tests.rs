@@ -7,17 +7,20 @@ use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
 
+use super::control::{WorkerControlRequest, apply_worker_control_requests, request_worker_control};
 use super::cron::{CronField, CronSchedule, parse_schedule, should_fire_cron};
 use super::logs::{background_agent_launch_path, background_agent_log_path, read_last_lines};
 use super::reconcile::reconcile_background_agents;
 use super::registry::{
-    background_agents_for_restore, background_agents_string, record_background_agent_started_at,
+    background_agents_for_restore, background_agents_string,
+    record_background_agent_finished_at_epoch_with_paths, record_background_agent_heartbeat_at,
+    record_background_agent_progress_at_epoch_with_paths, record_background_agent_started_at,
     request_background_agent_cancel,
 };
 use super::runtime::Daemon;
 use super::state::{
     BackgroundAgentInfo, BackgroundAgentLaunch, BackgroundAgentStatus, DaemonPaths, DaemonState,
-    SessionStatus, load_state, save_state,
+    SessionStatus, WorkerControlKind, WorkerControlStatus, load_state, save_state,
 };
 use super::worker::{
     spawn_background_agent_worker_with_paths, validate_worker_spawn_inputs,
@@ -58,6 +61,7 @@ fn test_launch(cwd: PathBuf) -> BackgroundAgentLaunch {
         agent_def: None, // Option<jfc_core::AgentDef>
         cwd,
         worker_exe: Some(std::env::current_exe().unwrap()),
+        worker_epoch: 0,
         active_team_name: None,
         created_at: SystemTime::now(),
     }
@@ -74,6 +78,9 @@ fn test_background_info(id: &str, parent_session_id: Option<&str>) -> Background
         updated_at: SystemTime::now(),
         completed_at: None,
         pid: Some(std::process::id()),
+        worker_epoch: 0,
+        last_heartbeat_at: None,
+        takeover_count: 0,
         model: None,
         worktree_path: None,
         log_path: tmp_log,
@@ -155,7 +162,50 @@ fn background_agent_launch_deserializes_old_records_without_worker_exe_robust() 
     });
     let launch: BackgroundAgentLaunch = serde_json::from_value(json).unwrap();
     assert!(launch.worker_exe.is_none());
+    assert_eq!(launch.worker_epoch, 0);
     assert!(launch.parent_session_id.is_none());
+}
+
+#[test]
+fn worker_control_prepare_spare_records_runtime_state_normal() {
+    let tmp = TempDir::new().unwrap();
+    let paths = DaemonPaths::new(tmp.path());
+    paths.ensure_dirs().unwrap();
+    save_state(&paths, &DaemonState::default()).unwrap();
+
+    let worker_exe = std::env::current_exe().unwrap();
+    let id = request_worker_control(
+        &paths,
+        WorkerControlRequest {
+            kind: WorkerControlKind::PrepareSpare,
+            agent_id: None,
+            target_pid: None,
+            worker_exe: Some(worker_exe.clone()),
+            force: false,
+            reason: Some("test".to_owned()),
+        },
+    )
+    .unwrap();
+
+    let mut state = load_state(&paths).unwrap();
+    assert_eq!(
+        state.worker_controls[0].status,
+        WorkerControlStatus::Pending
+    );
+    assert!(apply_worker_control_requests(&paths, &mut state));
+
+    let state = load_state(&paths).unwrap();
+    let rec = state
+        .worker_controls
+        .iter()
+        .find(|rec| rec.id == id)
+        .unwrap();
+    assert_eq!(rec.status, WorkerControlStatus::Completed);
+    assert!(state.runtime.spare_ready);
+    assert_eq!(
+        state.runtime.worker_exe.as_deref(),
+        Some(worker_exe.as_path())
+    );
 }
 
 #[test]
@@ -211,6 +261,76 @@ fn ui_metadata_refresh_does_not_clobber_detached_worker_pid_robust() {
     let agent = &state.background_agents["task-detached"];
     assert_eq!(agent.pid, Some(4242));
     assert_eq!(agent.description, "refreshed description");
+}
+
+#[test]
+fn worker_epoch_rejects_stale_worker_updates_robust() {
+    let tmp = TempDir::new().unwrap();
+    let paths = DaemonPaths::new(tmp.path());
+    paths.ensure_dirs().unwrap();
+    let mut state = DaemonState::default();
+    let mut agent = test_background_info("task-epoch", Some("ses-a"));
+    agent.worker_epoch = 2;
+    agent.pid = Some(2222);
+    agent.launch_path = Some(background_agent_launch_path(&paths, "task-epoch"));
+    state
+        .background_agents
+        .insert("task-epoch".to_owned(), agent);
+    save_state(&paths, &state).unwrap();
+
+    assert!(
+        !record_background_agent_progress_at_epoch_with_paths(
+            &paths,
+            "task-epoch",
+            1,
+            Some("Bash"),
+            Some(9),
+            None,
+            None,
+            None,
+            Some(10),
+        )
+        .unwrap()
+    );
+    assert!(
+        !record_background_agent_finished_at_epoch_with_paths(
+            &paths,
+            "task-epoch",
+            1,
+            BackgroundAgentStatus::Completed,
+            "stale result",
+        )
+        .unwrap()
+    );
+
+    let state = load_state(&paths).unwrap();
+    let agent = &state.background_agents["task-epoch"];
+    assert_eq!(agent.status, BackgroundAgentStatus::Running);
+    assert_eq!(agent.tool_use_count, 0);
+    assert!(agent.summary.is_none());
+}
+
+#[test]
+fn worker_epoch_accepts_current_heartbeat_normal() {
+    let tmp = TempDir::new().unwrap();
+    let paths = DaemonPaths::new(tmp.path());
+    paths.ensure_dirs().unwrap();
+    let mut state = DaemonState::default();
+    let mut agent = test_background_info("task-heartbeat", Some("ses-a"));
+    agent.worker_epoch = 3;
+    agent.pid = Some(1111);
+    agent.launch_path = Some(background_agent_launch_path(&paths, "task-heartbeat"));
+    state
+        .background_agents
+        .insert("task-heartbeat".to_owned(), agent);
+    save_state(&paths, &state).unwrap();
+
+    assert!(record_background_agent_heartbeat_at(&paths, "task-heartbeat", 3, 3333).unwrap());
+
+    let state = load_state(&paths).unwrap();
+    let agent = &state.background_agents["task-heartbeat"];
+    assert_eq!(agent.pid, Some(3333));
+    assert!(agent.last_heartbeat_at.is_some());
 }
 
 #[test]
@@ -499,6 +619,9 @@ fn background_agent_state_roundtrip_normal() {
             updated_at: SystemTime::now(),
             completed_at: None,
             pid: Some(std::process::id()),
+            worker_epoch: 0,
+            last_heartbeat_at: None,
+            takeover_count: 0,
             model: Some("claude-sonnet-4-5".to_owned()),
             worktree_path: Some(tmp.path().join("wt")),
             log_path: log_path.clone(),
@@ -541,6 +664,9 @@ fn background_agent_cancel_request_normal() {
             updated_at: SystemTime::now(),
             completed_at: None,
             pid: Some(std::process::id()),
+            worker_epoch: 0,
+            last_heartbeat_at: None,
+            takeover_count: 0,
             model: None,
             worktree_path: None,
             log_path: log_path.clone(),
@@ -583,6 +709,9 @@ fn background_agent_stale_owner_marked_failed_robust() {
             updated_at: SystemTime::now(),
             completed_at: None,
             pid: Some(0),
+            worker_epoch: 0,
+            last_heartbeat_at: None,
+            takeover_count: 0,
             model: None,
             worktree_path: None,
             log_path: log_path.clone(),

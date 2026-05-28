@@ -15,13 +15,16 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::control::apply_worker_control_requests;
 use super::cron::{CronJob, CronSchedule, describe_schedule, run_cron_command, should_fire_cron};
+use super::logs::append_log_line;
 use super::pid::{is_daemon_running, remove_pid_file, write_pid_file};
-use super::reconcile::reconcile_background_agents;
+use super::reconcile::{available_memory_mb, reconcile_background_agents};
 use super::state::{
-    DaemonPaths, DaemonState, ScheduledWakeup, SessionId, SessionInfo, SessionStatus, load_state,
-    load_state_for_update, save_state, with_state_lock,
+    BackgroundAgentStatus, DaemonPaths, DaemonState, ScheduledWakeup, SessionId, SessionInfo,
+    SessionStatus, load_state, load_state_for_update, save_state, with_state_lock,
 };
+use super::worker::resolve_worker_exe;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Worker tracking
@@ -357,6 +360,9 @@ pub async fn run_daemon(paths: DaemonPaths) -> std::io::Result<()> {
     let mut daemon = Daemon::new(&paths.base_dir)?;
     daemon.state.pid = std::process::id();
     daemon.state.started_at = SystemTime::now();
+    daemon.state.runtime.restart_requested = false;
+    daemon.state.runtime.restart_reason = None;
+    let _ = refresh_runtime_info(&mut daemon);
     daemon.persist();
 
     tracing::info!(
@@ -373,6 +379,7 @@ pub async fn run_daemon(paths: DaemonPaths) -> std::io::Result<()> {
 
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut restart_requested = false;
 
     loop {
         tokio::select! {
@@ -380,11 +387,28 @@ pub async fn run_daemon(paths: DaemonPaths) -> std::io::Result<()> {
                 let now = SystemTime::now();
                 let reconciled = reconcile_background_agents(&paths)
                     .unwrap_or_default();
+                daemon.state.background_agents = reconciled.background_agents.clone();
+                if refresh_runtime_info(&mut daemon).unwrap_or(false) {
+                    restart_requested = true;
+                    tracing::warn!(
+                        target: "jfc::daemon",
+                        reason = ?daemon.state.runtime.restart_reason,
+                        "daemon restart requested by runtime resilience check"
+                    );
+                    break;
+                }
+                if maybe_retire_low_memory_worker(&paths, &mut daemon).unwrap_or(false) {
+                    daemon.touch_activity();
+                }
+                if apply_worker_control_requests(&paths, &mut daemon.state) {
+                    daemon.touch_activity();
+                }
 
-                // Sync in-memory worker roster from the persisted
+                // Sync in-memory worker roster from the latest persisted
                 // background_agents state. Any agent with Running status
                 // and a live PID is considered an active worker.
-                sync_workers_from_state(&mut daemon, &reconciled);
+                let state_for_workers = daemon.state.clone();
+                sync_workers_from_state(&mut daemon, &state_for_workers);
 
                 let fired = daemon.tick_cron(now);
                 for id in &fired {
@@ -434,8 +458,69 @@ pub async fn run_daemon(paths: DaemonPaths) -> std::io::Result<()> {
         }
     }
 
+    if restart_requested {
+        remove_pid_file(&paths);
+        daemon.persist();
+        if let Err(err) = spawn_replacement_daemon(&paths, &daemon.state) {
+            tracing::error!(
+                target: "jfc::daemon",
+                error = %err,
+                "failed to spawn replacement daemon during takeover"
+            );
+        }
+        return Ok(());
+    }
+
     remove_pid_file(&paths);
     daemon.persist();
+    Ok(())
+}
+
+fn spawn_replacement_daemon(paths: &DaemonPaths, state: &DaemonState) -> std::io::Result<()> {
+    let exe = state
+        .runtime
+        .worker_exe
+        .clone()
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "daemon binary not found")
+        })?;
+    if !exe.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("daemon binary does not exist: {}", exe.display()),
+        ));
+    }
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("daemon")
+        .arg("start")
+        .env("JFC_DAEMON_TAKEOVER_PARENT", std::process::id().to_string())
+        .env("JFC_DAEMON_TAKEOVER_STATE", &paths.state_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+
+    let child = cmd.spawn()?;
+    tracing::warn!(
+        target: "jfc::daemon",
+        replacement_pid = child.id(),
+        "spawned replacement daemon during binary takeover"
+    );
     Ok(())
 }
 
@@ -585,6 +670,46 @@ pub fn status_string(paths: &DaemonPaths) -> String {
         state.wakeups.len(),
         state.fired_wakeups.len()
     ));
+    if !state.worker_controls.is_empty() {
+        let pending = state
+            .worker_controls
+            .iter()
+            .filter(|rec| {
+                matches!(
+                    rec.status,
+                    super::state::WorkerControlStatus::Pending
+                        | super::state::WorkerControlStatus::Running
+                )
+            })
+            .count();
+        s.push_str(&format!(
+            "worker controls: {} total, {} active\n",
+            state.worker_controls.len(),
+            pending
+        ));
+    }
+    if state.runtime.worker_exe.is_some()
+        || state.runtime.spare_ready
+        || state.runtime.restart_requested
+        || state.runtime.low_memory_retire_count > 0
+    {
+        let worker_exe = state
+            .runtime
+            .worker_exe
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unknown)".to_owned());
+        s.push_str(&format!(
+            "runtime: worker={} spare_ready={} restart_requested={} low_memory_retirements={}\n",
+            worker_exe,
+            state.runtime.spare_ready,
+            state.runtime.restart_requested,
+            state.runtime.low_memory_retire_count
+        ));
+        if let Some(reason) = state.runtime.restart_reason.as_deref() {
+            s.push_str(&format!("  restart reason: {reason}\n"));
+        }
+    }
 
     let active_agents: Vec<_> = state
         .background_agents
@@ -617,6 +742,122 @@ pub fn status_string(paths: &DaemonPaths) -> String {
         }
     }
     s
+}
+
+fn refresh_runtime_info(daemon: &mut Daemon) -> std::io::Result<bool> {
+    let now = SystemTime::now();
+    if daemon.state.runtime.restart_requested {
+        daemon.persist();
+        return Ok(true);
+    }
+    let worker_exe = resolve_worker_exe(None)?;
+    let worker_exe_mtime = std::fs::metadata(&worker_exe)
+        .and_then(|m| m.modified())
+        .ok();
+    let previous_exe = daemon.state.runtime.worker_exe.clone();
+    let previous_mtime = daemon.state.runtime.worker_exe_mtime;
+
+    daemon.state.runtime.worker_exe = Some(worker_exe.clone());
+    daemon.state.runtime.worker_exe_mtime = worker_exe_mtime;
+    if daemon_spare_enabled() {
+        daemon.state.runtime.spare_ready = worker_exe.is_file();
+        daemon.state.runtime.spare_checked_at = Some(now);
+    }
+
+    let changed = previous_exe
+        .as_ref()
+        .is_some_and(|previous| previous != &worker_exe)
+        || (previous_mtime.is_some() && previous_mtime != worker_exe_mtime);
+    if changed && daemon_restart_on_upgrade_enabled() {
+        daemon.state.runtime.restart_requested = true;
+        daemon.state.runtime.restart_reason = Some(format!(
+            "worker binary changed from {} to {}",
+            previous_exe
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(unknown)".to_owned()),
+            worker_exe.display()
+        ));
+        daemon.persist();
+        return Ok(true);
+    }
+    daemon.persist();
+    Ok(false)
+}
+
+fn maybe_retire_low_memory_worker(
+    paths: &DaemonPaths,
+    daemon: &mut Daemon,
+) -> std::io::Result<bool> {
+    let Some(threshold_mb) = std::env::var("JFC_DAEMON_LOW_MEM_RETIRE_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+    else {
+        return Ok(false);
+    };
+    let Some(available) = available_memory_mb() else {
+        return Ok(false);
+    };
+    if available >= threshold_mb {
+        return Ok(false);
+    }
+
+    let retired = with_state_lock(paths, || -> std::io::Result<Option<(String, PathBuf)>> {
+        let mut state = load_state_for_update(paths)?;
+        let Some(agent) = state
+            .background_agents
+            .values_mut()
+            .filter(|agent| {
+                agent.status == BackgroundAgentStatus::Running && !agent.cancel_requested
+            })
+            .min_by_key(|agent| agent.started_at)
+        else {
+            return Ok(None);
+        };
+        agent.cancel_requested = true;
+        agent.updated_at = SystemTime::now();
+        agent.error = Some(format!(
+            "low-memory retirement requested: MemAvailable={available}MB below threshold={threshold_mb}MB"
+        ));
+        let id = agent.id.clone();
+        let log_path = agent.log_path.clone();
+        state.runtime.low_memory_retire_count =
+            state.runtime.low_memory_retire_count.saturating_add(1);
+        save_state(paths, &state)?;
+        daemon.state = state;
+        Ok(Some((id, log_path)))
+    })?;
+    if let Some((id, log_path)) = retired {
+        append_log_line(
+            &log_path,
+            &format!(
+                "[retire-requested] low memory: MemAvailable={available}MB threshold={threshold_mb}MB"
+            ),
+        );
+        tracing::warn!(
+            target: "jfc::daemon",
+            agent_id = %id,
+            available_mb = available,
+            threshold_mb,
+            "requested low-memory worker retirement"
+        );
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn daemon_spare_enabled() -> bool {
+    std::env::var("JFC_DAEMON_SPARE_ENABLE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn daemon_restart_on_upgrade_enabled() -> bool {
+    std::env::var("JFC_DAEMON_RESTART_ON_UPGRADE")
+        .or_else(|_| std::env::var("JFC_DAEMON_SELF_RESTART_ON_UPGRADE"))
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 /// `jfc daemon list` — render cron jobs + pending wakeups.

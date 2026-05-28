@@ -270,9 +270,7 @@ fn destructive_warning_line(t: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             "[⚠ DESTRUCTIVE]",
-            Style::default()
-                .fg(t.warning)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             " This command may cause irreversible changes",

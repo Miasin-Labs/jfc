@@ -51,6 +51,25 @@ pub enum RemoteEnvelope {
         is_error: bool,
     },
 
+    /// Update the set of tool ids currently executing on the host. Mirrors
+    /// Claude CLI's SDK bridge event `set_in_progress_tool_use_ids`.
+    SetInProgressToolUseIds { action: String, ids: Vec<String> },
+
+    /// Tool yielded to the host but deferred before execution (approval,
+    /// classifier, or stream_done queue).
+    DeferredToolUse {
+        id: String,
+        name: String,
+        input_preview: String,
+        reason: String,
+    },
+
+    /// Single-line summary label for a completed tool batch.
+    ToolUseSummary {
+        summary: String,
+        preceding_tool_use_ids: Vec<String>,
+    },
+
     /// Session lifecycle status change.
     SessionStatus {
         status: SessionState,

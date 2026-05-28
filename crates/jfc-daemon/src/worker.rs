@@ -90,7 +90,7 @@ fn build_worker_exe_from_workspace() -> std::io::Result<Option<PathBuf>> {
     }
 }
 
-fn resolve_worker_exe(preferred: Option<&Path>) -> std::io::Result<PathBuf> {
+pub(super) fn resolve_worker_exe(preferred: Option<&Path>) -> std::io::Result<PathBuf> {
     if let Some(path) = preferred
         && path_is_executable_file(path)
     {
@@ -206,18 +206,62 @@ pub(super) fn record_background_agent_worker_pid(
     id: &str,
     pid: u32,
     launch_path: &Path,
+    worker_epoch: u64,
 ) -> std::io::Result<()> {
     with_state_lock(paths, || -> std::io::Result<()> {
         let mut state = load_state_for_update(paths)?;
         let Some(agent) = state.background_agents.get_mut(id) else {
             return Ok(());
         };
+        if worker_epoch != 0 && agent.worker_epoch != worker_epoch {
+            return Ok(());
+        }
+        let now = SystemTime::now();
         agent.pid = Some(pid);
         agent.launch_path = Some(launch_path.to_path_buf());
         agent.status = BackgroundAgentStatus::Running;
-        agent.updated_at = SystemTime::now();
+        agent.updated_at = now;
+        agent.last_heartbeat_at = Some(now);
         save_state(paths, &state)
     })
+}
+
+pub(super) fn arm_worker_launch_epoch(
+    paths: &DaemonPaths,
+    launch_path: &Path,
+    mut launch: BackgroundAgentLaunch,
+    takeover: bool,
+) -> std::io::Result<BackgroundAgentLaunch> {
+    let (worker_epoch, runtime_worker_exe) = with_state_lock(paths, || -> std::io::Result<_> {
+        let mut state = load_state_for_update(paths)?;
+        let Some(agent) = state.background_agents.get_mut(&launch.task_id) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("background agent not found: {}", launch.task_id),
+            ));
+        };
+        let next_epoch = agent.worker_epoch.saturating_add(1).max(1);
+        let now = SystemTime::now();
+        agent.worker_epoch = next_epoch;
+        agent.launch_path = Some(launch_path.to_path_buf());
+        agent.updated_at = now;
+        agent.last_heartbeat_at = None;
+        if takeover {
+            agent.takeover_count = agent.takeover_count.saturating_add(1);
+            agent.pid = None;
+        }
+        let runtime_worker_exe = state.runtime.worker_exe.clone();
+        save_state(paths, &state)?;
+        Ok((next_epoch, runtime_worker_exe))
+    })?;
+
+    launch.worker_epoch = worker_epoch;
+    if let Some(worker_exe) = runtime_worker_exe {
+        launch.worker_exe = Some(worker_exe);
+    }
+    let json = serde_json::to_string_pretty(&launch).map_err(std::io::Error::other)?;
+    std::fs::write(launch_path, json)?;
+    Ok(launch)
 }
 
 pub(super) fn mark_background_agent_spawn_failed(
@@ -275,26 +319,29 @@ pub(super) fn spawn_background_agent_worker_with_paths(
         return Err(e);
     }
     launch.worker_exe = Some(worker_exe);
-    let json = match serde_json::to_string_pretty(&launch).map_err(std::io::Error::other) {
-        Ok(json) => json,
+    let task_id = launch.task_id.clone();
+    let launch = match arm_worker_launch_epoch(paths, &launch_path, launch, false) {
+        Ok(launch) => launch,
         Err(e) => {
-            let _ = mark_background_agent_spawn_failed(paths, &launch.task_id, &e.to_string());
+            let _ = mark_background_agent_spawn_failed(paths, &task_id, &e.to_string());
             return Err(e);
         }
     };
-    if let Err(e) = std::fs::write(&launch_path, json) {
-        let _ = mark_background_agent_spawn_failed(paths, &launch.task_id, &e.to_string());
-        return Err(e);
-    }
 
     match spawn_worker_process(&launch_path, &launch) {
         Ok(child) => {
             let pid = child.id();
-            record_background_agent_worker_pid(paths, &launch.task_id, pid, &launch_path)?;
+            record_background_agent_worker_pid(
+                paths,
+                &launch.task_id,
+                pid,
+                &launch_path,
+                launch.worker_epoch,
+            )?;
             reap_worker_process(child);
             append_log_line(
                 &background_agent_log_path(paths, &launch.task_id),
-                &format!("[worker-started] pid={pid}"),
+                &format!("[worker-started] pid={pid} epoch={}", launch.worker_epoch),
             );
             Ok(pid)
         }
@@ -303,6 +350,60 @@ pub(super) fn spawn_background_agent_worker_with_paths(
             Err(e)
         }
     }
+}
+
+pub(super) fn takeover_background_agent_worker_with_paths(
+    paths: &DaemonPaths,
+    agent_id: &str,
+    force: bool,
+    reason: &str,
+) -> std::io::Result<u32> {
+    let (launch_path, launch, previous_pid) = with_state_lock(paths, || -> std::io::Result<_> {
+        let state = load_state_for_update(paths)?;
+        let agent = state.background_agents.get(agent_id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("background agent not found: {agent_id}"),
+            )
+        })?;
+        if agent.status != BackgroundAgentStatus::Running {
+            return Err(std::io::Error::other(format!(
+                "background agent {agent_id} is not running"
+            )));
+        }
+        if !force
+            && let Some(pid) = agent.pid
+            && super::pid::process_is_running(pid)
+        {
+            return Err(std::io::Error::other(format!(
+                "background agent {agent_id} owner pid {pid} is still running; pass --force to take over anyway"
+            )));
+        }
+        let launch_path = agent.launch_path.clone().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("background agent {agent_id} has no launch spec"),
+            )
+        })?;
+        let launch_json = std::fs::read_to_string(&launch_path)?;
+        let launch: BackgroundAgentLaunch =
+            serde_json::from_str(&launch_json).map_err(std::io::Error::other)?;
+        Ok((launch_path, launch, agent.pid))
+    })?;
+
+    let launch = arm_worker_launch_epoch(paths, &launch_path, launch, true)?;
+    let child = spawn_worker_process(&launch_path, &launch)?;
+    let pid = child.id();
+    record_background_agent_worker_pid(paths, agent_id, pid, &launch_path, launch.worker_epoch)?;
+    reap_worker_process(child);
+    append_log_line(
+        &background_agent_log_path(paths, agent_id),
+        &format!(
+            "[worker-takeover] pid={pid} previous_pid={previous_pid:?} epoch={} reason={reason}",
+            launch.worker_epoch
+        ),
+    );
+    Ok(pid)
 }
 
 /// Top-level entry called from `event_loop`/`stream` to launch a detached
@@ -352,6 +453,9 @@ pub fn spawn_background_agent_worker(launch: BackgroundAgentLaunch) -> std::io::
                 updated_at: now,
                 completed_at: None,
                 pid: None,
+                worker_epoch: 0,
+                last_heartbeat_at: None,
+                takeover_count: 0,
                 model: Some(launch.model.as_str().to_owned()),
                 worktree_path: None,
                 log_path: background_agent_log_path(&paths, &launch.task_id),

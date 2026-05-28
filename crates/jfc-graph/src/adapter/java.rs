@@ -365,7 +365,6 @@ fn find_enclosing_function(node: TsNode<'_>, source: &str, nodes: &[NodeData]) -
 
 use super::{build_nd, build_span, node_text as text};
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

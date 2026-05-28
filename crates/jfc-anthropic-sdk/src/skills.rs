@@ -2,12 +2,12 @@
 //! multipart/form-data; each version is immutable.
 //!
 //! Endpoints (`anthropic-beta: skills-2025-10-02`):
-//! - `POST /v1/beta/skills` — create (multipart)
-//! - `GET /v1/beta/skills` — list
-//! - `GET /v1/beta/skills/{id}` — retrieve
-//! - `DELETE /v1/beta/skills/{id}` — delete
-//! - `POST /v1/beta/skills/{id}/versions` — new version (multipart)
-//! - `GET /v1/beta/skills/{id}/versions` — list versions
+//! - `POST /v1/skills?beta=true` — create (multipart)
+//! - `GET /v1/skills?beta=true` — list
+//! - `GET /v1/skills/{id}?beta=true` — retrieve
+//! - `DELETE /v1/skills/{id}?beta=true` — delete
+//! - `POST /v1/skills/{id}/versions?beta=true` — new version (multipart)
+//! - `GET /v1/skills/{id}/versions?beta=true` — list versions
 
 use crate::beta;
 use crate::client::Client;
@@ -50,7 +50,7 @@ impl SkillService {
             .client
             .execute_with_retry(|| {
                 self.client
-                    .request(Method::GET, "/v1/beta/skills", Some(beta::SKILLS))
+                    .request(Method::GET, "/v1/skills?beta=true", Some(beta::SKILLS))
                     .query(params)
             })
             .await?;
@@ -58,7 +58,7 @@ impl SkillService {
     }
 
     pub async fn get(&self, skill_id: &str) -> Result<Skill> {
-        let path = format!("/v1/beta/skills/{skill_id}");
+        let path = format!("/v1/skills/{skill_id}?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| self.client.request(Method::GET, &path, Some(beta::SKILLS)))
@@ -67,7 +67,7 @@ impl SkillService {
     }
 
     pub async fn delete(&self, skill_id: &str) -> Result<()> {
-        let path = format!("/v1/beta/skills/{skill_id}");
+        let path = format!("/v1/skills/{skill_id}?beta=true");
         self.client
             .execute_with_retry(|| {
                 self.client
@@ -86,7 +86,7 @@ impl SkillService {
             .client
             .request_url(
                 Method::POST,
-                format!("{}/v1/beta/skills", self.client.base_url()),
+                format!("{}/v1/skills?beta=true", self.client.base_url()),
                 Some(beta::SKILLS),
             )
             .multipart(build_skill_form(display_title, files)?)
@@ -105,7 +105,7 @@ impl SkillService {
         files: Vec<SkillFile>,
     ) -> Result<SkillVersion> {
         let url = format!(
-            "{}/v1/beta/skills/{skill_id}/versions",
+            "{}/v1/skills/{skill_id}/versions?beta=true",
             self.client.base_url()
         );
         let resp = self
@@ -121,7 +121,7 @@ impl SkillService {
     }
 
     pub async fn list_versions(&self, skill_id: &str) -> Result<Page<SkillVersion>> {
-        let path = format!("/v1/beta/skills/{skill_id}/versions");
+        let path = format!("/v1/skills/{skill_id}/versions?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| self.client.request(Method::GET, &path, Some(beta::SKILLS)))

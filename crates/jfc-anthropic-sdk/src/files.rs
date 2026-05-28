@@ -1,11 +1,11 @@
 //! `BetaFileService` — upload, list, download, delete, metadata.
 //!
 //! Endpoints (`anthropic-beta: files-api-2025-04-14`):
-//! - `POST /v1/beta/files` — upload (multipart)
-//! - `GET /v1/beta/files` — list
-//! - `GET /v1/beta/files/{id}` — metadata
-//! - `GET /v1/beta/files/{id}/content` — download
-//! - `DELETE /v1/beta/files/{id}` — delete
+//! - `POST /v1/files?beta=true` — upload (multipart)
+//! - `GET /v1/files?beta=true` — list
+//! - `GET /v1/files/{id}?beta=true` — metadata
+//! - `GET /v1/files/{id}/content?beta=true` — download
+//! - `DELETE /v1/files/{id}?beta=true` — delete
 
 use crate::beta;
 use crate::client::Client;
@@ -42,7 +42,7 @@ impl FileService {
             .client
             .execute_with_retry(|| {
                 self.client
-                    .request(Method::GET, "/v1/beta/files", Some(beta::FILES))
+                    .request(Method::GET, "/v1/files?beta=true", Some(beta::FILES))
                     .query(params)
             })
             .await?;
@@ -50,7 +50,7 @@ impl FileService {
     }
 
     pub async fn metadata(&self, file_id: &str) -> Result<FileMetadata> {
-        let path = format!("/v1/beta/files/{file_id}");
+        let path = format!("/v1/files/{file_id}?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| self.client.request(Method::GET, &path, Some(beta::FILES)))
@@ -59,7 +59,7 @@ impl FileService {
     }
 
     pub async fn delete(&self, file_id: &str) -> Result<()> {
-        let path = format!("/v1/beta/files/{file_id}");
+        let path = format!("/v1/files/{file_id}?beta=true");
         self.client
             .execute_with_retry(|| {
                 self.client
@@ -70,7 +70,7 @@ impl FileService {
     }
 
     pub async fn download(&self, file_id: &str) -> Result<Vec<u8>> {
-        let path = format!("/v1/beta/files/{file_id}/content");
+        let path = format!("/v1/files/{file_id}/content?beta=true");
         let resp = self
             .client
             .execute_with_retry(|| self.client.request(Method::GET, &path, Some(beta::FILES)))
@@ -87,7 +87,7 @@ impl FileService {
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> Result<FileMetadata> {
-        let url = format!("{}/v1/beta/files", self.client.base_url());
+        let url = format!("{}/v1/files?beta=true", self.client.base_url());
         let part = Part::bytes(bytes)
             .file_name(filename.to_owned())
             .mime_str(mime_type)

@@ -52,9 +52,119 @@ pub(crate) fn handle_output_chunk(app: &mut App, tool_id: crate::ids::ToolId, ch
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Instant};
+
+    use super::*;
+    use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
+
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn available_models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+
+        async fn stream(
+            &self,
+            #[allow(dead_code)] _messages: Vec<ProviderMessage>,
+            #[allow(dead_code)] _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    impl jfc_provider::seal::Sealed for TestProvider {}
+
+    fn test_app_with_tool(status: ToolStatus) -> (App, crate::ids::ToolId) {
+        let tool_id = crate::ids::ToolId::from("tool-1");
+        let mut tool = ToolCall::new_pending(
+            tool_id.clone(),
+            ToolKind::Bash,
+            ToolInput::Generic {
+                summary: String::new(),
+            },
+        );
+        tool.status = status;
+
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.task_store = jfc_session::TaskStore::in_memory();
+        app.messages.push(ChatMessage::user("run tool".into()));
+        app.messages
+            .push(ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)]));
+        app.turn_started_at = Some(Instant::now());
+        app.is_streaming = false;
+        (app, tool_id)
+    }
+
+    #[tokio::test]
+    async fn all_complete_waits_for_out_of_order_tool_result() {
+        let (mut app, _tool_id) = test_app_with_tool(ToolStatus::Pending);
+        app.in_flight_tool_batches = 1;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+
+        handle_all_complete(&mut app, &tx).await;
+
+        assert_eq!(app.in_flight_tool_batches, 0);
+        assert!(app.turn_started_at.is_some());
+        assert!(!should_recheck_completion_after_tool_result(&app));
+    }
+
+    #[test]
+    fn late_tool_result_rechecks_completion_after_batch_signal_race() {
+        let (mut app, tool_id) = test_app_with_tool(ToolStatus::Pending);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+
+        handle_tool_result(
+            &mut app,
+            &tx,
+            tool_id,
+            crate::runtime::ExecutionResult::success("ok"),
+        );
+
+        assert!(should_recheck_completion_after_tool_result(&app));
+    }
+
+    #[test]
+    fn set_in_progress_tool_use_ids_updates_state_normal() {
+        let (mut app, _tool_id) = test_app_with_tool(ToolStatus::Pending);
+        handle_deferred_tool_use(
+            &mut app,
+            "tool-1".into(),
+            "Bash".into(),
+            "ls".into(),
+            "awaiting_approval".into(),
+        );
+        assert_eq!(app.deferred_tool_uses.len(), 1);
+
+        handle_set_in_progress_tool_use_ids(&mut app, "add".into(), vec!["tool-1".into()]);
+        assert!(app.in_progress_tool_use_ids.contains("tool-1"));
+        assert!(app.deferred_tool_uses.is_empty());
+
+        handle_set_in_progress_tool_use_ids(&mut app, "remove".into(), vec!["tool-1".into()]);
+        assert!(!app.in_progress_tool_use_ids.contains("tool-1"));
+    }
+
+    #[test]
+    fn completed_tool_batch_summary_single_tool_normal() {
+        let (app, _tool_id) = test_app_with_tool(ToolStatus::Completed);
+        let (summary, ids) =
+            completed_tool_batch_summary(&app).expect("completed tool should summarize");
+        assert!(summary.starts_with("Ran"), "{summary}");
+        assert_eq!(ids, vec!["tool-1"]);
+    }
+}
+
 /// Handle `ToolEvent::Result { tool_id, result }`.
 pub(crate) fn handle_tool_result(
     app: &mut App,
+    tx: &EventSender,
     tool_id: crate::ids::ToolId,
     result: crate::runtime::ExecutionResult,
 ) {
@@ -65,6 +175,12 @@ pub(crate) fn handle_tool_result(
         output_len = result.output.len(),
         "tool_result received"
     );
+    let _ = tx.try_send(AppEvent::Tool(
+        crate::runtime::ToolEvent::SetInProgressToolUseIds {
+            action: "remove".to_owned(),
+            ids: vec![tool_id.as_str().to_owned()],
+        },
+    ));
     let mut found = false;
     for msg in &mut app.messages {
         for part in &mut msg.parts {
@@ -178,22 +294,165 @@ pub(crate) fn handle_tool_result(
             break;
         }
     }
+    if !found {
+        tracing::warn!(
+            target: "jfc::event_loop",
+            tool_id = %tool_id,
+            is_error = result.is_error(),
+            output_len = result.output.len(),
+            "ToolResult did not match any assistant tool block",
+        );
+    }
     // Session save is deferred to AllToolsComplete so we write
     // once per batch, not once per tool result. This eliminates
     // the 650+ disk writes per agentic run observed in profiling.
 }
 
+pub(crate) fn handle_set_in_progress_tool_use_ids(app: &mut App, action: String, ids: Vec<String>) {
+    tracing::debug!(
+        target: "jfc::tool_state",
+        action = %action,
+        ids = ?ids,
+        "set_in_progress_tool_use_ids"
+    );
+    app.set_in_progress_tool_use_ids(&action, &ids);
+}
+
+pub(crate) fn handle_deferred_tool_use(
+    app: &mut App,
+    id: String,
+    name: String,
+    input_preview: String,
+    reason: String,
+) {
+    tracing::debug!(
+        target: "jfc::tool_state",
+        id = %id,
+        name = %name,
+        reason = %reason,
+        "deferred_tool_use"
+    );
+    app.record_deferred_tool_use(id, name, input_preview, reason);
+}
+
+pub(crate) fn handle_tool_use_summary(
+    app: &mut App,
+    summary: String,
+    preceding_tool_use_ids: Vec<String>,
+) {
+    tracing::debug!(
+        target: "jfc::tool_state",
+        summary = %summary,
+        ids = ?preceding_tool_use_ids,
+        "tool_use_summary"
+    );
+    app.record_tool_use_summary(summary, preceding_tool_use_ids);
+}
+
+fn last_assistant_has_unresolved_tool(app: &App) -> bool {
+    app.messages
+        .iter()
+        .rev()
+        .find(|msg| msg.role == Role::Assistant)
+        .is_some_and(|msg| {
+            msg.parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Tool(tool) if !tool.status.is_terminal()))
+        })
+}
+
+fn completed_tool_batch_summary(app: &App) -> Option<(String, Vec<String>)> {
+    let last_assistant = app
+        .messages
+        .iter()
+        .rev()
+        .find(|msg| msg.role == Role::Assistant)?;
+    let tools: Vec<&ToolCall> = last_assistant
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Tool(tool) if tool.status.is_terminal() => Some(tool),
+            _ => None,
+        })
+        .collect();
+    if tools.is_empty() {
+        return None;
+    }
+    let ids = tools
+        .iter()
+        .map(|tool| tool.id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let summary = if tools.len() == 1 {
+        let tool = tools[0];
+        let verb = match &tool.kind {
+            ToolKind::Read => "Read",
+            ToolKind::Edit | ToolKind::MultiEdit | ToolKind::Write | ToolKind::ApplyPatch => {
+                "Edited"
+            }
+            ToolKind::Bash => "Ran",
+            ToolKind::Grep | ToolKind::Glob | ToolKind::Search => "Searched",
+            ToolKind::Task | ToolKind::TaskCreate | ToolKind::TaskStop => "Managed task",
+            ToolKind::Advisor | ToolKind::ServerAdvisor => "Reviewed",
+            _ => tool.kind.label(),
+        };
+        let detail = truncate_summary(&tool.input.summary(), 42);
+        if detail.is_empty() {
+            verb.to_owned()
+        } else {
+            truncate_summary(&format!("{verb} {detail}"), 80)
+        }
+    } else {
+        let mut labels = Vec::<&str>::new();
+        for tool in &tools {
+            let label = tool.kind.label();
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        truncate_summary(
+            &format!("Ran {} tools: {}", tools.len(), labels.join(", ")),
+            80,
+        )
+    };
+    Some((summary, ids))
+}
+
+fn truncate_summary(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_owned();
+    }
+    let mut out: String = trimmed.chars().take(max_chars.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
+pub(crate) fn should_recheck_completion_after_tool_result(app: &App) -> bool {
+    !app.is_streaming
+        && app.pending_classifications == 0
+        && app.pending_approval.is_none()
+        && app.approval_queue.is_empty()
+        && app.pending_tool_calls.is_empty()
+        && app.in_flight_eager_dispatches == 0
+        && app.in_flight_tool_batches == 0
+        && app.compacting_started_at.is_none()
+        && stream::should_continue_loop(&app.messages)
+}
+
 /// Handle `ToolEvent::AllComplete` — all tools in the current batch finished.
 pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
-    // Decrement the eager-dispatch counter if there are outstanding ones.
+    // Decrement the dispatch counters if there are outstanding ones.
     app.in_flight_eager_dispatches = app.in_flight_eager_dispatches.saturating_sub(1);
+    app.in_flight_tool_batches = app.in_flight_tool_batches.saturating_sub(1);
     tracing::info!(
         target: "jfc::stream",
         message_count = app.messages.len(),
         model = %app.model,
         pending_approvals = app.approval_queue.len() + usize::from(app.pending_approval.is_some()),
         pending_tool_calls = app.pending_tool_calls.len(),
+        pending_classifications = app.pending_classifications,
         in_flight_eager = app.in_flight_eager_dispatches,
+        in_flight_batches = app.in_flight_tool_batches,
         "ToolEvent::AllComplete"
     );
     // AllToolsComplete is *batch-local*: it fires when
@@ -215,13 +474,28 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
     let turn_truly_complete = app.pending_approval.is_none()
         && app.approval_queue.is_empty()
         && app.pending_tool_calls.is_empty()
-        && app.in_flight_eager_dispatches == 0;
+        && app.pending_classifications == 0
+        && app.in_flight_eager_dispatches == 0
+        && app.in_flight_tool_batches == 0;
     if !turn_truly_complete {
         tracing::debug!(
             target: "jfc::stream",
             "AllToolsComplete: batch finished but turn still has pending tools — deferring side effects"
         );
         return;
+    }
+    if last_assistant_has_unresolved_tool(app) {
+        tracing::warn!(
+            target: "jfc::stream",
+            "AllToolsComplete arrived before all tool results were recorded — waiting for ToolResult recheck"
+        );
+        return;
+    }
+    if let Some((summary, preceding_tool_use_ids)) = completed_tool_batch_summary(app) {
+        let _ = tx.try_send(AppEvent::Tool(crate::runtime::ToolEvent::UseSummary {
+            summary,
+            preceding_tool_use_ids,
+        }));
     }
     // Save session once per completed tool batch (not per tool).
     if let Some(ref session_id) = app.current_session_id {

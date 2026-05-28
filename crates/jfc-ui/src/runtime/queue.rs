@@ -174,6 +174,13 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
     let overrides = StreamRequestOverrides {
         background_reminders: app.take_background_reminders(),
         disallowed_tools: app.effective_disallowed_tools(),
+        allowed_tools: app.allowed_tools.clone(),
+        custom_betas: app.custom_betas.clone(),
+        fine_grained_tool_streaming: app.fine_grained_tool_streaming,
+        strict_tool_schemas: app.strict_tool_schemas,
+        task_budget: app.cli_task_budget,
+        max_thinking_tokens: app.cli_max_thinking_tokens,
+        thinking_display: app.cli_thinking_display.clone(),
         ..Default::default()
     };
     // Park the *inner* task's abort handle on App so the watchdog can

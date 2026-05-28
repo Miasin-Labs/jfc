@@ -1151,35 +1151,12 @@ pub async fn execute_tool(
                 Err(e) => ExecutionResult::failure(format!("Failed to read MCP resource: {e}")),
             }
         }
-        (ToolKind::Advisor, ToolInput::Advisor {}) => {
-            // The Advisor tool auto-forwards the full conversation to a stronger
-            // reviewer model. We fire an event so the event loop (which holds
-            // `&mut App` with the provider + advisor session + transcript) can
-            // call `ask_advisor()` and append the reply as MessagePart::Advisor.
-            //
-            // The tool_use_id is empty here — the event-loop handler will use
-            // the most recent pending tool call on the assistant message.
-            if let Some(tx) = snapshot_event_sender() {
-                let _ = tx
-                    .send(crate::runtime::AppEvent::Ui(
-                        crate::runtime::UiEvent::AdvisorToolRequested {
-                            tool_use_id: String::new(),
-                        },
-                    ))
-                    .await;
-                ExecutionResult::success(
-                    "Advisor consulted. Your full conversation has been forwarded to \
-                     the advisor model. The guidance will appear as an advisor message."
-                        .to_string(),
-                )
-            } else {
-                ExecutionResult::failure(
-                    "Advisor tool requires an active session with an event sender. \
-                     Use /advisor <question> directly instead."
-                        .to_string(),
-                )
-            }
-        }
+        (ToolKind::Advisor, ToolInput::Advisor {}) => ExecutionResult::failure(
+            "Advisor must be executed through the stream dispatcher so JFC can \
+                 attach the current transcript snapshot. Use `/advisor <question>` \
+                 for a direct manual query."
+                .to_string(),
+        ),
         (ToolKind::ConnectGitHub, ToolInput::ConnectGitHub {}) => ExecutionResult::failure(
             "ConnectGitHub is not supported in this environment. \
                  Use `gh auth login` via the Bash tool instead."

@@ -82,6 +82,7 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
         max_tokens = opts.max_tokens,
         has_system = opts.system.is_some(),
         tool_count = opts.tools.len(),
+        advisor_model = ?opts.advisor_model.as_ref().map(|m| m.as_str()),
         thinking_mode,
         "building request body"
     );
@@ -110,12 +111,17 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
         body["top_p"] = serde_json::Value::from(top_p);
     }
 
-    if !opts.tools.is_empty() {
+    if !opts.tools.is_empty() || opts.advisor_model.is_some() {
         // Tag the LAST tool with cache_control so the entire tools
         // array becomes a cache breakpoint. v132 picks the last tool
         // (vs. first) so callers can prepend ephemeral tools without
         // re-keying the cache.
-        let mut tools = sse::build_tools(&opts.tools);
+        let mut tools = sse::build_tools_with_advisor(&opts.tools, opts.advisor_model.as_ref());
+        sse::apply_anthropic_tool_schema_controls(
+            &mut tools,
+            opts.eager_input_streaming,
+            opts.strict_tool_schemas,
+        );
         if let Some(arr) = tools.as_array_mut()
             && let Some(last) = arr.last_mut()
             && let Some(obj) = last.as_object_mut()
@@ -132,10 +138,14 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
         }
         body["thinking"] = thinking;
     } else if let Some(budget) = opts.thinking_budget {
-        body["thinking"] = json!({
+        let mut thinking = json!({
             "type": "enabled",
             "budget_tokens": budget,
         });
+        if let Some(display) = opts.thinking_display.as_deref() {
+            thinking["display"] = json!(display);
+        }
+        body["thinking"] = thinking;
     }
     {
         let mut oc = serde_json::Map::new();
@@ -152,6 +162,7 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
     for (key, value) in &opts.provider_options {
         body[key] = value.clone();
     }
+    sse::cap_cache_control_breakpoints(&mut body, 4);
 
     body
 }
@@ -229,6 +240,16 @@ impl Provider for AnthropicProvider {
         if options.task_budget_tokens.is_some() {
             betas.push_str(",task-budgets-2026-03-13");
         }
+        if options.advisor_model.is_some() {
+            betas.push_str(",advisor-tool-2026-03-01");
+        }
+        if options.eager_input_streaming {
+            betas.push_str(",fine-grained-tool-streaming-2025-05-14");
+        }
+        if options.strict_tool_schemas {
+            betas.push_str(",structured-outputs-2025-12-15");
+        }
+        append_custom_betas(&mut betas, &options.custom_betas);
         let beta_header = betas;
 
         let send_started = std::time::Instant::now();
@@ -336,6 +357,17 @@ impl Provider for AnthropicProvider {
     }
 }
 
+fn append_custom_betas(header: &mut String, custom_betas: &[String]) {
+    for beta in custom_betas {
+        let beta = beta.trim();
+        if beta.is_empty() {
+            continue;
+        }
+        header.push(',');
+        header.push_str(beta);
+    }
+}
+
 /// DO-178B §6.4.2 conformance: every behavior is exercised by at least one
 /// `_normal` test (canonical inputs / equivalence classes / boundary values)
 /// and one `_robust` test (invalid / abnormal / illegal-state inputs).
@@ -356,6 +388,13 @@ mod tests {
     fn make_user_msg(text: &str) -> ProviderMessage {
         ProviderMessage {
             role: ProviderRole::User,
+            content: vec![ProviderContent::Text(text.to_owned())],
+        }
+    }
+
+    fn make_assistant_msg(text: &str) -> ProviderMessage {
+        ProviderMessage {
+            role: ProviderRole::Assistant,
             content: vec![ProviderContent::Text(text.to_owned())],
         }
     }
@@ -506,6 +545,42 @@ mod tests {
         assert_eq!(body["tools"].as_array().unwrap().len(), 1);
     }
 
+    #[test]
+    fn build_body_caps_cache_control_breakpoints_to_four_robust() {
+        let body = build_body(
+            vec![
+                make_user_msg("first"),
+                make_assistant_msg("first response"),
+                make_user_msg("second"),
+                make_assistant_msg("second response"),
+            ],
+            &opts("m").system("stable instructions").tools(vec![ToolDef {
+                name: "Bash".into(),
+                description: "run".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]),
+        );
+
+        assert_eq!(sse::count_cache_control_breakpoints(&body), 4);
+        assert!(body["system"][0].get("cache_control").is_some());
+        assert!(body["tools"][0].get("cache_control").is_some());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        assert!(
+            body["messages"][2]["content"][0]
+                .get("cache_control")
+                .is_some()
+        );
+        assert!(
+            body["messages"][3]["content"][0]
+                .get("cache_control")
+                .is_some()
+        );
+    }
+
     // Normal: provider_options are caller-supplied transport controls. The
     // stream request layer uses this path for Anthropic `tool_choice`, so the
     // native body builder must not silently drop the map.
@@ -617,6 +692,17 @@ mod tests {
             &opts("m").adaptive().thinking_display("summarized"),
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[test]
+    fn build_body_legacy_thinking_display_summarized_normal() {
+        let body = build_body(
+            vec![make_user_msg("hi")],
+            &opts("m").thinking(8192).thinking_display("summarized"),
+        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 8192);
         assert_eq!(body["thinking"]["display"], "summarized");
     }
 

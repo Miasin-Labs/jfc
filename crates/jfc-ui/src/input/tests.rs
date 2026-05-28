@@ -502,6 +502,49 @@ async fn approval_esc_clears_queue_robust() {
     assert!(app.approval_queue.is_empty());
 }
 
+#[tokio::test]
+async fn remote_approval_matches_current_tool_id_normal() {
+    let mut app = test_app();
+    app.pending_approval = Some(crate::app::PendingApproval {
+        tool: make_bash_tool("t1", "echo ok"),
+        selected: 0,
+    });
+    let (tx, mut rx) = channel();
+
+    handle_remote_approval_response(&mut app, &tx, "t1".into(), true);
+
+    assert!(app.pending_approval.is_none());
+    let event = rx.recv().await;
+    assert!(matches!(
+        event,
+        Some(AppEvent::Tool(ToolEvent::SetInProgressToolUseIds { action, ids }))
+            if action == "add" && ids == vec!["t1".to_owned()]
+    ));
+}
+
+#[tokio::test]
+async fn remote_orphaned_permission_response_recovers_unresolved_tool_robust() {
+    let mut app = test_app();
+    let tool = make_tool("t_orphan", ToolKind::Bash);
+    app.messages.push(ChatMessage::user("run".into()));
+    app.messages
+        .push(ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)]));
+    let (tx, _rx) = channel();
+
+    handle_remote_approval_response(&mut app, &tx, "t_orphan".into(), false);
+
+    let status = app
+        .messages
+        .iter()
+        .flat_map(|msg| msg.parts.iter())
+        .find_map(|part| match part {
+            MessagePart::Tool(tool) if tool.id.as_str() == "t_orphan" => Some(tool.status),
+            _ => None,
+        })
+        .expect("tool should remain in transcript");
+    assert_eq!(status, ToolStatus::Failed);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Task panel modal
 // ─────────────────────────────────────────────────────────────────────

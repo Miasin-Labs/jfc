@@ -314,7 +314,6 @@ fn qualified(scope: &[&str], name: &str) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

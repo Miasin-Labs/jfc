@@ -43,6 +43,12 @@ pub struct DaemonState {
     /// `logs`, `wait`, and cross-process cancellation requests.
     #[serde(default)]
     pub background_agents: HashMap<String, BackgroundAgentInfo>,
+    /// Runtime resilience metadata recorded by the daemon process.
+    #[serde(default)]
+    pub runtime: DaemonRuntimeInfo,
+    /// Durable local control-plane requests for worker takeover/spare/restart.
+    #[serde(default)]
+    pub worker_controls: Vec<WorkerControlRecord>,
 }
 
 impl Default for DaemonState {
@@ -55,12 +61,88 @@ impl Default for DaemonState {
             wakeups: Vec::new(),
             fired_wakeups: Vec::new(),
             background_agents: HashMap::new(),
+            runtime: DaemonRuntimeInfo::default(),
+            worker_controls: Vec::new(),
         }
     }
 }
 
 pub(super) fn epoch() -> SystemTime {
     UNIX_EPOCH
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonRuntimeInfo {
+    #[serde(default)]
+    pub worker_exe: Option<PathBuf>,
+    #[serde(default)]
+    pub worker_exe_mtime: Option<SystemTime>,
+    #[serde(default)]
+    pub spare_ready: bool,
+    #[serde(default)]
+    pub spare_checked_at: Option<SystemTime>,
+    #[serde(default)]
+    pub restart_requested: bool,
+    #[serde(default)]
+    pub restart_reason: Option<String>,
+    #[serde(default)]
+    pub low_memory_retire_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerControlRecord {
+    pub id: String,
+    pub kind: WorkerControlKind,
+    pub status: WorkerControlStatus,
+    pub requested_at: SystemTime,
+    pub updated_at: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_exe: Option<PathBuf>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerControlKind {
+    PrepareSpare,
+    Takeover,
+    BinaryTakeover,
+    RestartOnUpgrade,
+    RetireLowMemory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerControlStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl Default for DaemonRuntimeInfo {
+    fn default() -> Self {
+        Self {
+            worker_exe: None,
+            worker_exe_mtime: None,
+            spare_ready: false,
+            spare_checked_at: None,
+            restart_requested: false,
+            restart_reason: None,
+            low_memory_retire_count: 0,
+        }
+    }
 }
 
 /// Information about a managed session.
@@ -117,6 +199,16 @@ pub struct BackgroundAgentInfo {
     pub updated_at: SystemTime,
     pub completed_at: Option<SystemTime>,
     pub pid: Option<u32>,
+    /// Monotonic ownership generation for detached workers. A takeover bumps
+    /// this value before spawning the replacement; old workers with a stale
+    /// epoch are ignored when they try to heartbeat, report progress, or
+    /// finish.
+    #[serde(default)]
+    pub worker_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<SystemTime>,
+    #[serde(default)]
+    pub takeover_count: u32,
     pub model: Option<String>,
     pub worktree_path: Option<PathBuf>,
     pub log_path: PathBuf,
@@ -165,6 +257,10 @@ pub struct BackgroundAgentLaunch {
     /// and lets us report a precise error if the original binary was removed.
     #[serde(default)]
     pub worker_exe: Option<PathBuf>,
+    /// Expected owner epoch for the worker process launched from this spec.
+    /// Missing/zero means a legacy launch spec.
+    #[serde(default)]
+    pub worker_epoch: u64,
     pub active_team_name: Option<String>,
     pub created_at: SystemTime,
 }
@@ -415,6 +511,9 @@ mod tests {
             updated_at: ts,
             completed_at: Some(ts),
             pid: None,
+            worker_epoch: 0,
+            last_heartbeat_at: None,
+            takeover_count: 0,
             model: None,
             worktree_path: None,
             log_path: PathBuf::from("/dev/null"),

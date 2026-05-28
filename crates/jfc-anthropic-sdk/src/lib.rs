@@ -1,6 +1,5 @@
 //! `jfc-anthropic-sdk` — a Rust client for Anthropic's Beta APIs, mirroring
-//! the public surface of the official `anthropic-sdk-go` (decompiled from the
-//! `ant-cli` binary at `~/VulnerabilityResearch/anthropic/ant-cli/all/`).
+//! the public surface of the official `anthropic-sdk-go` and `ant` CLI.
 //!
 //! The crate is laid out one module per service so callers can import only
 //! what they need:
@@ -11,6 +10,8 @@
 //! - [`skills`] — `BetaSkillService` + version management + multipart upload
 //! - [`environments`] — `BetaEnvironmentService` (isolated execution contexts)
 //! - [`vaults`] — `BetaVaultService` + `BetaVaultCredentialService`
+//! - [`memory_stores`] — `BetaMemoryStoreService` + memories + versions
+//! - [`webhooks`] — Standard Webhooks verification + Managed Agents event unwrap
 //! - [`files`] — `BetaFileService` (upload / download / metadata)
 //! - [`batches`] — `BetaMessageBatchService` (async batch processing)
 //! - [`models`] — `BetaModelService` (capability discovery)
@@ -41,6 +42,7 @@ pub mod environments;
 pub mod error;
 pub mod files;
 pub mod managed_agents;
+pub mod memory_stores;
 pub mod messages;
 pub mod models;
 pub mod pagination;
@@ -50,6 +52,7 @@ pub mod skills;
 pub mod sse;
 pub mod user_profiles;
 pub mod vaults;
+pub mod webhooks;
 
 pub use client::Client;
 pub use error::{Error, Result};
@@ -62,4 +65,7 @@ pub mod beta {
     pub const MESSAGE_BATCHES: &str = "message-batches-2024-09-24";
     pub const SKILLS: &str = "skills-2025-10-02";
     pub const USER_PROFILES: &str = "user-profiles-2026-03-24";
+    pub const TOKEN_COUNTING: &str = "token-counting-2024-11-01";
+    pub const STRUCTURED_OUTPUTS: &str = "structured-outputs-2025-12-15";
+    pub const CONTEXT_MANAGEMENT: &str = "context-management-2025-06-27";
 }
