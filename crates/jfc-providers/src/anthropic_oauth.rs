@@ -1341,16 +1341,28 @@ impl Provider for AnthropicOAuthProvider {
     }
 
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        tracing::debug!(
-            target: "jfc::provider::anthropic_oauth",
-            "using embedded Claude Code OAuth model catalog"
-        );
-        // Claude Code OAuth model routing is driven by its embedded first-party
-        // catalog plus account profile gating, not the public models.dev catalog.
-        // Returning the static list here prevents the startup background fetch
-        // from replacing alias/current-model rows with a public catalog that may
-        // lag Claude Code or omit OAuth-only entries.
-        Ok(self.available_models())
+        // The embedded Claude Code OAuth catalog owns the picker layout (alias
+        // rows, curated order/names) and is authoritative for OAuth-only entries
+        // the public catalog may omit. But it goes stale the moment Anthropic
+        // ships a new revision, so we *union* in any newer ids from models.dev
+        // rather than replacing the curated list. New models then appear at the
+        // bottom of the picker with no code change, while the canonical alias /
+        // current-model rows stay first. Network failure → canonical list only.
+        let canonical = self.available_models();
+        match super::models_dev::fetch_provider_models(&self.client, "anthropic", "anthropic-oauth")
+            .await
+        {
+            Ok(live) if !live.is_empty() => Ok(super::anthropic_models::merge_live_into_canonical(
+                canonical, live,
+            )),
+            _ => {
+                tracing::debug!(
+                    target: "jfc::provider::anthropic_oauth",
+                    "models.dev unavailable — using embedded OAuth catalog only"
+                );
+                Ok(canonical)
+            }
+        }
     }
 
     #[tracing::instrument(
@@ -2853,20 +2865,28 @@ mod tests {
         assert!(models.iter().all(|m| m.provider == "anthropic-oauth"));
     }
 
-    // Robust: OAuth model discovery must preserve the embedded Claude Code
-    // catalog. The public models.dev catalog can lag or omit Claude Code
-    // OAuth-specific rows, so fetch_models intentionally does no network
-    // replacement for this provider.
+    // Robust: OAuth model discovery preserves the embedded Claude Code catalog
+    // as the picker's first rows (alias / curated order / display names) and
+    // appends any newer ids from models.dev only at the tail. Offline / network
+    // failure must degrade to canonical-only, never an empty list.
     #[tokio::test]
-    async fn fetch_models_uses_embedded_oauth_catalog_robust() {
+    async fn fetch_models_preserves_canonical_prefix_robust() {
         let p = AnthropicOAuthProvider::new();
         let fetched = p.fetch_models().await.unwrap();
         let embedded = p.available_models();
-        assert_eq!(fetched.len(), embedded.len());
-        assert_eq!(
-            fetched.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            embedded.iter().map(|m| m.id.as_str()).collect::<Vec<_>>()
+        assert!(
+            fetched.len() >= embedded.len(),
+            "merged list shrunk below canonical: {} < {}",
+            fetched.len(),
+            embedded.len()
         );
+        for (i, want) in embedded.iter().enumerate() {
+            assert_eq!(
+                fetched[i].id, want.id,
+                "canonical row {i} was reshuffled by merge: want {} got {}",
+                want.id, fetched[i].id
+            );
+        }
         assert!(fetched.iter().all(|m| m.provider == "anthropic-oauth"));
     }
 

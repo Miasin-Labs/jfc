@@ -178,6 +178,68 @@ pub fn apply_seat_tier_filter(models: Vec<ModelInfo>, seat_tier: Option<&str>) -
     result
 }
 
+/// Merge a live models.dev catalog into the curated canonical list.
+///
+/// ## Why this exists
+///
+/// `anthropic_first_party_models` is a hand-maintained list mirrored from Claude
+/// Code's `ALL_MODEL_CONFIGS`. It owns the picker's *layout* — the three `↗ …
+/// (latest)` alias rows up top, the curated display names ("Claude Opus 4.7"),
+/// and the most-capable-first ordering. We never want a network fetch to clobber
+/// that. But the canonical list also goes stale the moment Anthropic ships a new
+/// revision: e.g. models.dev surfaced `claude-opus-4-8` the day it launched while
+/// our hardcoded list still topped out at `claude-opus-4-7`.
+///
+/// This merge gives us both: the canonical rows are emitted **verbatim and
+/// first**, then any live id that the canonical list doesn't already cover is
+/// appended (newest-first, as models.dev sorts them). A freshly-launched model
+/// thus appears at the bottom of the picker with no code change, while the
+/// curated alias/order/naming stay authoritative.
+///
+/// Dedup is by model id. Live rows are re-stamped with `canonical`'s provider tag
+/// so picker selection still routes back to the right `Provider` impl regardless
+/// of the tag models.dev was fetched under. If `live` is empty (offline / fetch
+/// failed) the result is exactly `canonical`.
+pub fn merge_live_into_canonical(
+    canonical: Vec<ModelInfo>,
+    live: Vec<ModelInfo>,
+) -> Vec<ModelInfo> {
+    use std::collections::HashSet;
+
+    let provider_tag: String = canonical
+        .first()
+        .map(|m| m.provider.to_string())
+        .unwrap_or_default();
+    let known: HashSet<String> = canonical.iter().map(|m| m.id.to_string()).collect();
+
+    let canonical_count = canonical.len();
+    let mut out = canonical;
+    let mut appended = 0usize;
+    for m in live {
+        if known.contains(m.id.as_str()) {
+            continue;
+        }
+        // Re-stamp the provider tag so the merged row routes to the same
+        // Provider impl as the canonical rows (models.dev may have been fetched
+        // under a different tag, e.g. "anthropic" vs "anthropic-oauth").
+        let restamped = ModelInfo::new(m.id.clone(), m.display_name.clone(), provider_tag.as_str())
+            .with_context_window_tokens(m.context_window_tokens)
+            .with_max_output_tokens(m.max_output_tokens)
+            .with_costs(m.input_cost, m.output_cost);
+        out.push(restamped);
+        appended += 1;
+    }
+
+    tracing::debug!(
+        target: "jfc::provider::anthropic_models",
+        canonical = canonical_count,
+        appended,
+        total = out.len(),
+        "merge_live_into_canonical"
+    );
+    out
+}
+
 /// Whether a model supports `thinking.type = "adaptive"` (Claude decides when
 /// and how much to think). Mirrors v137's `FH8()` function.
 ///
@@ -381,5 +443,148 @@ mod tests {
             models.iter().any(|m| m.id == "claude-mythos-preview"),
             "claude-mythos-preview should be in the catalog"
         );
+    }
+
+    // ── merge_live_into_canonical (models.dev union) ────────────────────────
+
+    fn live_row(id: &str, display: &str, tag: &str) -> ModelInfo {
+        ModelInfo::new(id, display, tag).with_context_window_tokens(200_000usize)
+    }
+
+    // Normal: canonical rows appear verbatim, in order, before any live row.
+    // Picker layout (alias rows up top, curated ordering) must never be
+    // reshuffled by a live fetch.
+    #[test]
+    fn merge_preserves_canonical_order_normal() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let canonical_ids: Vec<String> = canonical.iter().map(|m| m.id.to_string()).collect();
+        let live = vec![live_row("claude-opus-4-8", "Claude Opus 4.8", "anthropic")];
+        let merged = merge_live_into_canonical(canonical, live);
+        let merged_ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        // First N entries are the canonical list verbatim.
+        for (i, want) in canonical_ids.iter().enumerate() {
+            assert_eq!(merged_ids[i], want.as_str(), "canonical row {i} reshuffled");
+        }
+    }
+
+    // Normal: a brand-new live id (e.g. claude-opus-4-8 shipped after our
+    // hardcoded catalog was updated) is appended to the merged result. This
+    // is the whole point of the merge.
+    #[test]
+    fn merge_appends_new_live_id_normal() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let live = vec![live_row(
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+            "anthropic-oauth",
+        )];
+        let merged = merge_live_into_canonical(canonical, live);
+        assert!(
+            merged.iter().any(|m| m.id == "claude-opus-4-8"),
+            "new live id was not appended"
+        );
+    }
+
+    // Robust: a live row whose id collides with a canonical row is DROPPED.
+    // The canonical row's display names ("↗ Opus (latest)" and "Claude Opus 4.7")
+    // survive intact — models.dev never gets to rename our curated rows.
+    //
+    // Note: `claude-opus-4-7` legitimately appears twice in the canonical list
+    // (once as the `↗ Opus (latest)` alias row, once as the dated row). The
+    // merge must add ZERO more entries, not collapse them.
+    #[test]
+    fn merge_drops_live_rows_colliding_with_canonical_robust() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let canonical_47_count = canonical
+            .iter()
+            .filter(|m| m.id == "claude-opus-4-7")
+            .count();
+        let live = vec![live_row(
+            "claude-opus-4-7",
+            "Anthropic Opus 4.7 (different name)",
+            "anthropic-oauth",
+        )];
+        let merged = merge_live_into_canonical(canonical, live);
+        let merged_47_count = merged.iter().filter(|m| m.id == "claude-opus-4-7").count();
+        assert_eq!(
+            merged_47_count, canonical_47_count,
+            "live row was not deduped against canonical"
+        );
+        assert!(
+            !merged
+                .iter()
+                .any(|m| m.display_name == "Anthropic Opus 4.7 (different name)"),
+            "live display name leaked into merged list"
+        );
+    }
+
+    // Robust: live row's provider tag is overridden to the canonical's tag.
+    // Picker selection then routes the merged row through the same Provider
+    // impl as the canonical rows, regardless of what models.dev was fetched
+    // under.
+    #[test]
+    fn merge_restamps_provider_tag_robust() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let live = vec![live_row("claude-opus-4-8", "Claude Opus 4.8", "anthropic")];
+        let merged = merge_live_into_canonical(canonical, live);
+        let opus_48 = merged
+            .iter()
+            .find(|m| m.id == "claude-opus-4-8")
+            .expect("merge dropped the new id");
+        assert_eq!(
+            opus_48.provider, "anthropic-oauth",
+            "live row was not re-stamped with canonical provider tag"
+        );
+    }
+
+    // Robust: empty live (offline / fetch failure) → merged equals canonical
+    // exactly. This is the cold-path safety net — the picker must always
+    // have rows to show even when models.dev is unreachable.
+    #[test]
+    fn merge_with_empty_live_returns_canonical_robust() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let canonical_ids: Vec<String> = canonical.iter().map(|m| m.id.to_string()).collect();
+        let merged = merge_live_into_canonical(canonical, vec![]);
+        let merged_ids: Vec<String> = merged.iter().map(|m| m.id.to_string()).collect();
+        assert_eq!(merged_ids, canonical_ids);
+    }
+
+    // Robust: multiple new live ids are all appended; their relative order
+    // (newest-first as models.dev sorts them) is preserved.
+    #[test]
+    fn merge_preserves_live_relative_order_robust() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let live = vec![
+            live_row("claude-opus-4-9", "Claude Opus 4.9", "anthropic"),
+            live_row("claude-opus-4-8", "Claude Opus 4.8", "anthropic"),
+        ];
+        let merged = merge_live_into_canonical(canonical.clone(), live);
+        // Skip past the canonical prefix, then check the tail order.
+        let tail: Vec<&str> = merged
+            .iter()
+            .skip(canonical.len())
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(tail, vec!["claude-opus-4-9", "claude-opus-4-8"]);
+    }
+
+    // Robust: cost + context window fields survive the re-stamp. Picker's
+    // cost column would otherwise render "—" for merged rows.
+    #[test]
+    fn merge_preserves_live_costs_and_limits_robust() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let live_one = ModelInfo::new("claude-opus-4-8", "Claude Opus 4.8", "anthropic")
+            .with_context_window_tokens(1_000_000usize)
+            .with_max_output_tokens(128_000usize)
+            .with_costs(Some(15.0), Some(75.0));
+        let merged = merge_live_into_canonical(canonical, vec![live_one]);
+        let row = merged
+            .iter()
+            .find(|m| m.id == "claude-opus-4-8")
+            .expect("merge dropped the new id");
+        assert_eq!(row.context_window_tokens, Some(1_000_000));
+        assert_eq!(row.max_output_tokens, Some(128_000));
+        assert_eq!(row.input_cost, Some(15.0));
+        assert_eq!(row.output_cost, Some(75.0));
     }
 }

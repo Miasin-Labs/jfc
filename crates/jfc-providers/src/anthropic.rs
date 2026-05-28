@@ -205,13 +205,19 @@ impl Provider for AnthropicProvider {
     }
 
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        // Prefer the live models.dev catalog so we pick up new Anthropic models the
-        // moment they ship. Fall back to the embedded canonical list when the network
-        // is unavailable (offline / corp proxy / models.dev down).
+        // Union the live models.dev catalog into the curated canonical list.
+        // Replacing canonical wholesale (the old behaviour) lost the alias rows
+        // (`↗ Opus / Sonnet / Haiku (latest)`) the picker leads with, because
+        // those are emitted by `anthropic_first_party_models()` and aren't in
+        // models.dev. Merging keeps the curated layout *and* picks up new ids
+        // the moment Anthropic ships them. Network failure → canonical only.
+        let canonical = self.available_models();
         match super::models_dev::fetch_provider_models(&self.client, "anthropic", "anthropic").await
         {
-            Ok(m) if !m.is_empty() => Ok(m),
-            _ => Ok(self.available_models()),
+            Ok(live) if !live.is_empty() => Ok(super::anthropic_models::merge_live_into_canonical(
+                canonical, live,
+            )),
+            _ => Ok(canonical),
         }
     }
 
