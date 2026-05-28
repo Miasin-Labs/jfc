@@ -14,6 +14,7 @@ use jfc_provider::ModelInfo;
 fn limits_for_anthropic_model(id: &str) -> (usize, Option<usize>) {
     let id = id.to_ascii_lowercase();
     if id.contains("mythos")
+        || id.contains("opus-4-8")
         || id.contains("opus-4-7")
         || id.contains("opus-4-6")
         || id.contains("sonnet-4-6")
@@ -42,7 +43,9 @@ fn limits_for_anthropic_model(id: &str) -> (usize, Option<usize>) {
 /// without having to read release dates.
 pub const ALIAS_SONNET: &str = "claude-sonnet-4-6";
 pub const ALIAS_HAIKU: &str = "claude-haiku-4-5-20251001";
-pub const ALIAS_OPUS: &str = "claude-opus-4-7";
+/// Tracks Claude Code 2.1.154's first-party default
+/// (`he()` returns `Yz().opus48` for firstParty backends).
+pub const ALIAS_OPUS: &str = "claude-opus-4-8";
 
 /// Build the canonical first-party Anthropic model list.
 ///
@@ -61,6 +64,7 @@ pub fn anthropic_first_party_models(provider_tag: &str) -> Vec<ModelInfo> {
         // Preview / experimental
         ("claude-mythos-preview", "Claude Mythos (preview)"),
         // Opus — flagship, dated/specific
+        ("claude-opus-4-8", "Claude Opus 4.8"),
         ("claude-opus-4-7", "Claude Opus 4.7"),
         ("claude-opus-4-6", "Claude Opus 4.6"),
         ("claude-opus-4-5-20251101", "Claude Opus 4.5"),
@@ -68,6 +72,10 @@ pub fn anthropic_first_party_models(provider_tag: &str) -> Vec<ModelInfo> {
         ("claude-opus-4-20250514", "Claude Opus 4"),
         // Sonnet
         ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+        (
+            "claude-sonnet-4-6-20251114",
+            "Claude Sonnet 4.6 (2025-11-14)",
+        ),
         ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
         ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
         ("claude-3-7-sonnet-20250219", "Claude Sonnet 3.7"),
@@ -251,6 +259,7 @@ pub fn supports_adaptive_thinking(model_id: &str) -> bool {
     // Opus 4.6+ and Sonnet 4.6+ support adaptive
     id.contains("opus-4-6")
         || id.contains("opus-4-7")
+        || id.contains("opus-4-8")
         || id.contains("sonnet-4-6")
         || id.contains("mythos")
 }
@@ -280,11 +289,13 @@ mod tests {
     }
 
     // Normal: the canonical catalog includes the current flagship, mid, and fast tiers
-    // so the user can always reach them without typing a custom id.
+    // so the user can always reach them without typing a custom id. The flagship id
+    // tracks Claude Code's `he()` first-party default (`Yz().opus48` in CC 2.1.154+).
     #[test]
     fn current_flagship_models_present_normal() {
         let models = anthropic_first_party_models("x");
         for required in [
+            "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",
@@ -421,6 +432,7 @@ mod tests {
     fn adaptive_thinking_supported_for_4_6_plus_normal() {
         assert!(supports_adaptive_thinking("claude-opus-4-6"));
         assert!(supports_adaptive_thinking("claude-opus-4-7"));
+        assert!(supports_adaptive_thinking("claude-opus-4-8"));
         assert!(supports_adaptive_thinking("claude-sonnet-4-6"));
         assert!(supports_adaptive_thinking("claude-mythos-preview"));
     }
@@ -467,21 +479,39 @@ mod tests {
         }
     }
 
-    // Normal: a brand-new live id (e.g. claude-opus-4-8 shipped after our
-    // hardcoded catalog was updated) is appended to the merged result. This
-    // is the whole point of the merge.
+    // Normal: a brand-new live id (the canonical list always lags Anthropic's
+    // next release) is appended to the merged result. This is the whole point
+    // of the merge. Uses a synthetic id so the test doesn't false-pass once
+    // the canonical list catches up.
     #[test]
     fn merge_appends_new_live_id_normal() {
         let canonical = anthropic_first_party_models("anthropic-oauth");
         let live = vec![live_row(
-            "claude-opus-4-8",
-            "Claude Opus 4.8",
+            "claude-opus-4-9",
+            "Claude Opus 4.9",
             "anthropic-oauth",
         )];
         let merged = merge_live_into_canonical(canonical, live);
         assert!(
-            merged.iter().any(|m| m.id == "claude-opus-4-8"),
+            merged.iter().any(|m| m.id == "claude-opus-4-9"),
             "new live id was not appended"
+        );
+    }
+
+    // Robust: merge_restamps_provider_tag uses a synthetic future id so the
+    // assertion exercises the restamp path, not a canonical row.
+    #[test]
+    fn merge_restamps_provider_tag_synthetic_id_robust() {
+        let canonical = anthropic_first_party_models("anthropic-oauth");
+        let live = vec![live_row("claude-opus-4-9", "Claude Opus 4.9", "anthropic")];
+        let merged = merge_live_into_canonical(canonical, live);
+        let row = merged
+            .iter()
+            .find(|m| m.id == "claude-opus-4-9")
+            .expect("merge dropped the new id");
+        assert_eq!(
+            row.provider, "anthropic-oauth",
+            "live row was not re-stamped with canonical provider tag"
         );
     }
 
@@ -518,25 +548,6 @@ mod tests {
         );
     }
 
-    // Robust: live row's provider tag is overridden to the canonical's tag.
-    // Picker selection then routes the merged row through the same Provider
-    // impl as the canonical rows, regardless of what models.dev was fetched
-    // under.
-    #[test]
-    fn merge_restamps_provider_tag_robust() {
-        let canonical = anthropic_first_party_models("anthropic-oauth");
-        let live = vec![live_row("claude-opus-4-8", "Claude Opus 4.8", "anthropic")];
-        let merged = merge_live_into_canonical(canonical, live);
-        let opus_48 = merged
-            .iter()
-            .find(|m| m.id == "claude-opus-4-8")
-            .expect("merge dropped the new id");
-        assert_eq!(
-            opus_48.provider, "anthropic-oauth",
-            "live row was not re-stamped with canonical provider tag"
-        );
-    }
-
     // Robust: empty live (offline / fetch failure) → merged equals canonical
     // exactly. This is the cold-path safety net — the picker must always
     // have rows to show even when models.dev is unreachable.
@@ -555,8 +566,8 @@ mod tests {
     fn merge_preserves_live_relative_order_robust() {
         let canonical = anthropic_first_party_models("anthropic-oauth");
         let live = vec![
+            live_row("claude-opus-5-0", "Claude Opus 5", "anthropic"),
             live_row("claude-opus-4-9", "Claude Opus 4.9", "anthropic"),
-            live_row("claude-opus-4-8", "Claude Opus 4.8", "anthropic"),
         ];
         let merged = merge_live_into_canonical(canonical.clone(), live);
         // Skip past the canonical prefix, then check the tail order.
@@ -565,7 +576,7 @@ mod tests {
             .skip(canonical.len())
             .map(|m| m.id.as_str())
             .collect();
-        assert_eq!(tail, vec!["claude-opus-4-9", "claude-opus-4-8"]);
+        assert_eq!(tail, vec!["claude-opus-5-0", "claude-opus-4-9"]);
     }
 
     // Robust: cost + context window fields survive the re-stamp. Picker's
@@ -573,14 +584,14 @@ mod tests {
     #[test]
     fn merge_preserves_live_costs_and_limits_robust() {
         let canonical = anthropic_first_party_models("anthropic-oauth");
-        let live_one = ModelInfo::new("claude-opus-4-8", "Claude Opus 4.8", "anthropic")
+        let live_one = ModelInfo::new("claude-opus-4-9", "Claude Opus 4.9", "anthropic")
             .with_context_window_tokens(1_000_000usize)
             .with_max_output_tokens(128_000usize)
             .with_costs(Some(15.0), Some(75.0));
         let merged = merge_live_into_canonical(canonical, vec![live_one]);
         let row = merged
             .iter()
-            .find(|m| m.id == "claude-opus-4-8")
+            .find(|m| m.id == "claude-opus-4-9")
             .expect("merge dropped the new id");
         assert_eq!(row.context_window_tokens, Some(1_000_000));
         assert_eq!(row.max_output_tokens, Some(128_000));
