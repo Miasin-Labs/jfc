@@ -600,14 +600,28 @@ pub(crate) async fn handle_stream_done(
 /// (env/config/factory), disabled in plan mode, and capped by
 /// `max_self_continuations` to prevent runaway loops.
 async fn maybe_self_continue(app: &mut App, tx: &EventSender) {
-    // Only fire when the turn is fully settled and idle.
-    if app.is_streaming
-        || app.pending_approval.is_some()
-        || !app.approval_queue.is_empty()
-        || !app.pending_tool_calls.is_empty()
-        || !app.queued_prompts.is_empty()
-        || app.pending_classifications > 0
-    {
+    // Only fire when the turn is fully settled and idle. The
+    // `in_flight_*` guards are load-bearing: when StreamDone arrives
+    // with `stop_reason=ToolUse` and pending tools, the `has_pending_tools`
+    // arm above *dispatches* the batch (incrementing `in_flight_tool_batches`)
+    // and then falls through to here. Those tools are still Pending/Running —
+    // their `AllToolsComplete` hasn't landed yet. Without these guards we
+    // self-continue immediately, start the next assistant stream, and
+    // `build_assistant_and_tool_result_messages` serializes the still-running
+    // tool as "abandoned" (tool_wire.rs Pending/Running arm). Mirror the
+    // `turn_truly_complete` predicate in tools.rs so continuation is driven by
+    // `handle_all_complete` *after* the tool results land, not by this race.
+    let idle = TurnIdleness {
+        is_streaming: app.is_streaming,
+        pending_approval: app.pending_approval.is_some(),
+        approval_queue_len: app.approval_queue.len(),
+        pending_tool_calls_len: app.pending_tool_calls.len(),
+        queued_prompts_len: app.queued_prompts.len(),
+        pending_classifications: app.pending_classifications,
+        in_flight_eager_dispatches: app.in_flight_eager_dispatches,
+        in_flight_tool_batches: app.in_flight_tool_batches,
+    };
+    if !turn_is_idle_for_self_continue(&idle) {
         return;
     }
     // Plan mode is read-only by contract — never auto-act.
@@ -671,4 +685,154 @@ async fn maybe_self_continue(app: &mut App, tx: &EventSender) {
     let body = crate::system_reminder::format(&reason);
     app.messages.push(types::ChatMessage::user(body));
     stream::continue_agentic_loop(app, tx).await;
+}
+
+/// Snapshot of the runtime fields `maybe_self_continue` inspects to decide
+/// whether the turn is fully idle. Extracted into a value-only struct so the
+/// predicate can be unit-tested without spinning up an `App`.
+#[derive(Debug, Clone, Copy)]
+struct TurnIdleness {
+    is_streaming: bool,
+    pending_approval: bool,
+    approval_queue_len: usize,
+    pending_tool_calls_len: usize,
+    queued_prompts_len: usize,
+    pending_classifications: usize,
+    in_flight_eager_dispatches: usize,
+    in_flight_tool_batches: usize,
+}
+
+/// Pure predicate: returns true iff the runtime is genuinely quiescent and
+/// `maybe_self_continue` may start the next assistant stream.
+///
+/// The `in_flight_*` checks pin the bug fix: when `StreamDone(ToolUse)` arrives
+/// the handler dispatches the batch and increments `in_flight_tool_batches`
+/// before falling through to here. Returning `true` while those counters are
+/// positive starts the next stream over still-running tools, which then
+/// serialize as `[abandoned]` (tool_wire.rs Pending/Running arm).
+fn turn_is_idle_for_self_continue(idle: &TurnIdleness) -> bool {
+    !idle.is_streaming
+        && !idle.pending_approval
+        && idle.approval_queue_len == 0
+        && idle.pending_tool_calls_len == 0
+        && idle.queued_prompts_len == 0
+        && idle.pending_classifications == 0
+        && idle.in_flight_eager_dispatches == 0
+        && idle.in_flight_tool_batches == 0
+}
+
+#[cfg(test)]
+mod self_continue_idleness_tests {
+    //! Pins the `turn_is_idle_for_self_continue` predicate. The
+    //! `in_flight_*` checks reproduce the abandoned-tool race observed in
+    //! `ses_20260528_130646.log`:
+    //!
+    //! ```text
+    //! 20:29:25.570981 stream_done dispatching auto-routed batch n=1 kinds=["TaskUpdate"]
+    //! 20:29:25.571227 self-continuing without user nudge   ← BUG: too early
+    //! 20:29:25.571409 build_assistant_and_tool_result_messages ... abandoned_count=1
+    //! ```
+    use super::{TurnIdleness, turn_is_idle_for_self_continue};
+
+    fn fully_idle() -> TurnIdleness {
+        TurnIdleness {
+            is_streaming: false,
+            pending_approval: false,
+            approval_queue_len: 0,
+            pending_tool_calls_len: 0,
+            queued_prompts_len: 0,
+            pending_classifications: 0,
+            in_flight_eager_dispatches: 0,
+            in_flight_tool_batches: 0,
+        }
+    }
+
+    // Normal: fully-quiescent state is the only state that lets
+    // self-continue fire.
+    #[test]
+    fn fully_idle_allows_continue_normal() {
+        assert!(turn_is_idle_for_self_continue(&fully_idle()));
+    }
+
+    // Normal — REGRESSION: this is the exact state stream_done leaves
+    // behind after `dispatch_auto_routed_batch` increments
+    // `in_flight_tool_batches`. Pre-fix the predicate returned true and
+    // the next stream stomped over the still-running tool.
+    #[test]
+    fn in_flight_tool_batch_blocks_continue_normal_regression() {
+        let mut s = fully_idle();
+        s.in_flight_tool_batches = 1;
+        assert!(
+            !turn_is_idle_for_self_continue(&s),
+            "self-continue MUST wait for in-flight tool batches to drain"
+        );
+    }
+
+    // Normal — REGRESSION: same race for the eager-dispatch path
+    // (tool_event.rs schedules tools before StreamDone arrives).
+    #[test]
+    fn in_flight_eager_dispatch_blocks_continue_normal_regression() {
+        let mut s = fully_idle();
+        s.in_flight_eager_dispatches = 1;
+        assert!(
+            !turn_is_idle_for_self_continue(&s),
+            "self-continue MUST wait for in-flight eager dispatches to drain"
+        );
+    }
+
+    // Robust: each pre-existing guard still blocks, so the refactor is
+    // behaviour-preserving for the original conditions.
+    #[test]
+    fn pre_existing_guards_still_block_continue_robust() {
+        let cases = [
+            (
+                "is_streaming",
+                TurnIdleness {
+                    is_streaming: true,
+                    ..fully_idle()
+                },
+            ),
+            (
+                "pending_approval",
+                TurnIdleness {
+                    pending_approval: true,
+                    ..fully_idle()
+                },
+            ),
+            (
+                "approval_queue",
+                TurnIdleness {
+                    approval_queue_len: 1,
+                    ..fully_idle()
+                },
+            ),
+            (
+                "pending_tool_calls",
+                TurnIdleness {
+                    pending_tool_calls_len: 1,
+                    ..fully_idle()
+                },
+            ),
+            (
+                "queued_prompts",
+                TurnIdleness {
+                    queued_prompts_len: 1,
+                    ..fully_idle()
+                },
+            ),
+            (
+                "pending_classifications",
+                TurnIdleness {
+                    pending_classifications: 1,
+                    ..fully_idle()
+                },
+            ),
+        ];
+        for (label, state) in cases {
+            assert!(
+                !turn_is_idle_for_self_continue(&state),
+                "guard `{label}` must block self-continue"
+            );
+        }
+    }
 }
