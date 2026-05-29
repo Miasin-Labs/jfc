@@ -504,8 +504,10 @@ mod disk_io_tests {
         assert_eq!(all.len(), 3);
     }
 
-    // Normal: most_recent_session_for_cwd returns the newest in the matching
-    // project bucket.
+    // Normal: most_recent_session_for_cwd returns the matching-cwd session
+    // with the greatest `updated_at`. Saved in creation order here (each
+    // save stamps updated_at=now), so the last-saved /proj session wins and
+    // the /other-cwd session is excluded.
     #[tokio::test]
     async fn most_recent_session_for_cwd_returns_top_normal() {
         let _g = TempConfigHome::new();
@@ -518,16 +520,16 @@ mod disk_io_tests {
         )
         .await;
         save_session(
-            &SessionId::new("ses_20260301_000000"),
+            &SessionId::new("ses_20260201_000000"),
             &m,
-            Some("/proj"),
+            Some("/other"),
             None,
         )
         .await;
         save_session(
-            &SessionId::new("ses_20260201_000000"),
+            &SessionId::new("ses_20260301_000000"),
             &m,
-            Some("/other"),
+            Some("/proj"),
             None,
         )
         .await;
@@ -536,6 +538,50 @@ mod disk_io_tests {
             top.as_ref().map(|s| s.as_str()),
             Some("ses_20260301_000000")
         );
+    }
+
+    // Normal — REGRESSION (the "--continue resumed the wrong session" bug):
+    // ranking is by `updated_at`, NOT by filename/creation order. Create an
+    // OLD-id session, then a NEWER-id session, then re-save (touch) the OLD
+    // one. The old session now has the latest updated_at, so --continue must
+    // resume IT — even though its filename sorts earlier. Pre-fix, filename
+    // order wrongly picked the newer-created-but-untouched session.
+    #[tokio::test]
+    async fn most_recent_session_for_cwd_ranks_by_updated_at_regression() {
+        let _g = TempConfigHome::new();
+        let m = vec![ChatMessage::user("hi".into())];
+        let old = SessionId::new("ses_20260101_000000");
+        let new = SessionId::new("ses_20260901_000000");
+        save_session(&old, &m, Some("/proj"), None).await;
+        save_session(&new, &m, Some("/proj"), None).await;
+        // Touch the OLDER session last → its updated_at is now the greatest.
+        // A coarse-clock filesystem could stamp identical rfc3339 seconds, so
+        // nudge to guarantee a strictly-later timestamp.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        save_session(&old, &m, Some("/proj"), None).await;
+        let top = most_recent_session_for_cwd(Some("/proj")).await;
+        assert_eq!(
+            top.as_ref().map(|s| s.as_str()),
+            Some("ses_20260101_000000"),
+            "the most-recently-worked-in session must win, not the newest filename"
+        );
+    }
+
+    // Robust: a cwd with no matching sessions returns None (the caller's
+    // global fallback + foreign-cwd warning lives in the event loop). The
+    // /other session must not leak through as a match for /proj.
+    #[tokio::test]
+    async fn most_recent_session_for_cwd_no_match_returns_none_robust() {
+        let _g = TempConfigHome::new();
+        let m = vec![ChatMessage::user("hi".into())];
+        save_session(
+            &SessionId::new("ses_20260101_000000"),
+            &m,
+            Some("/other"),
+            None,
+        )
+        .await;
+        assert!(most_recent_session_for_cwd(Some("/proj")).await.is_none());
     }
 
     // Robust: most_recent_session (global) returns the newest id regardless

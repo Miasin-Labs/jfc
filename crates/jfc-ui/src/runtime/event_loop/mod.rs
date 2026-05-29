@@ -231,9 +231,21 @@ pub(crate) async fn run(
             let cwd_str = std::env::current_dir()
                 .ok()
                 .map(|p| p.display().to_string());
+            // Prefer a session from *this* project (cwd-scoped, codex-rs /
+            // v126 parity). Only when the current cwd has no sessions at all
+            // do we fall back to the globally-most-recent — and we flag that
+            // so the user isn't silently dropped into an unrelated project's
+            // transcript (the "`--continue` resumed the wrong repo" footgun).
+            let mut continued_foreign_cwd = false;
             let id = match jfc_session::most_recent_session_for_cwd(cwd_str.as_deref()).await {
                 Some(id) => Some(id),
-                None => jfc_session::most_recent_session().await, // legacy fallback
+                None => {
+                    let fallback = jfc_session::most_recent_session().await;
+                    if fallback.is_some() {
+                        continued_foreign_cwd = true;
+                    }
+                    fallback
+                }
             };
             if let Some(session_id) = id
                 && let Some((messages, saved_model)) =
@@ -288,6 +300,26 @@ pub(crate) async fn run(
                     }
                 }
                 app.recompute_token_estimate();
+                // If we fell back to the globally-most-recent session because
+                // this cwd had none of its own, the resumed transcript belongs
+                // to a *different* project. Surface that instead of silently
+                // dropping the user into an unrelated repo's history.
+                if continued_foreign_cwd {
+                    tracing::warn!(
+                        target: "jfc::session",
+                        cwd = ?cwd_str,
+                        "no session for this cwd — continued the globally-most-recent session from another project"
+                    );
+                    crate::toast::push_with_cap(
+                        &mut app.toasts,
+                        crate::toast::Toast::new(
+                            crate::toast::ToastKind::Warning,
+                            "No session for this directory — continued the most recent session from \
+                             another project. Use `--resume <id>` or start fresh if that's not what you wanted."
+                                .to_string(),
+                        ),
+                    );
+                }
                 let hl_cache_path = std::env::current_dir()
                     .unwrap_or_default()
                     .join(".jfc/highlight-heights.json");

@@ -328,7 +328,10 @@ pub async fn most_recent_session_for_cwd(cwd: Option<&str>) -> Option<SessionId>
         return None;
     };
 
-    // Collect filenames, sort newest-first (lexicographic on the timestamp)
+    // Collect filenames, sort newest-first (lexicographic on the timestamp).
+    // Filename order = *creation* order; we re-rank the cwd matches by
+    // `updated_at` below so the session you most recently *worked in* wins,
+    // not the one most recently created.
     let mut filenames: Vec<String> = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -336,11 +339,26 @@ pub async fn most_recent_session_for_cwd(cwd: Option<&str>) -> Option<SessionId>
             filenames.push(name);
         }
     }
-    filenames.sort_unstable_by(|a, b| b.cmp(a)); // newest first
+    filenames.sort_unstable_by(|a, b| b.cmp(a)); // newest-created first
 
-    // Scan each file's header for the cwd field. Read only 1 KB — the
-    // JSON header (id, created_at, updated_at, first_prompt, model, cwd)
-    // is always within the first ~400 bytes.
+    // Scan each matching file's header (1 KB is plenty — the JSON header
+    // `id, created_at, updated_at, first_prompt, model, cwd` lands within
+    // the first ~400 bytes; `first_prompt` is length-capped). Pick the
+    // cwd-matching session with the greatest `updated_at`.
+    //
+    // ## Why updated_at, not filename order
+    //
+    // Session filenames are `ses_<created_at>`, so filename order is
+    // *creation* order. But `--continue` should resume the session the user
+    // was last *working in*. If they resume an older session and keep
+    // editing it, its `updated_at` advances while its filename stays old —
+    // filename order would wrongly skip it for a newer-but-untouched session
+    // in the same project. `updated_at` is written on every save
+    // (session/core.rs), so it's the correct recency key. RFC3339 timestamps
+    // sort lexicographically == chronologically, so a string `max` works.
+    // Sessions missing `updated_at` (legacy) fall back to filename order via
+    // the `created_at`-shaped session id as the tiebreak key.
+    let mut best: Option<(String, String)> = None; // (updated_at_key, id)
     for filename in &filenames {
         let path = dir.join(filename);
         let Ok(file) = tokio::fs::File::open(&path).await else {
@@ -355,21 +373,35 @@ pub async fn most_recent_session_for_cwd(cwd: Option<&str>) -> Option<SessionId>
         };
         let header = &buf[..n];
 
-        // Fast extraction: find `"cwd":` then grab the string value.
-        // Format in the JSON is: `"cwd": "/path/to/project"`
-        if let Some(cwd_value) = extract_cwd_from_header(header)
-            && cwd_value == target_cwd
-        {
-            let id = filename.strip_suffix(".json").unwrap_or(filename);
-            debug!(
-                target: "jfc::session",
-                ?cwd,
-                session_id = id,
-                "fast cwd match (header scan)"
-            );
-            return Some(SessionId::new(id));
+        let Some(cwd_value) = extract_cwd_from_header(header) else {
+            continue; // legacy session without cwd, or cwd beyond 1 KB — skip
+        };
+        if cwd_value != target_cwd {
+            continue;
         }
-        // If cwd field is missing (legacy session) or doesn't match, skip.
+        let id = filename
+            .strip_suffix(".json")
+            .unwrap_or(filename)
+            .to_owned();
+        // Recency key: updated_at if present, else the id itself (which
+        // embeds the creation timestamp) so legacy rows still rank sanely.
+        let recency = extract_string_field_from_header(header, "updated_at")
+            .map(str::to_owned)
+            .unwrap_or_else(|| id.clone());
+        match &best {
+            Some((best_key, _)) if *best_key >= recency => {}
+            _ => best = Some((recency, id)),
+        }
+    }
+
+    if let Some((_, id)) = best {
+        debug!(
+            target: "jfc::session",
+            ?cwd,
+            session_id = %id,
+            "most-recent cwd match (by updated_at)"
+        );
+        return Some(SessionId::new(id));
     }
 
     debug!(target: "jfc::session", ?cwd, "no session found for cwd (header scan)");
@@ -379,20 +411,26 @@ pub async fn most_recent_session_for_cwd(cwd: Option<&str>) -> Option<SessionId>
 /// Extract the `"cwd"` value from a raw JSON header byte slice without
 /// full parsing. Returns `None` if the field isn't found in the buffer.
 fn extract_cwd_from_header(header: &[u8]) -> Option<&str> {
-    // Look for the pattern `"cwd":` (possibly with whitespace variations)
+    extract_string_field_from_header(header, "cwd")
+}
+
+/// Extract a top-level string field's value from a raw JSON header byte
+/// slice without full parsing. Returns `None` if the field isn't present
+/// in the buffer, or its value is `null` (legacy rows). The header values
+/// we scan (`cwd`, `updated_at`) never contain escaped quotes, so a simple
+/// next-quote scan is sufficient and avoids parsing the whole (possibly
+/// multi-hundred-MB) session file just to read a header field.
+fn extract_string_field_from_header<'a>(header: &'a [u8], field: &str) -> Option<&'a str> {
     let header_str = std::str::from_utf8(header).ok()?;
-    let cwd_key_idx = header_str.find("\"cwd\"")?;
-    // Skip past `"cwd"` + colon + optional whitespace + opening quote
-    let after_key = &header_str[cwd_key_idx + 5..]; // skip `"cwd"`
+    let needle = format!("\"{field}\"");
+    let key_idx = header_str.find(&needle)?;
+    let after_key = &header_str[key_idx + needle.len()..];
     let colon_idx = after_key.find(':')?;
     let after_colon = after_key[colon_idx + 1..].trim_start();
-    // Handle null values (legacy sessions without cwd)
     if after_colon.starts_with("null") {
         return None;
     }
-    // Should start with a quote
     let after_colon = after_colon.strip_prefix('"')?;
-    // Find the closing quote (cwd paths don't contain escaped quotes)
     let end_quote = after_colon.find('"')?;
     Some(&after_colon[..end_quote])
 }
@@ -402,4 +440,44 @@ pub async fn most_recent_session() -> Option<SessionId> {
     let result = list_sessions().await.into_iter().next();
     debug!(target: "jfc::session", found = result.is_some(), "most recent session (global)");
     result
+}
+
+#[cfg(test)]
+mod header_scan_tests {
+    use super::{extract_cwd_from_header, extract_string_field_from_header};
+
+    // Normal: pull cwd and updated_at out of a realistic header prefix.
+    #[test]
+    fn extracts_cwd_and_updated_at_normal() {
+        let header = br#"{"id":"ses_1","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-05-29T03:00:00Z","first_prompt":"hi","model":"opus","cwd":"/home/u/proj","title":null,"messages":["#;
+        assert_eq!(extract_cwd_from_header(header), Some("/home/u/proj"));
+        assert_eq!(
+            extract_string_field_from_header(header, "updated_at"),
+            Some("2026-05-29T03:00:00Z")
+        );
+    }
+
+    // Robust: null value (legacy session) yields None, not "null".
+    #[test]
+    fn null_field_returns_none_robust() {
+        let header = br#"{"id":"ses_1","updated_at":null,"cwd":null,"messages":["#;
+        assert_eq!(extract_cwd_from_header(header), None);
+        assert_eq!(extract_string_field_from_header(header, "updated_at"), None);
+    }
+
+    // Robust: a field truncated past the 1 KB read window is treated as
+    // absent (no panic, just None) — the caller falls back to id-order.
+    #[test]
+    fn field_beyond_buffer_returns_none_robust() {
+        // Header cut off mid-value before the closing quote.
+        let header = br#"{"id":"ses_1","cwd":"/home/u/very/long/pa"#;
+        assert_eq!(extract_cwd_from_header(header), None);
+    }
+
+    // Robust: missing field entirely → None.
+    #[test]
+    fn missing_field_returns_none_robust() {
+        let header = br#"{"id":"ses_1","messages":["#;
+        assert_eq!(extract_string_field_from_header(header, "updated_at"), None);
+    }
 }
