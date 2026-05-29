@@ -1047,6 +1047,39 @@ async fn handle_command_keys(
     }
 }
 
+/// Decide whether a fresh submit should *interrupt* the in-flight stream
+/// (cancel + start the new turn now) or be *queued* behind it.
+///
+/// Interrupt-on-submit gives real-time steering: it's right once the model
+/// is actually producing output and the user wants to redirect it. But it
+/// is **wrong before the connection has even opened** — cancelling a stream
+/// still inside `open_stream_with_cancel_and_timeout` makes it bail with
+/// "Stream cancelled before connection opened", and (pre-fix) that landed as
+/// a hard error on the brand-new turn. Even with that error now suppressed,
+/// interrupting a not-yet-started stream is pointless: there's no partial
+/// output to steer away from, and the user's first message hasn't been
+/// answered at all. Queueing is strictly better there — both messages are
+/// preserved and answered in order.
+///
+/// `streaming_response_bytes` is the precise "output has begun" signal: it's
+/// reset to 0 at every turn start and incremented on the first text/thinking/
+/// tool-input delta (see `stream_chunk.rs`). `> 0` therefore means the
+/// connection opened and the model started responding — the only state where
+/// interrupting is the right call.
+pub(crate) fn can_interrupt_on_submit(app: &App, compacting: bool) -> bool {
+    app.is_streaming
+        && !compacting
+        // Connection opened and the model has begun producing output. Before
+        // the first byte there's nothing to steer — queue instead so the
+        // first turn isn't silently dropped mid-connect.
+        && app.streaming_response_bytes > 0
+        && app.pending_approval.is_none()
+        && app
+            .pending_tool_calls
+            .iter()
+            .all(|t| crate::scheduler::is_concurrency_safe(&t.kind))
+}
+
 /// `Enter` (without Shift) submission flow: trim textarea, route to the
 /// streaming submit or to the queued-prompts list depending on busy-state.
 /// Returns `Some(Ok(false))` on the non-empty path, `None` when the
@@ -1083,13 +1116,7 @@ async fn handle_enter_submit(
                 // Check if we can interrupt: if streaming with only
                 // safe/interruptible tools, abort and inject instead
                 // of queuing. This gives real-time steering.
-                let can_interrupt = app.is_streaming
-                    && !compacting
-                    && app.pending_approval.is_none()
-                    && app
-                        .pending_tool_calls
-                        .iter()
-                        .all(|t| crate::scheduler::is_concurrency_safe(&t.kind));
+                let can_interrupt = can_interrupt_on_submit(app, compacting);
                 if can_interrupt {
                     tracing::info!(
                         target: "jfc::input::interrupt",

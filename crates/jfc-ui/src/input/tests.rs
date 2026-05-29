@@ -2003,6 +2003,9 @@ async fn enter_interrupts_and_submits_when_streaming_without_blockers() {
     let mut app = test_app_with_input("ask", 80);
     app.is_streaming = true;
     app.streaming_started_at = Some(std::time::Instant::now());
+    // Output has begun — interrupt-on-submit is the right call here (real-time
+    // steering). `streaming_response_bytes > 0` is the gate the fix added.
+    app.streaming_response_bytes = 128;
     let (tx, _rx) = channel();
 
     handle_key(&mut app, key(KeyCode::Enter), &tx)
@@ -2018,6 +2021,37 @@ async fn enter_interrupts_and_submits_when_streaming_without_blockers() {
     ));
     assert_eq!(app.messages[1].role, Role::Assistant);
     assert!(app.is_streaming);
+}
+
+// REGRESSION (queueing-during-connect): submitting a second message while the
+// first stream is still opening its connection (is_streaming but
+// streaming_response_bytes == 0) must QUEUE it, not interrupt. Pre-fix this
+// cancelled the still-connecting first stream — which then bailed "Stream
+// cancelled before connection opened" onto the new turn — and dropped the
+// first message's answer entirely.
+#[tokio::test]
+async fn enter_queues_when_streaming_before_first_byte_regression() {
+    let mut app = test_app_with_input("second message", 80);
+    app.is_streaming = true;
+    app.streaming_started_at = Some(std::time::Instant::now());
+    // No output yet — the connection is still opening.
+    app.streaming_response_bytes = 0;
+    let (tx, _rx) = channel();
+
+    handle_key(&mut app, key(KeyCode::Enter), &tx)
+        .await
+        .unwrap();
+
+    // The second message is queued, not submitted as a fresh turn.
+    assert_eq!(
+        app.queued_prompts.len(),
+        1,
+        "second message during connect must be queued"
+    );
+    assert_eq!(app.queued_prompts[0].text, "second message");
+    assert!(!app.queued_prompts[0].is_meta);
+    // The in-flight first stream is left untouched (not cancelled).
+    assert!(app.is_streaming, "first stream must keep running");
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2669,5 +2703,69 @@ fn slash_registry_table_is_nonempty_and_unique_normal() {
         deduped.len(),
         names.len(),
         "duplicate command literal in SLASH_COMMANDS table",
+    );
+}
+
+// ── can_interrupt_on_submit (queueing-during-connect fix) ──────────────────
+
+/// Helper: an App in the "mid-stream" state with `n` response bytes already
+/// accumulated. `bytes > 0` models "the model has started producing output".
+fn streaming_app_with_bytes(bytes: usize) -> App {
+    let mut app = test_app();
+    app.is_streaming = true;
+    app.streaming_response_bytes = bytes;
+    app
+}
+
+// Normal: once output has begun (bytes > 0) and nothing is gating, a fresh
+// submit may interrupt for real-time steering.
+#[test]
+fn can_interrupt_when_output_has_started_normal() {
+    let app = streaming_app_with_bytes(42);
+    assert!(key_dispatch::can_interrupt_on_submit(
+        &app, /* compacting = */ false
+    ));
+}
+
+// Normal — REGRESSION (the connect-phase drop): before the first byte
+// arrives (bytes == 0) the stream is still opening its connection. Submitting
+// must NOT interrupt — there's no output to steer and the first message
+// hasn't been answered. The caller falls through to the queue path instead.
+#[test]
+fn cannot_interrupt_before_first_byte_normal_regression() {
+    let app = streaming_app_with_bytes(0);
+    assert!(
+        !key_dispatch::can_interrupt_on_submit(&app, false),
+        "a not-yet-connected stream must be queued behind, not interrupted"
+    );
+}
+
+// Robust: compaction in progress is never interruptible regardless of bytes.
+#[test]
+fn cannot_interrupt_while_compacting_robust() {
+    let app = streaming_app_with_bytes(999);
+    assert!(!key_dispatch::can_interrupt_on_submit(
+        &app, /* compacting = */ true
+    ));
+}
+
+// Robust: not streaming at all ⇒ not interruptible (the busy state was a
+// non-streaming pipeline like a pending approval; queue path handles it).
+#[test]
+fn cannot_interrupt_when_not_streaming_robust() {
+    let mut app = streaming_app_with_bytes(100);
+    app.is_streaming = false;
+    assert!(!key_dispatch::can_interrupt_on_submit(&app, false));
+}
+
+// Robust: a pending approval modal blocks interrupt even mid-output — the
+// user must resolve the approval first; queueing keeps the contract intact.
+#[test]
+fn cannot_interrupt_with_pending_approval_robust() {
+    let mut app = streaming_app_with_bytes(100);
+    arm_approval(&mut app, ToolKind::Bash);
+    assert!(
+        !key_dispatch::can_interrupt_on_submit(&app, false),
+        "pending approval must force the queue path"
     );
 }
