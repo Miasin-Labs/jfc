@@ -206,6 +206,106 @@ fn permission_mode_bypass_auto_default_decisions_normal() {
     );
 }
 
+fn make_bash_tool(command: &str) -> ToolCall {
+    ToolCall {
+        id: crate::ids::ToolId::from("b-cat"),
+        kind: ToolKind::Bash,
+        status: ToolStatus::Pending,
+        input: ToolInput::Bash {
+            command: command.to_string(),
+            timeout: None,
+            workdir: None,
+        },
+        output: ToolOutput::Empty,
+        display: crate::types::ToolDisplayState::DEFAULT,
+        elapsed_ms: None,
+        started_at: None,
+        thought_signature: None,
+    }
+}
+
+// Normal — the catastrophic backstop: a whole-home `rm -rf` forces a prompt
+// even under BypassPermissions and Auto, which otherwise auto-approve bash.
+#[test]
+fn bypass_forces_prompt_on_catastrophic_rm_normal() {
+    let _g = super::shell_safety::CATASTROPHIC_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: lock serializes env mutation across parallel test threads.
+    unsafe { std::env::remove_var("JFC_ALLOW_CATASTROPHIC_BASH") };
+    let t = make_bash_tool("rm -rf /home/cole");
+    assert_eq!(
+        PermissionMode::BypassPermissions.auto_approves(&t),
+        PermissionDecision::NeedsPrompt,
+        "rm -rf /home/<user> must prompt even in Bypass"
+    );
+    assert_eq!(
+        PermissionMode::Auto.auto_approves(&t),
+        PermissionDecision::NeedsPrompt,
+        "rm -rf /home/<user> must prompt even in Auto (no silent classifier pass)"
+    );
+}
+
+// Normal — force-push over master is catastrophic under Bypass.
+#[test]
+fn bypass_forces_prompt_on_force_push_master_normal() {
+    let _g = super::shell_safety::CATASTROPHIC_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    unsafe { std::env::remove_var("JFC_ALLOW_CATASTROPHIC_BASH") };
+    let t = make_bash_tool("git push --force origin master");
+    assert_eq!(
+        PermissionMode::BypassPermissions.auto_approves(&t),
+        PermissionDecision::NeedsPrompt
+    );
+}
+
+// Robust — legitimate swarm cleanup must NOT be gated, or background agents
+// deadlock waiting on an approval nobody can give. These are the exact
+// patterns the forensic audit found running safely hundreds of times.
+#[test]
+fn bypass_still_approves_safe_destructive_robust() {
+    let _g = super::shell_safety::CATASTROPHIC_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    unsafe { std::env::remove_var("JFC_ALLOW_CATASTROPHIC_BASH") };
+    for safe in [
+        "rm -rf target",                                    // build artifact
+        "rm -rf /tmp/scratch-build",                        // tmp
+        "git worktree remove --force .jfc-worktrees/t1",    // worktree cleanup
+        "git branch -D jfc/old-agent-branch",               // merged branch
+        "git reset --hard HEAD",                            // merge-abort idiom
+        "git push --force-with-lease origin master",        // the SAFE force variant
+        "rm -rf /home/cole/RustProjects/active/jfc/target", // deep targeted path
+    ] {
+        let t = make_bash_tool(safe);
+        assert_eq!(
+            PermissionMode::BypassPermissions.auto_approves(&t),
+            PermissionDecision::Approved,
+            "safe destructive cmd was wrongly gated: {safe:?}"
+        );
+    }
+}
+
+// Robust — the env override restores full bypass for unattended runs that
+// genuinely need it.
+#[test]
+fn catastrophic_override_env_restores_bypass_robust() {
+    let _g = super::shell_safety::CATASTROPHIC_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: lock serializes env mutation across parallel test threads.
+    unsafe { std::env::set_var("JFC_ALLOW_CATASTROPHIC_BASH", "1") };
+    let t = make_bash_tool("rm -rf /home/cole");
+    let decision = PermissionMode::BypassPermissions.auto_approves(&t);
+    unsafe { std::env::remove_var("JFC_ALLOW_CATASTROPHIC_BASH") };
+    assert_eq!(
+        decision,
+        PermissionDecision::Approved,
+        "JFC_ALLOW_CATASTROPHIC_BASH=1 must restore full bypass"
+    );
+}
+
 // Robust: ApprovalChoice::label returns a fixed label for every
 // variant. Exercises the full match arm.
 #[test]

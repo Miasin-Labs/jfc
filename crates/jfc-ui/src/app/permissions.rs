@@ -59,6 +59,30 @@ impl PermissionMode {
         if matches!(tool.kind, ToolKind::UnknownTool { .. }) {
             return PermissionDecision::Denied("unknown tool — refusing to dispatch");
         }
+        // Catastrophic-command backstop. A tiny denylist of effectively
+        // unrecoverable, whole-system / whole-history operations
+        // (`rm -rf /home`, `dd of=/dev/sdX`, `mkfs`, force-push over master,
+        // `rm -rf .git`, fork bomb) forces a confirmation prompt **even in
+        // BypassPermissions / Auto** — the two modes that otherwise
+        // auto-approve a detached/swarm agent's bash. Without it, a single
+        // hallucinated path in an unattended run could wipe the box with no
+        // human in the loop. Narrow by design (a 305-session audit found zero
+        // real triggers) and overridable via `JFC_ALLOW_CATASTROPHIC_BASH=1`.
+        // Default / AcceptEdits already prompt for Bash, so this only changes
+        // behaviour where it must.
+        if matches!(self, Self::BypassPermissions | Self::Auto)
+            && let ToolKind::Bash = tool.kind
+            && let ToolInput::Bash { command, .. } = &tool.input
+            && let Some(reason) = super::shell_safety::catastrophic_bash_reason(command)
+        {
+            tracing::warn!(
+                target: "jfc::permissions",
+                mode = self.label(),
+                reason,
+                "catastrophic bash command — forcing approval prompt despite auto-approve mode"
+            );
+            return PermissionDecision::NeedsPrompt;
+        }
         match self {
             Self::Default => PermissionDecision::NeedsPrompt,
             Self::Plan => match tool.kind {

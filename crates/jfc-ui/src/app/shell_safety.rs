@@ -156,6 +156,201 @@ fn first_dangerous_reason(cmd: &str) -> Option<&'static str> {
     None
 }
 
+// ─── Catastrophic-command backstop ────────────────────────────────────────
+//
+// `classify_readonly_bash` above answers "is this safe to AUTO-RUN in Plan
+// mode?" — a strict allowlist. This is the opposite end: a tiny *denylist* of
+// commands so destructive that we want a confirmation prompt **even in
+// BypassPermissions / Auto**, where everything is normally auto-approved.
+//
+// Scope is deliberately narrow — only genuinely unrecoverable, whole-system
+// or whole-history loss. A 305-session forensic audit found ZERO of these
+// fired in practice (every `rm -rf` targeted /tmp, build artifacts, or
+// worktree dirs; every `reset --hard` was `HEAD` inside a merge-abort script;
+// every force-push was a solo-repo `--amend` iteration). So this backstop is
+// pure insurance: it should essentially never trip on real usage, and when it
+// does, the operation really is the catastrophic kind. Legit swarm cleanup
+// (`worktree remove --force`, `branch -D`, `reset --hard HEAD`,
+// `--force-with-lease`, `/tmp` deletes) is explicitly NOT catastrophic, so
+// headless/background agents never deadlock waiting on an approval nobody can
+// give. Override with `JFC_ALLOW_CATASTROPHIC_BASH=1` for unattended runs that
+// genuinely need it.
+
+/// Human-readable reason a command was flagged catastrophic. Surfaced in the
+/// approval prompt so the user sees *why* this bypassed the bypass.
+pub(super) const REASON_CATASTROPHIC_RM: &str =
+    "destructive: recursive delete of a root / home / system path";
+pub(super) const REASON_CATASTROPHIC_DISK: &str =
+    "destructive: raw disk write / filesystem format (dd / mkfs / shred of a device)";
+pub(super) const REASON_CATASTROPHIC_FORKBOMB: &str = "destructive: fork bomb";
+pub(super) const REASON_CATASTROPHIC_FORCE_PUSH: &str =
+    "destructive: force-push over master/main (use --force-with-lease)";
+pub(super) const REASON_CATASTROPHIC_GIT_WIPE: &str =
+    "destructive: removing .git (deletes repository history)";
+
+/// Returns `Some(reason)` if `cmd` contains a catastrophic, effectively
+/// unrecoverable operation that should prompt even under BypassPermissions.
+/// `None` for everything else (including ordinary destructive ops like a
+/// project-local `rm -rf target` or `git reset --hard HEAD`, which are the
+/// caller's normal Default-mode prompt territory, not this backstop's).
+pub(super) fn catastrophic_bash_reason(cmd: &str) -> Option<&'static str> {
+    if std::env::var("JFC_ALLOW_CATASTROPHIC_BASH")
+        .ok()
+        .is_some_and(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+    {
+        return None;
+    }
+    // Normalize whitespace runs to single spaces so `rm   -rf` matches.
+    let norm: String = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if let Some(r) = catastrophic_rm_reason(&norm) {
+        return Some(r);
+    }
+    // Raw-disk / format. `dd ... of=/dev/sdX`, `mkfs`, `shred /dev/...`.
+    if (norm.contains("dd ") && norm.contains("of=/dev/"))
+        || norm.contains("mkfs")
+        || (norm.contains("shred ") && norm.contains("/dev/"))
+    {
+        return Some(REASON_CATASTROPHIC_DISK);
+    }
+    // Classic fork bomb `:(){ :|:& };:` (and whitespace variants).
+    let despaced: String = cmd.chars().filter(|c| !c.is_whitespace()).collect();
+    if despaced.contains(":(){:|:") || despaced.contains(":(){:|:&};:") {
+        return Some(REASON_CATASTROPHIC_FORKBOMB);
+    }
+    // Force-push over the primary branch. `--force-with-lease` is the SAFE
+    // variant (refuses if the remote moved) — never flagged. Accept both the
+    // long `--force` and the short `-f` flag (`git push -f origin main`).
+    let has_force_flag = (norm.contains("--force") && !norm.contains("--force-with-lease"))
+        || norm.split(' ').any(|t| t == "-f");
+    if norm.contains("git push") && has_force_flag {
+        let targets_primary = norm.contains(" master")
+            || norm.contains(" main")
+            || norm.contains(":master")
+            || norm.contains(":main")
+            || norm.contains("HEAD:master")
+            || norm.contains("HEAD:main");
+        // A bare `git push --force` (no refspec) pushes the current branch —
+        // catastrophic only when that's the primary branch, which we can't
+        // know statically; treat an explicit master/main mention as the
+        // trigger and leave bare force-push to the normal Default prompt.
+        if targets_primary {
+            return Some(REASON_CATASTROPHIC_FORCE_PUSH);
+        }
+    }
+    // `rm -rf .git` (or `.git/`) — wipes repository history. The forensic
+    // tulip case (flattening a fresh scaffold) is rare; prompting once is a
+    // fair price for protecting real history.
+    if is_recursive_rm(&norm)
+        && (norm.contains(" .git ")
+            || norm.contains(" .git/")
+            || norm.ends_with(" .git")
+            || norm.contains("/.git "))
+    {
+        return Some(REASON_CATASTROPHIC_GIT_WIPE);
+    }
+    None
+}
+
+/// True if `norm` (whitespace-collapsed) contains a recursive+force `rm`.
+fn is_recursive_rm(norm: &str) -> bool {
+    // Match `rm -rf`, `rm -fr`, `rm -r -f`, `rm --recursive --force`, etc.
+    let mut tokens = norm.split(' ').peekable();
+    while let Some(t) = tokens.next() {
+        if t != "rm" {
+            continue;
+        }
+        let mut recursive = false;
+        let mut force = false;
+        for a in tokens.clone() {
+            if !a.starts_with('-') {
+                break;
+            }
+            if a == "--recursive" {
+                recursive = true;
+            }
+            if a == "--force" {
+                force = true;
+            }
+            if a.starts_with('-') && !a.starts_with("--") {
+                if a.contains('r') || a.contains('R') {
+                    recursive = true;
+                }
+                if a.contains('f') {
+                    force = true;
+                }
+            }
+        }
+        if recursive && force {
+            return true;
+        }
+    }
+    false
+}
+
+/// Reason if a recursive `rm` targets a root / home / system path or a bare
+/// glob. Project-relative and `/tmp` targets return `None`.
+fn catastrophic_rm_reason(norm: &str) -> Option<&'static str> {
+    if !is_recursive_rm(norm) {
+        return None;
+    }
+    // Pull the argument tokens after `rm`'s flags and test each target.
+    let mut tokens = norm.split(' ').peekable();
+    while let Some(t) = tokens.next() {
+        if t != "rm" {
+            continue;
+        }
+        for arg in tokens.by_ref() {
+            if arg.starts_with('-') {
+                continue; // flag
+            }
+            if is_catastrophic_rm_target(arg) {
+                return Some(REASON_CATASTROPHIC_RM);
+            }
+        }
+        break;
+    }
+    None
+}
+
+/// A single `rm` target path is catastrophic if it's a filesystem root, the
+/// home dir, a top-level system dir, or a bare `*` / `.` / `~`. `/tmp/...`
+/// and project-relative paths are safe.
+fn is_catastrophic_rm_target(arg: &str) -> bool {
+    // Strip a trailing slash for comparison.
+    let p = arg.trim_end_matches('/');
+    // Bare glob / cwd / home with nothing after it.
+    if matches!(arg, "*" | "." | ".." | "~" | "/" | "/*") {
+        return true;
+    }
+    // Absolute system roots and their globs.
+    const SYSTEM_ROOTS: &[&str] = &[
+        "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root",
+        "/run", "/sbin", "/srv", "/sys", "/usr", "/var",
+    ];
+    for root in SYSTEM_ROOTS {
+        // `/etc`, `/etc/`, `/etc/*`, `/home` exactly — but NOT a deep,
+        // specific path like `/home/cole/RustProjects/x/target` which is a
+        // legitimate targeted delete.
+        if p == *root || arg == format!("{root}/*") {
+            return true;
+        }
+        // `/home/<user>` with no further path component is whole-home.
+        if *root == "/home"
+            && let Some(rest) = p.strip_prefix("/home/")
+            && !rest.is_empty()
+            && !rest.contains('/')
+        {
+            return true; // /home/<user>
+        }
+    }
+    // `$HOME` / `~` with no sub-path.
+    if arg == "$HOME" || arg == "${HOME}" || arg == "~" {
+        return true;
+    }
+    false
+}
+
 // `contains_dangerous_token` was superseded by `first_dangerous_reason`,
 // which returns the specific reason constant for UI surfacing.
 
@@ -1238,4 +1433,115 @@ fn awk_script_has_dangerous(script: &str) -> bool {
         }
     }
     false
+}
+
+/// Serializes every test that mutates `JFC_ALLOW_CATASTROPHIC_BASH`, across
+/// modules, so cargo's parallel test threads can't interleave a `set_var` in
+/// one test with a `catastrophic_bash_reason` read in another (process-global
+/// env is shared state). Tests lock this for the full set→assert→clear span.
+#[cfg(test)]
+pub(super) static CATASTROPHIC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod catastrophic_tests {
+    use super::*;
+
+    /// Take the cross-module env lock and clear the override. Returned guard
+    /// must be held for the test body so no parallel test sets the var.
+    fn guard_off() -> std::sync::MutexGuard<'static, ()> {
+        let g = super::CATASTROPHIC_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("JFC_ALLOW_CATASTROPHIC_BASH") };
+        g
+    }
+
+    // Normal: each catastrophic class is flagged.
+    #[test]
+    fn flags_catastrophic_classes_normal() {
+        let _g = guard_off();
+        let cases = [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -rf ~",
+            "rm -rf /home/cole",
+            "rm -rf /etc",
+            "sudo rm -rf /usr",
+            "dd if=/dev/zero of=/dev/sda bs=1M",
+            "mkfs.ext4 /dev/sdb1",
+            "shred -u /dev/sda",
+            "git push --force origin master",
+            "git push -f origin main",
+            "rm -rf .git",
+            "cd /repo && rm -rf .git/",
+        ];
+        for c in cases {
+            assert!(
+                catastrophic_bash_reason(c).is_some(),
+                "should be catastrophic: {c:?}"
+            );
+        }
+    }
+
+    // Robust: ordinary destructive-but-recoverable ops are NOT flagged — they
+    // are the caller's normal Default-mode prompt territory, and gating them
+    // in Bypass would deadlock headless/swarm agents.
+    #[test]
+    fn does_not_flag_safe_destructive_robust() {
+        let _g = guard_off();
+        let safe = [
+            "rm -rf target",
+            "rm -rf node_modules",
+            "rm -rf /tmp/whatever",
+            "rm -rf .jfc-worktrees/t1",
+            "rm -rf /home/cole/RustProjects/active/jfc/target", // deep targeted
+            "git reset --hard HEAD",
+            "git reset --hard origin/master",
+            "git branch -D feature/old",
+            "git worktree remove --force .jfc-worktrees/x",
+            "git push --force-with-lease origin master", // SAFE variant
+            "git stash drop",
+            "git clean -fd",
+            "dd if=in.img of=out.img", // file→file, not a device
+            "echo hi > file.txt",
+        ];
+        for c in safe {
+            assert!(
+                catastrophic_bash_reason(c).is_none(),
+                "should NOT be catastrophic: {c:?} → {:?}",
+                catastrophic_bash_reason(c)
+            );
+        }
+    }
+
+    // Robust: force-with-lease is never flagged even targeting master (it's
+    // the collision-safe push and the recommended replacement).
+    #[test]
+    fn force_with_lease_is_safe_robust() {
+        let _g = guard_off();
+        assert!(catastrophic_bash_reason("git push --force-with-lease origin master").is_none());
+    }
+
+    // Robust: env override suppresses all flagging.
+    #[test]
+    fn override_env_suppresses_robust() {
+        let _g = super::CATASTROPHIC_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: lock serializes all env mutation across test threads.
+        unsafe { std::env::set_var("JFC_ALLOW_CATASTROPHIC_BASH", "1") };
+        let r = catastrophic_bash_reason("rm -rf /home/cole");
+        unsafe { std::env::remove_var("JFC_ALLOW_CATASTROPHIC_BASH") };
+        assert!(r.is_none(), "override must suppress catastrophic flagging");
+    }
+
+    // Robust: a deep, specific path under /home is a targeted delete, not a
+    // whole-home wipe — must not flag (false-positive guard).
+    #[test]
+    fn deep_home_path_is_not_whole_home_robust() {
+        let _g = guard_off();
+        assert!(catastrophic_bash_reason("rm -rf /home/cole/project/build").is_none());
+        // but the bare home dir IS catastrophic
+        assert!(catastrophic_bash_reason("rm -rf /home/cole").is_some());
+    }
 }
