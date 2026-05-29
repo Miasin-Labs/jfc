@@ -607,6 +607,13 @@ pub(crate) async fn maybe_resume_after_background(app: &mut App, tx: &EventSende
     crate::system_reminder::append_to_last_user(&mut app.messages, &reminder);
     app.agentic_turn_count = 0;
     app.turn_started_at = Some(std::time::Instant::now());
+    // Consume the transition signal: this auto-wake has now reported every
+    // currently-terminal agent. Without clearing it, a Tick landing in the
+    // window between here and the stream actually starting could re-enter and
+    // fire a *second* digest for the same completions. The flag re-arms the
+    // moment a fresh agent reaches terminal (the three live transition sites),
+    // so genuinely-later completions still wake the leader.
+    app.observed_bg_terminal_transition_this_process = false;
     stream::continue_agentic_loop(app, tx).await;
 }
 
@@ -721,5 +728,39 @@ mod autowake_tests {
             app.turn_started_at.is_some(),
             "a real completion this process must auto-wake the leader"
         );
+    }
+
+    // Robust — REGRESSION (double-fire window): after auto-wake fires, the
+    // transition flag must be cleared so a Tick re-entering before the stream
+    // starts cannot fire a *second* digest for the same completions. Simulate
+    // the re-entrant Tick by resetting turn_started_at (as if the turn already
+    // settled) and calling again — with the flag now false, no new turn opens.
+    #[tokio::test]
+    async fn autowake_clears_flag_and_second_call_noops_robust() {
+        let mut app = test_app();
+        app.background_tasks
+            .insert("a".into(), terminal_bg("a", "did a thing"));
+        app.turn_started_at = None;
+        app.observed_bg_terminal_transition_this_process = true;
+        let (tx, _rx) = mpsc::channel(8);
+
+        // First call: auto-wake fires and consumes the flag.
+        maybe_resume_after_background(&mut app, &tx).await;
+        assert!(
+            !app.observed_bg_terminal_transition_this_process,
+            "auto-wake must consume the transition flag"
+        );
+
+        // Re-entrant Tick: pretend the turn already settled, call again. The
+        // flag is false, so Case 2 short-circuits — no second summary turn.
+        app.turn_started_at = None;
+        let msgs_before = app.messages.len();
+        maybe_resume_after_background(&mut app, &tx).await;
+        assert_eq!(
+            app.messages.len(),
+            msgs_before,
+            "a second resume call with the flag cleared must not open another turn"
+        );
+        assert!(app.turn_started_at.is_none(), "no second turn should start");
     }
 }

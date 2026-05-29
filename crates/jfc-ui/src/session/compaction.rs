@@ -141,12 +141,63 @@ pub(super) fn is_empty_assistant_placeholder(msg: &ChatMessage) -> bool {
 }
 
 pub(super) fn persistent_session_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    let filtered: Vec<ChatMessage> = messages
+    let mut filtered: Vec<ChatMessage> = messages
         .iter()
         .filter(|m| !m.queued && !is_empty_assistant_placeholder(m))
         .cloned()
         .collect();
+    terminalize_stranded_tools(&mut filtered);
     coalesce_consecutive_same_role(&filtered)
+}
+
+/// Coerce any non-terminal (Pending / Running / Idle) tool that is stranded
+/// *before the final message* into a terminal `Failed` state with an
+/// abandoned-stub output. Tools in the **last** message are left untouched —
+/// those are legitimately in-flight at save time (the live streaming tail).
+///
+/// ## Why
+///
+/// A tool whose terminal status was lost (a dropped `ToolEvent`, an
+/// interrupt mid-batch, the abandoned-tool race) persisted to disk as
+/// `pending` *mid-history*, with completed turns after it (observed in
+/// `ses_20260528_184520` msg 53, `ses_20260528_143541` msg 49). On reload
+/// the provider-message builder already synthesizes an "abandoned" stub for
+/// such tools (`stream/messages/provider_messages.rs`), so it doesn't 400 —
+/// but the on-disk transcript stays misleading and the renderer shows a
+/// frozen spinner glyph forever. Terminalizing at save time makes the
+/// persisted history honest and matches what the wire builder does anyway.
+fn terminalize_stranded_tools(messages: &mut [ChatMessage]) {
+    let len = messages.len();
+    if len < 2 {
+        return; // only message is the (possibly in-flight) tail — leave it.
+    }
+    let last_idx = len - 1;
+    for (idx, msg) in messages.iter_mut().enumerate() {
+        if idx == last_idx {
+            continue; // live streaming tail — genuine in-flight tools.
+        }
+        for part in &mut msg.parts {
+            if let MessagePart::Tool(tc) = part
+                && !tc.status.is_terminal()
+            {
+                tracing::debug!(
+                    target: "jfc::session",
+                    tool = %tc.kind.label(),
+                    prior_status = tc.status.label(),
+                    msg_idx = idx,
+                    "terminalizing stranded non-terminal tool at save (lost completion signal)"
+                );
+                tc.status = crate::types::ToolStatus::Failed;
+                if matches!(tc.output, crate::types::ToolOutput::Empty) {
+                    tc.output = crate::types::ToolOutput::Text(
+                        "Tool did not report completion before the session was saved \
+                         (status reset to failed on persist)."
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub(super) fn repair_loaded_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -446,5 +497,115 @@ mod placeholder_tests {
             !is_empty_assistant_placeholder(&msg),
             "assistant with attachments carries content and must survive save"
         );
+    }
+}
+
+#[cfg(test)]
+mod terminalize_tests {
+    use super::persistent_session_messages;
+    use crate::types::{
+        ChatMessage, MessagePart, ToolCall, ToolDisplayState, ToolInput, ToolKind, ToolOutput,
+        ToolStatus,
+    };
+
+    fn tool(id: &str, status: ToolStatus, output: ToolOutput) -> MessagePart {
+        MessagePart::Tool(ToolCall {
+            id: crate::ids::ToolId::from(id),
+            kind: ToolKind::Bash,
+            status,
+            input: ToolInput::Generic {
+                summary: "x".into(),
+            },
+            output,
+            display: ToolDisplayState::DEFAULT,
+            elapsed_ms: None,
+            started_at: None,
+            thought_signature: None,
+        })
+    }
+
+    fn tool_status(msg: &ChatMessage) -> ToolStatus {
+        msg.parts
+            .iter()
+            .find_map(|p| match p {
+                MessagePart::Tool(tc) => Some(tc.status),
+                _ => None,
+            })
+            .expect("a tool part")
+    }
+
+    // Normal — REGRESSION: a tool left Pending *mid-history* (a completed turn
+    // follows it) is coerced to Failed on persist, with an abandoned-stub
+    // output so the on-disk transcript is honest. Mirrors ses_20260528_184520
+    // msg 53 / ses_20260528_143541 msg 49.
+    #[test]
+    fn stranded_pending_tool_is_terminalized_normal_regression() {
+        let input = vec![
+            ChatMessage::user("do it".into()),
+            ChatMessage::assistant_parts(vec![tool("t1", ToolStatus::Pending, ToolOutput::Empty)]),
+            ChatMessage::user("next".into()),
+            ChatMessage::assistant("done".into()), // tail — not the stranded tool
+        ];
+        let out = persistent_session_messages(&input);
+        // The mid-history assistant (now out[1]) had its Pending tool coerced.
+        let coerced = out
+            .iter()
+            .find(|m| m.parts.iter().any(|p| matches!(p, MessagePart::Tool(_))))
+            .expect("tool message survives");
+        assert_eq!(
+            tool_status(coerced),
+            ToolStatus::Failed,
+            "a stranded Pending tool must terminalize to Failed on save"
+        );
+        // Empty output replaced with the abandoned-stub text.
+        let has_stub = coerced.parts.iter().any(|p| matches!(
+            p,
+            MessagePart::Tool(tc) if matches!(&tc.output, ToolOutput::Text(t) if t.contains("did not report completion"))
+        ));
+        assert!(has_stub, "abandoned stub output must be written");
+    }
+
+    // Robust: a tool that's Running in the LAST message (the live streaming
+    // tail) is left untouched — it's legitimately in-flight at save time.
+    #[test]
+    fn in_flight_tail_tool_is_left_untouched_robust() {
+        let input = vec![
+            ChatMessage::user("do it".into()),
+            ChatMessage::assistant_parts(vec![tool("t1", ToolStatus::Running, ToolOutput::Empty)]),
+        ];
+        let out = persistent_session_messages(&input);
+        let tail = out.last().expect("tail survives");
+        assert_eq!(
+            tool_status(tail),
+            ToolStatus::Running,
+            "an in-flight tool in the tail message must keep its live status"
+        );
+    }
+
+    // Robust: an already-Completed mid-history tool is not disturbed (its
+    // real output and status survive verbatim).
+    #[test]
+    fn completed_tool_is_preserved_robust() {
+        let input = vec![
+            ChatMessage::user("do it".into()),
+            ChatMessage::assistant_parts(vec![tool(
+                "t1",
+                ToolStatus::Completed,
+                ToolOutput::Text("real output".into()),
+            )]),
+            ChatMessage::user("next".into()),
+            ChatMessage::assistant("done".into()),
+        ];
+        let out = persistent_session_messages(&input);
+        let coerced = out
+            .iter()
+            .find(|m| m.parts.iter().any(|p| matches!(p, MessagePart::Tool(_))))
+            .expect("tool message survives");
+        assert_eq!(tool_status(coerced), ToolStatus::Completed);
+        let preserved = coerced.parts.iter().any(|p| matches!(
+            p,
+            MessagePart::Tool(tc) if matches!(&tc.output, ToolOutput::Text(t) if t == "real output")
+        ));
+        assert!(preserved, "completed tool output must survive verbatim");
     }
 }
