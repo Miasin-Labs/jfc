@@ -564,6 +564,8 @@ impl TaskStore {
             kind: None,
             tags: Vec::new(),
             priority: None,
+            effort: None,
+            model: None,
             attempt_count: 0,
         };
         inner.tasks.insert(id, task.clone());
@@ -655,6 +657,12 @@ impl TaskStore {
         }
         if let Some(p) = patch.priority {
             task.priority = Some(p);
+        }
+        if let Some(e) = patch.effort {
+            task.effort = Some(e);
+        }
+        if let Some(m) = patch.model {
+            task.model = Some(m);
         }
 
         let updated = task.clone();
@@ -767,6 +775,36 @@ impl TaskStore {
         let task = task.clone();
         self.persist(&inner);
         Some(task)
+    }
+
+    /// Reset tasks stuck `InProgress` under `owner` back to Pending + unowned
+    /// so they can be re-claimed. The factory uses this when it is fully idle
+    /// (no live agent, no active turn) yet a task it claimed never reached a
+    /// terminal state — e.g. a turn ended without TaskDone, or a crash left
+    /// the claim dangling. Returns the ids that were re-queued.
+    ///
+    /// Only touches tasks whose `owner == owner`, so genuinely in-flight work
+    /// owned by a live subagent (a different owner string) is never disturbed.
+    pub fn requeue_stuck(&self, owner: &str) -> Vec<TaskId> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut requeued = Vec::new();
+        for task in inner.tasks.values_mut() {
+            if task.status == TaskStatus::InProgress && task.owner.as_deref() == Some(owner) {
+                task.status = TaskStatus::Pending;
+                task.owner = None;
+                requeued.push(task.id.clone());
+            }
+        }
+        if !requeued.is_empty() {
+            tracing::info!(
+                target: "jfc::tasks",
+                owner,
+                count = requeued.len(),
+                "TaskStore::requeue_stuck reset dangling in_progress tasks"
+            );
+            self.persist(&inner);
+        }
+        requeued
     }
 
     /// Counts by status — used by the UI overflow summary.
@@ -1020,6 +1058,8 @@ impl TaskStore {
             kind: Some(TaskKind::Decision),
             tags: vec!["replan".to_string()],
             priority: None,
+            effort: None,
+            model: None,
             attempt_count: 0,
         };
         inner.tasks.insert(replan_id.clone(), replan);
@@ -1745,5 +1785,86 @@ mod tests {
         assert_eq!(m.retried_tasks, 1);
         assert_eq!(m.total_attempts, 2);
         assert_eq!(m.multi_attempt_tasks, 1); // attempt_count > 1
+    }
+
+    #[test]
+    fn requeue_stuck_resets_factory_owned_in_progress() {
+        let store = TaskStore::in_memory();
+        store
+            .create("a".into(), "d".into(), None, Vec::<TaskId>::new())
+            .unwrap();
+        store
+            .create("b".into(), "d".into(), None, Vec::<TaskId>::new())
+            .unwrap();
+
+        // Factory claims one task → it goes in_progress, owned by jfc-factory.
+        let claimed = store.claim_next_available("jfc-factory").unwrap();
+        assert_eq!(claimed.status, TaskStatus::InProgress);
+
+        // A different owner (a live subagent) holds the other task.
+        store
+            .update(
+                "t2",
+                TaskPatch {
+                    status: Some(TaskStatus::InProgress),
+                    owner: Some("subagent-xyz".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Reaping the factory owner resets ONLY t1, never the subagent's t2.
+        let requeued = store.requeue_stuck("jfc-factory");
+        assert_eq!(requeued.len(), 1);
+        assert_eq!(requeued[0].as_str(), "t1");
+
+        let t1 = store.get("t1").unwrap();
+        assert_eq!(t1.status, TaskStatus::Pending);
+        assert!(
+            t1.owner.is_none(),
+            "reaped task must be unowned for re-claim"
+        );
+
+        let t2 = store.get("t2").unwrap();
+        assert_eq!(t2.status, TaskStatus::InProgress, "subagent work untouched");
+        assert_eq!(t2.owner.as_deref(), Some("subagent-xyz"));
+
+        // Idempotent: a second reap with nothing stuck is a no-op.
+        assert!(store.requeue_stuck("jfc-factory").is_empty());
+
+        // And the reaped task is immediately re-claimable.
+        let reclaimed = store.claim_next_available("jfc-factory").unwrap();
+        assert_eq!(reclaimed.id.as_str(), "t1");
+    }
+
+    #[test]
+    fn effort_and_model_patch_and_serde_round_trip() {
+        let store = TaskStore::in_memory();
+        let t = store
+            .create("hard task".into(), "d".into(), None, Vec::<TaskId>::new())
+            .unwrap();
+        assert!(t.effort.is_none() && t.model.is_none());
+
+        let updated = store
+            .update(
+                t.id.as_str(),
+                TaskPatch {
+                    effort: Some("max".into()),
+                    model: Some("claude-opus-4".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.effort.as_deref(), Some("max"));
+        assert_eq!(updated.model.as_deref(), Some("claude-opus-4"));
+
+        // Persisted fields survive a JSON round-trip (they're skipped only
+        // when None, so a set value must serialize and parse back).
+        let json = serde_json::to_string(&updated).unwrap();
+        assert!(json.contains("\"effort\":\"max\""));
+        assert!(json.contains("\"model\":\"claude-opus-4\""));
+        let back: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.effort.as_deref(), Some("max"));
+        assert_eq!(back.model.as_deref(), Some("claude-opus-4"));
     }
 }

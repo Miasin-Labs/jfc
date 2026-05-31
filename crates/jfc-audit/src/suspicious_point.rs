@@ -71,36 +71,70 @@ impl SuspiciousPointFinder {
         let lines: Vec<&str> = source.lines().collect();
 
         // Track current function context
-        let fn_regex = Regex::new(r"(pub\s+)?(unsafe\s+)?(fn\s+(\w+))").unwrap();
+        let fn_regex = Regex::new(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\b").unwrap();
 
-        let mut current_fn = String::new();
+        let mut current_fn: Option<String> = None;
+        let mut fn_brace_depth: i32 = 0;
+        let mut fn_body_started = false;
+        let mut in_block_comment = false;
 
         for (line_idx, line) in lines.iter().enumerate() {
             let line_num = (line_idx + 1) as u32;
+            let code = sanitized_code_line(line, &mut in_block_comment);
 
             // Update function context
-            if let Some(caps) = fn_regex.captures(line)
-                && let Some(name) = caps.get(4)
+            let mut brace_scan_start = 0;
+            if current_fn.is_none()
+                && let Some(caps) = fn_regex.captures(&code)
+                && let Some(name) = caps.get(1)
             {
-                current_fn = name.as_str().to_string();
+                current_fn = Some(name.as_str().to_string());
+                fn_brace_depth = 0;
+                fn_body_started = false;
+                brace_scan_start = caps.get(0).map(|m| m.start()).unwrap_or(0);
             }
 
             // Check each pattern
             for (kind, pattern) in &self.patterns {
-                if pattern.is_match(line) {
+                if pattern.is_match(&code) {
                     // Get surrounding context (up to 2 lines before/after)
                     let start = line_idx.saturating_sub(2);
                     let end = (line_idx + 3).min(lines.len());
                     let snippet: String = lines[start..end].join("\n");
+                    let surrounding_function =
+                        current_fn.clone().unwrap_or_else(|| "<module>".to_string());
 
                     results.push(SuspiciousPoint {
-                        handle: format!("fn:{current_fn}"),
+                        handle: format!("fn:{surrounding_function}"),
                         file: file_path.to_string(),
                         region_lines: (line_num, line_num),
                         trigger_kind: *kind,
                         context_snippet: snippet,
-                        surrounding_function: current_fn.clone(),
+                        surrounding_function,
                     });
+                }
+            }
+
+            if current_fn.is_some() {
+                let brace_segment = code.get(brace_scan_start..).unwrap_or("");
+                for ch in brace_segment.chars() {
+                    match ch {
+                        '{' => {
+                            fn_brace_depth += 1;
+                            fn_body_started = true;
+                        }
+                        '}' => {
+                            fn_brace_depth -= 1;
+                        }
+                        _ => {}
+                    }
+                }
+                if fn_body_started && fn_brace_depth <= 0 {
+                    current_fn = None;
+                    fn_brace_depth = 0;
+                    fn_body_started = false;
+                } else if !fn_body_started && code.trim_end().ends_with(';') {
+                    current_fn = None;
                 }
             }
         }
@@ -115,6 +149,61 @@ impl SuspiciousPointFinder {
             .flat_map(|(path, source)| self.scan_file(path, source))
             .collect()
     }
+}
+
+fn sanitized_code_line(line: &str, in_block_comment: &mut bool) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    let mut string_delim = '\0';
+    let mut escaped = false;
+
+    while let Some(ch) = chars.next() {
+        if *in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                *in_block_comment = false;
+                out.push(' ');
+                out.push(' ');
+            } else {
+                out.push(' ');
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == string_delim {
+                in_string = false;
+            }
+            out.push(' ');
+            continue;
+        }
+
+        if ch == '/' && chars.peek() == Some(&'/') {
+            break;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            *in_block_comment = true;
+            out.push(' ');
+            out.push(' ');
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            string_delim = ch;
+            out.push(' ');
+            continue;
+        }
+
+        out.push(ch);
+    }
+
+    out
 }
 
 impl Default for SuspiciousPointFinder {
@@ -187,5 +276,58 @@ pub fn transmute_bad() {
         let kinds: Vec<TriggerKind> = points.iter().map(|p| p.trigger_kind).collect();
         assert!(kinds.contains(&TriggerKind::RawPointer));
         assert!(kinds.contains(&TriggerKind::UnsafeTransmute));
+    }
+
+    #[test]
+    fn ignores_comments_and_strings_robust() {
+        let source = r#"
+pub fn clean() {
+    // panic!("not real");
+    let text = ".unwrap() unsafe { Vec::from_raw_parts(ptr, len, len) }";
+    /*
+       unreachable!();
+    */
+}
+"#;
+
+        let finder = SuspiciousPointFinder::new();
+        let points = finder.scan_file("src/lib.rs", source);
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn function_context_resets_after_closing_brace_robust() {
+        let source = r#"
+pub fn first() {
+    let x = Some(1).unwrap();
+}
+
+let y = values[idx];
+"#;
+
+        let finder = SuspiciousPointFinder::new();
+        let points = finder.scan_file("src/lib.rs", source);
+        let module_point = points
+            .iter()
+            .find(|p| p.trigger_kind == TriggerKind::ArrayIndex)
+            .expect("top-level array index should be reported");
+        assert_eq!(module_point.surrounding_function, "<module>");
+    }
+
+    #[test]
+    fn lifetime_parameters_do_not_break_function_scope_robust() {
+        let source = r#"
+pub fn borrowed<'a>(values: &'a [usize], idx: usize) -> usize {
+    values[idx]
+}
+"#;
+
+        let finder = SuspiciousPointFinder::new();
+        let points = finder.scan_file("src/lib.rs", source);
+        let point = points
+            .iter()
+            .find(|p| p.trigger_kind == TriggerKind::ArrayIndex)
+            .expect("array index should be reported");
+        assert_eq!(point.surrounding_function, "borrowed");
     }
 }

@@ -68,4 +68,5 @@ pub mod beta {
     pub const TOKEN_COUNTING: &str = "token-counting-2024-11-01";
     pub const STRUCTURED_OUTPUTS: &str = "structured-outputs-2025-12-15";
     pub const CONTEXT_MANAGEMENT: &str = "context-management-2025-06-27";
+    pub const NARRATION_SUMMARIES: &str = "summarize-connector-text-2026-03-13";
 }

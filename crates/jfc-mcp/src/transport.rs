@@ -25,11 +25,13 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Implementation,
     ReadResourceRequestParams, ReadResourceResult, Resource, Tool,
 };
 use rmcp::service::{NotificationContext, RoleClient, RunningService};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{ClientHandler, ServiceError, ServiceExt};
 use serde_json::Value;
@@ -78,6 +80,11 @@ pub enum RequestError {
     Disconnected,
     /// No response within the dispatch deadline.
     Timeout,
+    /// HTTP auth was configured explicitly and the server rejected it.
+    AuthHeaderRejected,
+    /// Network/transport-level MCP failure. Kept distinct from model/tool
+    /// errors so callers can present it as infrastructure trouble.
+    Transport { code: &'static str, message: String },
     /// The model produced arguments that weren't a JSON object.
     BadArguments,
     /// Any other `rmcp` service error (server-side MCP error, unexpected
@@ -90,6 +97,13 @@ impl std::fmt::Display for RequestError {
         match self {
             Self::Disconnected => f.write_str("MCP server disconnected"),
             Self::Timeout => f.write_str("MCP request timed out"),
+            Self::AuthHeaderRejected => f.write_str(
+                "MCP server rejected the configured Authorization header; \
+                 check the token for this endpoint",
+            ),
+            Self::Transport { code, message } => {
+                write!(f, "MCP transport error ({code}): {message}")
+            }
             Self::BadArguments => f.write_str("MCP tool arguments must be a JSON object"),
             Self::Service(m) => write!(f, "MCP service error: {m}"),
         }
@@ -100,12 +114,51 @@ impl std::error::Error for RequestError {}
 
 impl From<ServiceError> for RequestError {
     fn from(e: ServiceError) -> Self {
-        match e {
-            ServiceError::TransportClosed | ServiceError::Cancelled { .. } => Self::Disconnected,
-            ServiceError::Timeout { .. } => Self::Timeout,
-            other => Self::Service(other.to_string()),
-        }
+        map_service_error(e, false)
     }
+}
+
+fn map_service_error(e: ServiceError, has_auth_header: bool) -> RequestError {
+    match e {
+        ServiceError::TransportClosed | ServiceError::Cancelled { .. } => {
+            RequestError::Disconnected
+        }
+        ServiceError::Timeout { .. } => RequestError::Timeout,
+        ServiceError::TransportSend(e) => {
+            classify_transport_error(e.error.as_ref(), has_auth_header)
+        }
+        other => RequestError::Service(other.to_string()),
+    }
+}
+
+fn classify_transport_error(
+    err: &(dyn std::error::Error + Send + Sync + 'static),
+    has_auth_header: bool,
+) -> RequestError {
+    let message = err.to_string();
+    let lower = message.to_ascii_lowercase();
+    if has_auth_header
+        && (lower.contains("401")
+            || lower.contains("403")
+            || lower.contains("unauthorized")
+            || lower.contains("forbidden"))
+    {
+        return RequestError::AuthHeaderRejected;
+    }
+    let code = if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout"
+    } else if lower.contains("connection refused") || lower.contains("econnrefused") {
+        "connection_refused"
+    } else if lower.contains("connection reset") || lower.contains("econnreset") {
+        "connection_reset"
+    } else if lower.contains("dns") || lower.contains("enotfound") || lower.contains("eai_again") {
+        "dns"
+    } else if lower.contains("closed") || lower.contains("terminated") {
+        "connection_closed"
+    } else {
+        "transport"
+    };
+    RequestError::Transport { code, message }
 }
 
 /// Which rmcp client transport to drive for a server. Resolved
@@ -141,6 +194,7 @@ pub struct SpawnConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     pub url: Option<String>,
 }
 
@@ -154,6 +208,7 @@ pub struct Transport {
 struct TransportInner {
     server_name: String,
     client: RunningService<RoleClient, JfcClientHandler>,
+    has_auth_header: bool,
     stderr_ring: StderrRing,
 }
 
@@ -231,6 +286,7 @@ impl Transport {
             inner: Arc::new(TransportInner {
                 server_name: cfg.server_name,
                 client,
+                has_auth_header: false,
                 stderr_ring,
             }),
         })
@@ -238,17 +294,47 @@ impl Transport {
 
     async fn spawn_http(cfg: SpawnConfig) -> Option<Self> {
         let url = cfg.url.as_deref().unwrap_or_default();
-        let transport = StreamableHttpClientTransport::from_uri(url);
-        let client = match JfcClientHandler.serve(transport).await {
-            Ok(c) => c,
+        let (headers, has_auth_header) = match header_map_from_config(&cfg.headers) {
+            Ok(headers) => (
+                headers,
+                cfg.headers
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case("authorization")),
+            ),
             Err(e) => {
                 tracing::warn!(
                     target: "jfc::mcp",
                     server = %cfg.server_name,
-                    url = %url,
-                    error = ?e,
-                    "mcp http initialize handshake failed"
+                    error = %e,
+                    "invalid MCP HTTP headers"
                 );
+                return None;
+            }
+        };
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers),
+        );
+        let client = match JfcClientHandler.serve(transport).await {
+            Ok(c) => c,
+            Err(e) => {
+                let rejected_auth = has_auth_header && service_error_suggests_auth_rejection(&e);
+                if rejected_auth {
+                    tracing::warn!(
+                        target: "jfc::mcp",
+                        server = %cfg.server_name,
+                        url = %url,
+                        error = ?e,
+                        "mcp http initialize rejected configured Authorization header"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "jfc::mcp",
+                        server = %cfg.server_name,
+                        url = %url,
+                        error = ?e,
+                        "mcp http initialize handshake failed"
+                    );
+                }
                 return None;
             }
         };
@@ -263,6 +349,7 @@ impl Transport {
             inner: Arc::new(TransportInner {
                 server_name: cfg.server_name,
                 client,
+                has_auth_header,
                 // HTTP servers have no local stderr to capture.
                 stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
             }),
@@ -276,7 +363,7 @@ impl Transport {
             .client
             .list_all_tools()
             .await
-            .map_err(RequestError::from)
+            .map_err(|e| map_service_error(e, self.inner.has_auth_header))
     }
 
     /// Invoke `tool_name` with `arguments`, bounded by `timeout`.
@@ -299,7 +386,7 @@ impl Transport {
 
         match tokio::time::timeout(timeout, self.inner.client.call_tool(params)).await {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(e)) => Err(RequestError::from(e)),
+            Ok(Err(e)) => Err(map_service_error(e, self.inner.has_auth_header)),
             Err(_) => Err(RequestError::Timeout),
         }
     }
@@ -339,7 +426,7 @@ impl Transport {
             .client
             .list_all_resources()
             .await
-            .map_err(RequestError::from)
+            .map_err(|e| map_service_error(e, self.inner.has_auth_header))
     }
 
     /// Read a resource by URI from this server.
@@ -349,7 +436,7 @@ impl Transport {
             .client
             .read_resource(params)
             .await
-            .map_err(RequestError::from)
+            .map_err(|e| map_service_error(e, self.inner.has_auth_header))
     }
 
     /// Best-effort shutdown. `rmcp` cancels the service task and kills the
@@ -363,6 +450,28 @@ impl Transport {
             "shutdown requested — teardown happens on drop"
         );
     }
+}
+
+fn header_map_from_config(
+    headers: &HashMap<String, String>,
+) -> Result<HashMap<HeaderName, HeaderValue>, String> {
+    let mut out = HashMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| format!("invalid header name `{name}`: {e}"))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|e| format!("invalid value for header `{name}`: {e}"))?;
+        out.insert(name, value);
+    }
+    Ok(out)
+}
+
+fn service_error_suggests_auth_rejection(error: &impl std::fmt::Display) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("401")
+        || message.contains("403")
+        || message.contains("unauthorized")
+        || message.contains("forbidden")
 }
 
 /// Drain a child's stderr line-by-line into `tracing` and a bounded ring
@@ -393,6 +502,17 @@ fn spawn_stderr_drain(server_name: String, stderr: tokio::process::ChildStderr, 
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct StringError(&'static str);
+
+    impl std::fmt::Display for StringError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for StringError {}
+
     #[test]
     fn request_error_maps_transport_closed_to_disconnected() {
         let mapped = RequestError::from(ServiceError::TransportClosed);
@@ -411,5 +531,48 @@ mod tests {
     fn transport_kind_label() {
         assert_eq!(TransportKind::Stdio.label(), "stdio");
         assert_eq!(TransportKind::Http.label(), "http");
+    }
+
+    #[test]
+    fn header_map_from_config_accepts_custom_headers_normal() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_owned(), "Bearer token".to_owned());
+        headers.insert("X-Test".to_owned(), "ok".to_owned());
+        let map = header_map_from_config(&headers).unwrap();
+        assert_eq!(
+            map.get(&HeaderName::from_static("authorization")).unwrap(),
+            &HeaderValue::from_static("Bearer token")
+        );
+        assert_eq!(
+            map.get(&HeaderName::from_static("x-test")).unwrap(),
+            &HeaderValue::from_static("ok")
+        );
+    }
+
+    #[test]
+    fn header_map_from_config_rejects_bad_headers_robust() {
+        let mut headers = HashMap::new();
+        headers.insert("bad header".to_owned(), "ok".to_owned());
+        assert!(header_map_from_config(&headers).is_err());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-test".to_owned(), "bad\nvalue".to_owned());
+        assert!(header_map_from_config(&headers).is_err());
+    }
+
+    #[test]
+    fn auth_rejection_requires_configured_auth_header_robust() {
+        let err = StringError("server returned 401 unauthorized");
+        assert!(matches!(
+            classify_transport_error(&err, true),
+            RequestError::AuthHeaderRejected
+        ));
+        assert!(matches!(
+            classify_transport_error(&err, false),
+            RequestError::Transport {
+                code: "transport",
+                ..
+            }
+        ));
     }
 }

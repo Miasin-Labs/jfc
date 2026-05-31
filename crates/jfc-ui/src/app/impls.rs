@@ -33,6 +33,32 @@ impl App {
         self.last_stream_event_at = Some(Instant::now());
     }
 
+    pub fn pipeline_busy_for_submit(&self) -> bool {
+        self.compacting_started_at.is_some()
+            || self.pending_approval.is_some()
+            || !self.approval_queue.is_empty()
+            || !self.pending_tool_calls.is_empty()
+            || self.pending_classifications > 0
+            || self.in_flight_eager_dispatches > 0
+            || self.in_flight_tool_batches > 0
+            || !self.in_progress_tool_use_ids.is_empty()
+    }
+
+    pub fn has_interruptible_work(&self) -> bool {
+        self.is_streaming
+            || self
+                .active_stream_handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
+            || self.turn_started_at.is_some()
+            || self.pipeline_busy_for_submit()
+            || self.goal_evaluator_in_flight
+            || self
+                .background_tasks
+                .values()
+                .any(|bt| bt.status.is_alive())
+    }
+
     pub fn record_deferred_tool_use(
         &mut self,
         id: String,

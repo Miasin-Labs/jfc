@@ -2,7 +2,7 @@
 //! session save, continuation logic.
 
 use crate::app::{self, App};
-use crate::runtime::{AppEvent, EventSender, drain_queued_prompts};
+use crate::runtime::{EventSender, drain_queued_prompts};
 use crate::types::*;
 use crate::{config, session, stream, types};
 
@@ -82,6 +82,7 @@ pub(crate) async fn handle_stream_done(
     }
 
     app.is_streaming = false;
+    app.active_stream_handle = None;
     app.last_stream_event_at = None;
     app.render_cache.borrow_mut().clear_streaming();
 
@@ -153,7 +154,10 @@ pub(crate) async fn handle_stream_done(
     let turn_done = stop_reason == jfc_provider::StopReason::EndTurn
         && app.pending_approval.is_none()
         && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty();
+        && app.pending_tool_calls.is_empty()
+        && app.pending_classifications == 0
+        && app.in_flight_eager_dispatches == 0
+        && app.in_flight_tool_batches == 0;
     if turn_done {
         // v132 session auto-naming — fire on the first
         // assistant-turn completion if no title is set
@@ -355,7 +359,11 @@ pub(crate) async fn handle_stream_done(
     let turn_genuinely_done = stop_reason == jfc_provider::StopReason::EndTurn
         && app.pending_approval.is_none()
         && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty();
+        && app.pending_tool_calls.is_empty()
+        && app.pending_classifications == 0
+        && app.in_flight_eager_dispatches == 0
+        && app.in_flight_tool_batches == 0;
+    let needs_dynamic_loop_keepalive = turn_genuinely_done && dynamic_loop_keepalive_needed(app);
     if turn_genuinely_done {
         app.turn_started_at = None;
     }
@@ -404,7 +412,8 @@ pub(crate) async fn handle_stream_done(
     // silently dropping the user's requested tools and
     // leaving the model's "I'll write the file now" claim
     // unbacked — the "hallucinated Done" symptom.
-    let has_pending_tools = !app.pending_tool_calls.is_empty();
+    let has_pending_tools =
+        !app.pending_tool_calls.is_empty() || app.in_flight_eager_dispatches > 0;
     let waiting_on_approval = app.pending_approval.is_some() || !app.approval_queue.is_empty();
     // Auto-mode: one or more tool calls are still awaiting an async classifier
     // verdict. We must NOT finalize the turn (which clears the streaming slot)
@@ -447,66 +456,17 @@ pub(crate) async fn handle_stream_done(
             "stream_done holding turn open for in-flight auto-mode classifier verdicts"
         );
     } else if has_pending_tools {
-        let all_calls = std::mem::take(&mut app.pending_tool_calls);
-        // Filter out tools that were already eagerly dispatched mid-stream.
-        let calls: Vec<_> = all_calls
-            .into_iter()
-            .filter(|t| !app.pre_dispatched_tool_ids.contains(t.id.as_str()))
-            .collect();
-        if calls.is_empty() {
-            // All pending tools were pre-dispatched; their AllComplete events
-            // drive the turn forward. We already cleared pending_tool_calls
-            // (via take), so when the next AllComplete arrives it will see
-            // turn_truly_complete = true. But if all AllComplete events
-            // already fired (tools finished before stream ended), we must
-            // emit a synthetic AllComplete now to unblock the turn.
+        if app.in_flight_eager_dispatches > 0 || app.in_flight_tool_batches > 0 {
             tracing::info!(
                 target: "jfc::stream",
-                pre_dispatched = app.pre_dispatched_tool_ids.len(),
+                pending = app.pending_tool_calls.len(),
                 in_flight_eager = app.in_flight_eager_dispatches,
-                "stream_done: all pending tools already eagerly dispatched"
-            );
-            if app.in_flight_eager_dispatches == 0 {
-                crate::runtime::send_critical(
-                    tx,
-                    AppEvent::Tool(crate::runtime::ToolEvent::AllComplete),
-                );
-            }
-        } else {
-            tracing::info!(
-                target: "jfc::stream",
-                n = calls.len(),
+                in_flight_batches = app.in_flight_tool_batches,
                 ?stop_reason,
-                kinds = ?calls.iter().map(|t| t.kind.label()).collect::<Vec<_>>(),
-                pause_turn_latched = app.pending_pause_turn_resume,
-                "stream_done dispatching auto-routed batch"
+                "stream_done waiting for in-flight eager tool prefix before dispatching remaining tools"
             );
-            crate::runtime::update_task_activities(app, &calls);
-            app.in_flight_tool_batches += 1;
-            let _ = tx.try_send(AppEvent::Tool(
-                crate::runtime::ToolEvent::SetInProgressToolUseIds {
-                    action: "add".to_owned(),
-                    ids: calls
-                        .iter()
-                        .map(|tool| tool.id.as_str().to_owned())
-                        .collect(),
-                },
-            ));
-            stream::dispatch_tools_batched(
-                calls,
-                tx,
-                std::sync::Arc::clone(&app.dedup_cache),
-                Some(std::sync::Arc::clone(&app.task_store)),
-                app.team_context.team_name.clone(),
-                app.current_session_id
-                    .as_ref()
-                    .map(|id| id.as_str().to_owned()),
-                std::sync::Arc::clone(&app.provider),
-                app.model.clone(),
-                app.teammate_event_tx.clone(),
-                stream::LocalAdvisorDispatchContext::from_app(app),
-                app.cancel_token.clone(),
-            );
+        } else {
+            super::stream_tool::dispatch_pending_after_stream(app, tx);
         }
     } else if waiting_on_approval {
         tracing::info!(
@@ -625,7 +585,8 @@ pub(crate) async fn handle_stream_done(
                      The model's reply may be incomplete."
                         .to_string()
                 }
-                jfc_provider::StopReason::Other(s) if s.contains("refusal") => {
+                jfc_provider::StopReason::Refusal => "The model refused this request.".to_string(),
+                jfc_provider::StopReason::Other(s) if looks_like_refusal_stop_reason(s) => {
                     "The model refused this request.".to_string()
                 }
                 jfc_provider::StopReason::Other(s) => {
@@ -650,7 +611,143 @@ pub(crate) async fn handle_stream_done(
     // queued tasks, drive the next step instead of waiting for the user to
     // type "continue". This is the behavioral half of the "factory": the
     // stopping condition is *scope exhausted*, not *finished a sub-step*.
-    maybe_self_continue(app, tx).await;
+    if should_self_continue_after_stop_reason(&stop_reason) {
+        maybe_self_continue(app, tx).await;
+    }
+    if needs_dynamic_loop_keepalive && !app.is_streaming {
+        schedule_dynamic_loop_keepalive();
+    }
+}
+
+fn should_self_continue_after_stop_reason(stop_reason: &jfc_provider::StopReason) -> bool {
+    !matches!(stop_reason, jfc_provider::StopReason::Refusal)
+        && !matches!(stop_reason, jfc_provider::StopReason::Other(s) if looks_like_refusal_stop_reason(s))
+}
+
+fn looks_like_refusal_stop_reason(reason: &str) -> bool {
+    reason == "content_filter" || reason.contains("refusal")
+}
+
+fn dynamic_loop_keepalive_needed(app: &App) -> bool {
+    if !crate::autonomous_loop::loop_keepalive_enabled() {
+        return false;
+    }
+    let Some(loop_state) = app.autonomous_loop.as_ref() else {
+        return false;
+    };
+    if loop_state.pacing != crate::autonomous_loop::LoopPacing::Dynamic {
+        return false;
+    }
+    let Some(idx) = app.streaming_assistant_idx else {
+        return false;
+    };
+    let Some(message) = app.messages.get(idx) else {
+        return false;
+    };
+    !message_scheduled_dynamic_loop_wakeup(message)
+}
+
+fn message_scheduled_dynamic_loop_wakeup(message: &types::ChatMessage) -> bool {
+    message.parts.iter().any(|part| {
+        let MessagePart::Tool(tool) = part else {
+            return false;
+        };
+        tool.kind == ToolKind::ScheduleWakeup
+            && matches!(
+                &tool.input,
+                ToolInput::ScheduleWakeup { prompt, .. }
+                    if prompt == crate::autonomous_loop::LOOP_SENTINEL_DYNAMIC
+            )
+    })
+}
+
+fn schedule_dynamic_loop_keepalive() {
+    let result = crate::tools::execute_schedule_wakeup(
+        crate::autonomous_loop::LOOP_KEEPALIVE_DELAY_SECONDS,
+        crate::autonomous_loop::LOOP_SENTINEL_DYNAMIC,
+        "autonomous loop keepalive: model did not reschedule the dynamic loop",
+    );
+    if result.is_error() {
+        tracing::warn!(
+            target: "jfc::autonomous_loop",
+            error = %result.output,
+            "dynamic loop keepalive schedule failed"
+        );
+    } else {
+        tracing::info!(
+            target: "jfc::autonomous_loop",
+            output = %result.output,
+            "dynamic loop keepalive scheduled"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stream_done_lifecycle_tests {
+    use std::{sync::Arc, time::Instant};
+
+    use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
+
+    use super::*;
+
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn available_models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+
+        async fn stream(
+            &self,
+            #[allow(dead_code)] _messages: Vec<ProviderMessage>,
+            #[allow(dead_code)] _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    impl jfc_provider::seal::Sealed for TestProvider {}
+
+    #[tokio::test]
+    async fn pending_classifier_keeps_turn_clock_active_robust() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.task_store = jfc_session::TaskStore::in_memory();
+        app.is_streaming = true;
+        app.turn_started_at = Some(Instant::now());
+        app.pending_classifications = 1;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+
+        handle_stream_done(&mut app, &tx, jfc_provider::StopReason::EndTurn).await;
+
+        assert!(
+            app.turn_started_at.is_some(),
+            "classifier verdicts are still in flight, so the user turn must stay open"
+        );
+        assert!(!app.is_streaming);
+    }
+
+    #[tokio::test]
+    async fn stream_done_clears_active_stream_handle_robust() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.task_store = jfc_session::TaskStore::in_memory();
+        app.is_streaming = true;
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        app.active_stream_handle = Some(handle.abort_handle());
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+
+        handle_stream_done(&mut app, &tx, jfc_provider::StopReason::EndTurn).await;
+
+        assert!(app.active_stream_handle.is_none());
+        assert!(!app.has_interruptible_work());
+        handle.abort();
+    }
 }
 
 /// Auto-drive the next in-scope step when the model stalls or leaves work
@@ -790,7 +887,9 @@ mod self_continue_idleness_tests {
     //! 20:29:25.571227 self-continuing without user nudge   ← BUG: too early
     //! 20:29:25.571409 build_assistant_and_tool_result_messages ... abandoned_count=1
     //! ```
-    use super::{TurnIdleness, turn_is_idle_for_self_continue};
+    use super::{
+        TurnIdleness, should_self_continue_after_stop_reason, turn_is_idle_for_self_continue,
+    };
 
     fn fully_idle() -> TurnIdleness {
         TurnIdleness {
@@ -810,6 +909,19 @@ mod self_continue_idleness_tests {
     #[test]
     fn fully_idle_allows_continue_normal() {
         assert!(turn_is_idle_for_self_continue(&fully_idle()));
+    }
+
+    #[test]
+    fn refusal_stop_reason_blocks_retry_loop_robust() {
+        assert!(!should_self_continue_after_stop_reason(
+            &jfc_provider::StopReason::Refusal
+        ));
+        assert!(should_self_continue_after_stop_reason(
+            &jfc_provider::StopReason::EndTurn
+        ));
+        assert!(!should_self_continue_after_stop_reason(
+            &jfc_provider::StopReason::Other("content_filter".to_string())
+        ));
     }
 
     // Normal — REGRESSION: this is the exact state stream_done leaves

@@ -47,6 +47,35 @@ fn execution_result_failure_carries_diagnostic() {
     assert_eq!(result.diagnostics[0].message, "command failed");
 }
 
+#[test]
+fn send_user_message_policy_removes_tool_by_default_robust() {
+    let mut tools = all_tool_defs();
+    apply_send_user_message_policy(&mut tools, false, false);
+
+    assert!(!tools.iter().any(|tool| tool.name == "SendUserMessage"));
+}
+
+#[test]
+fn send_user_message_policy_keeps_tool_in_brief_mode_normal() {
+    let mut tools = all_tool_defs();
+    apply_send_user_message_policy(&mut tools, true, false);
+
+    assert!(tools.iter().any(|tool| tool.name == "SendUserMessage"));
+}
+
+#[test]
+fn send_user_message_policy_uses_pewter_prompt_normal() {
+    let mut tools = all_tool_defs();
+    apply_send_user_message_policy(&mut tools, false, true);
+
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "SendUserMessage")
+        .expect("SendUserMessage should be advertised for Pewter Owl");
+    assert!(tool.description.contains("read verbatim"));
+    assert!(tool.description.contains("status"));
+}
+
 #[tokio::test]
 async fn bash_runs_without_inherited_terminal_or_stdin() {
     let result = execute_bash(
@@ -1941,6 +1970,8 @@ fn execute_task_create_without_store_fails_robust() {
         None,
         vec![],
         None,
+        None,
+        None,
     );
     assert!(r.is_error());
     assert!(r.output.contains("Task store not available"));
@@ -1961,6 +1992,8 @@ fn execute_task_create_with_store_returns_task_json_normal() {
         None,
         None,
         vec![],
+        None,
+        None,
         None,
     );
     assert!(!r.is_error(), "{:?}", r);
@@ -1986,6 +2019,8 @@ fn execute_task_create_rejects_placeholder_fixture_robust() {
         None,
         vec![],
         None,
+        None,
+        None,
     );
     assert!(r.is_error(), "{:?}", r);
     assert!(r.output.contains("placeholder"), "{}", r.output);
@@ -2008,6 +2043,8 @@ fn execute_task_create_with_unknown_dependency_fails_robust() {
         None,
         vec![],
         None,
+        None,
+        None,
     );
     assert!(r.is_error(), "{:?}", r);
 }
@@ -2029,6 +2066,8 @@ fn execute_task_update_without_store_fails_robust() {
         vec![],
         vec![],
         None,
+        None,
+        None,
     );
     assert!(r.is_error());
 }
@@ -2049,6 +2088,8 @@ fn execute_task_update_changes_status_normal() {
         None,
         vec![],
         None,
+        None,
+        None,
     );
     assert!(!create.is_error());
     // First-created task gets id `t1`.
@@ -2066,6 +2107,8 @@ fn execute_task_update_changes_status_normal() {
         None,
         vec![],
         vec![],
+        None,
+        None,
         None,
     );
     assert!(!r.is_error(), "{}", r.output);
@@ -2088,6 +2131,8 @@ fn execute_task_update_invalid_status_fails_robust() {
         None,
         vec![],
         None,
+        None,
+        None,
     );
     let r = execute_task_update(
         Some(store),
@@ -2103,6 +2148,8 @@ fn execute_task_update_invalid_status_fails_robust() {
         None,
         vec![],
         vec![],
+        None,
+        None,
         None,
     );
     assert!(r.is_error(), "{}", r.output);
@@ -2124,6 +2171,8 @@ fn execute_task_done_marks_completed_normal() {
         None,
         None,
         vec![],
+        None,
+        None,
         None,
     );
     let r = execute_task_done(Some(store), "t1");
@@ -2160,6 +2209,8 @@ fn execute_task_list_returns_tasks_normal() {
         None,
         vec![],
         None,
+        None,
+        None,
     );
     execute_task_create(
         Some(store.clone()),
@@ -2173,6 +2224,8 @@ fn execute_task_list_returns_tasks_normal() {
         None,
         None,
         vec![],
+        None,
+        None,
         None,
     );
     let r = execute_task_list(Some(store), None, None);
@@ -2197,6 +2250,8 @@ fn execute_task_list_filters_by_owner_robust() {
         None,
         vec![],
         None,
+        None,
+        None,
     );
     execute_task_update(
         Some(store.clone()),
@@ -2212,6 +2267,8 @@ fn execute_task_list_filters_by_owner_robust() {
         None,
         vec![],
         vec![],
+        None,
+        None,
         None,
     );
     let only_alice = execute_task_list(Some(store.clone()), None, Some("alice"));
@@ -2531,6 +2588,8 @@ async fn execute_tool_dispatches_task_create_normal() {
             kind: None,
             tags: vec![],
             priority: None,
+            effort: None,
+            model: None,
         },
         PathBuf::from("."),
         None,

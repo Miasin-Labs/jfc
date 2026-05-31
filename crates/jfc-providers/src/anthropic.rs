@@ -10,6 +10,7 @@ use super::sse;
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA: &str = "interleaved-thinking-2025-05-14";
+const NARRATION_SUMMARIES_BETA: &str = jfc_anthropic_sdk::beta::NARRATION_SUMMARIES;
 // `mid-conversation-system-2026-04-07` is gated per-model via
 // `super::anthropic_oauth::mid_conversation_system_enabled` (mirrors CC's `XH8`).
 
@@ -248,29 +249,7 @@ impl Provider for AnthropicProvider {
     ) -> anyhow::Result<EventStream> {
         let body = build_body(messages, options);
 
-        // Build beta header: append fast-mode and/or task-budgets betas as needed.
-        let mut betas = ANTHROPIC_BETA.to_owned();
-        if super::anthropic_oauth::mid_conversation_system_enabled(&options.model) {
-            betas.push_str(",mid-conversation-system-2026-04-07");
-        }
-        if options.fast_mode {
-            betas.push_str(",fast-mode-2026-02-01");
-        }
-        if options.task_budget_tokens.is_some() {
-            betas.push_str(",task-budgets-2026-03-13");
-        }
-        if options.advisor_model.is_some() {
-            betas.push_str(",advisor-tool-2026-03-01");
-        }
-        if options.eager_input_streaming {
-            betas.push_str(",fine-grained-tool-streaming-2025-05-14");
-        }
-        if options.strict_tool_schemas {
-            betas.push_str(",structured-outputs-2025-12-15");
-        }
-        append_custom_betas(&mut betas, &options.custom_betas);
-        super::anthropic_oauth::append_env_betas(&mut betas);
-        let beta_header = betas;
+        let beta_header = build_beta_header(options);
 
         let send_started = std::time::Instant::now();
         let resp = match jfc_provider::http::send_with_retry("anthropic.messages", || {
@@ -388,6 +367,35 @@ fn append_custom_betas(header: &mut String, custom_betas: &[String]) {
     }
 }
 
+fn build_beta_header(options: &StreamOptions) -> String {
+    let mut betas = ANTHROPIC_BETA.to_owned();
+    if super::anthropic_oauth::mid_conversation_system_enabled(&options.model) {
+        betas.push_str(",mid-conversation-system-2026-04-07");
+    }
+    if options.fast_mode {
+        betas.push_str(",fast-mode-2026-02-01");
+    }
+    if options.task_budget_tokens.is_some() {
+        betas.push_str(",task-budgets-2026-03-13");
+    }
+    if options.advisor_model.is_some() {
+        betas.push_str(",advisor-tool-2026-03-01");
+    }
+    if options.eager_input_streaming {
+        betas.push_str(",fine-grained-tool-streaming-2025-05-14");
+    }
+    if options.strict_tool_schemas {
+        betas.push_str(",structured-outputs-2025-12-15");
+    }
+    if options.narration_summaries {
+        betas.push(',');
+        betas.push_str(NARRATION_SUMMARIES_BETA);
+    }
+    append_custom_betas(&mut betas, &options.custom_betas);
+    super::anthropic_oauth::append_env_betas(&mut betas);
+    betas
+}
+
 /// DO-178B §6.4.2 conformance: every behavior is exercised by at least one
 /// `_normal` test (canonical inputs / equivalence classes / boundary values)
 /// and one `_robust` test (invalid / abnormal / illegal-state inputs).
@@ -421,6 +429,18 @@ mod tests {
 
     fn opts(model: &str) -> StreamOptions {
         StreamOptions::new(model)
+    }
+
+    #[test]
+    fn build_beta_header_includes_narration_summaries_normal() {
+        let header = build_beta_header(&opts("claude-opus-4-7").narration_summaries(true));
+        assert!(header.contains(NARRATION_SUMMARIES_BETA));
+    }
+
+    #[test]
+    fn build_beta_header_omits_narration_summaries_by_default_robust() {
+        let header = build_beta_header(&opts("claude-opus-4-7"));
+        assert!(!header.contains(NARRATION_SUMMARIES_BETA));
     }
 
     // Normal: anthropic_error_type recognises the canonical shape

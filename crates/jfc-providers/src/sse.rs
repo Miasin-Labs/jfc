@@ -467,6 +467,7 @@ pub fn parse_stop_reason(s: Option<&str>) -> StopReason {
         // user message; the server resumes the loop where it left off.
         // See StopReason::PauseTurn docs and cli.js v142:622686.
         Some("pause_turn") => StopReason::PauseTurn,
+        Some("refusal") => StopReason::Refusal,
         Some("max_tokens") => StopReason::MaxTokens,
         Some("stop_sequence") => StopReason::StopSequence,
         Some(other) => {
@@ -475,7 +476,7 @@ pub fn parse_stop_reason(s: Option<&str>) -> StopReason {
             // traced back to a new server stop_reason being bucketed
             // into Other(...) and falling through event_loop's
             // dispatch ladder. The warn gives us a one-grep way to
-            // catch the next variant (e.g. "refusal", "container_*")
+            // catch the next variant (e.g. "container_*")
             // before users notice.
             tracing::warn!(
                 target: "jfc::provider::sse",
@@ -1410,10 +1411,7 @@ mod tests {
             parse_stop_reason(Some("stop_sequence")),
             StopReason::StopSequence
         );
-        assert_eq!(
-            parse_stop_reason(Some("refusal")),
-            StopReason::Other("refusal".into())
-        );
+        assert_eq!(parse_stop_reason(Some("refusal")), StopReason::Refusal);
         assert_eq!(parse_stop_reason(None), StopReason::EndTurn);
     }
 
@@ -1574,6 +1572,13 @@ mod tests {
         assert_eq!(parse_stop_reason(None), StopReason::EndTurn);
     }
 
+    // Robust: a known refusal stop reason gets a first-class variant so the UI
+    // can stop retry loops and show a specific diagnostic.
+    #[test]
+    fn parse_stop_reason_refusal_is_first_class_robust() {
+        assert_eq!(parse_stop_reason(Some("refusal")), StopReason::Refusal);
+    }
+
     // Robust: an unknown variant string buckets into Other(...) and is
     // expected to surface a warn in the trace log. We can't easily
     // capture the tracing event from a unit test without a
@@ -1582,10 +1587,6 @@ mod tests {
     // exact string Anthropic sent.
     #[test]
     fn parse_stop_reason_unknown_string_preserves_variant_robust() {
-        assert_eq!(
-            parse_stop_reason(Some("refusal")),
-            StopReason::Other("refusal".into())
-        );
         assert_eq!(
             parse_stop_reason(Some("container_oom")),
             StopReason::Other("container_oom".into())

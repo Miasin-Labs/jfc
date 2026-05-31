@@ -183,29 +183,23 @@ pub async fn stream_remote_events(
     }
 
     use futures::StreamExt;
-    let byte_stream = resp.bytes_stream();
+    let frames = jfc_anthropic_sdk::sse::response_event_stream(resp);
 
-    let event_stream = byte_stream.filter_map(|chunk| async move {
-        match chunk {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                // Parse SSE frames: look for "data: " lines
-                for line in text.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            return None;
-                        }
-                        match serde_json::from_str::<CcrEvent>(data) {
-                            Ok(event) => return Some(Ok(event)),
-                            Err(e) => {
-                                return Some(Err(anyhow::anyhow!("decode CcrEvent: {e}")));
-                            }
-                        }
-                    }
+    let event_stream = frames.filter_map(|frame| async move {
+        match frame {
+            Ok(frame) => {
+                let data = frame.data.trim();
+                if data == "[DONE]" {
+                    return None;
                 }
-                None
+                match serde_json::from_str::<CcrEvent>(data) {
+                    Ok(event) => Some(Ok(event)),
+                    Err(e) => Some(Err(anyhow::anyhow!("decode CcrEvent from SSE frame: {e}"))),
+                }
             }
-            Err(e) => Some(Err(anyhow::anyhow!("stream transport error: {e}"))),
+            Err(e) => Some(Err(anyhow::anyhow!(
+                "CCR event stream transport error: {e}"
+            ))),
         }
     });
 

@@ -146,8 +146,14 @@ pub(super) fn persistent_session_messages(messages: &[ChatMessage]) -> Vec<ChatM
         .filter(|m| !m.queued && !is_empty_assistant_placeholder(m))
         .cloned()
         .collect();
-    terminalize_stranded_tools(&mut filtered);
+    terminalize_stranded_tools(&mut filtered, TerminalizeTail::Preserve);
     coalesce_consecutive_same_role(&filtered)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalizeTail {
+    Preserve,
+    Include,
 }
 
 /// Coerce any non-terminal (Pending / Running / Idle) tool that is stranded
@@ -166,14 +172,19 @@ pub(super) fn persistent_session_messages(messages: &[ChatMessage]) -> Vec<ChatM
 /// but the on-disk transcript stays misleading and the renderer shows a
 /// frozen spinner glyph forever. Terminalizing at save time makes the
 /// persisted history honest and matches what the wire builder does anyway.
-fn terminalize_stranded_tools(messages: &mut [ChatMessage]) {
+fn terminalize_stranded_tools(messages: &mut [ChatMessage], tail: TerminalizeTail) {
     let len = messages.len();
+    if len == 0 {
+        return;
+    }
     if len < 2 {
-        return; // only message is the (possibly in-flight) tail — leave it.
+        if tail == TerminalizeTail::Preserve {
+            return; // only message is the (possibly in-flight) tail — leave it.
+        }
     }
     let last_idx = len - 1;
     for (idx, msg) in messages.iter_mut().enumerate() {
-        if idx == last_idx {
+        if tail == TerminalizeTail::Preserve && idx == last_idx {
             continue; // live streaming tail — genuine in-flight tools.
         }
         for part in &mut msg.parts {
@@ -185,7 +196,7 @@ fn terminalize_stranded_tools(messages: &mut [ChatMessage]) {
                     tool = %tc.kind.label(),
                     prior_status = tc.status.label(),
                     msg_idx = idx,
-                    "terminalizing stranded non-terminal tool at save (lost completion signal)"
+                    "terminalizing stranded non-terminal tool (lost completion signal)"
                 );
                 tc.status = crate::types::ToolStatus::Failed;
                 if matches!(tc.output, crate::types::ToolOutput::Empty) {
@@ -206,6 +217,7 @@ pub(super) fn repair_loaded_messages(messages: Vec<ChatMessage>) -> Vec<ChatMess
         .filter(|m| !is_empty_assistant_placeholder(m))
         .collect();
     let mut repaired = coalesce_consecutive_same_role(&stripped);
+    terminalize_stranded_tools(&mut repaired, TerminalizeTail::Include);
     for m in &mut repaired {
         crate::types::merge_consecutive_text_parts(&mut m.parts);
     }
@@ -502,7 +514,7 @@ mod placeholder_tests {
 
 #[cfg(test)]
 mod terminalize_tests {
-    use super::persistent_session_messages;
+    use super::{persistent_session_messages, repair_loaded_messages};
     use crate::types::{
         ChatMessage, MessagePart, ToolCall, ToolDisplayState, ToolInput, ToolKind, ToolOutput,
         ToolStatus,
@@ -607,5 +619,20 @@ mod terminalize_tests {
             MessagePart::Tool(tc) if matches!(&tc.output, ToolOutput::Text(t) if t == "real output")
         ));
         assert!(preserved, "completed tool output must survive verbatim");
+    }
+
+    #[test]
+    fn load_repair_terminalizes_final_pending_tool_robust() {
+        let input = vec![
+            ChatMessage::user("do it".into()),
+            ChatMessage::assistant_parts(vec![tool("t1", ToolStatus::Pending, ToolOutput::Empty)]),
+        ];
+        let out = repair_loaded_messages(input);
+        let tail = out.last().expect("tail survives");
+        assert_eq!(
+            tool_status(tail),
+            ToolStatus::Failed,
+            "a loaded transcript has no live in-flight tail, so pending tools must be failed"
+        );
     }
 }

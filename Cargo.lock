@@ -2684,6 +2684,7 @@ name = "jfc-mcp"
 version = "0.1.0"
 dependencies = [
  "jfc-provider",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",

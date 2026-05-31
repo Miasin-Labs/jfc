@@ -2052,10 +2052,11 @@ mod tests {
         )));
     }
 
-    // Robust: an unrecognized finish_reason maps to StopReason::Other
-    // verbatim. Future-proofs against a proxy emitting a novel reason.
+    // Robust: content-filter/refusal finish reasons map to the first-class
+    // Refusal variant so the runtime does not self-continue into the same
+    // blocked request.
     #[test]
-    fn stateful_finish_unknown_maps_to_other_robust() {
+    fn stateful_finish_content_filter_maps_refusal_robust() {
         let mut state = OpenAiStreamState::default();
         let events = evs_stateful(
             &mut state,
@@ -2068,7 +2069,24 @@ mod tests {
                 _ => None,
             })
             .expect("Done");
-        assert_eq!(done, StopReason::Other("content_filter".into()));
+        assert_eq!(done, StopReason::Refusal);
+    }
+
+    #[test]
+    fn stateful_finish_unknown_maps_to_other_robust() {
+        let mut state = OpenAiStreamState::default();
+        let events = evs_stateful(
+            &mut state,
+            chunk(ChunkDelta::default(), Some("gateway_weird")),
+        );
+        let done = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { stop_reason } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .expect("Done");
+        assert_eq!(done, StopReason::Other("gateway_weird".into()));
     }
 
     // Robust: a chunk with no choices at all is a no-op — push_chunk_events_stateful
@@ -3958,6 +3976,7 @@ fn push_chunk_events_stateful(
             "tool_calls" | "function_call" | "function_calls" => StopReason::ToolUse,
             "stop" => StopReason::EndTurn,
             "length" => StopReason::MaxTokens,
+            "content_filter" | "refusal" => StopReason::Refusal,
             other => StopReason::Other(other.to_owned()),
         };
 

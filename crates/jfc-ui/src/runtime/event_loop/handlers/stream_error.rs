@@ -58,7 +58,8 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     // *genuine* watchdog (clears is_streaming) both still surface.
     let is_superseded_stream_lifecycle_error = e.starts_with("Stream timed out")
         || e.starts_with("Stream cancelled before connection opened")
-        || e.starts_with("Stream open timed out");
+        || e.starts_with("Stream open timed out")
+        || e.starts_with("stream task cancelled");
     if is_superseded_stream_lifecycle_error
         && app.is_streaming
         && !app.cancel_token.is_cancelled()
@@ -72,6 +73,11 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
         return;
     }
 
+    let interrupted_by_user = e.contains("Interrupted by user")
+        || (e.starts_with("stream task cancelled")
+            && (app.cancel_token.is_cancelled()
+                || app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)));
+
     // ─── Synthetic tool_result injection on interrupt ────────
     // When a stream is interrupted with pending/running tool_use
     // entries in the conversation, inject a user-message with
@@ -79,7 +85,7 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     // Without this, the next API call fails because Anthropic's
     // API requires every tool_use to have a matching tool_result.
     // Mirrors claude-code 2.1.141's createSyntheticErrorMessage.
-    if e.contains("Interrupted by user")
+    if interrupted_by_user
         && let Some(assistant_idx) = app.streaming_assistant_idx
         && let Some(msg) = app.messages.get(assistant_idx)
     {
@@ -210,6 +216,7 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     app.render_cache.borrow_mut().clear_streaming();
     app.streaming_response_bytes = 0;
     app.streaming_assistant_idx = None;
+    app.active_stream_handle = None;
     app.current_stream_request = None;
     // Clear the turn clock and any pending tool calls so the
     // spinner row stops rendering. Without this, the
@@ -261,7 +268,7 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
                 toast::Toast::new(toast::ToastKind::Error, format!("Stream error: {preview}")),
             );
         }
-    } else if !auto_compact_signal {
+    } else if !auto_compact_signal && !interrupted_by_user {
         app.messages.push(ChatMessage::assistant(format!(
             "**Error:** {e}\n\n_Press Ctrl+R to retry the last prompt._"
         )));
@@ -435,6 +442,85 @@ mod tests {
 
         assert!(app.is_streaming);
         assert_eq!(app.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn superseded_aborted_stream_join_error_is_dropped_robust() {
+        let mut app = test_app();
+        app.messages.push(ChatMessage::user("new prompt".into()));
+        app.messages.push(ChatMessage::assistant(String::new()));
+        app.is_streaming = true;
+        app.streaming_assistant_idx = Some(1);
+        app.cancel_token = tokio_util::sync::CancellationToken::new();
+        app.interrupt_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_stream_error(
+            &mut app,
+            &tx,
+            "stream task cancelled: task 17 was cancelled".to_owned(),
+        )
+        .await;
+
+        assert!(app.is_streaming);
+        assert_eq!(app.streaming_assistant_idx, Some(1));
+        assert_eq!(app.messages.len(), 2, "no stale join error appended");
+    }
+
+    #[tokio::test]
+    async fn aborted_stream_join_error_after_user_interrupt_is_clean_robust() {
+        let mut app = test_app();
+        app.messages.push(ChatMessage::user("only prompt".into()));
+        app.messages.push(ChatMessage::assistant(String::new()));
+        app.is_streaming = true;
+        app.streaming_assistant_idx = Some(1);
+        app.cancel_token.cancel();
+        app.interrupt_flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_stream_error(
+            &mut app,
+            &tx,
+            "stream task cancelled: task 17 was cancelled".to_owned(),
+        )
+        .await;
+
+        assert!(!app.is_streaming);
+        assert_eq!(
+            app.messages.len(),
+            2,
+            "user interrupt should not add hard error"
+        );
+        assert!(
+            !app.cancel_token.is_cancelled(),
+            "next turn gets a fresh token"
+        );
+        assert!(
+            !app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "interrupt flag should be cleared after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_clears_active_stream_handle_robust() {
+        let mut app = test_app();
+        app.messages.push(ChatMessage::user("only prompt".into()));
+        app.messages.push(ChatMessage::assistant(String::new()));
+        app.is_streaming = true;
+        app.streaming_assistant_idx = Some(1);
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        app.active_stream_handle = Some(handle.abort_handle());
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_stream_error(&mut app, &tx, "provider failed".to_owned()).await;
+
+        assert!(app.active_stream_handle.is_none());
+        assert!(!app.has_interruptible_work());
+        handle.abort();
     }
 
     // Robust: a GENUINE pre-open cancel (no fresh turn took over —

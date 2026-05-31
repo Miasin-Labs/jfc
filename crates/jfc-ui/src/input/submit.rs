@@ -688,6 +688,7 @@ pub(super) async fn handle_submit(
         task_budget: app.cli_task_budget,
         max_thinking_tokens: app.cli_max_thinking_tokens,
         thinking_display: app.cli_thinking_display.clone(),
+        brief_mode: app.brief_mode,
         ..Default::default()
     };
 

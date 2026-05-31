@@ -96,8 +96,14 @@ pub(crate) fn assistant_text_stalls(messages: &[ChatMessage]) -> bool {
         return false;
     }
 
-    // Inspect the closing window (last ~240 chars) — stalls live at the end.
-    let tail_start = trimmed.len().saturating_sub(240);
+    // Inspect the closing window (last ~240 bytes) — stalls live at the end.
+    // The window start is a raw byte offset, so snap it forward to the next
+    // char boundary; otherwise a multi-byte char (e.g. an em-dash `—`) straddling
+    // the cut would panic the slice.
+    let mut tail_start = trimmed.len().saturating_sub(240);
+    while tail_start < trimmed.len() && !trimmed.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
     let tail = trimmed[tail_start..].to_lowercase();
 
     // Strong phrase signals anywhere in the tail.
@@ -253,6 +259,7 @@ fn spawn_substream(app: &mut App, messages: Vec<ProviderMessage>, tx: &mpsc::Sen
         task_budget: app.cli_task_budget,
         max_thinking_tokens: app.cli_max_thinking_tokens,
         thinking_display: app.cli_thinking_display.clone(),
+        brief_mode: app.brief_mode,
         ..Default::default()
     };
     let tx_guard = tx.clone();
@@ -1310,5 +1317,17 @@ mod stall_detection_tests {
             !assistant_text_stalls(&[assistant_text(&long)]),
             "a stall phrase far from the tail should not trip"
         );
+    }
+
+    // Regression: a multi-byte char (em-dash `—`, 3 bytes) straddling the
+    // 240-byte tail window must not panic the byte slice. The crash had
+    // start byte index inside '—'. Build a string so the cut lands mid-char.
+    #[test]
+    fn multibyte_char_on_tail_boundary_does_not_panic() {
+        for pad in 230..250usize {
+            let s = format!("{}— and that wraps it up.", "x".repeat(pad));
+            // Must not panic.
+            let _ = assistant_text_stalls(&[assistant_text(&s)]);
+        }
     }
 }

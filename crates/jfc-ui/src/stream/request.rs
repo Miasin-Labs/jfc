@@ -646,9 +646,34 @@ Do not use a colon before tool calls.";
         tool_count = tools::all_tool_defs().len(),
         "preparing stream request"
     );
-    let system_prompt_tokens = system_prompt.len() / 4;
     let max_out = max_output_tokens_for(model.as_str());
+    let pewter_owl_header = crate::feature_gates::pewter_owl_header_enabled(model.as_str(), false);
+    let pewter_owl_tool = crate::feature_gates::pewter_owl_tool_enabled(model.as_str(), false);
+    let pewter_owl_brief = crate::feature_gates::pewter_owl_brief_enabled(model.as_str(), false);
+    let effective_brief_mode = overrides.brief_mode || pewter_owl_brief;
+    if effective_brief_mode {
+        system_prompt.push_str(
+            "\n\n## Brief User Messages\n\nPlain assistant text is hidden from \
+             the main chat view. Put every substantive user-facing reply in \
+             `SendUserMessage`; use normal assistant text only for internal \
+             reasoning that can be omitted from the user's visible transcript.",
+        );
+    } else if pewter_owl_tool {
+        system_prompt.push_str(
+            "\n\n## Pewter Owl Messaging\n\n`SendUserMessage` is available for \
+             exact user-visible content between tool calls, such as generated \
+             snippets, specific values, and direct replies to mid-task user \
+             messages. Routine narration and final answers may remain normal \
+             assistant text.",
+        );
+    }
     let mut advertised_tools = tools::all_tool_defs_with_mcp().await;
+    tools::apply_send_user_message_policy(
+        &mut advertised_tools,
+        effective_brief_mode,
+        pewter_owl_tool,
+    );
+    let system_prompt_tokens = system_prompt.len() / 4;
 
     #[cfg(feature = "permission-automation")]
     {
@@ -767,7 +792,11 @@ Do not use a colon before tool calls.";
             tool_count = advertised_tools.len(),
             "suppressing tool catalog for non-action prompt"
         );
-        advertised_tools.clear();
+        if effective_brief_mode || pewter_owl_tool {
+            advertised_tools.retain(|tool| tool.name == "SendUserMessage");
+        } else {
+            advertised_tools.clear();
+        }
     }
     let advertised_tool_count = advertised_tools.len();
 
@@ -793,6 +822,9 @@ Do not use a colon before tool calls.";
     }
     if crate::effort::active_fast_mode() {
         base = base.fast_mode(true);
+    }
+    if pewter_owl_header {
+        base = base.narration_summaries(true);
     }
     let thinking_display = requested_thinking_display(&overrides);
     if !overrides.custom_betas.is_empty() {

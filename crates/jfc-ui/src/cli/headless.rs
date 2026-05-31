@@ -87,17 +87,50 @@ pub(super) async fn run_print_mode(
     let mut opts = StreamOptions::new(model.clone())
         .max_tokens(8192)
         .custom_betas(config.custom_betas.clone());
+    let pewter_owl_header = crate::feature_gates::pewter_owl_header_enabled(model.as_str(), true);
+    let pewter_owl_tool = crate::feature_gates::pewter_owl_tool_enabled(model.as_str(), true);
+    let pewter_owl_brief = crate::feature_gates::pewter_owl_brief_enabled(model.as_str(), true);
     if config.fine_grained_tool_streaming {
         opts = opts.eager_input_streaming(true);
     }
     if config.strict_tool_schemas {
         opts = opts.strict_tool_schemas(true);
     }
-    opts = opts.tools(crate::tools::all_tool_defs_with_mcp().await);
+    if pewter_owl_header {
+        opts = opts.narration_summaries(true);
+    }
+    let mut advertised_tools = crate::tools::all_tool_defs_with_mcp().await;
+    crate::tools::apply_send_user_message_policy(
+        &mut advertised_tools,
+        pewter_owl_brief,
+        pewter_owl_tool,
+    );
+    opts = opts.tools(advertised_tools);
+    let mut system_prompt = String::new();
+    if pewter_owl_brief {
+        system_prompt.push_str(
+            "Plain assistant text is hidden from the main chat view. Put every \
+             substantive user-facing reply in `SendUserMessage`; use normal \
+             assistant text only for internal reasoning that can be omitted \
+             from the user's visible transcript.",
+        );
+    } else if pewter_owl_tool {
+        system_prompt.push_str(
+            "`SendUserMessage` is available for exact user-visible content \
+             between tool calls, such as generated snippets, specific values, \
+             and direct replies to mid-task user messages. Routine narration \
+             and final answers may remain normal assistant text.",
+        );
+    }
     if let Some(advisor_model) = advisor_model {
-        opts = opts
-            .system(crate::advisor::SERVER_ADVISOR_SYSTEM_PROMPT)
-            .advisor_model(advisor_model);
+        if !system_prompt.is_empty() {
+            system_prompt.push_str("\n\n");
+        }
+        system_prompt.push_str(crate::advisor::SERVER_ADVISOR_SYSTEM_PROMPT);
+        opts = opts.advisor_model(advisor_model);
+    }
+    if !system_prompt.is_empty() {
+        opts = opts.system(system_prompt);
     }
     let mut stdout = std::io::stdout().lock();
     let mut exit_code = 0;
@@ -1105,6 +1138,7 @@ fn stop_reason_wire(reason: &jfc_provider::StopReason) -> String {
         jfc_provider::StopReason::EndTurn => "end_turn".to_owned(),
         jfc_provider::StopReason::ToolUse => "tool_use".to_owned(),
         jfc_provider::StopReason::PauseTurn => "pause_turn".to_owned(),
+        jfc_provider::StopReason::Refusal => "refusal".to_owned(),
         jfc_provider::StopReason::MaxTokens => "max_tokens".to_owned(),
         jfc_provider::StopReason::StopSequence => "stop_sequence".to_owned(),
         jfc_provider::StopReason::Other(value) => value.clone(),

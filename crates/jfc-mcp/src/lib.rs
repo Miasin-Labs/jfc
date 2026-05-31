@@ -38,6 +38,8 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
     pub url: Option<String>,
 }
 
@@ -150,6 +152,7 @@ mod tests {
             command: command.map(str::to_owned),
             args: Vec::new(),
             env: HashMap::new(),
+            headers: HashMap::new(),
             url: url.map(str::to_owned),
         }
     }

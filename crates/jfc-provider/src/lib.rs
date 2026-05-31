@@ -389,6 +389,10 @@ pub enum StopReason {
     /// and assistant response — the server will resume where it left off.
     /// Do NOT add an extra user message like 'Continue.'"
     PauseTurn,
+    /// The provider ended the turn with an explicit refusal and produced no
+    /// usable assistant content. This is distinct from an HTTP/content-policy
+    /// fallback error: Anthropic can emit it as a successful SSE stop_reason.
+    Refusal,
     MaxTokens,
     StopSequence,
     Other(String),
@@ -584,6 +588,10 @@ pub struct StreamOptions {
     /// providers inject the `advisor_20260301` server tool and the matching
     /// beta token for this request.
     pub advisor_model: Option<ModelId>,
+    /// When true, enables `summarize-connector-text-2026-03-13` so the
+    /// server can return narration summaries for connector/user-message
+    /// flows. Mirrors Claude Code 2.1.159's `narration_summaries` rollout.
+    pub narration_summaries: bool,
 }
 
 impl StreamOptions {
@@ -613,6 +621,7 @@ impl StreamOptions {
             prompt_caching_scope: true,
             session_id: None,
             advisor_model: None,
+            narration_summaries: false,
         }
     }
 
@@ -710,6 +719,11 @@ impl StreamOptions {
 
     pub fn advisor_model(mut self, model: impl Into<ModelId>) -> Self {
         self.advisor_model = Some(model.into());
+        self
+    }
+
+    pub fn narration_summaries(mut self, enabled: bool) -> Self {
+        self.narration_summaries = enabled;
         self
     }
 }

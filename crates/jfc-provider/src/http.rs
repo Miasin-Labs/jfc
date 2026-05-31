@@ -1,15 +1,15 @@
 use std::time::Duration;
 
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// Inter-chunk read timeout for streaming responses. The previous 60s
-/// value was too aggressive for Bedrock-via-LiteLLM and other proxies
-/// that can go silent for 60-90s during long thinking turns or while
-/// a large tool call is being assembled. We picked 600s to match the
-/// `x-litellm-stream-timeout: 600` header opencode-openwebui-auth's
-/// fetch.ts sets — without alignment, the client kills connections
-/// the upstream still considers active, surfacing as the misleading
-/// `error sending request for url (…)` reqwest error in the TUI.
-const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(600);
+/// Default inter-chunk read timeout for streaming responses. The previous
+/// 60s value was too aggressive for Bedrock-via-LiteLLM and other proxies
+/// that can go silent for 60-90s during long thinking turns or while a
+/// large tool call is being assembled. We keep 600s as the default to match
+/// the `x-litellm-stream-timeout: 600` header opencode-openwebui-auth's
+/// fetch.ts sets, while still allowing Claude Code-compatible env overrides.
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+const MIN_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 const HTTP_TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -22,7 +22,7 @@ pub fn streaming_client() -> reqwest::Client {
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         // Streaming responses have no known total duration. `read_timeout`
         // catches stalled reads without imposing a hard deadline on the body.
-        .read_timeout(HTTP_READ_TIMEOUT)
+        .read_timeout(byte_stream_idle_timeout())
         .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
         // TCP-level keepalive helps the kernel notice half-open
         // sockets through NAT/LB rewrites. Keep the interval/retry
@@ -41,6 +41,49 @@ pub fn streaming_client() -> reqwest::Client {
         .http2_keep_alive_while_idle(true)
         .build()
         .expect("provider HTTP client configuration is valid")
+}
+
+/// Main stream idle timeout. `JFC_STREAM_IDLE_TIMEOUT_MS` is the native name;
+/// `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is accepted so users can reuse existing
+/// Claude Code tuning.
+pub fn stream_idle_timeout() -> Duration {
+    timeout_from_env(
+        &[
+            "JFC_STREAM_IDLE_TIMEOUT_MS",
+            "CLAUDE_STREAM_IDLE_TIMEOUT_MS",
+        ],
+        DEFAULT_STREAM_IDLE_TIMEOUT,
+    )
+}
+
+/// Lower-level byte-stream idle timeout. Mirrors Claude Code 2.1.157's split:
+/// when a byte-specific override is present it wins, otherwise the general
+/// stream timeout applies.
+pub fn byte_stream_idle_timeout() -> Duration {
+    timeout_from_env(
+        &[
+            "JFC_BYTE_STREAM_IDLE_TIMEOUT_MS",
+            "CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS",
+        ],
+        stream_idle_timeout(),
+    )
+}
+
+fn timeout_from_env(keys: &[&str], default: Duration) -> Duration {
+    let configured = keys
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find_map(|value| parse_timeout_ms(Some(value.as_str())));
+    clamp_stream_timeout(configured.unwrap_or(default))
+}
+
+fn parse_timeout_ms(value: Option<&str>) -> Option<Duration> {
+    let millis = value?.trim().parse::<u64>().ok()?;
+    (millis > 0).then(|| Duration::from_millis(millis))
+}
+
+fn clamp_stream_timeout(timeout: Duration) -> Duration {
+    timeout.clamp(MIN_STREAM_IDLE_TIMEOUT, MAX_STREAM_IDLE_TIMEOUT)
 }
 
 /// Send an HTTP request with automatic retry on transient failures.
@@ -205,6 +248,33 @@ mod tests {
     #[test]
     fn streaming_client_builds_without_panic_normal() {
         let _ = streaming_client();
+    }
+
+    #[test]
+    fn stream_timeout_parser_ignores_missing_or_zero_robust() {
+        assert_eq!(parse_timeout_ms(None), None);
+        assert_eq!(parse_timeout_ms(Some("")), None);
+        assert_eq!(parse_timeout_ms(Some("0")), None);
+        assert_eq!(
+            parse_timeout_ms(Some("2500")),
+            Some(Duration::from_millis(2500))
+        );
+    }
+
+    #[test]
+    fn stream_timeout_clamps_to_supported_range_normal() {
+        assert_eq!(
+            clamp_stream_timeout(Duration::from_millis(1)),
+            MIN_STREAM_IDLE_TIMEOUT
+        );
+        assert_eq!(
+            clamp_stream_timeout(Duration::from_secs(60 * 60)),
+            MAX_STREAM_IDLE_TIMEOUT
+        );
+        assert_eq!(
+            clamp_stream_timeout(Duration::from_secs(600)),
+            Duration::from_secs(600)
+        );
     }
 
     // Robust: classify_send_error returns *something* non-empty for

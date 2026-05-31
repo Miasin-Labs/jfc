@@ -34,6 +34,17 @@ fn default_input_schema() -> Value {
     json!({ "type": "object" })
 }
 
+fn normalize_input_schema(mut schema: Value) -> Value {
+    if let Value::Object(object) = &mut schema {
+        // rmcp 8f558d8 strips these from generated tools/list schemas.
+        // Do the same at the client boundary so non-rmcp MCP servers don't
+        // leak redundant top-level metadata into provider tool schemas.
+        object.remove("title");
+        object.remove("description");
+    }
+    schema
+}
+
 impl From<rmcp::model::Tool> for McpTool {
     fn from(t: rmcp::model::Tool) -> Self {
         Self {
@@ -41,7 +52,7 @@ impl From<rmcp::model::Tool> for McpTool {
             description: t.description.map(|d| d.into_owned()).unwrap_or_default(),
             // `input_schema` is an `Arc<Map<String, Value>>`; clone the
             // map out so we own a plain `Value::Object`.
-            input_schema: Value::Object((*t.input_schema).clone()),
+            input_schema: normalize_input_schema(Value::Object((*t.input_schema).clone())),
         }
     }
 }
@@ -140,6 +151,40 @@ mod tests {
         let tool = Tool::new_with_raw("noop", None, Arc::new(serde_json::Map::new()));
         let mcp: McpTool = tool.into();
         assert_eq!(mcp.description, "");
+    }
+
+    #[test]
+    fn mcp_tool_strips_redundant_top_level_input_schema_metadata_normal() {
+        let mut schema = serde_json::Map::new();
+        schema.insert(
+            "$schema".into(),
+            json!("https://json-schema.org/draft/2020-12/schema"),
+        );
+        schema.insert("title".into(), json!("AddRequest"));
+        schema.insert(
+            "description".into(),
+            json!("Parameters for adding two numbers."),
+        );
+        schema.insert("type".into(), json!("object"));
+        schema.insert(
+            "properties".into(),
+            json!({
+                "a": {
+                    "description": "The left-hand number.",
+                    "type": "number"
+                }
+            }),
+        );
+
+        let tool = Tool::new("add", "Add two numbers.", Arc::new(schema));
+        let mcp: McpTool = tool.into();
+
+        assert!(mcp.input_schema.get("title").is_none());
+        assert!(mcp.input_schema.get("description").is_none());
+        assert_eq!(
+            mcp.input_schema["properties"]["a"]["description"],
+            "The left-hand number."
+        );
     }
 
     #[test]

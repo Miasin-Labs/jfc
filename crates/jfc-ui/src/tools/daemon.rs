@@ -62,7 +62,7 @@ pub(super) fn execute_cron_delete(id: &str) -> ExecutionResult {
     }
 }
 
-pub(super) fn execute_schedule_wakeup(
+pub(crate) fn execute_schedule_wakeup(
     delay_seconds: u32,
     prompt: &str,
     reason: &str,

@@ -98,6 +98,17 @@ pub enum FeatureGate {
     /// (`tengu_sage_compass2`). Enables the Anthropic `advisor` server tool
     /// when the active model supports it.
     TenguSageCompass2,
+    /// Claude Code 2.1.159 Pewter Owl header rollout
+    /// (`pewter_owl_header`). Adds the `narration_summaries` beta header
+    /// for interactive Anthropic-native requests.
+    PewterOwlHeader,
+    /// Claude Code 2.1.159 Pewter Owl tool rollout (`pewter_owl_tool`).
+    /// Enables `SendUserMessage` outside strict brief mode with the lighter
+    /// Pewter Owl prompt.
+    PewterOwlTool,
+    /// Claude Code 2.1.159 Pewter Owl brief rollout (`pewter_owl_brief`).
+    /// Forces brief-mode visibility and `SendUserMessage` availability.
+    PewterOwlBrief,
 }
 
 impl FeatureGate {
@@ -121,6 +132,9 @@ impl FeatureGate {
         FeatureGate::DestructiveWarn,
         FeatureGate::AutoDefaultNudge,
         FeatureGate::TenguSageCompass2,
+        FeatureGate::PewterOwlHeader,
+        FeatureGate::PewterOwlTool,
+        FeatureGate::PewterOwlBrief,
     ];
 
     pub fn codename(self) -> &'static str {
@@ -144,6 +158,9 @@ impl FeatureGate {
             Self::DestructiveWarn => "destructive-warn",
             Self::AutoDefaultNudge => "auto-default-nudge",
             Self::TenguSageCompass2 => "tengu_sage_compass2",
+            Self::PewterOwlHeader => "pewter_owl_header",
+            Self::PewterOwlTool => "pewter_owl_tool",
+            Self::PewterOwlBrief => "pewter_owl_brief",
         }
     }
 
@@ -174,6 +191,9 @@ impl FeatureGate {
             Self::DestructiveWarn => true,
             Self::AutoDefaultNudge => false,
             Self::TenguSageCompass2 => false,
+            Self::PewterOwlHeader => false,
+            Self::PewterOwlTool => false,
+            Self::PewterOwlBrief => false,
         }
     }
 
@@ -201,6 +221,9 @@ impl FeatureGate {
                 "Show one-time notice that auto is the default permission mode"
             }
             Self::TenguSageCompass2 => "Enable the Anthropic server-side advisor tool",
+            Self::PewterOwlHeader => "Enable Pewter Owl narration summary beta headers",
+            Self::PewterOwlTool => "Enable Pewter Owl SendUserMessage tool prompt",
+            Self::PewterOwlBrief => "Enable Pewter Owl brief-only display mode",
         }
     }
 }
@@ -263,6 +286,65 @@ pub fn system_prompt_section() -> Option<String> {
     Some(out)
 }
 
+pub fn pewter_owl_header_enabled(model: &str, non_interactive: bool) -> bool {
+    pewter_owl_gate_enabled(FeatureGate::PewterOwlHeader, model, non_interactive)
+}
+
+pub fn pewter_owl_tool_enabled(model: &str, non_interactive: bool) -> bool {
+    pewter_owl_gate_enabled(FeatureGate::PewterOwlTool, model, non_interactive)
+}
+
+pub fn pewter_owl_brief_enabled(model: &str, non_interactive: bool) -> bool {
+    pewter_owl_gate_enabled(FeatureGate::PewterOwlBrief, model, non_interactive)
+}
+
+fn pewter_owl_gate_enabled(gate: FeatureGate, model: &str, non_interactive: bool) -> bool {
+    if env_falsey("CLAUDE_CODE_PEWTER_OWL") || env_falsey("JFC_PEWTER_OWL") {
+        return false;
+    }
+    if env_truthy("CLAUDE_CODE_PEWTER_OWL") || env_truthy("JFC_PEWTER_OWL") {
+        return true;
+    }
+    if non_interactive {
+        return false;
+    }
+    if let Some(filter) = pewter_owl_model_filter()
+        && !canonical_model(model).contains(&filter)
+    {
+        return false;
+    }
+    is_enabled(gate)
+}
+
+fn pewter_owl_model_filter() -> Option<String> {
+    std::env::var("JFC_PEWTER_OWL_MODEL")
+        .ok()
+        .or_else(|| std::env::var("CLAUDE_CODE_PEWTER_OWL_MODEL").ok())
+        .map(|v| canonical_model(&v))
+        .filter(|v| !v.is_empty())
+}
+
+fn canonical_model(model: &str) -> String {
+    model.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn env_truthy(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .is_some_and(|v| matches_bool(&v, &["1", "true", "yes", "on"]))
+}
+
+fn env_falsey(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .is_some_and(|v| matches_bool(&v, &["0", "false", "no", "off"]))
+}
+
+fn matches_bool(value: &str, accepted: &[&str]) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    accepted.iter().any(|candidate| value == *candidate)
+}
+
 // ─── Marsh shared buffer ────────────────────────────────────────────────────
 //
 // Process-global slot the streaming bash tool fills with chunks; the
@@ -317,6 +399,9 @@ mod tests {
         assert!(is_enabled(FeatureGate::Harbor));
         assert!(is_enabled(FeatureGate::Siskin));
         assert!(!is_enabled(FeatureGate::Finch));
+        assert!(!is_enabled(FeatureGate::PewterOwlHeader));
+        assert!(!is_enabled(FeatureGate::PewterOwlTool));
+        assert!(!is_enabled(FeatureGate::PewterOwlBrief));
     }
 
     #[serial_test::serial]
@@ -369,5 +454,51 @@ mod tests {
         // Setting a gate to its default value should not surface as a deviation.
         set(FeatureGate::Harbor, true);
         assert!(system_prompt_section().is_none());
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn pewter_owl_env_force_enables_all_gates_normal() {
+        clear_for_test();
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_PEWTER_OWL", "1");
+            std::env::remove_var("JFC_PEWTER_OWL");
+            std::env::remove_var("JFC_PEWTER_OWL_MODEL");
+            std::env::remove_var("CLAUDE_CODE_PEWTER_OWL_MODEL");
+        }
+        assert!(pewter_owl_header_enabled("claude-opus-4-7", true));
+        assert!(pewter_owl_tool_enabled("claude-opus-4-7", true));
+        assert!(pewter_owl_brief_enabled("claude-opus-4-7", true));
+        unsafe { std::env::remove_var("CLAUDE_CODE_PEWTER_OWL") };
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn pewter_owl_env_force_disable_wins_robust() {
+        clear_for_test();
+        set(FeatureGate::PewterOwlHeader, true);
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_PEWTER_OWL", "0");
+            std::env::remove_var("JFC_PEWTER_OWL");
+            std::env::remove_var("JFC_PEWTER_OWL_MODEL");
+            std::env::remove_var("CLAUDE_CODE_PEWTER_OWL_MODEL");
+        }
+        assert!(!pewter_owl_header_enabled("claude-opus-4-7", false));
+        unsafe { std::env::remove_var("CLAUDE_CODE_PEWTER_OWL") };
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn pewter_owl_gate_honors_model_filter_normal() {
+        clear_for_test();
+        set(FeatureGate::PewterOwlTool, true);
+        unsafe {
+            std::env::remove_var("CLAUDE_CODE_PEWTER_OWL");
+            std::env::remove_var("JFC_PEWTER_OWL");
+            std::env::set_var("JFC_PEWTER_OWL_MODEL", "opus-4-8");
+        }
+        assert!(pewter_owl_tool_enabled("claude-opus-4-8", false));
+        assert!(!pewter_owl_tool_enabled("claude-sonnet-4-6", false));
+        unsafe { std::env::remove_var("JFC_PEWTER_OWL_MODEL") };
     }
 }

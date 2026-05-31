@@ -181,6 +181,7 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
         task_budget: app.cli_task_budget,
         max_thinking_tokens: app.cli_max_thinking_tokens,
         thinking_display: app.cli_thinking_display.clone(),
+        brief_mode: app.brief_mode,
         ..Default::default()
     };
     // Park the *inner* task's abort handle on App so the watchdog can

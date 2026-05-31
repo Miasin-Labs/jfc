@@ -104,9 +104,24 @@ const DESTRUCTIVE_BASH_PATTERNS: &[&str] = &[
     "git push --force",
     "git push -f",
     "git push --force-with-lease",
-    "git reset --hard origin",
-    "git clean -fdx",
-    "git clean -fdX",
+    // Work-discarding git operations. These don't wipe the whole system
+    // (so they're below the catastrophic backstop) but they silently throw
+    // away uncommitted or unpushed work — the exact "lost state" class the
+    // session audit flagged. Matched on the normalized (lowercased) command.
+    "git reset --hard",
+    "git clean -fd",
+    "git clean -f ",
+    "git clean -xf",
+    "git checkout -- ",
+    "git checkout .",
+    "git restore ",
+    "git branch -d",
+    "git stash drop",
+    "git stash clear",
+    "git worktree remove --force",
+    "git worktree remove -f",
+    "git reflog expire",
+    "git update-ref -d",
     "dd if=",
     "dd of=/dev",
     "mkfs",
@@ -126,13 +141,21 @@ const DESTRUCTIVE_BASH_PATTERNS: &[&str] = &[
 /// command warning UI (`DestructiveWarn` feature gate) to surface a
 /// ⚠ DESTRUCTIVE label in the approval prompt.
 pub fn is_destructive_bash(command: &str) -> bool {
+    destructive_bash_match(command).is_some()
+}
+
+/// Returns the destructive pattern a command matches, if any. Single source
+/// of truth shared by `is_destructive_bash` (UI label) and the classifier
+/// precedence guard, so the denylist can never drift between them.
+fn destructive_bash_match(command: &str) -> Option<&'static str> {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
-        return false;
+        return None;
     }
     DESTRUCTIVE_BASH_PATTERNS
         .iter()
-        .any(|pat| normalized.contains(pat))
+        .find(|pat| normalized.contains(**pat))
+        .copied()
 }
 
 /// Top-level entry: classify one tool call.
@@ -143,6 +166,19 @@ pub fn classify_tool_use(
 ) -> ClassifierDecision {
     if is_read_only(kind) {
         return ClassifierDecision::Allow;
+    }
+    // Destructive-Bash denylist takes precedence over allow-rules. A broad
+    // `Bash` (or `Bash(git*)`) allow-rule must NOT be able to wave through a
+    // work-discarding command like `git reset --hard HEAD~3`. Without this
+    // ordering, `is_explicitly_allowed` returns early and the denylist below
+    // never runs — the precedence hole the destructive-command audit found.
+    if let ToolInput::Bash { command, .. } = input
+        && let Some(pat) = destructive_bash_match(command)
+    {
+        return ClassifierDecision::Deny(format!(
+            "destructive pattern `{}` detected in command",
+            pat.trim()
+        ));
     }
     if is_explicitly_allowed(kind, input, allow_rules) {
         return ClassifierDecision::Allow;
@@ -226,13 +262,11 @@ fn classify_bash(command: &str) -> ClassifierDecision {
     if normalized.is_empty() {
         return ClassifierDecision::Ask;
     }
-    for pat in DESTRUCTIVE_BASH_PATTERNS {
-        if normalized.contains(pat) {
-            return ClassifierDecision::Deny(format!(
-                "destructive pattern `{}` detected in command",
-                pat.trim()
-            ));
-        }
+    if let Some(pat) = destructive_bash_match(command) {
+        return ClassifierDecision::Deny(format!(
+            "destructive pattern `{}` detected in command",
+            pat.trim()
+        ));
     }
     for prefix in SAFE_BASH_PREFIXES {
         if matches_safe_prefix(&normalized, prefix) {
@@ -372,5 +406,39 @@ mod tests {
             classify_tool_use(&ToolKind::Edit, &edit(), &[]),
             ClassifierDecision::Ask
         );
+    }
+
+    #[test]
+    fn broad_bash_rule_does_not_bypass_destructive_deny() {
+        // Regression: a blanket `Bash` allow-rule must NOT wave through a
+        // work-discarding command. Precedence: denylist before allow-rules.
+        let rules = vec!["Bash".to_string()];
+        assert!(matches!(
+            classify_tool_use(&ToolKind::Bash, &bash("git reset --hard HEAD~3"), &rules),
+            ClassifierDecision::Deny(_)
+        ));
+        // Scoped Bash(git*) rule must also not bypass.
+        let scoped = vec!["Bash(git*)".to_string()];
+        assert!(matches!(
+            classify_tool_use(&ToolKind::Bash, &bash("git clean -fd"), &scoped),
+            ClassifierDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn work_discarding_git_ops_denied() {
+        for cmd in [
+            "git reset --hard HEAD~3",
+            "git checkout -- src/main.rs",
+            "git stash drop",
+            "git branch -D feature",
+            "git clean -fd",
+            "git restore src/lib.rs",
+        ] {
+            assert!(
+                matches!(classify_bash(cmd), ClassifierDecision::Deny(_)),
+                "expected deny for `{cmd}`"
+            );
+        }
     }
 }

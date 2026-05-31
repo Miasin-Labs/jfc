@@ -78,6 +78,31 @@ pub(crate) fn handle_tool_result(
             if let MessagePart::Tool(tc) = part
                 && tc.id == tool_id
             {
+                // Use the typestate-style transition
+                // helpers — they refuse to revive a
+                // terminal tool (Failed → Completed
+                // would be a logic bug, e.g. a stale
+                // ToolResult arriving after a denial).
+                // On invalid transition we log + leave
+                // the existing terminal status alone,
+                // since the second result is the
+                // duplicate, not the first.
+                let transition = if result.is_error() {
+                    tc.mark_failed()
+                } else {
+                    tc.mark_completed()
+                };
+                if let Err(err) = transition {
+                    tracing::warn!(
+                        target: "jfc::event_loop",
+                        tool_id = %tc.id.as_str(),
+                        from = ?err.from,
+                        to = ?err.to,
+                        "ToolResult: refusing to revive terminal tool — \
+                         keeping prior status",
+                    );
+                    return;
+                }
                 // Stamp wall-clock duration as soon as
                 // the result lands. The renderer reads
                 // `tc.elapsed_ms` to draw a muted
@@ -109,30 +134,6 @@ pub(crate) fn handle_tool_result(
                 app.path_yank_cursor = 0;
                 if result.is_error() {
                     crate::notifications::notify_tool_failed(tc.kind.label(), &result.output);
-                }
-                // Use the typestate-style transition
-                // helpers — they refuse to revive a
-                // terminal tool (Failed → Completed
-                // would be a logic bug, e.g. a stale
-                // ToolResult arriving after a denial).
-                // On invalid transition we log + leave
-                // the existing terminal status alone,
-                // since the second result is the
-                // duplicate, not the first.
-                let transition = if result.is_error() {
-                    tc.mark_failed()
-                } else {
-                    tc.mark_completed()
-                };
-                if let Err(err) = transition {
-                    tracing::warn!(
-                        target: "jfc::event_loop",
-                        tool_id = %tc.id.as_str(),
-                        from = ?err.from,
-                        to = ?err.to,
-                        "ToolResult: refusing to revive terminal tool — \
-                         keeping prior status",
-                    );
                 }
                 let new_status = tc.status;
                 // Sparkle on success: stamp the tool
@@ -346,6 +347,26 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         in_flight_batches = app.in_flight_tool_batches,
         "ToolEvent::AllComplete"
     );
+    if app.is_streaming {
+        // A late AllComplete after cancellation may still find queued safe
+        // tools. Dispatching is OK: the shared cancellation token makes the
+        // scheduler report them as cancelled instead of running side effects.
+        let dispatched = super::stream_tool::dispatch_eager_safe_prefix(app, tx);
+        if !dispatched.is_empty() {
+            tracing::debug!(
+                target: "jfc::stream",
+                ids = ?dispatched,
+                "AllToolsComplete: dispatched next eager-safe prefix"
+            );
+            return;
+        }
+    } else if super::stream_tool::dispatch_pending_after_stream(app, tx) {
+        tracing::debug!(
+            target: "jfc::stream",
+            "AllToolsComplete: dispatched remaining ordered tool batch after eager prefix"
+        );
+        return;
+    }
     // AllToolsComplete is *batch-local*: it fires when
     // the current `dispatch_tools_batched` call finishes
     // its tools. The approval path dispatches one tool at
@@ -889,6 +910,31 @@ mod tests {
         );
 
         assert!(should_recheck_completion_after_tool_result(&app));
+    }
+
+    #[test]
+    fn stale_success_result_does_not_overwrite_failed_tool_output() {
+        let (mut app, tool_id) = test_app_with_tool(ToolStatus::Failed);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        if let Some(MessagePart::Tool(tool)) = app.messages[1].parts.get_mut(0) {
+            tool.output = ToolOutput::Text("Denied by permission mode".to_owned());
+        }
+
+        handle_tool_result(
+            &mut app,
+            &tx,
+            tool_id,
+            crate::runtime::ExecutionResult::success("late stale result"),
+        );
+
+        let MessagePart::Tool(tool) = &app.messages[1].parts[0] else {
+            panic!("expected tool part");
+        };
+        assert_eq!(tool.status, ToolStatus::Failed);
+        assert!(matches!(
+            &tool.output,
+            ToolOutput::Text(text) if text == "Denied by permission mode"
+        ));
     }
 
     #[test]

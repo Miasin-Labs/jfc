@@ -84,6 +84,9 @@ pub struct StreamRequestOverrides {
     pub max_thinking_tokens: Option<u32>,
     /// Thinking display mode from `--thinking-display`.
     pub thinking_display: Option<String>,
+    /// Interactive brief mode: keep `SendUserMessage` advertised and suppress
+    /// routine assistant prose from the visible transcript.
+    pub brief_mode: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

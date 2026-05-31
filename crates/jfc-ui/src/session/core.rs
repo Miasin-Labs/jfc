@@ -901,6 +901,8 @@ mod disk_io_tests {
             kind: Some("implementation".into()),
             tags: vec![],
             priority: None,
+            effort: None,
+            model: None,
         };
         let decoded = deserialize_tool_input(serialize_tool_input(&create));
         match decoded {

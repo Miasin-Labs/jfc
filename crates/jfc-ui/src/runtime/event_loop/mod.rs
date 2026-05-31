@@ -19,6 +19,28 @@ mod guards;
 mod handlers;
 mod narration_retry;
 
+fn prioritize_terminal_events(events: &mut Vec<AppEvent>) {
+    if events.len() < 2
+        || !events
+            .iter()
+            .any(|event| matches!(event, AppEvent::Ui(UiEvent::Term(_))))
+    {
+        return;
+    }
+
+    let mut terminal_events = Vec::new();
+    let mut other_events = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        if matches!(event, AppEvent::Ui(UiEvent::Term(_))) {
+            terminal_events.push(event);
+        } else {
+            other_events.push(event);
+        }
+    }
+    terminal_events.extend(other_events);
+    *events = terminal_events;
+}
+
 pub(crate) async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     providers: Vec<Arc<dyn Provider>>,
@@ -31,6 +53,7 @@ pub(crate) async fn run(
     cli_config: crate::CliRuntimeConfig,
 ) -> anyhow::Result<()> {
     let (tx, mut rx): (EventSender, EventReceiver) = mpsc::channel(APP_EVENT_BUFFER);
+    let (term_tx, mut term_rx) = mpsc::unbounded_channel::<event::Event>();
     // Make the channel reachable from non-Task code paths (bounty
     // solver/validator agents, future cron-triggered work) so they
     // emit the same TaskStarted/AgentChunk/TaskCompleted events the
@@ -537,13 +560,12 @@ pub(crate) async fn run(
     }
 
     {
-        let tx = tx.clone();
         tokio::spawn(async move {
             let mut reader = event::EventStream::new();
             while let Some(ev) = reader.next().await {
                 match ev {
                     Ok(ev) => {
-                        _ = tx.send(AppEvent::Ui(UiEvent::Term(ev))).await;
+                        _ = term_tx.send(ev);
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -715,6 +737,7 @@ pub(crate) async fn run(
             task_budget: app.cli_task_budget,
             max_thinking_tokens: app.cli_max_thinking_tokens,
             thinking_display: app.cli_thinking_display.clone(),
+            brief_mode: app.brief_mode,
             ..Default::default()
         };
         let tx_guard = tx.clone();
@@ -763,24 +786,58 @@ pub(crate) async fn run(
     const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
     let mut last_draw = std::time::Instant::now();
     let mut pending_draw = false;
+    let mut term_events_open = true;
 
     'main_loop: loop {
         // Burst-recv: block on the first event, then drain everything currently
         // queued without re-awaiting. Process them all, draw once at the end.
         // This collapses N rapid stream chunks into 1 frame instead of N frames.
-        let mut events: Vec<AppEvent> = match rx.recv().await {
-            Some(e) => vec![e],
-            None => break,
+        let first_event = loop {
+            if !term_events_open {
+                break match rx.recv().await {
+                    Some(e) => e,
+                    None => break 'main_loop,
+                };
+            }
+            tokio::select! {
+                biased;
+                term = term_rx.recv() => {
+                    match term {
+                        Some(ev) => break AppEvent::Ui(UiEvent::Term(ev)),
+                        None => term_events_open = false,
+                    }
+                }
+                app_event = rx.recv() => {
+                    break match app_event {
+                        Some(e) => e,
+                        None => break 'main_loop,
+                    };
+                }
+            }
         };
+        let mut events: Vec<AppEvent> = vec![first_event];
         // Cap burst draining to prevent starvation: at most 256 events per
         // iteration so producers can't endlessly refill while we drain.
         const BURST_CAP: usize = 256;
         while events.len() < BURST_CAP {
+            if term_events_open {
+                match term_rx.try_recv() {
+                    Ok(term) => {
+                        events.push(AppEvent::Ui(UiEvent::Term(term)));
+                        continue;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        term_events_open = false;
+                    }
+                }
+            }
             match rx.try_recv() {
                 Ok(extra) => events.push(extra),
                 Err(_) => break,
             }
         }
+        prioritize_terminal_events(&mut events);
 
         // Track whether any event in this burst dirties the screen. Pure Tick
         // events with no streaming/animation skip the draw entirely — eliminates
@@ -1212,6 +1269,45 @@ fn resolve_effort_for_model(cfg: &crate::config::Config, model: &str) -> Option<
     }
     // 3: [default] block
     cfg.default.reasoning_effort.clone()
+}
+
+#[cfg(test)]
+mod event_priority_tests {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    #[test]
+    fn terminal_events_are_prioritized_within_burst_robust() {
+        let mut events = vec![
+            AppEvent::Stream(StreamEvent::Chunk {
+                text: Some("first".to_owned()),
+                reasoning: None,
+            }),
+            AppEvent::Ui(UiEvent::Tick),
+            AppEvent::Ui(UiEvent::Term(Event::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))),
+            AppEvent::Stream(StreamEvent::Chunk {
+                text: Some("second".to_owned()),
+                reasoning: None,
+            }),
+        ];
+
+        prioritize_terminal_events(&mut events);
+
+        assert!(matches!(&events[0], AppEvent::Ui(UiEvent::Term(_))));
+        assert!(matches!(
+            &events[1],
+            AppEvent::Stream(StreamEvent::Chunk { .. })
+        ));
+        assert!(matches!(&events[2], AppEvent::Ui(UiEvent::Tick)));
+        assert!(matches!(
+            &events[3],
+            AppEvent::Stream(StreamEvent::Chunk { .. })
+        ));
+    }
 }
 
 #[cfg(test)]

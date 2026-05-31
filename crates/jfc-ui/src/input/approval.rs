@@ -65,6 +65,22 @@ fn dispatch_approved_tools(app: &mut App, tools: Vec<ToolCall>, tx: &mpsc::Sende
     );
 }
 
+pub(super) fn deny_pending_and_queued(app: &mut App, tx: &mpsc::Sender<AppEvent>) -> usize {
+    let mut denied = Vec::new();
+    if let Some(pending) = app.pending_approval.take() {
+        denied.push(pending.tool);
+    }
+    denied.extend(app.approval_queue.drain(..));
+    let denied_count = denied.len();
+    for tool in denied {
+        deny_tool(app, tool);
+    }
+    if denied_count > 0 {
+        crate::runtime::send_critical(tx, AppEvent::Tool(crate::runtime::ToolEvent::AllComplete));
+    }
+    denied_count
+}
+
 /// Promote the next queued tool into `pending_approval` so the modal cycles
 /// through every tool the model emitted in this turn. Auto-applies prior
 /// `always_approved` / `session_approved` decisions so the user doesn't get
@@ -254,6 +270,12 @@ pub(super) fn handle_approval_key(
         return false;
     };
 
+    if key.modifiers.contains(event::KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+    {
+        return false;
+    }
+
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             let tool = app.pending_approval.take().unwrap().tool;
@@ -314,8 +336,7 @@ pub(super) fn handle_approval_key(
             // Esc cancels the entire batch — drop the queue too. Otherwise
             // a queued tool would surface immediately and the user would
             // have to dismiss them one-by-one.
-            app.pending_approval = None;
-            app.approval_queue.clear();
+            deny_pending_and_queued(app, tx);
         }
         KeyCode::Char('b') | KeyCode::Char('B')
             if crate::feature_gates::is_enabled(crate::feature_gates::FeatureGate::Tern) =>

@@ -246,7 +246,7 @@ macro_rules! for_each_regular_tool_input {
             Grep => { pattern: req_str @ "pattern", path: opt_str @ "path", glob: opt_str @ "glob", output_mode: opt_str @ "output_mode" }
             Search => { query: req_str @ "query", path: opt_str @ "path" }
             ApplyPatch => { patch: req_str @ "patch" }
-            TaskUpdate => { task_id: req_str @ "task_id", status: opt_str @ "status", subject: opt_str @ "subject", description: opt_str @ "description", owner: opt_str @ "owner", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind", blocked_by: str_vec @ "blocked_by", tags: str_vec @ "tags", priority: opt_u8 @ "priority" }
+            TaskUpdate => { task_id: req_str @ "task_id", status: opt_str @ "status", subject: opt_str @ "subject", description: opt_str @ "description", owner: opt_str @ "owner", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind", blocked_by: str_vec @ "blocked_by", tags: str_vec @ "tags", priority: opt_u8 @ "priority", effort: opt_str @ "effort", model: opt_str @ "model" }
             TaskList => { status_filter: opt_str @ "status_filter", owner_filter: opt_str @ "owner_filter" }
             TaskDone => { task_id: req_str @ "task_id" }
             TaskStop => { task_id: req_str @ "task_id" }
@@ -318,7 +318,7 @@ macro_rules! for_each_to_value_only_tool_input {
     ($cb:ident) => {
         $cb! {
             Bash => { command: req_str @ "command", timeout: opt_u64 @ "timeout", workdir: opt_str @ "workdir" }
-            TaskCreate => { subject: req_str @ "subject", description: req_str @ "description", active_form: opt_str @ "active_form", blocked_by: str_vec @ "blocked_by", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind", tags: str_vec @ "tags", priority: opt_u8 @ "priority" }
+            TaskCreate => { subject: req_str @ "subject", description: req_str @ "description", active_form: opt_str @ "active_form", blocked_by: str_vec @ "blocked_by", acceptance_criteria: opt_str @ "acceptance_criteria", verification_command: opt_str @ "verification_command", risk: opt_str @ "risk", parent_id: opt_str @ "parent_id", kind: opt_str @ "kind", tags: str_vec @ "tags", priority: opt_u8 @ "priority", effort: opt_str @ "effort", model: opt_str @ "model" }
             Skill => { name: req_str @ "name", args: opt_str @ "args" }
             SendMessage => { to: req_str @ "to", message: req_str @ "message", summary: opt_str @ "summary" }
         }
@@ -472,6 +472,8 @@ pub enum ToolInput {
         kind: Option<String>,
         tags: Vec<String>,
         priority: Option<u8>,
+        effort: Option<String>,
+        model: Option<String>,
     },
     TaskUpdate {
         task_id: String,
@@ -487,6 +489,8 @@ pub enum ToolInput {
         blocked_by: Vec<String>,
         tags: Vec<String>,
         priority: Option<u8>,
+        effort: Option<String>,
+        model: Option<String>,
     },
     TaskList {
         status_filter: Option<String>,
@@ -1238,6 +1242,8 @@ impl ToolInput {
                     kind: opt_str_field("kind"),
                     tags,
                     priority,
+                    effort: opt_str_field("effort"),
+                    model: opt_str_field("model"),
                 }
             }
             ToolKind::TaskStop => Self::TaskStop {

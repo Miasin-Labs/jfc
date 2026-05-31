@@ -167,6 +167,17 @@ pub struct Task {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
+    /// Per-task reasoning-effort override (e.g. "low", "medium", "high",
+    /// "max"). When the factory auto-continues this task, this effort is
+    /// applied for the turn. Precedence mirrors subagents: Task.effort >
+    /// AgentDef.effort > global. `None` = inherit the session default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Per-task model override (e.g. "claude-opus-4", "claude-haiku-4-5").
+    /// When the factory auto-continues this task, it requests this model for
+    /// the turn. `None` = use the session's active model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// How many times execution of this task has failed. Drives bounded
     /// retry (transient failures re-queue until this hits `max_attempts`)
     /// and the rework/attempts factory metrics. See
@@ -215,6 +226,8 @@ pub struct TaskPatch {
     pub kind: Option<TaskKind>,
     pub tags: Option<Vec<String>>,
     pub priority: Option<u8>,
+    pub effort: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]

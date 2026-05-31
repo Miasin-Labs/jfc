@@ -291,21 +291,27 @@ pub(crate) async fn handle_task_completed(
     // finish cleanly while its queued task stayed
     // `in_progress` — the Task tool result and the
     // persistent todo were never connected.
-    if let Some(ref ptid) = linked_task_id
-        && let Err(e) = app.task_store.update(
+    if let Some(ref ptid) = linked_task_id {
+        if let Err(e) = app.task_store.update(
             ptid,
             jfc_session::TaskPatch {
                 status: Some(jfc_session::TaskStatus::Completed),
                 ..Default::default()
             },
-        )
-    {
-        tracing::warn!(
-            target: "jfc::task",
-            parent_task_id = %ptid,
-            error = %e,
-            "TaskCompleted: failed to mark linked task completed"
-        );
+        ) {
+            tracing::warn!(
+                target: "jfc::task",
+                parent_task_id = %ptid,
+                error = %e,
+                "TaskCompleted: failed to mark linked task completed"
+            );
+        } else {
+            // Parity with the manual TaskDone path (tools/dispatch.rs): a
+            // subagent finishing its parent_task_id-linked todo must also
+            // advance any plan that linked the task, otherwise plans stall
+            // whenever work is delegated instead of done inline.
+            crate::tools::advance_linked_plans(&app.task_store, ptid);
+        }
     }
     crate::daemon::record_background_agent_finished(
         task_id.as_str(),

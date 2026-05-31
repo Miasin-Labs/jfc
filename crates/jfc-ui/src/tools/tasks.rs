@@ -20,6 +20,8 @@ pub(super) fn execute_task_create(
     kind: Option<String>,
     tags: Vec<String>,
     priority: Option<u8>,
+    effort: Option<String>,
+    model: Option<String>,
 ) -> ExecutionResult {
     debug!(target: "jfc::tools", %subject, blocked_count = blocked_by.len(), "task_create: creating");
     let Some(store) = store else {
@@ -46,7 +48,9 @@ pub(super) fn execute_task_create(
                 || parent_id.is_some()
                 || parsed_kind.is_some()
                 || !tags.is_empty()
-                || priority.is_some();
+                || priority.is_some()
+                || effort.is_some()
+                || model.is_some();
             if has_extras {
                 let patch = TaskPatch {
                     acceptance_criteria,
@@ -56,6 +60,8 @@ pub(super) fn execute_task_create(
                     kind: parsed_kind,
                     tags: if tags.is_empty() { None } else { Some(tags) },
                     priority,
+                    effort,
+                    model,
                     ..Default::default()
                 };
                 match store.update(task.id.as_str(), patch) {
@@ -103,6 +109,8 @@ pub(super) fn execute_task_update(
     blocked_by: Vec<String>,
     tags: Vec<String>,
     priority: Option<u8>,
+    effort: Option<String>,
+    model: Option<String>,
 ) -> ExecutionResult {
     debug!(target: "jfc::tools", task_id, status = status.as_deref(), "task_update: updating");
     let Some(store) = store else {
@@ -138,6 +146,8 @@ pub(super) fn execute_task_update(
         },
         tags: if tags.is_empty() { None } else { Some(tags) },
         priority,
+        effort,
+        model,
         ..Default::default()
     };
     match store.update(task_id, patch) {

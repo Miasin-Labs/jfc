@@ -31,7 +31,7 @@ impl LocalAdvisorDispatchContext {
     }
 }
 
-#[tracing::instrument(target = "jfc::stream", skip(tx, dedup, task_store, provider, model, teammate_event_tx, local_advisor), fields(n = tool_calls.len()))]
+#[tracing::instrument(target = "jfc::stream", skip(tool_calls, tx, dedup, task_store, provider, model, teammate_event_tx, local_advisor, cancel), fields(n = tool_calls.len()))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_tools_batched(
     tool_calls: Vec<ToolCall>,
@@ -91,24 +91,33 @@ pub(crate) fn dispatch_tools_batched(
         let provider_advisor = provider.clone();
         let tool_id = tc.id.clone();
         let context = local_advisor.clone();
+        let cancel_advisor = cancel.clone();
         tokio::spawn(async move {
-            let result = match context {
-                Some(context) => match crate::advisor::ask_local_advisor_tool(
-                    provider_advisor.as_ref(),
-                    context.advisor_model,
-                    &context.transcript,
-                )
-                .await
-                {
-                    Ok(reply) => crate::runtime::ExecutionResult::success(reply),
-                    Err(e) => crate::runtime::ExecutionResult::failure(format!(
-                        "Local advisor error: {e}"
-                    )),
-                },
-                None => crate::runtime::ExecutionResult::failure(
-                    "Local advisor is not configured. Use `/advisor config <model>` or start with `--advisor [MODEL]`."
-                        .to_owned(),
-                ),
+            let result = tokio::select! {
+                biased;
+                _ = cancel_advisor.cancelled() => {
+                    crate::runtime::ExecutionResult::failure("Local advisor cancelled by user")
+                }
+                result = async {
+                    match context {
+                        Some(context) => match crate::advisor::ask_local_advisor_tool(
+                            provider_advisor.as_ref(),
+                            context.advisor_model,
+                            &context.transcript,
+                        )
+                        .await
+                        {
+                            Ok(reply) => crate::runtime::ExecutionResult::success(reply),
+                            Err(e) => crate::runtime::ExecutionResult::failure(format!(
+                                "Local advisor error: {e}"
+                            )),
+                        },
+                        None => crate::runtime::ExecutionResult::failure(
+                            "Local advisor is not configured. Use `/advisor config <model>` or start with `--advisor [MODEL]`."
+                                .to_owned(),
+                        ),
+                    }
+                } => result,
             };
             send_critical(
                 &tx_advisor,
@@ -288,6 +297,7 @@ pub(crate) fn dispatch_tools_batched(
             continue;
         }
 
+        let cancel_task = cancel.clone();
         tokio::spawn(async move {
             // If isolation: "worktree", create a git worktree for this agent
             let worktree_info = if task_input.isolation.as_deref() == Some("worktree") {
@@ -379,18 +389,30 @@ pub(crate) fn dispatch_tools_batched(
             // them in the daemon roster too, where the reconciler would
             // later mark them stale at UI exit, confusing the next
             // session's restored "background agents" list.
-            let result = crate::tools::execute_task(
-                &task_input,
-                provider_task.as_ref(),
-                model_task,
-                Some(&tx_task),
-                Some(&task_id),
-                agent_def.as_ref(),
-                cwd_override,
-                task_store_task,
-                active_team_name_task.as_deref(),
-            )
-            .await;
+            let result = tokio::select! {
+                biased;
+                _ = cancel_task.cancelled() => {
+                    let killed = crate::bash_processes::terminate_all();
+                    tracing::info!(
+                        target: "jfc::stream",
+                        task_id = %task_id,
+                        killed,
+                        "task tool cancelled via turn token"
+                    );
+                    crate::runtime::ExecutionResult::failure("Task cancelled by user")
+                }
+                result = crate::tools::execute_task(
+                    &task_input,
+                    provider_task.as_ref(),
+                    model_task,
+                    Some(&tx_task),
+                    Some(&task_id),
+                    agent_def.as_ref(),
+                    cwd_override,
+                    task_store_task,
+                    active_team_name_task.as_deref(),
+                ) => result,
+            };
             let elapsed_ms = started.elapsed().as_millis() as u64;
 
             if result.is_error() {
@@ -549,18 +571,26 @@ pub(crate) fn dispatch_tools_batched(
         );
         let tx_clone = tx.clone();
         let done = send_all_complete.clone();
-        // wg-async cancellation: race the batch executor against the
-        // turn's cancel token. The scheduler itself runs synchronous
-        // tool work; a token-cancel cuts off the *await* between tools
-        // and lets the spawn return early so its capture set drops.
+        // Let the scheduler settle every started tool before emitting
+        // AllComplete. Dropping this future on cancellation drops its
+        // JoinHandles, and Tokio treats that as detach rather than abort:
+        // stale tool tasks can keep running and report after the turn was
+        // announced complete. ESCx2 still SIGTERMs tracked bash subprocesses;
+        // this await keeps the transcript/event ordering coherent.
         let cancel_batch = cancel.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                _ = cancel_batch.cancelled() => {
-                    tracing::info!(target: "jfc::stream", "tool batch cancelled via token");
-                }
-                _ = scheduler::execute_batches(batches, &tx_clone, cwd, dedup, task_store, active_team_name) => {}
+            scheduler::execute_batches(
+                batches,
+                &tx_clone,
+                cwd,
+                dedup,
+                task_store,
+                active_team_name,
+                cancel_batch.clone(),
+            )
+            .await;
+            if cancel_batch.is_cancelled() {
+                tracing::info!(target: "jfc::stream", "tool batch settled after cancellation");
             }
             done();
         });

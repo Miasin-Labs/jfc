@@ -73,7 +73,8 @@ impl<'a> RenderCtx<'a> {
             theme: app.theme,
             launched_at: app.launched_at,
             diagnostics: &app.diagnostics,
-            brief_mode: app.brief_mode,
+            brief_mode: app.brief_mode
+                || crate::feature_gates::pewter_owl_brief_enabled(app.model.as_str(), false),
         }
     }
 

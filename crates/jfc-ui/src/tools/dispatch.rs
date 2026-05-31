@@ -209,6 +209,8 @@ pub async fn execute_tool(
                 kind,
                 tags,
                 priority,
+                effort,
+                model,
             },
         ) => execute_task_create(
             task_store,
@@ -223,6 +225,8 @@ pub async fn execute_tool(
             kind,
             tags,
             priority,
+            effort,
+            model,
         ),
         (
             ToolKind::TaskUpdate,
@@ -240,6 +244,8 @@ pub async fn execute_tool(
                 blocked_by,
                 tags,
                 priority,
+                effort,
+                model,
             },
         ) => execute_task_update(
             task_store,
@@ -256,6 +262,8 @@ pub async fn execute_tool(
             blocked_by,
             tags,
             priority,
+            effort,
+            model,
         ),
         (
             ToolKind::TaskList,
@@ -1177,7 +1185,7 @@ pub async fn execute_tool(
 /// the plan's status flips to `Done`. Errors are logged-and-swallowed —
 /// plan bookkeeping is best-effort and must never fail the underlying
 /// TaskDone tool call.
-fn advance_linked_plans(task_store: &TaskStore, task_id: &str) {
+pub(crate) fn advance_linked_plans(task_store: &TaskStore, task_id: &str) {
     let git_root = crate::context::discover_git_root();
     let plan_store = match crate::plan::PlanStore::open_project(git_root.as_deref()) {
         Ok(s) => s,

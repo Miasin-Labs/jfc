@@ -220,6 +220,70 @@ pub async fn handle_key(
     Ok(false)
 }
 
+fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::runtime::AppEvent>) {
+    let already_requested = app.cancel_token.is_cancelled()
+        || app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst);
+
+    let old_cancel = app.cancel_token.clone();
+    app.interrupt_flag
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    old_cancel.cancel();
+    app.cancel_token = tokio_util::sync::CancellationToken::new();
+    app.last_esc_at = None;
+
+    if let Some(handle) = app.active_stream_handle.take() {
+        handle.abort();
+    }
+
+    let denied_approvals = approval::deny_pending_and_queued(app, tx);
+
+    if app.goal_evaluator_in_flight {
+        tracing::info!(
+            target: "jfc::input::abort",
+            "marking in-flight goal evaluator cancelled"
+        );
+        app.goal_evaluator_in_flight = false;
+    }
+
+    let killed = crate::bash_processes::terminate_all();
+    if killed > 0 {
+        tracing::info!(
+            target: "jfc::input::abort",
+            killed,
+            "SIGTERMed in-flight bash subprocesses"
+        );
+    }
+
+    if !app.has_interruptible_work() {
+        app.interrupt_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    if already_requested {
+        tracing::debug!(
+            target: "jfc::input::abort",
+            denied_approvals,
+            "interrupt request ignored because cancellation is already in progress"
+        );
+        return;
+    }
+
+    crate::toast::push_with_cap(
+        &mut app.toasts,
+        crate::toast::Toast::new(
+            crate::toast::ToastKind::Warning,
+            if killed > 0 {
+                format!(
+                    "⏹ Interrupted (killed {killed} process{})",
+                    if killed == 1 { "" } else { "es" }
+                )
+            } else {
+                "⏹ Interrupted".to_owned()
+            },
+        ),
+    );
+}
+
 /// Command-key handling: the global keybinding match (Ctrl/Alt combos,
 /// transcript navigation, diagnostic-panel keys, cursor motions). Split
 /// out of `handle_key` per the cohesion guidance — every real arm
@@ -238,6 +302,10 @@ async fn handle_command_keys(
                 // Also clear pasted images so the next paste starts fresh.
                 app.pasted_images.clear();
                 app.image_counter = 0;
+                return Some(Ok(false));
+            }
+            if app.has_interruptible_work() {
+                request_user_interrupt(app, tx);
                 return Some(Ok(false));
             }
             Some(Ok(true))
@@ -897,49 +965,19 @@ async fn handle_command_keys(
             // This gives the user a confirmation step (prevents accidental
             // kills) while making the actual kill truly instant when confirmed.
             const DOUBLE_TAP_MS: u128 = 600;
-            let active = app.is_streaming
-                || app.compacting_started_at.is_some()
-                || !app.pending_tool_calls.is_empty()
-                || app
-                    .background_tasks
-                    .values()
-                    .any(|bt| matches!(bt.status, crate::types::TaskLifecycle::Running));
+            let active = app.has_interruptible_work();
             if active {
+                if key.kind == event::KeyEventKind::Repeat {
+                    return Some(Ok(false));
+                }
+
                 let now = std::time::Instant::now();
                 let armed = app
                     .last_esc_at
                     .map(|t| now.duration_since(t).as_millis() < DOUBLE_TAP_MS)
                     .unwrap_or(false);
                 if armed {
-                    // 2nd ESC — INSTANT KILL. CancellationToken wakes the
-                    // select! in stream_response on the next scheduler tick.
-                    app.interrupt_flag
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    app.cancel_token.cancel();
-                    app.last_esc_at = None;
-                    // SIGTERM all in-flight bash subprocesses immediately.
-                    let killed = crate::bash_processes::terminate_all();
-                    if killed > 0 {
-                        tracing::info!(
-                            target: "jfc::input::abort",
-                            killed,
-                            "SIGTERMed in-flight bash subprocesses"
-                        );
-                    }
-                    crate::toast::push_with_cap(
-                        &mut app.toasts,
-                        crate::toast::Toast::new(
-                            crate::toast::ToastKind::Warning,
-                            if killed > 0 {
-                                format!(
-                                    "⏹ Interrupted (killed {killed} process{})",
-                                    if killed == 1 { "" } else { "es" }
-                                )
-                            } else {
-                                "⏹ Interrupted".to_owned()
-                            },
-                        ),
-                    );
+                    request_user_interrupt(app, tx);
                 } else {
                     // 1st ESC — arm the double-tap timer + hint.
                     app.last_esc_at = Some(now);
@@ -1074,6 +1112,11 @@ pub(crate) fn can_interrupt_on_submit(app: &App, compacting: bool) -> bool {
         // first turn isn't silently dropped mid-connect.
         && app.streaming_response_bytes > 0
         && app.pending_approval.is_none()
+        && app.approval_queue.is_empty()
+        && app.pending_classifications == 0
+        && app.in_flight_eager_dispatches == 0
+        && app.in_flight_tool_batches == 0
+        && app.in_progress_tool_use_ids.is_empty()
         && app
             .pending_tool_calls
             .iter()
@@ -1124,9 +1167,7 @@ async fn handle_enter_submit(
             // The prompt renders in the transcript right away so the user
             // knows it landed, and drains via `drain_queued_prompts` in
             // main.rs once the approval pipeline empties.
-            let pipeline_busy = app.pending_approval.is_some()
-                || !app.approval_queue.is_empty()
-                || !app.pending_tool_calls.is_empty();
+            let pipeline_busy = app.pipeline_busy_for_submit();
             let compacting = app.compacting_started_at.is_some();
             if app.is_streaming || pipeline_busy || compacting {
                 // Check if we can interrupt: if streaming with only
@@ -1140,6 +1181,9 @@ async fn handle_enter_submit(
                     );
                     // Cancel the current stream
                     app.cancel_token.cancel();
+                    if let Some(handle) = app.active_stream_handle.take() {
+                        handle.abort();
+                    }
                     app.cancel_token = tokio_util::sync::CancellationToken::new();
                     app.interrupt_flag
                         .store(false, std::sync::atomic::Ordering::SeqCst);

@@ -4,7 +4,7 @@
 //! transport chunk into `String`: UTF-8 code points, CRLF pairs, and SSE lines
 //! can all be split across network chunks.
 
-use std::{collections::VecDeque, pin::Pin, str};
+use std::{collections::VecDeque, pin::Pin, str, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures::{Stream, StreamExt};
@@ -13,6 +13,9 @@ const PRODUCTION_MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const PRODUCTION_MAX_EVENT_DATA_BYTES: usize = 64 * 1024 * 1024;
 const TEST_MAX_LINE_BYTES: usize = 64;
 const TEST_MAX_EVENT_DATA_BYTES: usize = 128;
+const DEFAULT_BYTE_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+const MIN_BYTE_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_BYTE_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseFrame {
@@ -188,8 +191,20 @@ where
                 return None;
             }
 
-            match state.stream.next().await {
-                Some(Ok(chunk)) => match state.parser.push(chunk.as_ref()) {
+            let idle_timeout = byte_stream_idle_timeout();
+            let next_chunk = tokio::time::timeout(idle_timeout, state.stream.next()).await;
+            match next_chunk {
+                Err(_) => {
+                    state.finished = true;
+                    return Some((
+                        Err(anyhow!(
+                            "SSE byte stream was idle for {}ms",
+                            idle_timeout.as_millis()
+                        )),
+                        state,
+                    ));
+                }
+                Ok(Some(Ok(chunk))) => match state.parser.push(chunk.as_ref()) {
                     Ok(frames) => {
                         state.pending.extend(frames.into_iter().map(Ok));
                     }
@@ -198,11 +213,11 @@ where
                         return Some((Err(e), state));
                     }
                 },
-                Some(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     state.finished = true;
                     return Some((Err(anyhow!(e)), state));
                 }
-                None => {
+                Ok(None) => {
                     state.finished = true;
                     match state.parser.finish() {
                         Ok(frames) => {
@@ -214,6 +229,28 @@ where
             }
         }
     }))
+}
+
+fn byte_stream_idle_timeout() -> Duration {
+    let configured = [
+        "JFC_BYTE_STREAM_IDLE_TIMEOUT_MS",
+        "CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS",
+        "JFC_STREAM_IDLE_TIMEOUT_MS",
+        "CLAUDE_STREAM_IDLE_TIMEOUT_MS",
+    ]
+    .iter()
+    .filter_map(|key| std::env::var(key).ok())
+    .find_map(|value| parse_timeout_ms(Some(value.as_str())));
+    clamp_byte_stream_timeout(configured.unwrap_or(DEFAULT_BYTE_STREAM_IDLE_TIMEOUT))
+}
+
+fn parse_timeout_ms(value: Option<&str>) -> Option<Duration> {
+    let millis = value?.trim().parse::<u64>().ok()?;
+    (millis > 0).then(|| Duration::from_millis(millis))
+}
+
+fn clamp_byte_stream_timeout(timeout: Duration) -> Duration {
+    timeout.clamp(MIN_BYTE_STREAM_IDLE_TIMEOUT, MAX_BYTE_STREAM_IDLE_TIMEOUT)
 }
 
 fn next_line_bounds(buffer: &[u8], eof: bool) -> Option<(usize, usize)> {
@@ -336,6 +373,24 @@ mod tests {
         let line = vec![b'a'; TEST_MAX_LINE_BYTES + 1];
         let err = parser.push(&line).unwrap_err();
         assert!(err.to_string().contains("exceeded"));
+    }
+
+    #[test]
+    fn byte_stream_timeout_parser_and_clamp_normal() {
+        assert_eq!(parse_timeout_ms(None), None);
+        assert_eq!(parse_timeout_ms(Some("0")), None);
+        assert_eq!(
+            parse_timeout_ms(Some("15000")),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            clamp_byte_stream_timeout(Duration::from_millis(1)),
+            MIN_BYTE_STREAM_IDLE_TIMEOUT
+        );
+        assert_eq!(
+            clamp_byte_stream_timeout(Duration::from_secs(3600)),
+            MAX_BYTE_STREAM_IDLE_TIMEOUT
+        );
     }
 
     #[tokio::test]

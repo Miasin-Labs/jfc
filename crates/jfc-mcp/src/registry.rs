@@ -303,6 +303,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
                     command: cfg.command.clone().unwrap_or_default(),
                     args: cfg.args.clone(),
                     env: cfg.env.clone(),
+                    headers: cfg.headers.clone(),
                     url: cfg.url.clone(),
                 },
             };
@@ -315,6 +316,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
         command: cfg.command.clone().unwrap_or_default(),
         args: cfg.args.clone(),
         env: cfg.env.clone(),
+        headers: cfg.headers.clone(),
         url: cfg.url.clone(),
     };
 
@@ -409,6 +411,7 @@ pub async fn restart_server(registry: &McpRegistry, name: &str) -> Option<bool> 
         command: Some(old.spawn_cfg.command.clone()),
         args: old.spawn_cfg.args.clone(),
         env: old.spawn_cfg.env.clone(),
+        headers: old.spawn_cfg.headers.clone(),
         url: old.spawn_cfg.url.clone(),
     };
     let new_server = build_server(name, &cfg).await;
@@ -435,6 +438,7 @@ mod tests {
                 command: "fake".into(),
                 args: Vec::new(),
                 env: HashMap::new(),
+                headers: HashMap::new(),
                 url: None,
             },
         }
@@ -574,6 +578,7 @@ mod tests {
                 command: None,
                 args: vec![],
                 env: HashMap::new(),
+                headers: HashMap::new(),
                 url: None,
             },
         );
@@ -596,6 +601,7 @@ mod tests {
                 command: Some("/nonexistent/jfc-mcp-test-binary".into()),
                 args: vec![],
                 env: HashMap::new(),
+                headers: HashMap::new(),
                 url: None,
             },
         );

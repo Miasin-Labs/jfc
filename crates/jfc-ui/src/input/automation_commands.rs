@@ -108,6 +108,7 @@ Use the MemoryCreate tool for new memories and MemoryDelete for stale ones.{cron
         task_budget: app.cli_task_budget,
         max_thinking_tokens: app.cli_max_thinking_tokens,
         thinking_display: app.cli_thinking_display.clone(),
+        brief_mode: app.brief_mode,
         ..Default::default()
     };
     tokio::spawn(async move {
@@ -275,6 +276,7 @@ Then immediately execute the prompt now (do not wait for the first cron fire)."
         task_budget: app.cli_task_budget,
         max_thinking_tokens: app.cli_max_thinking_tokens,
         thinking_display: app.cli_thinking_display.clone(),
+        brief_mode: app.brief_mode,
         ..Default::default()
     };
     tokio::spawn(async move {
@@ -400,6 +402,7 @@ and display the results in a readable table with columns: id, schedule, command,
         task_budget: app.cli_task_budget,
         max_thinking_tokens: app.cli_max_thinking_tokens,
         thinking_display: app.cli_thinking_display.clone(),
+        brief_mode: app.brief_mode,
         ..Default::default()
     };
     tokio::spawn(async move {

@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::navigation::{scan_path_refs, user_prompts};
 use super::*;
@@ -166,6 +166,10 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn key_mod(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, mods)
+}
+
+fn key_repeat(code: KeyCode) -> KeyEvent {
+    KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Repeat)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -496,10 +500,49 @@ async fn approval_esc_clears_queue_robust() {
     arm_approval(&mut app, ToolKind::Bash);
     app.approval_queue
         .push_back(make_tool("t2", ToolKind::Bash));
-    let (tx, _rx) = channel();
+    let (tx, mut rx) = channel();
     handle_key(&mut app, key(KeyCode::Esc), &tx).await.unwrap();
     assert!(app.pending_approval.is_none());
     assert!(app.approval_queue.is_empty());
+    let event = rx.recv().await;
+    assert!(matches!(
+        event,
+        Some(AppEvent::Tool(ToolEvent::AllComplete))
+    ));
+}
+
+#[tokio::test]
+async fn approval_ctrl_c_interrupts_instead_of_being_swallowed_robust() {
+    let mut app = test_app();
+    app.is_streaming = true;
+    arm_approval(&mut app, ToolKind::Bash);
+    app.approval_queue
+        .push_back(make_tool("t2", ToolKind::Bash));
+    let (tx, mut rx) = channel();
+
+    let exit = handle_key(
+        &mut app,
+        key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &tx,
+    )
+    .await
+    .unwrap();
+
+    assert!(!exit);
+    assert!(app.pending_approval.is_none());
+    assert!(app.approval_queue.is_empty());
+    assert!(
+        app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
+        "Ctrl+C in approval modal must still request an active turn interrupt"
+    );
+    assert!(
+        !app.cancel_token.is_cancelled(),
+        "App should mint a fresh token after cancelling the active turn clone"
+    );
+    assert!(matches!(
+        rx.recv().await,
+        Some(AppEvent::Tool(ToolEvent::AllComplete))
+    ));
 }
 
 #[tokio::test]
@@ -1214,6 +1257,29 @@ async fn ctrl_c_exits_when_input_empty_robust() {
     assert!(exit);
 }
 
+#[tokio::test]
+async fn ctrl_c_interrupts_active_work_when_input_empty_normal() {
+    let mut app = test_app();
+    app.is_streaming = true;
+    let (tx, _rx) = channel();
+    let exit = handle_key(
+        &mut app,
+        key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert!(!exit);
+    assert!(
+        app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
+        "Ctrl+C during active work should request interrupt, not exit"
+    );
+    assert!(
+        !app.cancel_token.is_cancelled(),
+        "App should mint a fresh token after cancelling the active turn clone"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Ctrl+D
 // ─────────────────────────────────────────────────────────────────────
@@ -1750,10 +1816,35 @@ async fn esc_double_tap_while_streaming_interrupts_instantly_normal() {
         "2nd ESC must set interrupt_flag"
     );
     assert!(
-        app.cancel_token.is_cancelled(),
-        "2nd ESC must cancel the token"
+        !app.cancel_token.is_cancelled(),
+        "2nd ESC must leave the App ready with a fresh token"
     );
     assert!(app.last_esc_at.is_none(), "timer cleared after kill");
+}
+
+#[tokio::test]
+async fn esc_repeat_does_not_confirm_or_spam_interrupt_robust() {
+    let mut app = test_app();
+    app.is_streaming = true;
+    let (tx, _rx) = channel();
+
+    handle_key(&mut app, key(KeyCode::Esc), &tx).await.unwrap();
+    let toast_count = app.toasts.len();
+
+    handle_key(&mut app, key_repeat(KeyCode::Esc), &tx)
+        .await
+        .unwrap();
+
+    assert!(
+        !app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
+        "held ESC repeat must not count as the confirming tap"
+    );
+    assert!(!app.cancel_token.is_cancelled());
+    assert_eq!(
+        app.toasts.len(),
+        toast_count,
+        "held ESC repeat should not spam duplicate toasts"
+    );
 }
 
 #[tokio::test]
@@ -2800,5 +2891,15 @@ fn cannot_interrupt_with_pending_approval_robust() {
     assert!(
         !key_dispatch::can_interrupt_on_submit(&app, false),
         "pending approval must force the queue path"
+    );
+}
+
+#[test]
+fn cannot_interrupt_with_in_flight_tool_batch_robust() {
+    let mut app = streaming_app_with_bytes(100);
+    app.in_flight_tool_batches = 1;
+    assert!(
+        !key_dispatch::can_interrupt_on_submit(&app, false),
+        "in-flight tool batches must finish or cancel through the tool pipeline"
     );
 }

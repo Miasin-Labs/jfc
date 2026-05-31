@@ -267,7 +267,7 @@ pub fn clear_cache() {
 /// response, returns `Ok(vec![])` — recall is opportunistic, never blocking.
 #[tracing::instrument(
     target = "jfc::memory_recall",
-    skip(available, provider),
+    skip(query, available, provider),
     fields(
         provider = %provider.name(),
         model = %model,
@@ -385,7 +385,7 @@ fn parse_selection(content: &str) -> Option<Vec<String>> {
 /// failed.
 #[tracing::instrument(
     target = "jfc::memory_recall",
-    skip(selected, provider),
+    skip(query, selected, provider),
     fields(
         provider = %provider.name(),
         model = %model,

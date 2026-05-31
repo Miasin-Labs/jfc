@@ -60,6 +60,15 @@ pub fn task_tool_defs() -> Vec<ToolDef> {
                     "priority": {
                         "type": "number",
                         "description": "Priority 0-9 (0=highest, 9=lowest). Affects ordering in task list."
+                    },
+                    "effort": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "max"],
+                        "description": "Reasoning-effort override applied when the factory auto-continues this task (only for models that support reasoning effort). Use 'high'/'max' for hard or risky tasks, 'low' for mechanical ones."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model override applied when the factory auto-continues this task (e.g. a cheaper model for trivial tasks, a stronger one for hard tasks). Omit to use the session's active model."
                     }
                 },
                 "required": ["subject", "description"]
@@ -132,6 +141,15 @@ pub fn task_tool_defs() -> Vec<ToolDef> {
                     "priority": {
                         "type": "number",
                         "description": "Priority 0-9 (0=highest, 9=lowest)"
+                    },
+                    "effort": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "max"],
+                        "description": "Reasoning-effort override applied when the factory auto-continues this task (models that support reasoning effort only)."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model override applied when the factory auto-continues this task. Omit to use the session's active model."
                     }
                 },
                 "required": ["task_id"]

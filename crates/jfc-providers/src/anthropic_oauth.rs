@@ -55,6 +55,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 // "unexpected value" beta errors that flip our cap-strip-and-retry path on
 // for no reason. Appended conditionally in `build_beta_header` below.
 const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,redact-thinking-2026-02-12,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
+const NARRATION_SUMMARIES_BETA: &str = jfc_anthropic_sdk::beta::NARRATION_SUMMARIES;
 
 /// Whether `mid-conversation-system-2026-04-07` should be appended for `model`.
 ///
@@ -128,6 +129,7 @@ fn build_beta_header(
     advisor_tool: bool,
     eager_input_streaming: bool,
     strict_tool_schemas: bool,
+    narration_summaries: bool,
     custom_betas: &[String],
     model: &str,
 ) -> String {
@@ -155,6 +157,10 @@ fn build_beta_header(
     }
     if strict_tool_schemas && !header.contains("structured-outputs-2025-12-15") {
         header.push_str(",structured-outputs-2025-12-15");
+    }
+    if narration_summaries {
+        header.push(',');
+        header.push_str(NARRATION_SUMMARIES_BETA);
     }
     for beta in custom_betas {
         let beta = beta.trim();
@@ -1480,6 +1486,7 @@ impl Provider for AnthropicOAuthProvider {
         let want_advisor_tool = options.advisor_model.is_some();
         let want_eager_input_streaming = options.eager_input_streaming;
         let want_strict_tool_schemas = options.strict_tool_schemas;
+        let want_narration_summaries = options.narration_summaries;
         let custom_betas = options.custom_betas.clone();
 
         // Two nested loops:
@@ -1546,6 +1553,7 @@ impl Provider for AnthropicOAuthProvider {
                     want_advisor_tool,
                     want_eager_input_streaming,
                     want_strict_tool_schemas,
+                    want_narration_summaries,
                     &custom_betas,
                     &options.model,
                 );
@@ -1928,6 +1936,7 @@ impl Provider for AnthropicOAuthProvider {
         let want_advisor_tool = options.advisor_model.is_some();
         let want_eager_input_streaming = options.eager_input_streaming;
         let want_strict_tool_schemas = options.strict_tool_schemas;
+        let want_narration_summaries = options.narration_summaries;
         let custom_betas = options.custom_betas.clone();
         let mgr = self.account_manager().await?;
         let total_wait_started = std::time::Instant::now();
@@ -1979,6 +1988,7 @@ impl Provider for AnthropicOAuthProvider {
                     want_advisor_tool,
                     want_eager_input_streaming,
                     want_strict_tool_schemas,
+                    want_narration_summaries,
                     &custom_betas,
                     &options.model,
                 );
@@ -2559,6 +2569,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
             "claude-opus-4-7",
         );
@@ -2579,6 +2590,7 @@ mod tests {
             &caps,
             true,
             true,
+            false,
             false,
             false,
             false,
@@ -2604,6 +2616,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
             "claude-opus-4-7",
         );
@@ -2621,6 +2634,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 &[],
                 "claude-opus-4-7"
             )
@@ -2632,6 +2646,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 false,
                 false,
                 &[],
@@ -2651,12 +2666,47 @@ mod tests {
             false,
             true,
             true,
+            false,
             &["custom-beta-2099-01-01".to_owned()],
             "claude-opus-4-7",
         );
         assert!(header.contains("fine-grained-tool-streaming-2025-05-14"));
         assert!(header.contains("structured-outputs-2025-12-15"));
         assert!(header.contains("custom-beta-2099-01-01"));
+    }
+
+    #[test]
+    fn build_beta_header_appends_narration_summaries_normal() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities::default();
+        let header = build_beta_header(
+            &caps,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            &[],
+            "claude-opus-4-7",
+        );
+        assert!(header.contains(NARRATION_SUMMARIES_BETA));
+    }
+
+    #[test]
+    fn build_beta_header_omits_narration_summaries_by_default_robust() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities::default();
+        let header = build_beta_header(
+            &caps,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+            "claude-opus-4-7",
+        );
+        assert!(!header.contains(NARRATION_SUMMARIES_BETA));
     }
 
     // ── mid_conversation_system gating ─────────────────────────────────────
@@ -2699,6 +2749,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
             "claude-opus-4-8",
         );
@@ -2713,6 +2764,7 @@ mod tests {
         let caps = super::super::anthropic_accounts::AccountCapabilities::default();
         let header = build_beta_header(
             &caps,
+            false,
             false,
             false,
             false,

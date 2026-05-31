@@ -68,6 +68,8 @@ pub enum RemoteEnvelope {
     ToolUseSummary {
         summary: String,
         preceding_tool_use_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<String>,
     },
 
     /// Session lifecycle status change.
@@ -169,6 +171,9 @@ impl RemoteEnvelope {
             Self::AssistantDelta { .. }
                 | Self::ToolUse { .. }
                 | Self::ToolResult { .. }
+                | Self::SetInProgressToolUseIds { .. }
+                | Self::DeferredToolUse { .. }
+                | Self::ToolUseSummary { .. }
                 | Self::SessionStatus { .. }
                 | Self::PermissionRequest { .. }
                 | Self::PlanApprovalRequest { .. }
@@ -225,6 +230,21 @@ mod tests {
         let json = serde_json::to_string(&env).unwrap();
         let back: RemoteEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn tool_use_summary_timestamp_is_optional_robust() {
+        let json = r#"{"type":"tool_use_summary","summary":"edited files","preceding_tool_use_ids":["t1"]}"#;
+        let env: RemoteEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            env,
+            RemoteEnvelope::ToolUseSummary {
+                summary: "edited files".into(),
+                preceding_tool_use_ids: vec!["t1".into()],
+                timestamp: None,
+            }
+        );
+        assert!(env.is_outbound());
     }
 
     #[test]

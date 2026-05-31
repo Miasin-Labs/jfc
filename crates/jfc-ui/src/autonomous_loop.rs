@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 pub const LOOP_SENTINEL_CRON: &str = "<<autonomous-loop>>";
 pub const LOOP_SENTINEL_DYNAMIC: &str = "<<autonomous-loop-dynamic>>";
 
+/// Fallback delay when a dynamic loop tick finishes without scheduling
+/// its own next wakeup.
+pub const LOOP_KEEPALIVE_DELAY_SECONDS: u32 = 20 * 60;
+
 /// Maximum size of loop.md content (bytes) before truncation.
 const MAX_LOOP_FILE_BYTES: usize = 8192;
 
@@ -66,6 +70,29 @@ impl AutonomousLoopState {
 /// Check if a wakeup prompt is an autonomous loop sentinel.
 pub fn is_loop_sentinel(prompt: &str) -> bool {
     prompt == LOOP_SENTINEL_CRON || prompt == LOOP_SENTINEL_DYNAMIC
+}
+
+/// Whether dynamic autonomous loops should be kept alive when the model
+/// forgets to call ScheduleWakeup. Enabled by default for active loops;
+/// set JFC_LOOP_KEEPALIVE=0 to restore strict model-driven pacing.
+pub fn loop_keepalive_enabled() -> bool {
+    std::env::var("JFC_LOOP_KEEPALIVE")
+        .ok()
+        .and_then(|value| parse_loop_keepalive_flag(&value))
+        .or_else(|| {
+            std::env::var("CLAUDE_CODE_LOOP_KEEPALIVE")
+                .ok()
+                .and_then(|value| parse_loop_keepalive_flag(&value))
+        })
+        .unwrap_or(true)
+}
+
+pub fn parse_loop_keepalive_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// Read loop.md from the project, truncating if too large.
@@ -160,3 +187,22 @@ the transcript or use a reversible alternative.
 If three consecutive ticks found nothing actionable, broaden scope once (re-read \
 the original task, check sibling work), then stop if still quiet. Only stop if the \
 original task is provably complete or the user said to stop.";
+
+#[cfg(test)]
+mod tests {
+    use super::parse_loop_keepalive_flag;
+
+    #[test]
+    fn parse_loop_keepalive_flag_normal() {
+        assert_eq!(parse_loop_keepalive_flag("1"), Some(true));
+        assert_eq!(parse_loop_keepalive_flag("on"), Some(true));
+        assert_eq!(parse_loop_keepalive_flag("false"), Some(false));
+        assert_eq!(parse_loop_keepalive_flag("0"), Some(false));
+    }
+
+    #[test]
+    fn parse_loop_keepalive_flag_ignores_unknown_robust() {
+        assert_eq!(parse_loop_keepalive_flag(""), None);
+        assert_eq!(parse_loop_keepalive_flag("maybe"), None);
+    }
+}

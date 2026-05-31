@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::context::ReadDedupCache;
@@ -116,11 +118,42 @@ pub struct ToolExecution {
     pub result: ExecutionResult,
 }
 
+fn cancelled_execution(tool_id: String) -> ToolExecution {
+    ToolExecution {
+        tool_id,
+        result: ExecutionResult::failure("Tool cancelled by user"),
+    }
+}
+
+fn emit_cancelled_result(
+    tx: &mpsc::Sender<AppEvent>,
+    tool_id: crate::ids::ToolId,
+) -> ToolExecution {
+    let exec = cancelled_execution(tool_id.as_str().to_owned());
+    crate::runtime::send_critical(
+        tx,
+        AppEvent::Tool(ToolEvent::Result {
+            tool_id,
+            result: exec.result.clone(),
+        }),
+    );
+    exec
+}
+
+fn emit_cancelled_batch(tx: &mpsc::Sender<AppEvent>, batch: ToolBatch) -> Vec<ToolExecution> {
+    match batch {
+        ToolBatch::Parallel(calls) => calls
+            .into_iter()
+            .map(|call| emit_cancelled_result(tx, call.id))
+            .collect(),
+        ToolBatch::Sequential(call) => vec![emit_cancelled_result(tx, call.id)],
+    }
+}
+
 /// Execute all batches in order, sending `ToolEvent::Result` events for each completion.
 ///
-/// Parallel batches spawn up to `MAX_CONCURRENCY` tasks and join them.
-/// Sequential batches run one at a time. The `tx` channel is used to send
-/// per-tool `AppEvent::Tool(ToolEvent::Result)` events as each tool finishes.
+/// Parallel batches spawn up to `MAX_CONCURRENCY` tasks and emit each result
+/// as soon as that task finishes. Sequential batches run one at a time.
 pub async fn execute_batches(
     batches: Vec<ToolBatch>,
     tx: &mpsc::Sender<AppEvent>,
@@ -128,6 +161,7 @@ pub async fn execute_batches(
     dedup: Arc<Mutex<ReadDedupCache>>,
     task_store: Option<Arc<TaskStore>>,
     active_team_name: Option<String>,
+    cancel: CancellationToken,
 ) -> Vec<ToolExecution> {
     let mut all_results = Vec::new();
 
@@ -138,6 +172,10 @@ pub async fn execute_batches(
     );
 
     for batch in batches {
+        if cancel.is_cancelled() {
+            all_results.extend(emit_cancelled_batch(tx, batch));
+            continue;
+        }
         match batch {
             ToolBatch::Parallel(calls) => {
                 debug!(
@@ -149,7 +187,8 @@ pub async fn execute_batches(
                 // Track each spawned task's identity outside the future so a
                 // JoinError (panic / cancel) still carries enough context to
                 // log which tool failed.
-                let mut handles = Vec::with_capacity(calls.len());
+                let mut pending_aborts = Vec::with_capacity(calls.len());
+                let mut joins = FuturesUnordered::new();
                 for call in calls {
                     let id = call.id.clone();
                     let kind = call.kind.clone();
@@ -175,57 +214,79 @@ pub async fn execute_batches(
                             result,
                         }
                     });
-                    handles.push((id, kind, handle));
+                    pending_aborts.push((id.clone(), handle.abort_handle()));
+                    joins.push(async move { (id, kind, handle.await) });
                 }
-                for (id, kind, handle) in handles {
-                    match handle.await {
-                        Ok(exec) => {
-                            info!(
-                                target: "jfc::scheduler",
-                                tool_id = %exec.tool_id,
-                                kind = ?kind,
-                                outcome = ?exec.result.outcome,
-                                output_len = exec.result.output.len(),
-                                "tool completed",
-                            );
-                            if tx
-                                .send(AppEvent::Tool(ToolEvent::Result {
-                                    tool_id: id.clone(),
-                                    result: exec.result.clone(),
-                                }))
-                                .await
-                                .is_err()
-                            {
-                                warn!(
-                                    target: "jfc::scheduler",
-                                    tool_id = %exec.tool_id,
-                                    kind = ?kind,
-                                    "app event channel closed — dropping tool result",
-                                );
+
+                while !pending_aborts.is_empty() {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            for (id, abort) in pending_aborts.drain(..) {
+                                abort.abort();
+                                all_results.push(emit_cancelled_result(tx, id));
                             }
-                            all_results.push(exec);
+                            break;
                         }
-                        Err(err) => {
-                            warn!(
-                                target: "jfc::scheduler",
-                                tool_id = %id,
-                                tool_kind = ?kind,
-                                error = %err,
-                                "parallel tool task panicked or was cancelled",
-                            );
-                            // Emit a synthetic failure result so the agentic
-                            // loop doesn't stall. Without this the tool stays
-                            // in Running status forever and
-                            // should_continue_loop returns false.
-                            let _ = tx
-                                .send(AppEvent::Tool(ToolEvent::Result {
-                                    tool_id: id.clone(),
-                                    result: crate::tools::ExecutionResult::failure(format!(
-                                        "Tool panicked: {err}"
-                                    )),
-                                }))
-                                .await;
+                        Some((id, kind, joined)) = joins.next() => {
+                            if let Some(pos) =
+                                pending_aborts.iter().position(|(pending_id, _)| pending_id == &id)
+                            {
+                                pending_aborts.swap_remove(pos);
+                            }
+                            match joined {
+                                Ok(exec) => {
+                                    info!(
+                                        target: "jfc::scheduler",
+                                        tool_id = %exec.tool_id,
+                                        kind = ?kind,
+                                        outcome = ?exec.result.outcome,
+                                        output_len = exec.result.output.len(),
+                                        "tool completed",
+                                    );
+                                    if tx
+                                        .send(AppEvent::Tool(ToolEvent::Result {
+                                            tool_id: id.clone(),
+                                            result: exec.result.clone(),
+                                        }))
+                                        .await
+                                        .is_err()
+                                    {
+                                        warn!(
+                                            target: "jfc::scheduler",
+                                            tool_id = %exec.tool_id,
+                                            kind = ?kind,
+                                            "app event channel closed — dropping tool result",
+                                        );
+                                    }
+                                    all_results.push(exec);
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        target: "jfc::scheduler",
+                                        tool_id = %id,
+                                        tool_kind = ?kind,
+                                        error = %err,
+                                        "parallel tool task panicked or was cancelled",
+                                    );
+                                    let result = if err.is_cancelled() {
+                                        ExecutionResult::failure("Tool cancelled by user")
+                                    } else {
+                                        ExecutionResult::failure(format!("Tool panicked: {err}"))
+                                    };
+                                    let _ = tx
+                                        .send(AppEvent::Tool(ToolEvent::Result {
+                                            tool_id: id.clone(),
+                                            result: result.clone(),
+                                        }))
+                                        .await;
+                                    all_results.push(ToolExecution {
+                                        tool_id: id.as_str().to_owned(),
+                                        result,
+                                    });
+                                }
+                            }
                         }
+                        else => break,
                     }
                 }
             }
@@ -239,42 +300,86 @@ pub async fn execute_batches(
                     kind = ?kind,
                     "executing sequential tool",
                 );
-                let result = tools::execute_tool(
-                    kind.clone(),
-                    input,
-                    cwd.clone(),
-                    Some(Arc::clone(&dedup)),
-                    task_store.clone(),
-                    active_team_name.as_deref(),
-                )
-                .await;
-                info!(
-                    target: "jfc::scheduler",
-                    tool_id = %id,
-                    kind = ?kind,
-                    outcome = ?result.outcome,
-                    output_len = result.output.len(),
-                    "tool completed",
-                );
-                if tx
-                    .send(AppEvent::Tool(ToolEvent::Result {
-                        tool_id: id.clone(),
-                        result: result.clone(),
-                    }))
+                let cwd_for_task = cwd.clone();
+                let dedup_for_task = Arc::clone(&dedup);
+                let task_store_for_task = task_store.clone();
+                let active_team_name_for_task = active_team_name.clone();
+                let task_kind = kind.clone();
+                let handle = tokio::spawn(async move {
+                    tools::execute_tool(
+                        task_kind,
+                        input,
+                        cwd_for_task,
+                        Some(dedup_for_task),
+                        task_store_for_task,
+                        active_team_name_for_task.as_deref(),
+                    )
                     .await
-                    .is_err()
-                {
-                    warn!(
-                        target: "jfc::scheduler",
-                        tool_id = %id,
-                        tool_kind = ?kind,
-                        "app event channel closed — dropping tool result",
-                    );
-                }
-                all_results.push(ToolExecution {
-                    tool_id: id.as_str().to_owned(),
-                    result,
                 });
+                let abort = handle.abort_handle();
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        abort.abort();
+                        all_results.push(emit_cancelled_result(tx, id.clone()));
+                    }
+                    joined = handle => {
+                        match joined {
+                            Ok(result) => {
+                                info!(
+                                    target: "jfc::scheduler",
+                                    tool_id = %id,
+                                    kind = ?kind,
+                                    outcome = ?result.outcome,
+                                    output_len = result.output.len(),
+                                    "tool completed",
+                                );
+                                if tx
+                                    .send(AppEvent::Tool(ToolEvent::Result {
+                                        tool_id: id.clone(),
+                                        result: result.clone(),
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    warn!(
+                                        target: "jfc::scheduler",
+                                        tool_id = %id,
+                                        tool_kind = ?kind,
+                                        "app event channel closed — dropping tool result",
+                                    );
+                                }
+                                all_results.push(ToolExecution {
+                                    tool_id: id.as_str().to_owned(),
+                                    result,
+                                });
+                            }
+                            Err(err) => {
+                                warn!(
+                                    target: "jfc::scheduler",
+                                    tool_id = %id,
+                                    kind = ?kind,
+                                    error = %err,
+                                    "sequential tool task panicked or was cancelled",
+                                );
+                                let result = if err.is_cancelled() {
+                                    ExecutionResult::failure("Tool cancelled by user")
+                                } else {
+                                    ExecutionResult::failure(format!("Tool panicked: {err}"))
+                                };
+                                let _ = tx
+                                    .send(AppEvent::Tool(ToolEvent::Result {
+                                        tool_id: id.clone(),
+                                        result: result.clone(),
+                                    }))
+                                    .await;
+                                all_results.push(ToolExecution {
+                                    tool_id: id.as_str().to_owned(),
+                                    result,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -286,6 +391,7 @@ pub async fn execute_batches(
 mod tests {
     use super::*;
     use crate::types::{ToolInput, ToolOutput, ToolStatus};
+    use std::time::Duration;
 
     fn make_call(kind: ToolKind, id: &str) -> ToolCall {
         ToolCall {
@@ -490,6 +596,24 @@ mod tests {
         }
     }
 
+    fn bash_call(id: &str, command: &str) -> ToolCall {
+        ToolCall {
+            id: crate::ids::ToolId::from(id),
+            kind: ToolKind::Bash,
+            status: ToolStatus::Pending,
+            input: crate::types::ToolInput::Bash {
+                command: command.to_owned(),
+                timeout: Some(5_000),
+                workdir: None,
+            },
+            output: ToolOutput::Empty,
+            display: crate::types::ToolDisplayState::DEFAULT,
+            elapsed_ms: None,
+            started_at: None,
+            thought_signature: None,
+        }
+    }
+
     // Normal: a parallel batch of two Read calls runs to completion, sends
     // two ToolResult events on the channel, and returns two executions.
     #[tokio::test(flavor = "current_thread")]
@@ -507,8 +631,16 @@ mod tests {
         let batches = schedule_tools(calls);
         let (tx, mut rx) = mpsc::channel::<AppEvent>(1024);
         let dedup = Arc::new(Mutex::new(ReadDedupCache::new()));
-        let results =
-            execute_batches(batches, &tx, dir.path().to_path_buf(), dedup, None, None).await;
+        let results = execute_batches(
+            batches,
+            &tx,
+            dir.path().to_path_buf(),
+            dedup,
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .await;
         assert_eq!(results.len(), 2);
         // Both ToolResult events should be on the channel.
         drop(tx);
@@ -519,6 +651,55 @@ mod tests {
             }
         }
         assert_eq!(got, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_batches_parallel_emits_each_result_when_it_finishes_regression() {
+        let fast_id = crate::ids::ToolId::from("fast");
+        let slow_id = crate::ids::ToolId::from("slow");
+        let fast = bash_call(fast_id.as_str(), "printf fast");
+        let slow = bash_call(slow_id.as_str(), "sleep 1; printf slow");
+        let (tx, mut rx) = mpsc::channel(8);
+        let tx_task = tx.clone();
+        let dedup = Arc::new(Mutex::new(ReadDedupCache::new()));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let handle = tokio::spawn(async move {
+            execute_batches(
+                vec![ToolBatch::Parallel(vec![slow, fast])],
+                &tx_task,
+                cwd,
+                dedup,
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+        });
+
+        let first = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("fast result should arrive before the slow tool finishes")
+            .expect("scheduler should send a result");
+
+        match first {
+            AppEvent::Tool(ToolEvent::Result { tool_id, result }) => {
+                assert_eq!(tool_id, fast_id);
+                assert!(result.output.contains("fast"));
+            }
+            _ => panic!("expected ToolEvent::Result"),
+        }
+
+        let results = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("scheduler should finish")
+            .expect("scheduler task should not panic");
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .any(|result| result.tool_id == slow_id.as_str())
+        );
     }
 
     // Normal: a sequential batch (Glob → Edit) runs the unsafe call alone.
@@ -542,8 +723,16 @@ mod tests {
         assert!(matches!(&batches[0], ToolBatch::Sequential(_)));
         let (tx, mut rx) = mpsc::channel::<AppEvent>(1024);
         let dedup = Arc::new(Mutex::new(ReadDedupCache::new()));
-        let results =
-            execute_batches(batches, &tx, dir.path().to_path_buf(), dedup, None, None).await;
+        let results = execute_batches(
+            batches,
+            &tx,
+            dir.path().to_path_buf(),
+            dedup,
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .await;
         assert_eq!(results.len(), 1);
         drop(tx);
         let ev = rx.recv().await.expect("event present");
@@ -557,8 +746,16 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let (tx, mut rx) = mpsc::channel::<AppEvent>(1024);
         let dedup = Arc::new(Mutex::new(ReadDedupCache::new()));
-        let results =
-            execute_batches(Vec::new(), &tx, dir.path().to_path_buf(), dedup, None, None).await;
+        let results = execute_batches(
+            Vec::new(),
+            &tx,
+            dir.path().to_path_buf(),
+            dedup,
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .await;
         assert!(results.is_empty());
         drop(tx);
         assert!(rx.recv().await.is_none());
@@ -575,11 +772,54 @@ mod tests {
         let batches = schedule_tools(calls);
         let (tx, mut rx) = mpsc::channel::<AppEvent>(1024);
         let dedup = Arc::new(Mutex::new(ReadDedupCache::new()));
-        let results =
-            execute_batches(batches, &tx, dir.path().to_path_buf(), dedup, None, None).await;
+        let results = execute_batches(
+            batches,
+            &tx,
+            dir.path().to_path_buf(),
+            dedup,
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .await;
         assert_eq!(results.len(), 1);
         drop(tx);
         let ev = rx.recv().await.expect("got result");
         assert!(matches!(ev, AppEvent::Tool(ToolEvent::Result { .. })));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_batches_cancelled_before_start_emits_failures_robust() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let calls = vec![
+            read_call("r1", "will-not-run"),
+            read_call("r2", "will-not-run-either"),
+        ];
+        let batches = schedule_tools(calls);
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(1024);
+        let dedup = Arc::new(Mutex::new(ReadDedupCache::new()));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let results = execute_batches(
+            batches,
+            &tx,
+            dir.path().to_path_buf(),
+            dedup,
+            None,
+            None,
+            cancel,
+        )
+        .await;
+
+        assert_eq!(results.len(), 2);
+        drop(tx);
+        let mut got = 0usize;
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, AppEvent::Tool(ToolEvent::Result { .. })) {
+                got += 1;
+            }
+        }
+        assert_eq!(got, 2);
     }
 }

@@ -358,6 +358,7 @@ pub fn mirror_event(ev: &AppEvent) -> Option<RemoteEnvelope> {
         }) => Some(RemoteEnvelope::ToolUseSummary {
             summary: summary.clone(),
             preceding_tool_use_ids: preceding_tool_use_ids.clone(),
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
         }),
         // Done/Idle transitions are derived post-burst from `app.is_streaming`
         // in the event loop (see `mirror_status`). Errors carry a message, so
