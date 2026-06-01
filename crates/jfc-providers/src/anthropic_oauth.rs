@@ -139,6 +139,12 @@ fn build_beta_header(
     if mid_conversation_system_enabled(model) {
         header.push_str(",mid-conversation-system-2026-04-07");
     }
+    // Keep the `context_hint` beta header in lockstep with the body field
+    // (see `CONTEXT_HINT_BETA_ENABLED`): both on or both off, never one alone.
+    if CONTEXT_HINT_BETA_ENABLED {
+        header.push(',');
+        header.push_str(CONTEXT_HINT_BETA);
+    }
     for (token, cap) in GATED_BETAS {
         if !cap.is_disabled(caps) {
             header.push(',');
@@ -217,7 +223,17 @@ fn classify_beta_400(body: &str) -> Option<super::anthropic_accounts::AccountCap
     }
 }
 // Rejected by API as of 2026-05-19 — re-enable when Anthropic activates them:
-// ,context-hint-2026-04-09,mcp-servers-2025-12-04,ccr-byoc-2025-07-29
+// ,mcp-servers-2025-12-04,ccr-byoc-2025-07-29
+
+/// The `context_hint` request body field is gated behind this beta. Anthropic
+/// rejected the beta as of 2026-05-19, so it must stay OUT of the
+/// `anthropic-beta` header. This single flag keeps the header token and the
+/// body field in lockstep: when both were allowed to desync (header dropped,
+/// body still sent) the API returned `400 "context_hint: Extra inputs are not
+/// permitted"` (observed on claude-haiku-4-5). Flip to `true` only when the
+/// beta is reactivated — both sites turn on together.
+const CONTEXT_HINT_BETA: &str = "context-hint-2026-04-09";
+const CONTEXT_HINT_BETA_ENABLED: bool = false;
 
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -1373,10 +1389,13 @@ fn build_body(
     if let Some(ref msg_id) = opts.previous_message_id {
         body["diagnostics"] = json!({ "previous_message_id": msg_id });
     }
-    // context_hint: when compaction has saved significant tokens, hint to
-    // the API that we want context management assistance. Mirrors v144's
-    // context-hint-2026-04-09 beta behavior.
-    if let Some(saved) = opts.context_hint_tokens_saved
+    // context_hint: when compaction has saved significant tokens, hint to the
+    // API that we want context management assistance (v144's
+    // context-hint-2026-04-09 beta). Gated on `CONTEXT_HINT_BETA_ENABLED` so
+    // it is sent ONLY when the matching beta header is also sent — otherwise
+    // the API 400s with "context_hint: Extra inputs are not permitted".
+    if CONTEXT_HINT_BETA_ENABLED
+        && let Some(saved) = opts.context_hint_tokens_saved
         && saved >= 20_000
     {
         body["context_hint"] = json!({

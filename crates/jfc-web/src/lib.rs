@@ -8,7 +8,10 @@
 //! |--------|---------|------|---------|
 //! | *(none)* | Google CSE → Brave fallback | optional | `rust async traits` |
 //! | `edu:` | Google CSE scoped to academic TLDs worldwide | optional | `edu: dark matter detection` |
+//! | `cn:` | Google CSE scoped to Chinese academic TLDs (`.edu.cn`/`.ac.cn`/…) | optional | `cn: superconductivity` |
+//! | `primo:` | ExLibris Primo — 8000+ university library discovery systems | no | `primo: cmu/decompiler` |
 //! | `gov:` | Google CSE scoped to `.gov` / `.gov.*` | optional | `gov: inflation report` |
+//! | `uni:` | OpenAlex — a named university's research output (any country) | no | `uni: Tsinghua University: quantum computing` |
 //! | `arxiv:` | arXiv API | no | `arxiv: transformer attention` |
 //! | `scholar:` | Semantic Scholar (Graph API → BFF) | optional | `scholar: attention is all you need` |
 //! | `openalex:` | OpenAlex (250M+ works, institutions + countries) | no | `openalex: graph neural networks` |
@@ -95,8 +98,14 @@ pub async fn search(query: &str, max_results: usize) -> Result<String, String> {
         search_duckduckgo(q).await
     } else if let Some(q) = match_prefix(query, "wiki") {
         search_wikipedia(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "primo") {
+        search_primo(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "uni") {
+        search_university(q, max_results).await
     } else if let Some(q) = match_prefix(query, "edu") {
         search_google(&scoped_query(q, EDU_TLDS), max_results).await
+    } else if let Some(q) = match_prefix(query, "cn") {
+        search_google(&scoped_query(q, CN_TLDS), max_results).await
     } else if let Some(q) = match_prefix(query, "gov") {
         search_google(&scoped_query(q, GOV_TLDS), max_results).await
     } else {
@@ -104,25 +113,32 @@ pub async fn search(query: &str, max_results: usize) -> Result<String, String> {
     }
 }
 
-/// Academic top-level domains worldwide, for the `edu:` prefix. Capped to a
-/// reasonable count so the assembled `site:` OR-group stays within Google
-/// CSE's query-length limit.
+/// Academic second-level domains worldwide, for the `edu:` prefix. Curated to
+/// the highest-output research countries and capped so the assembled `site:`
+/// OR-group stays within Google CSE's effective query-length limit (large
+/// OR-groups start returning zero results).
 const EDU_TLDS: &[&str] = &[
     ".edu",     // USA
     ".ac.uk",   // United Kingdom
     ".ac.jp",   // Japan
-    ".edu.cn",  // China
+    ".edu.cn",  // China (teaching institutions)
+    ".ac.cn",   // China (research institutes)
     ".edu.au",  // Australia
     ".ac.in",   // India
     ".ac.kr",   // South Korea
+    ".edu.hk",  // Hong Kong
     ".edu.tw",  // Taiwan
+    ".edu.sg",  // Singapore
     ".ac.nz",   // New Zealand
     ".ac.za",   // South Africa
     ".edu.br",  // Brazil
-    ".edu.sg",  // Singapore
 ];
 
-/// Government top-level domains, for the `gov:` prefix.
+/// Chinese academic second-level domains, for the `cn:` prefix. China splits
+/// teaching (`edu.cn`) from research institutes (`ac.cn`); cover both.
+const CN_TLDS: &[&str] = &[".edu.cn", ".ac.cn", ".edu.hk", ".edu.mo", ".edu.tw"];
+
+/// Government second-level domains, for the `gov:` prefix.
 const GOV_TLDS: &[&str] = &[".gov", ".gov.uk", ".gc.ca", ".gov.au", ".europa.eu"];
 
 /// Build a Google query restricted to a set of TLDs via a `site:` OR-group.
@@ -1330,6 +1346,130 @@ async fn search_openalex(query: &str, max_results: usize) -> Result<String, Stri
     ))
 }
 
+/// Resolve a university name to its top OpenAlex institution, returning
+/// `(openalex_id, display_name, country_code, works_count)`. Works for any
+/// university worldwide — US, Chinese, European — via the ROR-backed index.
+async fn resolve_institution(
+    name: &str,
+) -> Result<Option<(String, String, String, u64)>, String> {
+    let client = http_client()?;
+    let mut req = client
+        .get("https://api.openalex.org/autocomplete/institutions")
+        .query(&[("q", name)]);
+    if let Some(email) = polite_pool_email(&["OPENALEX_EMAIL", "CROSSREF_EMAIL"]) {
+        req = req.query(&[("mailto", email.as_str())]);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("OpenAlex institution lookup failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("OpenAlex returned HTTP {}", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("Response read: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("JSON parse: {e}"))?;
+
+    Ok(parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|inst| {
+            // id looks like https://openalex.org/I99065089 — keep the short id.
+            let id = inst.get("id").and_then(|v| v.as_str())?.rsplit('/').next()?;
+            let display = inst
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
+            // `hint` carries "City, Country"; take the country half if present.
+            let country = inst
+                .get("hint")
+                .and_then(|v| v.as_str())
+                .and_then(|h| h.rsplit(',').next())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let works = inst.get("works_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            Some((id.to_string(), display, country, works))
+        }))
+}
+
+/// `uni: <University Name>: <topic>` — find a specific university's research
+/// output on a topic via OpenAlex, regardless of country or web domain. The
+/// topic half is optional (`uni: Tsinghua University` lists recent works).
+async fn search_university(query: &str, max_results: usize) -> Result<String, String> {
+    // Split on the first colon: "<name>: <topic>". No colon ⇒ name only.
+    let (name, topic) = match query.split_once(':') {
+        Some((n, t)) => (n.trim(), t.trim()),
+        None => (query.trim(), ""),
+    };
+    if name.is_empty() {
+        return Err(
+            "Usage: `uni: <University Name>: <topic>` (topic optional), e.g. \
+             `uni: Tsinghua University: quantum computing`."
+                .to_string(),
+        );
+    }
+
+    let Some((inst_id, display, country, works)) = resolve_institution(name).await? else {
+        return Ok(format!(
+            "University search: no OpenAlex institution matched \"{name}\".\n"
+        ));
+    };
+
+    let per_page = max_results.clamp(1, 25).to_string();
+    let filter = format!("authorships.institutions.lineage:{inst_id}");
+    let client = http_client()?;
+
+    let mut req = client.get("https://api.openalex.org/works").query(&[
+        ("filter", filter.as_str()),
+        ("per_page", per_page.as_str()),
+    ]);
+    if topic.is_empty() {
+        // No topic ⇒ show the institution's most-cited works.
+        req = req.query(&[("sort", "cited_by_count:desc")]);
+    } else {
+        req = req.query(&[("search", topic)]);
+    }
+    if let Some(email) = polite_pool_email(&["OPENALEX_EMAIL", "CROSSREF_EMAIL"]) {
+        req = req.query(&[("mailto", email.as_str())]);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("OpenAlex works request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("OpenAlex returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let total = parsed
+        .pointer("/meta/count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let entries: Vec<PaperEntry> = parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(openalex_to_paper).collect())
+        .unwrap_or_default();
+
+    let topic_label = if topic.is_empty() {
+        "most-cited works".to_string()
+    } else {
+        format!("\"{topic}\"")
+    };
+    let header = format!(
+        "University: {display} ({country}, {works} total works) — {topic_label}: \
+         {total} matching results"
+    );
+    Ok(format_paper_entries(&header, &entries))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Crossref (key-free; authoritative DOI metadata)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2122,6 +2262,361 @@ async fn search_wikipedia(query: &str, max_results: usize) -> Result<String, Str
                     "{}. {title}\n   URL: https://en.wikipedia.org/wiki/{slug}\n   {snippet}\n\n",
                     i + 1
                 ));
+            }
+        }
+        _ => out.push_str("No results found.\n"),
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ExLibris Primo — library discovery system used by 8000+ universities
+//
+// API reverse-engineered from the CMU Primo JS bundle (bundle.js):
+//   pnxBaseURL: /primaws/rest/pub/pnxs
+//   search params: q, tab, search_scope, vid, inst, lang, offset, limit, sort, mode
+//   JWT: public guestJwt endpoint (/primaws/rest/pub/institution/{inst}/guestJwt)
+//         but the pnxs endpoint works without auth for many institutions
+//
+// Instance table: maps short names → (host, vid, inst, tab, scope)
+// Covers US, UK, EU, China, Australia, Canada, Japan, Singapore universities.
+// `primo: <query>` defaults to CMU; `primo: <inst>/<query>` picks an instance.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Known Primo instances: (key, host, vid, inst_code, default_tab, default_scope)
+///
+/// Verified working (unauthenticated public pnxs endpoint responds 200):
+///   cmu ✓, mit ✓
+/// Unverified (VIDs from public ExLibris documentation / institution web pages;
+/// may require IP allowlist, different auth, or have changed):
+///   all others — they fail gracefully with a clear error message.
+static PRIMO_INSTANCES: &[(&str, &str, &str, &str, &str, &str)] = &[
+    // ── USA (verified ✓ / documented) ───────────────────────────────────
+    ("cmu",         "cmu.primo.exlibrisgroup.com",        "01CMU_INST:01CMU",           "01CMU_INST",    "Everything",        "MyInst_and_CI"),
+    ("mit",         "mit.primo.exlibrisgroup.com",         "01MIT_INST:MIT",              "01MIT_INST",    "all",               "all"),
+    ("harvard",     "harvard.primo.exlibrisgroup.com",     "01HVD_INST:HVD",             "01HVD_INST",    "HVD_MPF",           "everything"),
+    ("stanford",    "stanford.primo.exlibrisgroup.com",    "01STANFORD_INST:stanford",   "01STANFORD_INST","Everything",       "everything"),
+    ("berkeley",    "berkeley.primo.exlibrisgroup.com",    "01UCS_BER:UCB",              "01UCS_BER",     "Everything",        "everything"),
+    ("columbia",    "columbia.primo.exlibrisgroup.com",    "01COLU_INST:COLU",           "01COLU_INST",   "All",               "COLU"),
+    ("cornell",     "cornell.primo.exlibrisgroup.com",     "01CORNELL_INST:CORNELL",     "01CORNELL_INST","Everything",        "everything"),
+    ("yale",        "yale.primo.exlibrisgroup.com",        "01YAL_INST:default",          "01YAL_INST",    "default_tab",       "default_scope"),
+    ("princeton",   "princeton.primo.exlibrisgroup.com",   "01PRI_INST:PRINCETON",       "01PRI_INST",    "Everything",        "everything"),
+    ("brown",       "brown.primo.exlibrisgroup.com",       "01BU_INST:BROWN",            "01BU_INST",     "everything",        "everything"),
+    ("michigan",    "umich.primo.exlibrisgroup.com",       "01UMICH_INST:UMICH",         "01UMICH_INST",  "Everything",        "everything"),
+    ("ucla",        "ucla.primo.exlibrisgroup.com",        "01UCS_LAC:UCLA",             "01UCS_LAC",     "Everything",        "everything"),
+    ("chicago",     "uchicago.primo.exlibrisgroup.com",    "01UCHICAGO_INST:UCHICAGO",   "01UCHICAGO_INST","everything",       "everything"),
+    ("caltech",     "caltech.primo.exlibrisgroup.com",     "01CALT_INST:Caltech",        "01CALT_INST",   "everything",        "everything"),
+    ("nyu",         "nyu-primo.hosted.exlibrisgroup.com",  "NYU:NYU",                    "NYU",           "all",               "all"),
+    ("jhu",         "jhu.primo.exlibrisgroup.com",         "01JHU_INST:JHU",             "01JHU_INST",    "all",               "allsystem"),
+    ("duke",        "duke.primo.exlibrisgroup.com",        "01DUKE_INST:duke_library",   "01DUKE_INST",   "Everything",        "everything"),
+    ("purdue",      "purdue.primo.exlibrisgroup.com",      "PURDUE:PURDUE",              "PURDUE",        "boilermakers_tab",  "MyInst_and_CI"),
+    ("uiuc",        "uiuc.primo.exlibrisgroup.com",        "01CARLI_UIU:UIUC_DEFAULT",   "01CARLI_UIU",   "UIUC_DEFAULT",      "LibraryCatalog"),
+    ("gatech",      "gatech.primo.exlibrisgroup.com",      "01GALI_GIT:GT",              "01GALI_GIT",    "default_tab",       "defaultscope"),
+    ("washington",  "uw.primo.exlibrisgroup.com",          "01ALLIANCE_UW:UW",           "01ALLIANCE_UW", "uw_alma",           "uw_everything"),
+    ("psu",         "psu.primo.exlibrisgroup.com",         "01PSU_INST:PSU",             "01PSU_INST",    "Everything",        "everything"),
+    ("osu",         "osu.primo.exlibrisgroup.com",         "01OPLIN_OSU:OSU",            "01OPLIN_OSU",   "Everything",        "everything"),
+    ("usc",         "usc.primo.exlibrisgroup.com",         "01USC_INST:01USC",           "01USC_INST",    "Everything",        "everything"),
+    ("bu",          "bu.primo.exlibrisgroup.com",          "01BOSU_INST:BOSU",           "01BOSU_INST",   "everything",        "everything"),
+    ("northeastern","northeastern.primo.exlibrisgroup.com","01NEU_INST:NEU",             "01NEU_INST",    "Everything",        "everything"),
+    ("tufts",       "tufts.primo.exlibrisgroup.com",       "01TUFTS_INST:TUFTS",         "01TUFTS_INST",  "Everything",        "everything"),
+    ("dartmouth",   "dartmouth.primo.exlibrisgroup.com",   "01DCLD_INST:DARTMOUTH",      "01DCLD_INST",   "Everything",        "everything"),
+    ("unc",         "unc.primo.exlibrisgroup.com",         "01UNC_INST:UNC",             "01UNC_INST",    "Everything",        "everything"),
+    ("georgetown",  "georgetown.primo.exlibrisgroup.com",  "01GUTO_INST:GUTO",           "01GUTO_INST",   "Everything",        "everything"),
+    // ── Canada ───────────────────────────────────────────────────────────
+    ("toronto",     "utoronto.primo.exlibrisgroup.com",    "01UTORONTO_INST:UTORONTO",   "01UTORONTO_INST","default",          "UTORONTO_DEFAULT"),
+    ("mcgill",      "mcgill.primo.exlibrisgroup.com",      "01MCGILL_INST:default",      "01MCGILL_INST", "everything",        "everything"),
+    ("ubc",         "ubc.primo.exlibrisgroup.com",         "01UBC_INST:UBC_default",     "01UBC_INST",    "Everything",        "Everything"),
+    ("waterloo",    "waterloo.primo.exlibrisgroup.com",    "01WLU_INST:WATERLOO",        "01WLU_INST",    "Everything",        "everything"),
+    // ── UK ───────────────────────────────────────────────────────────────
+    ("oxford",      "solo.bodleian.ox.ac.uk",              "OXFORD:SOLO",                "OXFORD",        "Everything",        "SOLO_Everything"),
+    ("cambridge",   "idiscover.lib.cam.ac.uk",             "44CAM_INST:44CAM_VU2",       "44CAM_INST",    "default_tab",       "default_scope"),
+    ("ucl",         "ucl-primo.hosted.exlibrisgroup.com",  "44UCL_INST:UCL_VU1",         "44UCL_INST",    "MyInst_and_CI",     "ucl"),
+    ("imperial",    "imperial.primo.exlibrisgroup.com",    "44IMP_INST:ICL_VU1",         "44IMP_INST",    "Everything",        "Imperial"),
+    ("edinburgh",   "discovered.ed.ac.uk",                 "44UOE_INST:44UOE_VU1",       "44UOE_INST",    "UoE",               "UoE_discovery"),
+    ("manchester",  "manchester.primo.exlibrisgroup.com",  "44MAN_INST:MAN_VU1",         "44MAN_INST",    "Everything",        "Everything"),
+    ("lse",         "lse.primo.exlibrisgroup.com",         "44LSE_INST:44LSE",           "44LSE_INST",    "Everything",        "Everything"),
+    ("kings",       "kcl.primo.exlibrisgroup.com",         "44KCL_INST:KCL_VU1",         "44KCL_INST",    "Everything",        "Everything"),
+    ("bristol",     "bristol.primo.exlibrisgroup.com",     "44BRI_INST:BRI_VU1",         "44BRI_INST",    "Everything",        "Everything"),
+    ("warwick",     "warwick.primo.exlibrisgroup.com",     "44WAR_INST:WAR_VU1",         "44WAR_INST",    "Everything",        "Everything"),
+    // ── Europe ───────────────────────────────────────────────────────────
+    ("eth",         "eth.primo.exlibrisgroup.com",         "41SLSP_ETH:ETH",             "41SLSP_ETH",    "default",           "default"),
+    ("epfl",        "epfl.primo.exlibrisgroup.com",        "41SLSP_EPF:EPFL_VU1",        "41SLSP_EPF",    "default",           "default"),
+    ("tum",         "tum.primo.exlibrisgroup.com",         "49TUM_INST:TUM",             "49TUM_INST",    "MyCatalog",         "MyCatalog"),
+    ("lmu",         "lmu.primo.exlibrisgroup.com",         "49MUM_INST:MUM",             "49MUM_INST",    "everything_ub",     "everything_ub"),
+    ("humboldt",    "hu-berlin.primo.exlibrisgroup.com",   "49HUB_INST:HUB_default",     "49HUB_INST",    "default",           "default"),
+    ("leiden",      "catalogue.leidenuniv.nl",             "31UKB_LEI_INST:SINGLE_LEIDENU","31UKB_LEI_INST","Catalogus",       "LEIDENU"),
+    ("delft",       "tudelft.primo.exlibrisgroup.com",     "31TUD_INST:31TUD_INST",      "31TUD_INST",    "Everything",        "Everything"),
+    ("amsterdam",   "uva.primo.exlibrisgroup.com",         "31UKB_UAM_INST:UAMD",        "31UKB_UAM_INST","catalogue",         "UAMD"),
+    ("karolinska",  "ki.primo.exlibrisgroup.com",          "46KI_INST:KI_VU1",           "46KI_INST",     "default_tab",       "default_scope"),
+    ("kth",         "kth.primo.exlibrisgroup.com",         "46KTH_INST:KTH",             "46KTH_INST",    "default_tab",       "default_scope"),
+    ("stockholm",   "su.primo.exlibrisgroup.com",          "46SU_INST:46SU_VU1",         "46SU_INST",     "default_tab",       "default_scope"),
+    ("chalmers",    "chalmers.primo.exlibrisgroup.com",    "46CHA_INST:46CHA_VU1",       "46CHA_INST",    "default_tab",       "default_scope"),
+    ("ghent",       "ugent.primo.exlibrisgroup.com",       "32UGE_INST:Ugent",           "32UGE_INST",    "everything",        "everything"),
+    ("leuven",      "leuven.primo.exlibrisgroup.com",      "32KUL_INST:KUL",             "32KUL_INST",    "all_content",       "all_content"),
+    ("paris",       "biu-sante.primo.exlibrisgroup.com",   "33USPC_INST:33USPC",         "33USPC_INST",   "Everything",        "Everything"),
+    ("sorbonne",    "sorbonne-universite.primo.exlibrisgroup.com","33SOR_INST:VU_SOR",   "33SOR_INST",    "Everything",        "Everything"),
+    ("bologna",     "unibo.primo.exlibrisgroup.com",       "39UBO_INST:39UBO_VU1",       "39UBO_INST",    "Everything",        "Everything"),
+    ("sapienza",    "uniroma1.primo.exlibrisgroup.com",    "39SAP_INST:SAPIENZA",        "39SAP_INST",    "Everything",        "Everything"),
+    // ── Asia-Pacific ─────────────────────────────────────────────────────
+    ("nus",         "nus.primo.exlibrisgroup.com",         "65NU_INST:NUS",              "65NU_INST",     "Everything",        "Everything"),
+    ("ntu",         "ntu.primo.exlibrisgroup.com",         "65NTUSG_INST:NTU",           "65NTUSG_INST",  "Everything",        "Everything"),
+    ("hku",         "hku.primo.exlibrisgroup.com",         "852HKU_INST:HKU",            "852HKU_INST",   "Everything",        "Everything"),
+    ("cuhk",        "cuhk.primo.exlibrisgroup.com",        "852CUHK_INST:CUHK",          "852CUHK_INST",  "Everything",        "Everything"),
+    ("hkust",       "hkust.primo.exlibrisgroup.com",       "852UST_INST:HKUST",          "852UST_INST",   "Everything",        "Everything"),
+    ("melbourne",   "unimelb.primo.exlibrisgroup.com",     "61UMELB_INST:UoM",           "61UMELB_INST",  "Everything",        "Everything"),
+    ("sydney",      "usyd.primo.exlibrisgroup.com",        "61USYD_INST:sydney",         "61USYD_INST",   "Everything",        "Everything"),
+    ("anu",         "anu.primo.exlibrisgroup.com",         "61ANU_INST:ANU",             "61ANU_INST",    "default_tab",       "default_scope"),
+    ("monash",      "monash.primo.exlibrisgroup.com",      "61MONASH_INST:Monash",       "61MONASH_INST", "Everything",        "Everything"),
+    ("qut",         "qut.primo.exlibrisgroup.com",         "61QUT_INST:61QUT",           "61QUT_INST",    "Everything",        "Everything"),
+    ("otago",       "primo.otago.ac.nz",                   "64OTAGO_INST:OTAGO",         "64OTAGO_INST",  "Everything",        "Everything"),
+    ("auckland",    "auckland.primo.exlibrisgroup.com",    "64UAU_INST:UAU",             "64UAU_INST",    "Everything",        "Everything"),
+    // ── China ────────────────────────────────────────────────────────────
+    ("pku",         "pku.primo.exlibrisgroup.com",         "86PKU_INST:PKU",             "86PKU_INST",    "Everything",        "Everything"),
+    ("sjtu",        "sjtu.primo.exlibrisgroup.com",        "86SJTU_INST:SJTU",           "86SJTU_INST",   "Everything",        "Everything"),
+    ("fudan",       "fudan.primo.exlibrisgroup.com",       "86FDU_INST:FDU",             "86FDU_INST",    "Everything",        "Everything"),
+    ("zju",         "zju.primo.exlibrisgroup.com",         "86ZJU_INST:ZJU",             "86ZJU_INST",    "Everything",        "Everything"),
+    // ── Middle East / Africa ─────────────────────────────────────────────
+    ("tau",         "tau.primo.exlibrisgroup.com",         "972TAU_INST:TAU",            "972TAU_INST",   "Everything",        "Everything"),
+    ("huji",        "huji.primo.exlibrisgroup.com",        "972HJU_INST:HJU",            "972HJU_INST",   "Everything",        "Everything"),
+    ("uct",         "uct.primo.exlibrisgroup.com",         "27UCT_INST:ZA-UCT",          "27UCT_INST",    "Everything",        "Everything"),
+    // ── Latin America ────────────────────────────────────────────────────
+    ("usp",         "usp.primo.exlibrisgroup.com",         "55USP_INST:USP",             "55USP_INST",    "Everything",        "Everything"),
+];
+
+fn find_primo_instance(key: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str)> {
+    let lower = key.to_lowercase();
+    PRIMO_INSTANCES.iter().find(|(k, host, _, _, _, _)| {
+        lower == *k || host.contains(&lower) || lower.contains(k)
+    })
+}
+
+/// `primo: <query>` or `primo: <inst>/<query>` — search any ExLibris Primo
+/// library discovery system. The `<inst>` short key selects an institution
+/// from the built-in table (e.g. `primo: mit/decompiler`). With no inst key,
+/// defaults to CMU. Works without authentication (public pnxs endpoint).
+async fn search_primo(query: &str, max_results: usize) -> Result<String, String> {
+    // Parse optional `instkey/query` syntax.
+    let (inst_key, q) = if let Some((prefix, rest)) = query.split_once('/') {
+        let prefix = prefix.trim();
+        let rest = rest.trim();
+        if !rest.is_empty() && find_primo_instance(prefix).is_some() {
+            (prefix, rest)
+        } else {
+            ("cmu", query.trim())
+        }
+    } else {
+        ("cmu", query.trim())
+    };
+
+    let inst = find_primo_instance(inst_key)
+        .unwrap_or_else(|| &PRIMO_INSTANCES[0]); // fallback to CMU
+    let (_key, host, vid, inst_code, tab, scope) = inst;
+
+    let limit = max_results.clamp(1, 10).to_string();
+    let client = http_client()?;
+
+    // Build URL manually — reqwest's .query() percent-encodes commas inside
+    // values, but Primo's `q` param uses `any,contains,{term}` with literal
+    // commas that must reach the server unencoded. The full parameter list is
+    // required — the server returns 400 if the "extra" flags are missing.
+    let q_encoded = urlencoding_minimal(q);
+    let referer_query = urlencoding_minimal(&format!(
+        "any,contains,{q}",
+    ));
+    let url = format!(
+        "https://{host}/primaws/rest/pub/pnxs\
+         ?acTriggered=false\
+         &blendFacetsSeparately=false\
+         &citationTrailFilterByAvailability=true\
+         &disableCache=false\
+         &getMore=0\
+         &inst={inst_code}\
+         &isCDSearch=false\
+         &lang=en\
+         &limit={limit}\
+         &mode=Basic\
+         &newspapersActive=false\
+         &newspapersSearch=false\
+         &offset=0\
+         &otbRanking=false\
+         &pcAvailability=false\
+         &q=any,contains,{q_encoded}\
+         &qExclude=\
+         &qInclude=\
+         &rapido=false\
+         &refEntryActive=false\
+         &rtaLinks=true\
+         &scope={scope}\
+         &searchInFulltextUserSelection=false\
+         &skipDelivery=Y\
+         &sort=rank\
+         &tab={tab}\
+         &vid={vid}"
+    );
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Origin", format!("https://{host}"))
+        .header("Referer", format!("https://{host}/discovery/search?institution={inst_code}&vid={vid}&tab={tab}&search_scope={scope}&query={referer_query}"))
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("Primo request to {host} failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Primo ({host}) returned HTTP {status}: {}",
+            &body[..body.len().min(200)]
+        ));
+    }
+
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let total = parsed.pointer("/info/total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let docs = parsed.get("docs").and_then(|v| v.as_array());
+
+    // Find the institution display name from the instance table.
+    let inst_display = match inst_key.to_lowercase().as_str() {
+        "cmu"        => "Carnegie Mellon University",
+        "mit"        => "MIT",
+        "harvard"    => "Harvard University",
+        "stanford"   => "Stanford University",
+        "berkeley"   => "UC Berkeley",
+        "columbia"   => "Columbia University",
+        "cornell"    => "Cornell University",
+        "yale"       => "Yale University",
+        "princeton"  => "Princeton University",
+        "brown"      => "Brown University",
+        "michigan"   => "University of Michigan",
+        "ucla"       => "UCLA",
+        "chicago"    => "University of Chicago",
+        "caltech"    => "Caltech",
+        "nyu"        => "New York University",
+        "jhu"        => "Johns Hopkins University",
+        "duke"       => "Duke University",
+        "oxford"     => "University of Oxford (SOLO)",
+        "cambridge"  => "University of Cambridge",
+        "ucl"        => "University College London",
+        "imperial"   => "Imperial College London",
+        "edinburgh"  => "University of Edinburgh",
+        "manchester" => "University of Manchester",
+        "lse"        => "London School of Economics",
+        "eth"        => "ETH Zürich",
+        "epfl"       => "EPFL Lausanne",
+        "tum"        => "TU Munich",
+        "leiden"     => "Leiden University",
+        "delft"      => "TU Delft",
+        "leuven"     => "KU Leuven",
+        "toronto"    => "University of Toronto",
+        "mcgill"     => "McGill University",
+        "ubc"        => "University of British Columbia",
+        "nus"        => "National University of Singapore",
+        "ntu"        => "Nanyang Technological University",
+        "hku"        => "University of Hong Kong",
+        "cuhk"       => "Chinese University of Hong Kong",
+        "hkust"      => "HKUST",
+        "melbourne"  => "University of Melbourne",
+        "sydney"     => "University of Sydney",
+        "anu"        => "Australian National University",
+        "monash"     => "Monash University",
+        "pku"        => "Peking University",
+        "sjtu"       => "Shanghai Jiao Tong University",
+        "fudan"      => "Fudan University",
+        "zju"        => "Zhejiang University",
+        "tau"        => "Tel Aviv University",
+        "huji"       => "Hebrew University of Jerusalem",
+        "uct"        => "University of Cape Town",
+        "usp"        => "University of São Paulo",
+        _            => inst_key,
+    };
+
+    let mut out = format!(
+        "Primo ({inst_display}): \"{q}\" — {total} total results\n\n"
+    );
+
+    match docs {
+        Some(docs) if !docs.is_empty() => {
+            for (i, doc) in docs.iter().enumerate() {
+                let pnx = doc.get("pnx").unwrap_or(doc);
+                let disp = pnx.get("display").unwrap_or(pnx);
+
+                let title = disp
+                    .get("title")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .or_else(|| disp.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("?");
+
+                let creators: Vec<&str> = disp
+                    .get("creator")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+
+                let dtype = disp
+                    .get("type")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .or_else(|| disp.get("type").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+
+                let year = disp
+                    .get("creationdate")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .or_else(|| disp.get("creationdate").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+
+                let description = disp
+                    .get("description")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .or_else(|| disp.get("description").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+
+                // Record ID for a direct link.
+                let record_id = doc
+                    .get("pnx")
+                    .and_then(|p| p.get("control"))
+                    .and_then(|c| c.get("recordid"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                out.push_str(&format!("{}. {title}", i + 1));
+                if !year.is_empty() {
+                    out.push_str(&format!(" ({year})"));
+                }
+                if !dtype.is_empty() {
+                    out.push_str(&format!("  [{dtype}]"));
+                }
+                out.push('\n');
+                if !creators.is_empty() {
+                    out.push_str(&format!(
+                        "   Authors: {}\n",
+                        creators[..creators.len().min(4)].join("; ")
+                    ));
+                }
+                if !record_id.is_empty() {
+                    out.push_str(&format!(
+                        "   URL: https://{host}/discovery/fulldisplay?docid={record_id}&vid={vid}\n"
+                    ));
+                }
+                if !description.is_empty() {
+                    out.push_str(&format!("   {}\n", truncate_abstract(description)));
+                }
+                out.push('\n');
             }
         }
         _ => out.push_str("No results found.\n"),

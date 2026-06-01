@@ -80,8 +80,21 @@ fn web_search_def() -> ToolDef {
             Engine (falling back to Brave if no Google key is set). \
             Prefix the query to select a backend:\n\
             • `edu: <query>` — Google scoped to academic TLDs worldwide \
-            (.edu, .ac.uk, .ac.jp, .edu.cn, .edu.au, .ac.in, .ac.kr, …); \
-            great for finding university/library/open-courseware pages.\n\
+            (.edu, .ac.uk, .ac.jp, .edu.cn, .ac.cn, .edu.au, .ac.in, .ac.kr, \
+            .edu.hk, .edu.tw, .edu.sg, .ac.nz, .ac.za, .edu.br); great for \
+            finding university/library/open-courseware pages.\n\
+            • `cn: <query>` — Google scoped to Chinese academic domains \
+            (.edu.cn, .ac.cn, .edu.hk, .edu.mo, .edu.tw).\n\
+            • `primo: <inst>/<query>` or `primo: <query>` — ExLibris Primo \
+            university library discovery (8000+ universities; supported inst \
+            keys: cmu, mit, harvard, stanford, berkeley, columbia, cornell, \
+            yale, princeton, brown, michigan, ucla, chicago, caltech, nyu, \
+            jhu, duke, oxford, cambridge, ucl, eth, tum, nus, hku, \
+            melbourne, pku, sjtu, and more). Defaults to CMU.\n\
+            • `uni: <University Name>: <topic>` — a specific university's \
+            research output via OpenAlex, regardless of country or web domain \
+            (e.g. `uni: Tsinghua University: quantum computing`); topic \
+            optional. Works for US, Chinese, and European universities alike.\n\
             • `gov: <query>` — Google scoped to government domains (.gov, .gov.uk, …).\n\
             • `arxiv: <query>` — arXiv papers (free, no key).\n\
             • `scholar: <query>` — Semantic Scholar (optional key, BFF fallback).\n\
