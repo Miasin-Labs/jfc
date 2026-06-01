@@ -142,6 +142,33 @@ pub(super) async fn cmd_audit(
     app.messages.push(ChatMessage::assistant(body));
 }
 
+/// `/changes [show|test|apply|revert <id> [-- <cmd>]]` — review surface for
+/// agent change-sets. Bare `/changes` lists; subcommands operate on one id.
+pub(super) async fn cmd_changes(
+    app: &mut App,
+    parts: &[&str],
+    text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    let root = std::path::PathBuf::from(&app.cwd);
+    let body = match (parts.get(1), parts.get(2)) {
+        (Some(&"show"), Some(id)) => crate::changeset::show_change(&root, id),
+        (Some(&"apply"), Some(id)) => crate::changeset::apply_change(&root, id).await,
+        (Some(&"revert"), Some(id)) => crate::changeset::revert_change(&root, id).await,
+        (Some(&"test"), Some(id)) => {
+            // Everything after `-- ` is the test command.
+            let cmd = text.split_once(" -- ").map(|(_, c)| c.trim()).unwrap_or("");
+            if cmd.is_empty() {
+                "usage: /changes test <id> -- <command>".to_string()
+            } else {
+                crate::changeset::test_change(&root, id, cmd).await
+            }
+        }
+        _ => crate::changeset::list_changes(&root),
+    };
+    app.messages.push(ChatMessage::assistant(body));
+}
+
 pub(super) async fn cmd_bug(
     app: &mut App,
     parts: &[&str],

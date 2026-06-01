@@ -16,6 +16,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod auth;
 mod bridge;
+mod changes;
 mod daemon;
 mod headless;
 mod logging;
@@ -32,6 +33,7 @@ pub(crate) use provider_bootstrap::{
 
 use auth::{AuthSubcommand, run_auth_subcommand};
 use bridge::{BridgeSubcommand, run_bridge_subcommand};
+use changes::{ChangesSubcommand, run_changes_subcommand};
 use daemon::{DaemonSubcommand, compact_terminal_agents_on_startup, run_daemon_subcommand};
 use headless::{
     HeadlessInputFormat, HeadlessOutputFormat, PrintModeConfig, run_print_mode, run_remote_session,
@@ -307,6 +309,11 @@ enum Command {
     Rc {
         #[command(subcommand)]
         sub: RcSubcommand,
+    },
+    /// Review/apply/revert agent change-sets (isolated branch proposals).
+    Changes {
+        #[command(subcommand)]
+        sub: ChangesSubcommand,
     },
     /// Manage local plugins and workflow bundles.
     Plugin {
@@ -868,6 +875,7 @@ async fn run_subcommand(cmd: Command) -> anyhow::Result<()> {
         Command::Daemon { sub } => run_daemon_subcommand(sub).await,
         Command::Auth { sub } => run_auth_subcommand(sub).await,
         Command::Rc { sub } => run_rc_subcommand(sub).await,
+        Command::Changes { sub } => run_changes_subcommand(sub).await,
         Command::Plugin { sub } => run_plugin_subcommand(sub).await,
         Command::Policy { sub } => run_policy_subcommand(sub).await,
         Command::Memory { sub } => run_memory_subcommand(sub).await,

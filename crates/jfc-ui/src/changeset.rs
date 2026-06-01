@@ -347,6 +347,273 @@ pub(crate) async fn finalize_for_worktree(repo_root: &Path, change_id: &str, wor
     }
 }
 
+// ── `jfc changes` operations ───────────────────────────────────────────────
+//
+// These back both the `jfc changes` CLI subcommand and the `/changes` slash
+// command. They wrap the pure jfc-changeset store with the git operations it
+// deliberately omits (test in worktree, merge branch, revert merge).
+
+use jfc_changeset::{ChangeFilter, ChangeState, TestRun};
+
+/// Open the change store at `root`, mapping errors to a user string.
+fn open_store(root: &Path) -> std::result::Result<ChangeStore, String> {
+    ChangeStore::open_project(root).map_err(|e| format!("opening change store: {e}"))
+}
+
+/// `jfc changes list` — a compact table of every change-set, newest first.
+pub(crate) fn list_changes(root: &Path) -> String {
+    let store = match open_store(root) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let all = store.query(&ChangeFilter::default());
+    if all.is_empty() {
+        return "No change-sets recorded.".to_string();
+    }
+    let mut out = String::from("CHANGE-ID         STATE      FILES  BRANCH\n");
+    for cs in all {
+        out.push_str(&format!(
+            "{:<16}  {:<9}  {:>5}  {}\n",
+            cs.id,
+            cs.state.label(),
+            cs.changed_files.len(),
+            cs.branch
+        ));
+    }
+    out
+}
+
+/// `jfc changes show <id>` — full detail: provenance, diff summary, files,
+/// test runs, approval, and the change's audit-ledger events.
+pub(crate) fn show_change(root: &Path, id: &str) -> String {
+    let store = match open_store(root) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let Some(cs) = store.get(id) else {
+        return format!("change-set {id} not found");
+    };
+    let mut out = format!(
+        "change {id}\n  state:    {}\n  branch:   {}\n  base:     {}\n  worktree: {}\n",
+        cs.state.label(),
+        cs.branch,
+        cs.base_head,
+        cs.worktree_path,
+    );
+    if let Some(t) = &cs.task_id {
+        out.push_str(&format!("  task:     {t}\n"));
+    }
+    if !cs.diff_summary.is_empty() {
+        out.push_str(&format!("  diff:     {}\n", cs.diff_summary));
+    }
+    for f in &cs.changed_files {
+        out.push_str(&format!("    {} (+{} -{})\n", f.path, f.insertions, f.deletions));
+    }
+    for t in &cs.test_runs {
+        out.push_str(&format!(
+            "  test:     `{}` exit={} ({}ms)\n",
+            t.command, t.exit_code, t.duration_ms
+        ));
+    }
+    let events = query_ledger_in(
+        root,
+        &LedgerFilter {
+            change_id: Some(id.to_string()),
+            ..Default::default()
+        },
+    );
+    if !events.is_empty() {
+        out.push_str(&format!("  ledger:   {} event(s)\n", events.len()));
+    }
+    out
+}
+
+/// `jfc changes test <id> -- <cmd...>` — run a test command in the change's
+/// worktree, record the result, and advance Ready→Tested. Best-effort git.
+pub(crate) async fn test_change(root: &Path, id: &str, command: &str) -> String {
+    let (worktree, base_state) = {
+        let store = match open_store(root) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let Some(cs) = store.get(id) else {
+            return format!("change-set {id} not found");
+        };
+        (cs.worktree_path.clone(), cs.state)
+    };
+    if base_state != ChangeState::Ready {
+        return format!(
+            "change {id} is {} — only a Ready change can be tested",
+            base_state.label()
+        );
+    }
+
+    let started = std::time::Instant::now();
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&worktree)
+        .output()
+        .await;
+    let (exit_code, duration_ms) = match output {
+        Ok(o) => (o.status.code().unwrap_or(-1), started.elapsed().as_millis() as u64),
+        Err(e) => return format!("failed to run test command: {e}"),
+    };
+
+    let run = TestRun {
+        command: command.to_string(),
+        exit_code,
+        duration_ms,
+        finished_at_ms: now_ms(),
+    };
+    let mut store = match open_store(root) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let Some(mut cs) = store.get(id).cloned() else {
+        return format!("change-set {id} not found");
+    };
+    if let Err(e) = cs.record_test_run(run, now_ms()) {
+        return format!("recording test run: {e}");
+    }
+    if let Err(e) = store.upsert(cs) {
+        return format!("persisting test run: {e}");
+    }
+    format!(
+        "test {} for {id} (exit {exit_code}, {duration_ms}ms) — state now Tested",
+        if exit_code == 0 { "passed" } else { "FAILED" }
+    )
+}
+
+/// `jfc changes apply <id>` — merge the change's branch into the base. Refuses
+/// unless the change is Approved (the review/test-before-production gate is
+/// enforced by the state machine). Surfaces merge conflicts instead of losing
+/// them. On a clean merge, transitions Approved→Applied.
+pub(crate) async fn apply_change(root: &Path, id: &str) -> String {
+    let (branch, state) = {
+        let store = match open_store(root) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let Some(cs) = store.get(id) else {
+            return format!("change-set {id} not found");
+        };
+        (cs.branch.clone(), cs.state)
+    };
+    if state != ChangeState::Approved {
+        return format!(
+            "change {id} is {} — only an Approved change can be applied \
+             (run tests + approve first; review/test-before-production is enforced)",
+            state.label()
+        );
+    }
+
+    let merge = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("merge")
+        .arg("--no-ff")
+        .arg(&branch)
+        .output()
+        .await;
+    match merge {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            // Abort a conflicted merge so the working tree isn't left dirty,
+            // but surface the conflict text — never silently lose it.
+            let _ = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .arg("merge")
+                .arg("--abort")
+                .output()
+                .await;
+            return format!(
+                "merge of {branch} failed (conflicts surfaced, merge aborted):\n{}",
+                String::from_utf8_lossy(&o.stdout)
+            );
+        }
+        Err(e) => return format!("failed to spawn git merge: {e}"),
+    }
+
+    let mut store = match open_store(root) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let Some(mut cs) = store.get(id).cloned() else {
+        return format!("change-set {id} not found");
+    };
+    if let Err(e) = cs.transition_to(ChangeState::Applied, now_ms()) {
+        return format!("state transition failed: {e}");
+    }
+    if let Err(e) = store.upsert(cs) {
+        return format!("persisting applied state: {e}");
+    }
+    record_event(
+        LedgerEvent::new(now_ms(), EventKind::Approval, "apply")
+            .with_detail(format!("merged {branch}"))
+            .with_change_id(Some(id.to_string())),
+    );
+    format!("applied {id}: merged {branch} into base — state now Applied")
+}
+
+/// `jfc changes revert <id>` — undo a previously applied change with
+/// `git revert`. Transitions Applied→Reverted.
+pub(crate) async fn revert_change(root: &Path, id: &str) -> String {
+    let state = {
+        let store = match open_store(root) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        match store.get(id) {
+            Some(cs) => cs.state,
+            None => return format!("change-set {id} not found"),
+        }
+    };
+    if state != ChangeState::Applied {
+        return format!(
+            "change {id} is {} — only an Applied change can be reverted",
+            state.label()
+        );
+    }
+
+    let revert = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("revert")
+        .arg("--no-edit")
+        .arg("-m")
+        .arg("1")
+        .arg("HEAD")
+        .output()
+        .await;
+    match revert {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            return format!(
+                "git revert failed:\n{}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        Err(e) => return format!("failed to spawn git revert: {e}"),
+    }
+
+    let mut store = match open_store(root) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let Some(mut cs) = store.get(id).cloned() else {
+        return format!("change-set {id} not found");
+    };
+    if let Err(e) = cs.transition_to(ChangeState::Reverted, now_ms()) {
+        return format!("state transition failed: {e}");
+    }
+    if let Err(e) = store.upsert(cs) {
+        return format!("persisting reverted state: {e}");
+    }
+    format!("reverted {id} — state now Reverted")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +657,38 @@ mod tests {
             ledger_detail_for(&crate::types::ToolKind::Write, &write),
             "src/lib.rs"
         );
+    }
+
+    // Robust — the review-gate at the command layer: `apply_change` refuses a
+    // change that is merely Ready (not Tested+Approved). No git is invoked
+    // because the gate rejects before the merge.
+    #[tokio::test]
+    async fn apply_refuses_unapproved_change_robust() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let mut store = ChangeStore::open_project(root).unwrap();
+        let mut cs = jfc_changeset::AgentChangeSet::open("h", "jfc/x", "/tmp/x", 1);
+        cs.mark_ready(Vec::new(), "noop", 2).unwrap();
+        let id = cs.id.clone();
+        store.upsert(cs).unwrap();
+
+        let msg = apply_change(root, &id).await;
+        assert!(
+            msg.contains("only an Approved change can be applied"),
+            "Ready change must be refused: {msg}"
+        );
+        // State unchanged on disk.
+        let store = ChangeStore::open_project(root).unwrap();
+        assert_eq!(store.get(&id).unwrap().state, ChangeState::Ready);
+    }
+
+    // Robust: list/show render gracefully on an unknown id / empty store.
+    #[test]
+    fn list_and_show_handle_empty_and_missing_robust() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        assert_eq!(list_changes(root), "No change-sets recorded.");
+        assert!(show_change(root, "nope").contains("not found"));
     }
 
     // Robust — the end-to-end audit-ledger contract: append events to a
