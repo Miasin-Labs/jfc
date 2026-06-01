@@ -104,6 +104,18 @@ fn user_text_requests_action(text: &str) -> bool {
         return true;
     }
 
+    // Questions about the user's *local* machine or repo state need tools to
+    // answer truthfully even when phrased informationally ("tell me about my
+    // device", "what's installed", "what's in this repo"). These carry no
+    // action verb, so the `strong_action_terms` gate below would suppress the
+    // whole catalog — the model then can't inspect anything and emulates a
+    // tool call as raw `<Bash .../>` text that leaks into the transcript
+    // (observed on gpt-5.5 with "tell me about my device"). High-precision
+    // deictic/possessive references to local resources keep tools available.
+    if references_local_environment(trimmed) {
+        return true;
+    }
+
     let strong_action_terms = [
         "add",
         "apply",
@@ -214,6 +226,63 @@ fn user_text_requests_action(text: &str) -> bool {
     }
 
     true
+}
+
+/// Detect prompts that reference the user's concrete local environment —
+/// their machine, hardware, or working repo — which can only be answered by
+/// inspecting it with tools. Kept high-precision: matches possessive/deictic
+/// phrases ("my device", "this repo") and a few unambiguous status questions
+/// ("what's installed") rather than bare nouns, so prose questions like
+/// "what is the memory model" don't trip it.
+fn references_local_environment(trimmed: &str) -> bool {
+    const LOCAL_REFERENCES: &[&str] = &[
+        // Possessive references to the local machine.
+        "my device",
+        "my machine",
+        "my system",
+        "my hardware",
+        "my computer",
+        "my laptop",
+        "my desktop",
+        "my workstation",
+        "my rig",
+        "my setup",
+        "my environment",
+        "my cpu",
+        "my gpu",
+        "my ram",
+        "my disk",
+        "my os",
+        "my kernel",
+        "my specs",
+        // Possessive/deictic references to the working repo.
+        "my repo",
+        "my project",
+        "my codebase",
+        "this machine",
+        "this device",
+        "this system",
+        "this computer",
+        "this repo",
+        "this project",
+        "this codebase",
+        "this directory",
+        "this folder",
+        "this crate",
+        "this package",
+        // Status questions that require inspecting the local environment.
+        "system specs",
+        "hardware specs",
+        "what's installed",
+        "whats installed",
+        "what is installed",
+        "what's running",
+        "whats running",
+        "what is running",
+    ];
+    LOCAL_REFERENCES
+        .iter()
+        .any(|needle| trimmed.contains(needle))
 }
 
 fn explicitly_requests_tool_use(trimmed: &str) -> bool {
@@ -1143,6 +1212,24 @@ mod tests {
         ));
         assert!(!user_text_requests_action("this is pretty wild right"));
         assert!(!user_text_requests_action("/help"));
+        // Bare environment-adjacent nouns in a prose question must NOT trip
+        // the local-environment detector — only concrete possessive/deictic
+        // references do.
+        assert!(!user_text_requests_action("what is the rust memory model"));
+        assert!(!user_text_requests_action("explain how the os schedules threads"));
+    }
+
+    // REGRESSION (gpt-5.5 "tell me about my device" leaked raw <Bash/> XML):
+    // questions about the local machine or repo carry no action verb but must
+    // keep tools advertised so the model can actually inspect the system.
+    #[test]
+    fn action_intent_keeps_tools_for_local_environment_questions_regression() {
+        assert!(user_text_requests_action("tell me about my device"));
+        assert!(user_text_requests_action("what are my system specs"));
+        assert!(user_text_requests_action("describe this machine"));
+        assert!(user_text_requests_action("what's installed on here"));
+        assert!(user_text_requests_action("tell me about this repo"));
+        assert!(user_text_requests_action("what is this codebase"));
     }
 
     #[tokio::test]

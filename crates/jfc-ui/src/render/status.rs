@@ -179,11 +179,8 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
     push1!(cwd_display, muted, 45);
 
-    match (&app.subscription_type, &app.seat_tier) {
-        (Some(sub), Some(tier)) => push1!(format!("{sub}·{tier}"), muted, 40),
-        (Some(sub), None) => push1!(sub.clone(), muted, 40),
-        (None, Some(tier)) => push1!(tier.clone(), muted, 40),
-        (None, None) => {}
+    if let Some(badge) = plan_badge(app.subscription_type.as_deref(), app.seat_tier.as_deref()) {
+        push1!(badge, muted, 40);
     }
     if app.worktree_count > 0 {
         push1!(format!("⌥ {} wt", app.worktree_count), muted, 30);
@@ -287,6 +284,40 @@ pub(super) fn effort_status_badge(app: &App) -> String {
     match app.effort_state.current {
         Some(effort) => format!("effort {effort}"),
         None => "effort default".to_string(),
+    }
+}
+
+/// Render the Anthropic plan/seat badge for the status bar, or `None` when no
+/// subscription info is known.
+///
+/// The OAuth profile reports `subscription_type` as a lowercase id
+/// (`"max"`, `"pro"`, `"team"`, `"enterprise"`). Rendered bare next to the
+/// reasoning-effort badge (`effort high`) the lowercase `max` was read as a
+/// *second effort level* — the user reported the footer "showing high and
+/// max". We disambiguate by branding the plan with a `◆` glyph and Title Case
+/// (`◆ Max`), so the subscription tier can't be confused with the effort knob.
+pub(super) fn plan_badge(subscription: Option<&str>, seat: Option<&str>) -> Option<String> {
+    let plan = subscription.map(pretty_plan_name);
+    match (plan, seat) {
+        (Some(plan), Some(seat)) => Some(format!("◆ {plan}·{seat}")),
+        (Some(plan), None) => Some(format!("◆ {plan}")),
+        // A seat tier without a known plan is an internal id (e.g. `opus`),
+        // not a user-facing plan name — show it plainly without the ◆ brand.
+        (None, Some(seat)) => Some(seat.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// Title-case the known Anthropic plan ids; pass anything unrecognized through
+/// unchanged so a new plan name still renders (just without our casing).
+fn pretty_plan_name(subscription: &str) -> String {
+    match subscription {
+        "max" => "Max".to_owned(),
+        "pro" => "Pro".to_owned(),
+        "team" => "Team".to_owned(),
+        "enterprise" => "Enterprise".to_owned(),
+        "free" => "Free".to_owned(),
+        other => other.to_owned(),
     }
 }
 

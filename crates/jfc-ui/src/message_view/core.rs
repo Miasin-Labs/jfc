@@ -768,6 +768,20 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                     } else {
                         inner_w
                     };
+                    // Render-layer guard: a model that lost its tool catalog
+                    // (misclassified prompt -> tools stripped in stream::request)
+                    // can emit a tool call as visible text like
+                    // `<Bash command="…" />`. Replace such leaked markup with a
+                    // muted notice so the raw XML never reaches the transcript.
+                    // Only assistant output is sanitized — a user who pasted
+                    // tool-call-looking text should see it verbatim.
+                    let render_text: std::borrow::Cow<'_, str> =
+                        if msg.role == Role::Assistant {
+                            super::tool_xml_guard::sanitize_leaked_tool_calls(text)
+                        } else {
+                            std::borrow::Cow::Borrowed(text.as_str())
+                        };
+                    let render_text = render_text.as_ref();
                     let lines = if is_streaming_placeholder {
                         // Streaming fast path: recompute every frame without
                         // syntect. Cost is ~5µs/KB (pulldown-cmark only) vs
@@ -779,11 +793,11 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                         let theme = t;
                         let width = content_w as u16;
                         let mut cache = ctx.render_cache.borrow_mut();
-                        if let Some(lines) = cache.get_streaming(idx, width, text) {
+                        if let Some(lines) = cache.get_streaming(idx, width, render_text) {
                             lines.to_vec()
                         } else {
-                            let lines = markdown::to_lines_streaming(text, &theme, content_w);
-                            cache.set_streaming(idx, width, text, lines.clone());
+                            let lines = markdown::to_lines_streaming(render_text, &theme, content_w);
+                            cache.set_streaming(idx, width, render_text, lines.clone());
                             lines
                         }
                     } else {
@@ -791,7 +805,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                         let width = content_w as u16;
                         let theme = t;
                         cache
-                            .get_or_insert_with(text, width, |t_text, w| {
+                            .get_or_insert_with(render_text, width, |t_text, w| {
                                 markdown::to_lines(t_text, &theme, w as usize)
                             })
                             .to_vec()

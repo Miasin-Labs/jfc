@@ -364,7 +364,7 @@ mod render_helpers_tests {
 mod pure_helper_tests {
     use super::input_box::{input_soft_wrapped_lines, input_visual_line_count};
     use super::model_picker::{provider_color, provider_label};
-    use super::status::{context_gauge_label, effort_status_badge};
+    use super::status::{context_gauge_label, effort_status_badge, plan_badge};
     use super::*;
     use std::sync::Arc;
 
@@ -890,6 +890,45 @@ mod pure_helper_tests {
         let mut app = fake_app();
         app.effort_state.set(crate::effort::ReasoningEffort::XHigh);
         assert_eq!(effort_status_badge(&app), "effort xhigh".to_string());
+    }
+
+    // --- plan_badge --------------------------------------------------
+    // Regression: the lowercase plan id `max` rendered bare next to
+    // `effort high` was misread as a second effort level. The plan badge
+    // must be branded + Title Case so the two can't be confused.
+
+    #[test]
+    fn plan_badge_brands_max_plan_regression() {
+        assert_eq!(
+            plan_badge(Some("max"), Some("opus")),
+            Some("◆ Max·opus".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_badge_titlecases_known_plans_normal() {
+        assert_eq!(plan_badge(Some("pro"), None), Some("◆ Pro".to_string()));
+        assert_eq!(plan_badge(Some("team"), None), Some("◆ Team".to_string()));
+        assert_eq!(
+            plan_badge(Some("enterprise"), None),
+            Some("◆ Enterprise".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_badge_seat_only_is_unbranded_normal() {
+        // A seat tier with no plan is an internal id — no ◆ brand.
+        assert_eq!(plan_badge(None, Some("opus")), Some("opus".to_string()));
+    }
+
+    #[test]
+    fn plan_badge_none_when_unknown_normal() {
+        assert_eq!(plan_badge(None, None), None);
+    }
+
+    #[test]
+    fn plan_badge_passes_through_unknown_plan_robust() {
+        assert_eq!(plan_badge(Some("startup"), None), Some("◆ startup".to_string()));
     }
 
     // --- provider_color / provider_label -----------------------------

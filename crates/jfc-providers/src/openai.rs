@@ -432,6 +432,25 @@ fn is_anthropic_base_url(url: &str) -> bool {
         .is_some_and(|host| host == "api.anthropic.com" || host.ends_with(".anthropic.com"))
 }
 
+/// Clamp a requested reasoning effort to what OpenAI's Responses API
+/// accepts. OpenAI supports `none | minimal | low | medium | high | xhigh`
+/// (the `reasoning.effort` field). It does NOT accept Anthropic's `max`
+/// tier — sending it 400s with
+/// `Invalid value: 'max'. Supported values are: 'none', 'minimal', 'low',
+/// 'medium', 'high', and 'xhigh'`. Our `ReasoningEffort` enum can emit
+/// `max` (it's the global pin shared across providers), so a session pinned
+/// to `max` then routed to a gpt-5/o-series model would otherwise fail.
+/// We map `max -> xhigh` (OpenAI's deepest tier) and pass the rest through;
+/// unknown values pass through unchanged so future OpenAI tiers aren't
+/// silently dropped. Mirrors `anthropic_models::effort_for_model`, which
+/// does the analogous per-model clamp on the Anthropic side.
+fn clamp_effort_for_openai(requested: &str) -> &str {
+    match requested.trim().to_ascii_lowercase().as_str() {
+        "max" => "xhigh",
+        _ => requested,
+    }
+}
+
 pub(crate) fn build_responses_body(
     messages: Vec<ProviderMessage>,
     options: &StreamOptions,
@@ -457,7 +476,7 @@ pub(crate) fn build_responses_body(
     }
 
     if let Some(ref effort) = options.reasoning_effort {
-        body["reasoning"] = json!({ "effort": effort });
+        body["reasoning"] = json!({ "effort": clamp_effort_for_openai(effort) });
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
     if let Some(temp) = options.temperature {
@@ -929,6 +948,28 @@ mod tests {
         assert_eq!(body["top_p"], 0.9);
         assert_eq!(body["metadata"]["source"], "test");
         assert_eq!(body["stream"], true);
+    }
+
+    // Normal — REGRESSION (the openai 400): a session pinned to `max` (a
+    // valid Anthropic tier) routed to a gpt-5/o-series model must clamp to
+    // OpenAI's deepest accepted tier `xhigh`, not forward the unsupported
+    // `max` value.
+    #[test]
+    fn clamps_max_effort_to_xhigh_for_openai_regression() {
+        let options = StreamOptions::new("gpt-5.5").reasoning_effort("max");
+        let body = build_responses_body(Vec::new(), &options, false);
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
+    // Robust: OpenAI-supported tiers pass through verbatim; the helper only
+    // rewrites `max`.
+    #[test]
+    fn openai_effort_clamp_passthrough_robust() {
+        for tier in ["none", "minimal", "low", "medium", "high", "xhigh"] {
+            assert_eq!(clamp_effort_for_openai(tier), tier, "{tier} must pass through");
+        }
+        assert_eq!(clamp_effort_for_openai("max"), "xhigh");
+        assert_eq!(clamp_effort_for_openai("MAX"), "xhigh");
     }
 
     #[test]
