@@ -4,7 +4,7 @@ target/
 .env
 .env.*
 !.env.example
-.claude/worktrees/
+.claude/
 .jfc-worktrees/
 .sisyphus/
 dhat-heap.json
