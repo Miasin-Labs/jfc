@@ -654,7 +654,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
     async fn execute_batches_parallel_emits_each_result_when_it_finishes_regression() {
+        // Forks real bash subprocesses and asserts the fast one returns before
+        // the slow one. `#[serial]` + sandbox reset keep it off the bwrap path
+        // (which a parallel `/sandbox` dispatch would otherwise enable) and out
+        // of CPU contention that blows the 500ms timing budget.
+        crate::sandbox::reset_active_bash_sandbox_for_test();
         let fast_id = crate::ids::ToolId::from("fast");
         let slow_id = crate::ids::ToolId::from("slow");
         let fast = bash_call(fast_id.as_str(), "printf fast");

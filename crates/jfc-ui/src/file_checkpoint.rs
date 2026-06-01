@@ -198,14 +198,15 @@ pub fn prune_old_checkpoints(max_age: Duration) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // CHECKPOINT_DIR is process-global (relative cwd). Tests serialize
-    // cwd mutation behind this mutex so they can run with `--test-threads`.
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
-
+    // CHECKPOINT_DIR is process-global (relative cwd). Mutating the process
+    // cwd races EVERY other test that reads cwd or forks a subprocess (the
+    // bash/git/graph tests). A private mutex here only serialized checkpoint
+    // tests against each other — not against those victims. Each cwd-mutating
+    // test is therefore `#[serial_test::serial]` (a process-global lock shared
+    // with the bash/git tests below), so no test ever observes a half-swapped
+    // or already-deleted cwd.
     fn with_temp_cwd<R>(f: impl FnOnce(&Path) -> R) -> R {
-        let _g = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
@@ -215,6 +216,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn checkpoint_then_restore_round_trips_content() {
         with_temp_cwd(|root| {
             let target = root.join("hello.txt");
@@ -232,6 +234,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn checkpoint_of_missing_file_records_absence() {
         with_temp_cwd(|root| {
             let target = root.join("never-existed.txt");
@@ -253,6 +256,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn list_returns_newest_first() {
         with_temp_cwd(|root| {
             let a = root.join("a.txt");
@@ -271,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn prune_removes_old_entries() {
         with_temp_cwd(|root| {
             let a = root.join("a.txt");

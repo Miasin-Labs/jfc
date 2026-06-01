@@ -166,7 +166,10 @@ mod tests {
 
     // Integration test — only meaningful inside an actual git repo.
     // This test runs inside the jfc project which is itself a git repo.
+    // `#[serial]`: reads the process cwd (shells out to git), so it must not
+    // race the file_checkpoint tests that swap cwd to a TempDir.
     #[test]
+    #[serial_test::serial]
     fn get_git_context_returns_populated_in_repo() {
         let ctx = get_git_context();
         // We're running inside the jfc repo, so we should have a branch.

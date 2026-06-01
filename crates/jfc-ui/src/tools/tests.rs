@@ -77,7 +77,9 @@ fn send_user_message_policy_uses_pewter_prompt_normal() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn bash_runs_without_inherited_terminal_or_stdin() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
     let result = execute_bash(
         "read -t 0.1 value || true; (cat /dev/tty >/dev/null 2>&1 && echo has-tty || echo no-tty); if [ -n \"${value:-}\" ]; then echo stdin-leaked; fi",
         Some(5_000),
@@ -997,6 +999,7 @@ fn parse_validator_output_none_markers_robust() {
 // calls another function inside an `if` returns the predicate
 // text on that call edge.
 #[test]
+#[serial_test::serial]
 fn outgoing_call_predicates_picks_up_if_normal() {
     // We need a graph + source where a function calls another
     // inside an if. The deep_call_chain.rs fixture is straight-
@@ -1555,7 +1558,9 @@ fn execution_result_with_diff_attaches_normal() {
 // ─── execute_bash dispatch ────────────────────────────────────────────
 
 #[tokio::test]
+#[serial_test::serial]
 async fn execute_bash_success_carries_provenance_normal() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
     let result = execute_bash("echo hello", Some(5_000), Path::new(".")).await;
     assert!(!result.is_error());
     assert!(result.output.contains("hello"), "{}", result.output);
@@ -1575,7 +1580,9 @@ async fn execute_bash_nonzero_exit_is_complete_with_header_normal() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn execute_bash_timeout_returns_failure_robust() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
     // sleep longer than the timeout — must time out cleanly.
     let result = execute_bash("sleep 5", Some(100), Path::new(".")).await;
     assert!(result.is_error());
@@ -1583,7 +1590,9 @@ async fn execute_bash_timeout_returns_failure_robust() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn execute_bash_combines_stdout_and_stderr_normal() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
     let result = execute_bash("echo out; echo err >&2", Some(5_000), Path::new(".")).await;
     assert!(!result.is_error());
     assert!(result.output.contains("out"), "{}", result.output);
@@ -1596,7 +1605,9 @@ async fn execute_bash_combines_stdout_and_stderr_normal() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn execute_bash_strips_ansi_escape_codes_normal() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
     // bash subprocess emits ANSI red — terminal_safe_text strips it.
     let result = execute_bash("printf '\\033[31mred\\033[0m'", Some(5_000), Path::new(".")).await;
     assert!(!result.is_error());
@@ -1609,7 +1620,9 @@ async fn execute_bash_strips_ansi_escape_codes_normal() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn execute_bash_streaming_progress_delivers_bursty_lines_regression() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let receiver = tokio::spawn(async move {
         let mut chunks = Vec::new();

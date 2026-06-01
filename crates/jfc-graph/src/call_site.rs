@@ -51,6 +51,12 @@ pub struct CallSite {
     pub path_segments: Vec<String>,
     /// 1-indexed source line of the call expression.
     pub line: u32,
+    /// Byte offset of the call expression's start in the file. Carried so the
+    /// resolver's `Calls` edge can record the real call-site location — which
+    /// `outgoing_call_predicates` walks up from to find the enclosing
+    /// `if`/`match`/`while` guard. Without it the edge span defaulted to byte
+    /// 0 (file top), so no enclosing predicate was ever found.
+    pub byte_offset: usize,
     pub kind: CallSiteKind,
 }
 
@@ -85,6 +91,7 @@ mod tests {
             name: "foo".into(),
             path_segments: Vec::new(),
             line: 42,
+            byte_offset: 0,
             kind: CallSiteKind::Bare,
         };
         assert_eq!(s.name_for_resolution(), "foo");
@@ -99,6 +106,7 @@ mod tests {
             name: "execute_tool".into(),
             path_segments: vec!["dispatch".into(), "heavy".into()],
             line: 42,
+            byte_offset: 0,
             kind: CallSiteKind::Qualified,
         };
         assert_eq!(s.name_for_resolution(), "execute_tool");

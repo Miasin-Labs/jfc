@@ -946,6 +946,7 @@ fn walk_call_sites(
                         name,
                         path_segments,
                         line,
+                        byte_offset: child.start_byte(),
                         kind,
                     });
                 }

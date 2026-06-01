@@ -125,6 +125,21 @@ pub fn active_bash_sandbox_config() -> Option<BashSandboxConfig> {
     ACTIVE_BASH_SANDBOX.read().ok().and_then(|g| g.clone())
 }
 
+/// Clear the process-global sandbox config back to "none installed".
+///
+/// `install_bash_sandbox_config` mutates a process-global that bash execution
+/// reads, so a test exercising `/sandbox` (e.g. the slash-registry drift test)
+/// otherwise leaves the sandbox *enabled* for every subsequent bash test in
+/// the same process — they then try to `bwrap` against a non-existent cwd and
+/// fail with `execvp bash`. Tests that touch or depend on the sandbox state
+/// call this (under `#[serial]`) to restore a deterministic baseline.
+#[cfg(test)]
+pub fn reset_active_bash_sandbox_for_test() {
+    if let Ok(mut guard) = ACTIVE_BASH_SANDBOX.write() {
+        *guard = None;
+    }
+}
+
 /// Build the bwrap argv prefix for wrapping a bash command.
 ///
 /// Returns `None` when sandboxing is disabled or bwrap is unavailable.

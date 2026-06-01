@@ -244,7 +244,9 @@ fn synthetic_span(site: &CallSite) -> Span {
         start_col: 0,
         end_line: site.line,
         end_col: 0,
-        byte_range: 0..0,
+        // Record the real call-site byte offset (not 0..0) so predicate
+        // extraction can walk up to the enclosing if/match/while guard.
+        byte_range: site.byte_offset..site.byte_offset,
     }
 }
 
@@ -311,6 +313,7 @@ mod tests {
             name: "execute_tool".into(),
             path_segments: vec!["dispatch".into()],
             line: 1,
+            byte_offset: 0,
             kind: CallSiteKind::Qualified,
         };
         assert_eq!(qualifier_match_bonus(&site, &cand), 50);
@@ -327,6 +330,7 @@ mod tests {
             name: "target".into(),
             path_segments: Vec::new(),
             line: 5,
+            byte_offset: 0,
             kind: CallSiteKind::Bare,
         };
         let mut resolver = ReferenceResolver::new(&mut g);
@@ -350,6 +354,7 @@ mod tests {
             name: "dup".into(),
             path_segments: Vec::new(),
             line: 1,
+            byte_offset: 0,
             kind: CallSiteKind::Bare,
         };
         let mut resolver = ReferenceResolver::new(&mut g);
@@ -376,6 +381,7 @@ mod tests {
             name: "run".into(),
             path_segments: vec!["stage_apply".into()],
             line: 1,
+            byte_offset: 0,
             kind: CallSiteKind::Qualified,
         };
         let mut resolver = ReferenceResolver::new(&mut g);
@@ -396,6 +402,7 @@ mod tests {
             name: "nonexistent".into(),
             path_segments: Vec::new(),
             line: 1,
+            byte_offset: 0,
             kind: CallSiteKind::Bare,
         };
         let mut resolver = ReferenceResolver::new(&mut g);

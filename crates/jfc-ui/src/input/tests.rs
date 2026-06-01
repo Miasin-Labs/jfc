@@ -2886,6 +2886,7 @@ fn palette_items_unfiltered_robust() {
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial_test::serial]
 async fn slash_registry_every_entry_dispatches_robust() {
     for (name, _help) in crate::input::SLASH_COMMANDS {
         let mut app = test_app();
@@ -2905,6 +2906,9 @@ async fn slash_registry_every_entry_dispatches_robust() {
              the SLASH_COMMANDS table has drifted from the dispatch match",
         );
     }
+    // Dispatching `/sandbox` installed the process-global sandbox config;
+    // restore the baseline so later bash tests aren't forced through bwrap.
+    crate::sandbox::reset_active_bash_sandbox_for_test();
 }
 
 #[test]
