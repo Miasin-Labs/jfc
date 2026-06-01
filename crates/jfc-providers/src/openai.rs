@@ -604,6 +604,7 @@ fn responses_events_from_sse(data: &str) -> Vec<anyhow::Result<StreamEvent>> {
                 vec![Ok(StreamEvent::ThinkingDelta {
                     index: output_index(&value),
                     delta: delta.to_string(),
+                    estimated_tokens: None,
                 })]
             })
             .unwrap_or_default(),

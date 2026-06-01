@@ -130,7 +130,7 @@ pub(super) async fn drain_stream_events(
                     }))
                     .await;
             }
-            StreamEvent::ThinkingDelta { delta, .. } => {
+            StreamEvent::ThinkingDelta { delta, estimated_tokens, .. } => {
                 committed_output = true;
                 // Same rationale as TextDelta — thinking text is displayed
                 // in the UI and losing chunks creates gaps in the reasoning
@@ -141,6 +141,16 @@ pub(super) async fn drain_stream_events(
                         reasoning: Some(delta),
                     }))
                     .await;
+                // Emit server-authoritative thinking token estimate if available.
+                // Matches cli.js pattern of separate "thinking_tokens" system events.
+                if let Some(tokens) = estimated_tokens {
+                    if tx
+                        .try_send(AppEvent::Stream(RuntimeStreamEvent::ThinkingTokens(tokens)))
+                        .is_err()
+                    {
+                        tracing::trace!(target: "jfc::stream", "ThinkingTokens dropped (buffer full)");
+                    }
+                }
             }
             StreamEvent::ToolDelta { index, delta } => {
                 committed_output = true;

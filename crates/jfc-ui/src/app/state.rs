@@ -379,6 +379,10 @@ pub struct App {
     /// for the spinner's token estimate (matches v126's `responseLengthRef.current / 4`).
     /// Reset at the start of each streaming turn.
     pub streaming_response_bytes: usize,
+    /// Server-authoritative cumulative thinking token count from `thinking_delta.estimated_tokens`.
+    /// Populated during extended-thinking phases (live thinking) or redacted-thinking blocks.
+    /// Reset at the start of each streaming turn. Displayed separately from output tokens.
+    pub streaming_thinking_tokens: u64,
     /// Visible while a provider is silently retrying a transient network/API
     /// failure. The spinner replaces its normal cycling verb with this code
     /// until the next real stream byte arrives.
@@ -1270,6 +1274,7 @@ impl App {
             streaming_text: String::new(),
             streaming_reasoning: String::new(),
             streaming_response_bytes: 0,
+            streaming_thinking_tokens: 0,
             network_recovery_status: None,
             network_recovery_attempts: 0,
             claude_status: None,

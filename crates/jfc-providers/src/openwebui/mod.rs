@@ -3897,6 +3897,7 @@ fn push_chunk_events_stateful(
         out.push(Ok(StreamEvent::ThinkingDelta {
             index: 0,
             delta: thinking,
+            estimated_tokens: None,
         }));
     }
     if let Some(text) = choice.delta.content.clone()

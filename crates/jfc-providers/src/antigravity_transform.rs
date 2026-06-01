@@ -676,6 +676,7 @@ fn part_to_event(part: GeminiPart, state: &mut ParserState) -> Option<StreamEven
         Some(StreamEvent::ThinkingDelta {
             index: state.text_index,
             delta: text,
+            estimated_tokens: None,
         })
     } else {
         let idx = state.next_text_idx();

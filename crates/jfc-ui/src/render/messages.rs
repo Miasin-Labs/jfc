@@ -1005,6 +1005,7 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
             stall,
             stream_idle,
             thinking,
+            app.streaming_thinking_tokens,
         );
         head_glyph = segs.glyph;
         // Use the in-progress task's activeForm as the verb if available,

@@ -318,7 +318,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
 #[allow(clippy::enum_variant_names)]
 pub enum Delta {
     TextDelta { text: String },
-    ThinkingDelta { thinking: String },
+    ThinkingDelta { thinking: String, estimated_tokens: Option<u32> },
     InputJsonDelta { partial_json: String },
     SignatureDelta { signature: String },
     CitationsDelta {},
@@ -353,6 +353,10 @@ impl<'de> Deserialize<'de> for Delta {
             },
             "thinking_delta" => Self::ThinkingDelta {
                 thinking: field("thinking"),
+                estimated_tokens: value
+                    .get("estimated_tokens")
+                    .and_then(Value::as_u64)
+                    .map(|u| u as u32),
             },
             "input_json_delta" => Self::InputJsonDelta {
                 partial_json: field("partial_json"),
@@ -579,13 +583,14 @@ pub fn translate(
                 }
                 Some(StreamEvent::TextDelta { index, delta: text })
             }
-            Delta::ThinkingDelta { thinking } => {
+            Delta::ThinkingDelta { thinking, estimated_tokens } => {
                 if let Some(Some(BlockState::Thinking { accumulated })) = blocks.get_mut(index) {
                     accumulated.push_str(&thinking);
                 }
                 Some(StreamEvent::ThinkingDelta {
                     index,
                     delta: thinking,
+                    estimated_tokens,
                 })
             }
             Delta::InputJsonDelta { partial_json } => {
@@ -1311,7 +1316,7 @@ fn log_parsed_event(event: &SseEvent) {
         SseEvent::ContentBlockDelta { index, delta } => {
             let (kind, len) = match delta {
                 Delta::TextDelta { text } => ("text", text.len()),
-                Delta::ThinkingDelta { thinking } => ("thinking", thinking.len()),
+                Delta::ThinkingDelta { thinking, .. } => ("thinking", thinking.len()),
                 Delta::InputJsonDelta { partial_json } => ("input_json", partial_json.len()),
                 Delta::SignatureDelta { signature } => ("signature", signature.len()),
                 Delta::CitationsDelta {} => ("citations", 0),
@@ -1480,13 +1485,14 @@ mod tests {
                 index: 0,
                 delta: Delta::ThinkingDelta {
                     thinking: "thought".into(),
+                    estimated_tokens: Some(42),
                 },
             },
             &mut blocks,
             &mut sr,
         );
         assert!(
-            matches!(out, Some(StreamEvent::ThinkingDelta { delta, .. }) if delta == "thought")
+            matches!(out, Some(StreamEvent::ThinkingDelta { delta, estimated_tokens: Some(42), .. }) if delta == "thought")
         );
     }
 
@@ -1730,6 +1736,7 @@ mod tests {
                 index: 1,
                 delta: Delta::ThinkingDelta {
                     thinking: "t".into(),
+                    estimated_tokens: None,
                 },
             },
             &mut blocks,

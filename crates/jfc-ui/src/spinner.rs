@@ -505,8 +505,14 @@ pub fn status_segments(
     time_since_last_token: Duration,
     time_since_last_stream_event: Option<Duration>,
     thinking: Option<ThinkingStatus>,
+    thinking_tokens: u64,
 ) -> StatusSegments {
     let mut parts: Vec<String> = vec![fmt_elapsed(elapsed)];
+    // Display server-authoritative thinking tokens during redacted-thinking phases
+    // (shown separately from output tokens to match cli.js pattern).
+    if thinking_tokens > 0 {
+        parts.push(format!("⟳ {} thinking", fmt_tokens(thinking_tokens)));
+    }
     if output_tokens > 0 {
         parts.push(format!("↓ {} tokens", fmt_tokens(output_tokens)));
         // Windowed tokens/sec (computed by the caller from a trailing sample
@@ -564,8 +570,12 @@ pub fn format_status(
     time_since_last_token: Duration,
     time_since_last_stream_event: Option<Duration>,
     thinking: Option<ThinkingStatus>,
+    thinking_tokens: u64,
 ) -> String {
     let mut parts: Vec<String> = vec![fmt_elapsed(elapsed)];
+    if thinking_tokens > 0 {
+        parts.push(format!("⟳ {} thinking", fmt_tokens(thinking_tokens)));
+    }
     if output_tokens > 0 {
         parts.push(format!("↓ {} tokens", fmt_tokens(output_tokens)));
         // Windowed tokens/sec — see `status_segments` for the rationale.
@@ -733,6 +743,7 @@ mod tests {
             Duration::from_secs(70),
             Some(Duration::from_secs(0)),
             None,
+            0,
         );
         assert!(s.contains("…"), "verb ellipsis missing: {s}");
         assert!(s.contains("5m 10s"), "elapsed missing: {s}");
@@ -803,6 +814,7 @@ mod tests {
             Duration::from_secs(0),
             None,
             None,
+            0,
         );
         assert!(
             !s.contains("tokens"),
@@ -821,6 +833,7 @@ mod tests {
             Duration::from_secs(2),
             None,
             None,
+            0,
         );
         assert!(
             !s.contains("thinking"),
@@ -839,6 +852,7 @@ mod tests {
             Duration::from_secs(20),
             Some(Duration::from_secs(20)),
             Some(ThinkingStatus::Live),
+            0,
         );
         assert!(s.contains("thinking"), "expected live thinking: {s}");
         assert!(
@@ -865,6 +879,7 @@ mod tests {
             Duration::from_secs(0),
             Some(Duration::from_secs(1)),
             Some(ThinkingStatus::Done(Duration::from_secs(12))),
+            0,
         );
         assert!(s.contains("thought for 12s"), "expected duration: {s}");
     }
@@ -881,6 +896,7 @@ mod tests {
             Duration::from_secs(0),
             None,
             Some(ThinkingStatus::Done(Duration::from_millis(400))),
+            0,
         );
         assert!(s.contains("thought for 1s"), "expected 1s floor: {s}");
     }

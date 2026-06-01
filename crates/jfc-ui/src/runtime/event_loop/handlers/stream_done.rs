@@ -425,6 +425,7 @@ pub(crate) async fn handle_stream_done(
     // full turn's token estimate.
     if turn_done {
         app.streaming_response_bytes = 0;
+        app.streaming_thinking_tokens = 0;
     }
     // Clear the user-turn clock only when the loop has
     // genuinely concluded — EndTurn stop reason AND no

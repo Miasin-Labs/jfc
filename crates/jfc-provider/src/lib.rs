@@ -282,6 +282,11 @@ pub enum StreamEvent {
     ThinkingDelta {
         index: usize,
         delta: String,
+        /// Server-provided thinking token estimate for this delta. Accumulates
+        /// across the thinking block. Matches cli.js's `estimated_tokens_delta`
+        /// (Anthropic's official client accumulates these to report live thinking
+        /// tok/s).
+        estimated_tokens: Option<u32>,
     },
     ThinkingDone {
         index: usize,

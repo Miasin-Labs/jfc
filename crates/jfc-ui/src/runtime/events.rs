@@ -160,6 +160,11 @@ pub enum StreamEvent {
     /// Carries the byte length so the spinner's token estimate stays live during
     /// tool input streaming (matching v126's responseLengthRef accumulation).
     ToolInputDelta(usize),
+    /// Server-authoritative thinking token estimate delta. Emitted on each
+    /// `thinking_delta` event with `estimated_tokens` set. Accumulates across
+    /// the thinking block for display (matching cli.js's thinking_tokens system
+    /// events which surface token/sec stats during redacted-thinking phase).
+    ThinkingTokens(u32),
     Tool(ToolCall),
     /// Opaque redacted thinking blob — store on message parts for round-tripping.
     RedactedThinking(String),

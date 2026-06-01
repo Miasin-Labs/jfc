@@ -2252,7 +2252,7 @@ fn execute_task_done_unknown_id_fails_robust() {
 
 #[test]
 fn execute_task_list_without_store_fails_robust() {
-    let r = execute_task_list(None, None, None);
+    let r = execute_task_list(None, None, None, false, None);
     assert!(r.is_error());
 }
 
@@ -2291,7 +2291,7 @@ fn execute_task_list_returns_tasks_normal() {
         None,
         None,
     );
-    let r = execute_task_list(Some(store), None, None);
+    let r = execute_task_list(Some(store), None, None, false, None);
     assert!(!r.is_error(), "{}", r.output);
     assert!(r.output.contains("alpha"), "{}", r.output);
     assert!(r.output.contains("bravo"), "{}", r.output);
@@ -2334,10 +2334,10 @@ fn execute_task_list_filters_by_owner_robust() {
         None,
         None,
     );
-    let only_alice = execute_task_list(Some(store.clone()), None, Some("alice"));
+    let only_alice = execute_task_list(Some(store.clone()), None, Some("alice"), false, None);
     assert!(only_alice.output.contains("alice"), "{}", only_alice.output);
 
-    let only_bob = execute_task_list(Some(store), None, Some("bob"));
+    let only_bob = execute_task_list(Some(store), None, Some("bob"), false, None);
     assert!(!only_bob.output.contains("alice"), "{}", only_bob.output);
 }
 

@@ -911,6 +911,11 @@ pub(crate) async fn run(
                 AppEvent::Stream(StreamEvent::ToolInputDelta(byte_len)) => {
                     handlers::stream_chunk::handle_tool_input_delta(&mut app, byte_len);
                 }
+                AppEvent::Stream(StreamEvent::ThinkingTokens(tokens)) => {
+                    app.streaming_thinking_tokens =
+                        app.streaming_thinking_tokens.saturating_add(tokens as u64);
+                    app.last_stream_event_at = Some(std::time::Instant::now());
+                }
                 AppEvent::Stream(StreamEvent::RedactedThinking(data)) => {
                     handlers::stream_chunk::handle_redacted_thinking(&mut app, data);
                 }

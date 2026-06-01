@@ -75,6 +75,7 @@ pub(crate) fn restart_stream_in_place_with_overrides(
     app.streaming_text = String::new();
     app.streaming_reasoning = String::new();
     app.streaming_response_bytes = 0;
+    app.streaming_thinking_tokens = 0;
     app.streaming_assistant_idx = Some(assistant_idx);
     app.is_streaming = true;
     let now = std::time::Instant::now();
