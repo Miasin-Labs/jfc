@@ -441,12 +441,16 @@ mod tests {
         let with = ToolInput::TaskList {
             status_filter: Some("pending".into()),
             owner_filter: None,
+            include_history: None,
+            history_query: None,
         };
         assert_eq!(with.summary(), "list tasks (pending)");
 
         let without = ToolInput::TaskList {
             status_filter: None,
             owner_filter: None,
+            include_history: None,
+            history_query: None,
         };
         assert_eq!(without.summary(), "list tasks");
     }

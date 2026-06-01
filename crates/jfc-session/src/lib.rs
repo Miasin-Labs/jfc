@@ -10,6 +10,7 @@ use jfc_core::SessionId;
 use tracing::debug;
 
 mod catalog;
+mod task_history;
 mod task_store;
 
 pub use catalog::{
@@ -18,6 +19,7 @@ pub use catalog::{
     load_session_metadata, most_recent_session, most_recent_session_for_cwd, relative_time,
     shorten_cwd,
 };
+pub use task_history::{TaskHistoryRecord, history_path_for, read_records as read_task_history};
 pub use task_store::{
     DeletedFilter, FactoryMetrics, FailureRecovery, Task, TaskCounts, TaskError, TaskId, TaskKind,
     TaskPatch, TaskRisk, TaskStatus, TaskStore, TaskValidation, is_transient_failure,

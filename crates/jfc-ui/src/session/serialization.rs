@@ -257,6 +257,10 @@ pub enum SerializedToolInput {
         status_filter: Option<String>,
         #[serde(default)]
         owner_filter: Option<String>,
+        #[serde(default)]
+        include_history: Option<bool>,
+        #[serde(default)]
+        history_query: Option<String>,
     },
     TaskDone {
         task_id: String,

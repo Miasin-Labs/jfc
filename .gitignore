@@ -20,6 +20,7 @@ profiling-results/
 # config (.jfc/agents, .jfc/memory, .jfc/workflows, .jfc/plans) tracked.
 .jfc/scratchpad/
 .jfc/tasks.json
+.jfc/tasks-history.jsonl
 .jfc/learn/
 .jfc/teleport/
 # Runtime audit ledger + agent change-sets (per-run state, not source).

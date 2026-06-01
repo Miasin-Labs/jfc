@@ -157,7 +157,7 @@ pub fn task_tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "TaskList".into(),
-            description: "List all tasks, optionally filtered by status or owner.".into(),
+            description: "List tasks. By default returns the live (working-set) task list. Set include_history=true to ALSO return the durable archive of past tasks (pruned terminal tasks from earlier sessions) — the persistent 'everything we've worked on' log. Use history_query to substring-filter that archive.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -169,6 +169,14 @@ pub fn task_tool_defs() -> Vec<ToolDef> {
                     "owner_filter": {
                         "type": "string",
                         "description": "Only return tasks assigned to this owner"
+                    },
+                    "include_history": {
+                        "type": "boolean",
+                        "description": "When true, also return the archived task-history log (durable record of pruned terminal tasks) under a `history` key. Use to recall what was worked on in prior sessions."
+                    },
+                    "history_query": {
+                        "type": "string",
+                        "description": "Case-insensitive substring filter for archived history records (matches subject/id/tags). Ignored unless include_history is true."
                     }
                 },
                 "required": []

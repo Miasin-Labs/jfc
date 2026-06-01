@@ -287,6 +287,13 @@ impl TaskStore {
         Arc::new(Self::default())
     }
 
+    /// Backing file path for this store (empty for in-memory stores). Callers
+    /// derive the sibling history-log path from this via
+    /// `jfc_session::history_path_for`.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Open or create the **project-level** task store at
     /// `<git_root>/.jfc/tasks.json`. This is the primary persistence layer
     /// that survives across ALL sessions for the same project. Unlike
@@ -417,31 +424,60 @@ impl TaskStore {
     /// Hard-remove stale terminal tasks while keeping recent terminal rows for
     /// session history. Active tasks are never pruned. Two passes: an age
     /// window (`TERMINAL_TASK_RETENTION_MS`) then a count cap (`max_terminal`).
+    ///
+    /// Pruned rows are not lost: each is distilled into a `TaskHistoryRecord`
+    /// and appended to the sibling `*-history.jsonl` archive before removal, so
+    /// the durable "everything we've worked on" log survives even as the hot
+    /// working set stays bounded.
     pub fn prune_terminal_tasks(&self, max_terminal: usize) -> usize {
         let mut inner = self.inner.lock().unwrap();
         let now_ms = now_ms();
-        let pruned = Self::prune_terminal_tasks_from_inner(&mut inner, max_terminal, now_ms);
+        let archived =
+            Self::prune_terminal_tasks_from_inner(&mut inner, max_terminal, now_ms);
+        let pruned = archived.len();
         if pruned == 0 {
             return 0;
         }
 
         self.persist(&inner);
+        drop(inner);
+        self.archive_history(&archived, now_ms);
         tracing::info!(
             target: "jfc::tasks",
             pruned,
             retained = max_terminal,
             retention_ms = TERMINAL_TASK_RETENTION_MS,
             path = %self.path.display(),
-            "pruned old terminal tasks"
+            "pruned old terminal tasks (archived to history)"
         );
         pruned
     }
 
+    /// Append distilled records for the just-pruned tasks to the history log.
+    /// Best-effort: a missing/unwritable archive never blocks pruning.
+    fn archive_history(&self, pruned: &[Task], archived_at_ms: u64) {
+        if pruned.is_empty() {
+            return;
+        }
+        let history_path = crate::task_history::history_path_for(&self.path);
+        if history_path.as_os_str().is_empty() {
+            return; // in-memory store — nothing durable to archive to
+        }
+        let records: Vec<crate::TaskHistoryRecord> = pruned
+            .iter()
+            .map(|task| crate::TaskHistoryRecord::from_task(task, archived_at_ms))
+            .collect();
+        crate::task_history::append_records(&history_path, &records);
+    }
+
+    /// Compute the prune set and remove it, returning the *removed task
+    /// values* (not just ids) so callers can distill them into history before
+    /// they're gone.
     fn prune_terminal_tasks_from_inner(
         inner: &mut TaskStoreInner,
         max_terminal: usize,
         now_ms: u64,
-    ) -> usize {
+    ) -> Vec<Task> {
         let is_terminal = |task: &Task| {
             matches!(
                 task.status,
@@ -480,11 +516,14 @@ impl TaskStore {
         }
 
         if prune_ids.is_empty() {
-            return 0;
+            return Vec::new();
         }
 
+        let mut removed = Vec::with_capacity(prune_ids.len());
         for id in &prune_ids {
-            inner.tasks.remove(id);
+            if let Some(task) = inner.tasks.remove(id) {
+                removed.push(task);
+            }
         }
 
         for task in inner.tasks.values_mut() {
@@ -492,7 +531,7 @@ impl TaskStore {
             task.blocked_by.retain(|id| !prune_ids.contains(id));
         }
 
-        prune_ids.len()
+        removed
     }
 
     /// Current on-disk modification time of `path`, or `None` if the file
@@ -524,10 +563,11 @@ impl TaskStore {
                 return false;
             }
         }
+        let now_ms = now_ms();
         let mut fresh = Self::load_inner(&self.path);
         let deleted = Self::delete_legacy_placeholders_from_inner(&mut fresh);
-        let pruned =
-            Self::prune_terminal_tasks_from_inner(&mut fresh, MAX_TERMINAL_TASKS, now_ms());
+        let archived = Self::prune_terminal_tasks_from_inner(&mut fresh, MAX_TERMINAL_TASKS, now_ms);
+        let pruned = archived.len();
         let mut inner = self.inner.lock().unwrap();
         *inner = fresh;
         drop(inner);
@@ -535,12 +575,13 @@ impl TaskStore {
             if let Ok(inner) = self.inner.lock() {
                 self.persist(&inner);
             }
+            self.archive_history(&archived, now_ms);
             tracing::warn!(
                 target: "jfc::tasks",
                 deleted,
                 pruned,
                 path = %self.path.display(),
-                "compacted task store after external reload"
+                "compacted task store after external reload (pruned rows archived to history)"
             );
         } else {
             *self.disk_mtime.lock().unwrap() = current;
@@ -1483,6 +1524,68 @@ mod tests {
         assert!(store.get(stale.id.as_str()).is_none());
         assert!(store.get(fresh.id.as_str()).is_some());
         assert!(store.get(old_active.id.as_str()).is_some());
+    }
+
+    // Normal: pruned terminal tasks are archived to the sibling history JSONL
+    // and can be read back, while the live store no longer contains them. This
+    // is the working-memory → archival-memory handoff end-to-end.
+    #[test]
+    fn prune_archives_to_history_jsonl_normal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store_path = tmp.path().join("tasks.json");
+        // Build a store directly on disk (bypass session-id path resolution).
+        let store = Arc::new(TaskStore {
+            inner: Mutex::new(TaskStoreInner::default()),
+            path: store_path.clone(),
+            disk_mtime: Mutex::new(None),
+        });
+
+        let task = store
+            .create(
+                "archived subject".into(),
+                "d".into(),
+                None,
+                Vec::<TaskId>::new(),
+            )
+            .unwrap();
+        store
+            .update(
+                task.id.as_str(),
+                TaskPatch {
+                    status: Some(TaskStatus::Completed),
+                    tags: Some(vec!["perf".into()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Force the age window to fire by backdating the terminal task.
+        {
+            let mut inner = store.inner.lock().unwrap();
+            inner.tasks.get_mut(&task.id).unwrap().created_at_ms = 1;
+        }
+
+        assert_eq!(store.prune_terminal_tasks(200), 1);
+        // Live store no longer has it.
+        assert!(store.get(task.id.as_str()).is_none());
+
+        // History log exists beside the store and round-trips.
+        let history_path = crate::task_history::history_path_for(&store_path);
+        let records = crate::task_history::read_records(&history_path, 10, None);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].subject, "archived subject");
+        assert_eq!(records[0].status, "completed");
+        assert_eq!(records[0].tags, vec!["perf".to_owned()]);
+
+        // Query filter matches by tag/subject.
+        assert_eq!(
+            crate::task_history::read_records(&history_path, 10, Some("perf")).len(),
+            1
+        );
+        assert_eq!(
+            crate::task_history::read_records(&history_path, 10, Some("nomatch")).len(),
+            0
+        );
     }
 
     // Normal: blocked_by cross-links — when t2 declares blocked_by=[t1], t1's

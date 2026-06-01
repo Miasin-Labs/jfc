@@ -284,11 +284,15 @@ pub async fn execute_tool(
             ToolInput::TaskList {
                 status_filter,
                 owner_filter,
+                include_history,
+                history_query,
             },
         ) => execute_task_list(
             task_store,
             status_filter.as_deref(),
             owner_filter.as_deref(),
+            include_history.unwrap_or(false),
+            history_query.as_deref(),
         ),
         (ToolKind::TaskDone, ToolInput::TaskDone { task_id }) => {
             let result = execute_task_done(task_store.clone(), &task_id);

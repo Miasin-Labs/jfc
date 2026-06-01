@@ -212,9 +212,13 @@ pub(crate) fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
         ToolInput::TaskList {
             status_filter,
             owner_filter,
+            include_history,
+            history_query,
         } => SerializedToolInput::TaskList {
             status_filter: status_filter.clone(),
             owner_filter: owner_filter.clone(),
+            include_history: *include_history,
+            history_query: history_query.clone(),
         },
         ToolInput::TaskDone { task_id } => SerializedToolInput::TaskDone {
             task_id: task_id.clone(),

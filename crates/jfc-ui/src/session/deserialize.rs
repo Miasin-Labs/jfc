@@ -501,9 +501,13 @@ pub(crate) fn deserialize_tool_input(input: SerializedToolInput) -> ToolInput {
         SerializedToolInput::TaskList {
             status_filter,
             owner_filter,
+            include_history,
+            history_query,
         } => ToolInput::TaskList {
             status_filter,
             owner_filter,
+            include_history,
+            history_query,
         },
         SerializedToolInput::TaskDone { task_id } => ToolInput::TaskDone { task_id },
         SerializedToolInput::TaskStop { task_id } => ToolInput::TaskStop { task_id },

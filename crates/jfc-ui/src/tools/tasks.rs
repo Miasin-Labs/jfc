@@ -194,12 +194,18 @@ fn parse_kind(s: &str) -> Option<TaskKind> {
     }
 }
 
+/// Cap on archived history records returned in one `TaskList` call. The log is
+/// append-only and unbounded on disk; this keeps the tool result token-bounded.
+const TASK_HISTORY_RETRIEVAL_LIMIT: usize = 100;
+
 pub(super) fn execute_task_list(
     store: Option<Arc<TaskStore>>,
     status_filter: Option<&str>,
     owner_filter: Option<&str>,
+    include_history: bool,
+    history_query: Option<&str>,
 ) -> ExecutionResult {
-    debug!(target: "jfc::tools", status_filter, owner_filter, "task_list: listing");
+    debug!(target: "jfc::tools", status_filter, owner_filter, include_history, "task_list: listing");
     let Some(store) = store else {
         return ExecutionResult::failure("Task store not available");
     };
@@ -216,8 +222,33 @@ pub(super) fn execute_task_list(
         tasks.retain(|t| t.owner.as_deref() == Some(of));
     }
     debug!(target: "jfc::tools", count = tasks.len(), "task_list: result");
-    let output =
-        serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| format!("{} tasks", tasks.len()));
+
+    // Without history retrieval, preserve the original array-of-tasks shape so
+    // existing callers/tests see no change.
+    if !include_history {
+        let output = serde_json::to_string_pretty(&tasks)
+            .unwrap_or_else(|_| format!("{} tasks", tasks.len()));
+        return ExecutionResult::success(output);
+    }
+
+    // Archival memory: read back the durable "everything we've worked on" log
+    // (pruned terminal tasks) from the sibling JSONL, newest first.
+    let history_path = jfc_session::history_path_for(store.path());
+    let history =
+        jfc_session::read_task_history(&history_path, TASK_HISTORY_RETRIEVAL_LIMIT, history_query);
+    debug!(
+        target: "jfc::tools",
+        history_count = history.len(),
+        history_query,
+        "task_list: included archived history"
+    );
+    let combined = serde_json::json!({
+        "active": tasks,
+        "history": history,
+        "history_truncated": history.len() == TASK_HISTORY_RETRIEVAL_LIMIT,
+    });
+    let output = serde_json::to_string_pretty(&combined)
+        .unwrap_or_else(|_| format!("{} active, {} history", tasks.len(), history.len()));
     ExecutionResult::success(output)
 }
 

@@ -257,7 +257,7 @@ macro_rules! for_each_regular_tool_input {
             Grep => { pattern: req_str @ "pattern", path: opt_str @ "path", glob: opt_str @ "glob", output_mode: opt_str @ "output_mode" }
             Search => { query: req_str @ "query", path: opt_str @ "path" }
             ApplyPatch => { patch: req_str @ "patch" }
-            TaskList => { status_filter: opt_str @ "status_filter", owner_filter: opt_str @ "owner_filter" }
+            TaskList => { status_filter: opt_str @ "status_filter", owner_filter: opt_str @ "owner_filter", include_history: raw_bool_opt @ "include_history", history_query: opt_str @ "history_query" }
             TaskDone => { task_id: req_str @ "task_id" }
             TaskStop => { task_id: req_str @ "task_id" }
             TaskGet => { task_id: req_str @ "task_id" }
@@ -505,6 +505,12 @@ pub enum ToolInput {
     TaskList {
         status_filter: Option<String>,
         owner_filter: Option<String>,
+        /// When true, also return the archived task-history log (durable record
+        /// of pruned terminal tasks) alongside the live task list.
+        include_history: Option<bool>,
+        /// Case-insensitive substring filter applied to archived history
+        /// records (subject/id/tags). Ignored unless `include_history` is set.
+        history_query: Option<String>,
     },
     TaskDone {
         task_id: String,
@@ -882,10 +888,21 @@ impl ToolInput {
             Self::ApplyPatch { patch } => format!("apply patch ({} bytes)", patch.len()),
             Self::TaskCreate { subject, .. } => format!("create: {subject}"),
             Self::TaskUpdate { task_id, .. } => format!("update: {task_id}"),
-            Self::TaskList { status_filter, .. } => match status_filter {
-                Some(f) => format!("list tasks ({f})"),
-                None => "list tasks".into(),
-            },
+            Self::TaskList {
+                status_filter,
+                include_history,
+                ..
+            } => {
+                let hist = if include_history.unwrap_or(false) {
+                    " +history"
+                } else {
+                    ""
+                };
+                match status_filter {
+                    Some(f) => format!("list tasks ({f}){hist}"),
+                    None => format!("list tasks{hist}"),
+                }
+            }
             Self::TaskDone { task_id } => format!("done: {task_id}"),
             Self::TaskStop { task_id } => format!("stop: {task_id}"),
             Self::TaskGet { task_id } => format!("get: {task_id}"),
