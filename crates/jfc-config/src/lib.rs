@@ -1291,4 +1291,23 @@ disallowed_tools = ["Bash", "Write"]
         assert_eq!(second.default.model.as_deref(), Some("a/one"));
         assert_eq!(read_count() - before, 2);
     }
+
+    // Robust: an `[isolation]` table that omits `fail_closed` still defaults
+    // to fail-closed (true) — no silent flip to the permissive cwd fallback.
+    #[test]
+    fn isolation_table_defaults_fail_closed_robust() {
+        let cfg: Config = toml::from_str("[isolation]\n").expect("parse");
+        assert!(
+            cfg.isolation.expect("isolation present").fail_closed,
+            "omitted key must default to fail-closed"
+        );
+    }
+
+    // Robust: opting out is explicit and round-trips.
+    #[test]
+    fn isolation_fail_open_opt_out_robust() {
+        let cfg: Config =
+            toml::from_str("[isolation]\nfail_closed = false\n").expect("parse");
+        assert!(!cfg.isolation.expect("present").fail_closed);
+    }
 }
