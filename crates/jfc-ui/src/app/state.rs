@@ -431,6 +431,15 @@ pub struct App {
     /// `max_self_continuations` to prevent a runaway loop when the model keeps
     /// stalling. Reset to 0 on every genuine user submit.
     pub self_continuation_count: u32,
+    /// Consecutive empty-but-billed turns we've discarded and re-streamed
+    /// since the last turn that produced real content. A degraded provider
+    /// stream can bill output tokens yet emit no text/tools/reasoning (renders
+    /// as a blank `assistant (Brewed …)` bubble and leaves an `empty_message`
+    /// invariant violation on save). `handle_stream_done` removes that empty
+    /// message and re-streams; this counter caps the retries so a persistently
+    /// broken provider can't loop forever. Reset to 0 whenever a turn produces
+    /// content and on every genuine user submit.
+    pub empty_billed_resend_count: u32,
     /// Text saved by Esc-clear so Up-arrow can recall it. Single slot —
     /// each Esc-clear overwrites. None when no text has been cleared.
     #[allow(dead_code)]
@@ -1268,6 +1277,7 @@ impl App {
             turn_start_cost: 0.0,
             agentic_turn_count: 0,
             self_continuation_count: 0,
+            empty_billed_resend_count: 0,
             esc_saved_text: None,
             history_cursor: None,
             is_streaming: false,

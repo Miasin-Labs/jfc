@@ -633,6 +633,8 @@ pub(super) async fn handle_submit(
     // A genuine user submit resets the self-continuation budget — the human
     // is back in the loop, so the auto-driver starts fresh.
     app.self_continuation_count = 0;
+    // New user turn — the empty-but-billed resend budget starts fresh too.
+    app.empty_billed_resend_count = 0;
     // Reset thinking-state for the new turn so the spinner doesn't carry
     app.pre_dispatched_tool_ids.clear();
     app.deferred_tool_uses.clear();
