@@ -1118,6 +1118,23 @@ async fn search_s2_via_bff_entries(query: &str, limit: usize) -> Result<Vec<Pape
 
 // ── Shared formatting helpers ───────────────────────────────────────────────
 
+/// Strip HTML/XML tags from `s`, returning plain text. Used by Crossref
+/// (JATS XML abstracts) and MediaWiki (searchmatch span markup).
+fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            // Intentional no-op: inside a tag, non-delimiter chars are skipped.
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Truncate `text` to at most ~200 chars on a UTF-8 char boundary.
 fn truncate_abstract(text: &str) -> String {
     if text.len() > 200 {
@@ -1524,20 +1541,8 @@ fn crossref_to_paper(item: &serde_json::Value) -> PaperEntry {
     let abstract_text = item
         .get("abstract")
         .and_then(|v| v.as_str())
-        .map(|s| {
-            // Crossref abstracts contain JATS XML tags; strip them crudely.
-            let mut out = String::with_capacity(s.len());
-            let mut in_tag = false;
-            for c in s.chars() {
-                match c {
-                    '<' => in_tag = true,
-                    '>' => in_tag = false,
-                    _ if !in_tag => out.push(c),
-                    _ => {}
-                }
-            }
-            out.split_whitespace().collect::<Vec<_>>().join(" ")
-        })
+        // Crossref abstracts embed JATS XML tags; strip them.
+        .map(strip_html_tags)
         .unwrap_or_default();
 
     PaperEntry {
@@ -2242,20 +2247,8 @@ async fn search_wikipedia(query: &str, max_results: usize) -> Result<String, Str
                 let snippet = item
                     .get("snippet")
                     .and_then(|v| v.as_str())
-                    .map(|s| {
-                        // Strip the <span class="searchmatch"> markup MediaWiki injects.
-                        let mut clean = String::with_capacity(s.len());
-                        let mut in_tag = false;
-                        for c in s.chars() {
-                            match c {
-                                '<' => in_tag = true,
-                                '>' => in_tag = false,
-                                _ if !in_tag => clean.push(c),
-                                _ => {}
-                            }
-                        }
-                        clean
-                    })
+                    // Strip the <span class="searchmatch"> markup MediaWiki injects.
+                    .map(strip_html_tags)
                     .unwrap_or_default();
                 let slug = title.replace(' ', "_");
                 out.push_str(&format!(
@@ -2294,14 +2287,14 @@ static PRIMO_INSTANCES: &[(&str, &str, &str, &str, &str, &str)] = &[
     // ── USA (verified ✓ / documented) ───────────────────────────────────
     ("cmu",         "cmu.primo.exlibrisgroup.com",        "01CMU_INST:01CMU",           "01CMU_INST",    "Everything",        "MyInst_and_CI"),
     ("mit",         "mit.primo.exlibrisgroup.com",         "01MIT_INST:MIT",              "01MIT_INST",    "all",               "all"),
-    ("harvard",     "harvard.primo.exlibrisgroup.com",     "01HVD_INST:HVD",             "01HVD_INST",    "HVD_MPF",           "everything"),
+    ("harvard",     "hollis.harvard.edu",                  "01HVD_INST:HVD2",            "01HVD_INST",    "Everything",        "MyInst_and_CI"),
     ("stanford",    "stanford.primo.exlibrisgroup.com",    "01STANFORD_INST:stanford",   "01STANFORD_INST","Everything",       "everything"),
     ("berkeley",    "berkeley.primo.exlibrisgroup.com",    "01UCS_BER:UCB",              "01UCS_BER",     "Everything",        "everything"),
     ("columbia",    "columbia.primo.exlibrisgroup.com",    "01COLU_INST:COLU",           "01COLU_INST",   "All",               "COLU"),
     ("cornell",     "cornell.primo.exlibrisgroup.com",     "01CORNELL_INST:CORNELL",     "01CORNELL_INST","Everything",        "everything"),
     ("yale",        "yale.primo.exlibrisgroup.com",        "01YAL_INST:default",          "01YAL_INST",    "default_tab",       "default_scope"),
     ("princeton",   "princeton.primo.exlibrisgroup.com",   "01PRI_INST:PRINCETON",       "01PRI_INST",    "Everything",        "everything"),
-    ("brown",       "brown.primo.exlibrisgroup.com",       "01BU_INST:BROWN",            "01BU_INST",     "everything",        "everything"),
+    ("brown",       "brown.primo.exlibrisgroup.com",       "01BU_INST:BROWN",            "01BU_INST",     "Everything",        "MyInst_and_CI"),
     ("michigan",    "umich.primo.exlibrisgroup.com",       "01UMICH_INST:UMICH",         "01UMICH_INST",  "Everything",        "everything"),
     ("ucla",        "ucla.primo.exlibrisgroup.com",        "01UCS_LAC:UCLA",             "01UCS_LAC",     "Everything",        "everything"),
     ("chicago",     "uchicago.primo.exlibrisgroup.com",    "01UCHICAGO_INST:UCHICAGO",   "01UCHICAGO_INST","everything",       "everything"),
@@ -2360,7 +2353,7 @@ static PRIMO_INSTANCES: &[(&str, &str, &str, &str, &str, &str)] = &[
     // ── Asia-Pacific ─────────────────────────────────────────────────────
     ("nus",         "nus.primo.exlibrisgroup.com",         "65NU_INST:NUS",              "65NU_INST",     "Everything",        "Everything"),
     ("ntu",         "ntu.primo.exlibrisgroup.com",         "65NTUSG_INST:NTU",           "65NTUSG_INST",  "Everything",        "Everything"),
-    ("hku",         "hku.primo.exlibrisgroup.com",         "852HKU_INST:HKU",            "852HKU_INST",   "Everything",        "Everything"),
+    ("hku",         "julac-hku.primo.exlibrisgroup.com",   "852JULAC_HKU:HKU",           "852JULAC_HKU",  "Everything",        "MyInst_and_CI"),
     ("cuhk",        "cuhk.primo.exlibrisgroup.com",        "852CUHK_INST:CUHK",          "852CUHK_INST",  "Everything",        "Everything"),
     ("hkust",       "hkust.primo.exlibrisgroup.com",       "852UST_INST:HKUST",          "852UST_INST",   "Everything",        "Everything"),
     ("melbourne",   "unimelb.primo.exlibrisgroup.com",     "61UMELB_INST:UoM",           "61UMELB_INST",  "Everything",        "Everything"),
@@ -2382,6 +2375,123 @@ static PRIMO_INSTANCES: &[(&str, &str, &str, &str, &str, &str)] = &[
     // ── Latin America ────────────────────────────────────────────────────
     ("usp",         "usp.primo.exlibrisgroup.com",         "55USP_INST:USP",             "55USP_INST",    "Everything",        "Everything"),
 ];
+
+/// Map a Primo instance key to a human-readable institution name.
+fn primo_display_name(key: &str) -> &'static str {
+    match key.to_lowercase().as_str() {
+        "cmu"        => "Carnegie Mellon University",
+        "mit"        => "MIT",
+        "harvard"    => "Harvard University",
+        "stanford"   => "Stanford University",
+        "berkeley"   => "UC Berkeley",
+        "columbia"   => "Columbia University",
+        "cornell"    => "Cornell University",
+        "yale"       => "Yale University",
+        "princeton"  => "Princeton University",
+        "brown"      => "Brown University",
+        "michigan"   => "University of Michigan",
+        "ucla"       => "UCLA",
+        "chicago"    => "University of Chicago",
+        "caltech"    => "Caltech",
+        "nyu"        => "New York University",
+        "jhu"        => "Johns Hopkins University",
+        "duke"       => "Duke University",
+        "oxford"     => "University of Oxford (SOLO)",
+        "cambridge"  => "University of Cambridge",
+        "ucl"        => "University College London",
+        "imperial"   => "Imperial College London",
+        "edinburgh"  => "University of Edinburgh",
+        "manchester" => "University of Manchester",
+        "lse"        => "London School of Economics",
+        "eth"        => "ETH Zürich",
+        "epfl"       => "EPFL Lausanne",
+        "tum"        => "TU Munich",
+        "leiden"     => "Leiden University",
+        "delft"      => "TU Delft",
+        "leuven"     => "KU Leuven",
+        "toronto"    => "University of Toronto",
+        "mcgill"     => "McGill University",
+        "ubc"        => "University of British Columbia",
+        "nus"        => "National University of Singapore",
+        "ntu"        => "Nanyang Technological University",
+        "hku"        => "University of Hong Kong",
+        "cuhk"       => "Chinese University of Hong Kong",
+        "hkust"      => "HKUST",
+        "melbourne"  => "University of Melbourne",
+        "sydney"     => "University of Sydney",
+        "anu"        => "Australian National University",
+        "monash"     => "Monash University",
+        "pku"        => "Peking University",
+        "sjtu"       => "Shanghai Jiao Tong University",
+        "fudan"      => "Fudan University",
+        "zju"        => "Zhejiang University",
+        "tau"        => "Tel Aviv University",
+        "huji"       => "Hebrew University of Jerusalem",
+        "uct"        => "University of Cape Town",
+        "usp"        => "University of São Paulo",
+        // Unknown key — fall back to the raw key, which is `'static` because
+        // it comes from the `PRIMO_INSTANCES` static table or a literal branch.
+        // Use a leak only if the key is a user-supplied runtime string; in
+        // practice the key is always one of the static table entries.
+        _            => "?",
+    }
+}
+
+/// Extract a display-field string from a Primo PNX display block.
+/// Primo stores values as either a JSON array or a plain string.
+fn pnx_str<'a>(disp: &'a serde_json::Value, field: &str) -> &'a str {
+    disp.get(field)
+        .and_then(|v| {
+            v.as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .or_else(|| v.as_str())
+        })
+        .unwrap_or("")
+}
+
+/// Format one Primo PNX document into the human-readable output block.
+fn primo_format_doc(i: usize, doc: &serde_json::Value, host: &str, vid: &str) -> String {
+    let pnx  = doc.get("pnx").unwrap_or(doc);
+    let disp = pnx.get("display").unwrap_or(pnx);
+
+    let title       = pnx_str(disp, "title");
+    let year        = pnx_str(disp, "creationdate");
+    let dtype       = pnx_str(disp, "type");
+    let description = pnx_str(disp, "description");
+
+    let creators: Vec<&str> = disp
+        .get("creator")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let record_id = pnx
+        .get("control")
+        .and_then(|c| c.get("recordid"))
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let mut out = format!("{}. {}", i + 1, if title.is_empty() { "?" } else { title });
+    if !year.is_empty()  { out.push_str(&format!(" ({year})"));   }
+    if !dtype.is_empty() { out.push_str(&format!("  [{dtype}]")); }
+    out.push('\n');
+    if !creators.is_empty() {
+        out.push_str(&format!("   Authors: {}\n", creators[..creators.len().min(4)].join("; ")));
+    }
+    if !record_id.is_empty() {
+        out.push_str(&format!(
+            "   URL: https://{host}/discovery/fulldisplay?docid={record_id}&vid={vid}\n"
+        ));
+    }
+    if !description.is_empty() {
+        out.push_str(&format!("   {}\n", truncate_abstract(description)));
+    }
+    out.push('\n');
+    out
+}
 
 fn find_primo_instance(key: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str)> {
     let lower = key.to_lowercase();
@@ -2479,144 +2589,15 @@ async fn search_primo(query: &str, max_results: usize) -> Result<String, String>
         .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
 
     let total = parsed.pointer("/info/total").and_then(|v| v.as_u64()).unwrap_or(0);
-    let docs = parsed.get("docs").and_then(|v| v.as_array());
+    let docs  = parsed.get("docs").and_then(|v| v.as_array());
 
-    // Find the institution display name from the instance table.
-    let inst_display = match inst_key.to_lowercase().as_str() {
-        "cmu"        => "Carnegie Mellon University",
-        "mit"        => "MIT",
-        "harvard"    => "Harvard University",
-        "stanford"   => "Stanford University",
-        "berkeley"   => "UC Berkeley",
-        "columbia"   => "Columbia University",
-        "cornell"    => "Cornell University",
-        "yale"       => "Yale University",
-        "princeton"  => "Princeton University",
-        "brown"      => "Brown University",
-        "michigan"   => "University of Michigan",
-        "ucla"       => "UCLA",
-        "chicago"    => "University of Chicago",
-        "caltech"    => "Caltech",
-        "nyu"        => "New York University",
-        "jhu"        => "Johns Hopkins University",
-        "duke"       => "Duke University",
-        "oxford"     => "University of Oxford (SOLO)",
-        "cambridge"  => "University of Cambridge",
-        "ucl"        => "University College London",
-        "imperial"   => "Imperial College London",
-        "edinburgh"  => "University of Edinburgh",
-        "manchester" => "University of Manchester",
-        "lse"        => "London School of Economics",
-        "eth"        => "ETH Zürich",
-        "epfl"       => "EPFL Lausanne",
-        "tum"        => "TU Munich",
-        "leiden"     => "Leiden University",
-        "delft"      => "TU Delft",
-        "leuven"     => "KU Leuven",
-        "toronto"    => "University of Toronto",
-        "mcgill"     => "McGill University",
-        "ubc"        => "University of British Columbia",
-        "nus"        => "National University of Singapore",
-        "ntu"        => "Nanyang Technological University",
-        "hku"        => "University of Hong Kong",
-        "cuhk"       => "Chinese University of Hong Kong",
-        "hkust"      => "HKUST",
-        "melbourne"  => "University of Melbourne",
-        "sydney"     => "University of Sydney",
-        "anu"        => "Australian National University",
-        "monash"     => "Monash University",
-        "pku"        => "Peking University",
-        "sjtu"       => "Shanghai Jiao Tong University",
-        "fudan"      => "Fudan University",
-        "zju"        => "Zhejiang University",
-        "tau"        => "Tel Aviv University",
-        "huji"       => "Hebrew University of Jerusalem",
-        "uct"        => "University of Cape Town",
-        "usp"        => "University of São Paulo",
-        _            => inst_key,
-    };
-
-    let mut out = format!(
-        "Primo ({inst_display}): \"{q}\" — {total} total results\n\n"
-    );
+    let inst_display = primo_display_name(inst_key);
+    let mut out = format!("Primo ({inst_display}): \"{q}\" — {total} total results\n\n");
 
     match docs {
-        Some(docs) if !docs.is_empty() => {
-            for (i, doc) in docs.iter().enumerate() {
-                let pnx = doc.get("pnx").unwrap_or(doc);
-                let disp = pnx.get("display").unwrap_or(pnx);
-
-                let title = disp
-                    .get("title")
-                    .and_then(|v| v.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str())
-                    .or_else(|| disp.get("title").and_then(|v| v.as_str()))
-                    .unwrap_or("?");
-
-                let creators: Vec<&str> = disp
-                    .get("creator")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-                    .unwrap_or_default();
-
-                let dtype = disp
-                    .get("type")
-                    .and_then(|v| v.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str())
-                    .or_else(|| disp.get("type").and_then(|v| v.as_str()))
-                    .unwrap_or("");
-
-                let year = disp
-                    .get("creationdate")
-                    .and_then(|v| v.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str())
-                    .or_else(|| disp.get("creationdate").and_then(|v| v.as_str()))
-                    .unwrap_or("");
-
-                let description = disp
-                    .get("description")
-                    .and_then(|v| v.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str())
-                    .or_else(|| disp.get("description").and_then(|v| v.as_str()))
-                    .unwrap_or("");
-
-                // Record ID for a direct link.
-                let record_id = doc
-                    .get("pnx")
-                    .and_then(|p| p.get("control"))
-                    .and_then(|c| c.get("recordid"))
-                    .and_then(|v| v.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                out.push_str(&format!("{}. {title}", i + 1));
-                if !year.is_empty() {
-                    out.push_str(&format!(" ({year})"));
-                }
-                if !dtype.is_empty() {
-                    out.push_str(&format!("  [{dtype}]"));
-                }
-                out.push('\n');
-                if !creators.is_empty() {
-                    out.push_str(&format!(
-                        "   Authors: {}\n",
-                        creators[..creators.len().min(4)].join("; ")
-                    ));
-                }
-                if !record_id.is_empty() {
-                    out.push_str(&format!(
-                        "   URL: https://{host}/discovery/fulldisplay?docid={record_id}&vid={vid}\n"
-                    ));
-                }
-                if !description.is_empty() {
-                    out.push_str(&format!("   {}\n", truncate_abstract(description)));
-                }
-                out.push('\n');
+        Some(items) if !items.is_empty() => {
+            for (i, doc) in items.iter().enumerate() {
+                out.push_str(&primo_format_doc(i, doc, host, vid));
             }
         }
         _ => out.push_str("No results found.\n"),
