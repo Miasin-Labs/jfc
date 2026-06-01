@@ -402,11 +402,17 @@ Do not use a colon before tool calls.";
         let config = crate::config::load_arc();
         let recall_enabled = crate::memory_recall::is_enabled(config.memory_recall_enabled);
         let mut recall_block: Option<String> = None;
+        let mut recall_was_fresh = false;
         if recall_enabled && !memories.is_empty() {
             let last_user_query = last_user_text(messages);
             if let Some(query) = last_user_query {
                 let trimmed = query.trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('/') {
+                    // Check the cache BEFORE calling run_recall so we know whether
+                    // this is a fresh recall or a hit from a prior substream in the
+                    // same agentic turn. Only fire the `MemoryRecalled` toast on
+                    // the first (fresh) recall — not on every continuation.
+                    let was_cached = crate::memory_recall::cached_recall(trimmed).is_some();
                     recall_block = crate::memory_recall::run_recall(
                         trimmed,
                         &memories,
@@ -414,6 +420,7 @@ Do not use a colon before tool calls.";
                         model.clone(),
                     )
                     .await;
+                    recall_was_fresh = !was_cached && recall_block.is_some();
                 }
             }
         }
@@ -428,9 +435,14 @@ Do not use a colon before tool calls.";
         } else if let Some(memories_section) = crate::memory::render_memories_section(&memories) {
             system_prompt.push_str(&memories_section);
         }
-        // Remember how much recalled-memory context we injected so the UI can
-        // tell the user a recall happened this turn.
-        recalled_memory_chars = recall_block.as_ref().map_or(0, |b| b.len());
+        // Only set recalled_memory_chars on a fresh recall (cache miss) so
+        // the `MemoryRecalled` toast fires once per turn, not once per
+        // agentic-loop substream continuation.
+        recalled_memory_chars = if recall_was_fresh {
+            recall_block.as_ref().map_or(0, |b| b.len())
+        } else {
+            0
+        };
         if let Some(memory_store_section) = sdk_memory_store_prompt_section().await {
             system_prompt.push_str(&memory_store_section);
         }

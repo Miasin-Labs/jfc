@@ -214,10 +214,16 @@ pub fn status_segments(
 
     match thinking {
         Some(ThinkingStatus::Live) => {
+            // Show live thinking duration (never frozen) instead of a static token count.
+            // The thinking phase duration lives in the elapsed timer, so it always moves.
+            parts.push(format!("thinking {}", fmt_elapsed(elapsed)));
+            // Add token estimate if available, but don't gate on it — during
+            // extended thinking the server may stop incrementing estimated_tokens
+            // after reaching a steady state, so we show the estimate we have.
             if thinking_tokens > 0 {
-                parts.push(format!("{} thinking", fmt_tokens(thinking_tokens)));
-                push_rate(&mut parts);
+                parts.push(format!("~{} tok", fmt_tokens(thinking_tokens)));
             }
+            push_rate(&mut parts);
         }
         Some(ThinkingStatus::Done(d)) => {
             parts.push(format!("thought {}s", d.as_secs().max(1)));
@@ -365,9 +371,16 @@ mod tests {
         );
         assert_eq!(s.label, "Thinking");
         assert!(s.body.contains("1m04s"), "elapsed missing: {}", s.body);
+        // Live thinking duration is shown (never frozen), e.g., "thinking 1m04s"
         assert!(
-            s.body.contains("1.2k thinking"),
-            "thinking tokens missing: {}",
+            s.body.contains("thinking 1m04s"),
+            "thinking duration missing: {}",
+            s.body
+        );
+        // Token estimate shown as "~1.2k tok" (approximate, may stall at server)
+        assert!(
+            s.body.contains("~1.2k tok"),
+            "thinking token estimate missing: {}",
             s.body
         );
         assert!(
