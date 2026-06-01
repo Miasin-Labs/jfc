@@ -51,12 +51,24 @@ pub(crate) fn handle_stream_usage(
     // recover the gauge total. We do the same: at
     // resume time the picker reads the last message's
     // `usage` rather than a default of 0.
+    //
+    // BUG FIX (2026-06-01): ResponseMetadata can arrive early with
+    // partial_input_only={input_tokens, output_tokens:0}. The original
+    // logic stamped this incomplete usage onto the message, and if the
+    // stream failed before the final Usage event arrived, the message
+    // was persisted with output_tokens:0 even though it contained actual
+    // streamed content. Now we only update the message's usage if:
+    // 1. It's a full Usage event (not partial_input_only), OR
+    // 2. The message already has usage and this event is strictly better
+    //
+    // This prevents the partial early snapshot from permanently clobbering
+    // the message's usage field on incomplete streams.
     if let Some(msg) = streaming_assistant_mut(app)
         && (!partial_input_only
             || msg
                 .usage
                 .as_ref()
-                .is_none_or(|usage| usage.total_context_tokens() <= reported_total as u64))
+                .is_some_and(|usage| usage.total_context_tokens() <= reported_total as u64))
     {
         msg.usage = Some(crate::types::ModelUsage {
             input_tokens: input_tokens as u64,
@@ -161,6 +173,34 @@ mod tests {
         assert_eq!(app.tool_ctx.approx_tokens, 122_000);
         assert_eq!(app.last_usage_input, 40_000);
         assert_eq!(app.last_usage_output, 2_000);
+    }
+
+    #[test]
+    fn partial_input_only_usage_does_not_stamp_message_on_first_arrival_bugfix() {
+        // BUG FIX (2026-06-01): ResponseMetadata arriving before chunks
+        // should NOT stamp the message with output_tokens:0. If the stream
+        // fails before the final Usage event, the message would persist
+        // with output_tokens:0 even though it contains actual content.
+        let mut app = test_app();
+        app.messages.push(ChatMessage::assistant(String::new()));
+        app.streaming_assistant_idx = Some(0);
+        
+        // Simulate ResponseMetadata arriving with input_tokens only
+        handle_stream_usage(&mut app, 40_000, 0, 0, 0);
+        
+        // The message should NOT have usage stamped yet (prevents the bug)
+        assert!(
+            app.messages[0].usage.is_none(),
+            "partial_input_only on first arrival must NOT stamp message"
+        );
+        
+        // Later, final Usage event arrives with full data
+        handle_stream_usage(&mut app, 40_000, 2_000, 75_000, 5_000);
+        
+        // Now the full usage is stamped
+        let usage = app.messages[0].usage.as_ref().expect("usage");
+        assert_eq!(usage.output_tokens, 2_000);
+        assert_eq!(usage.total_context_tokens(), 122_000);
     }
 
     #[test]
