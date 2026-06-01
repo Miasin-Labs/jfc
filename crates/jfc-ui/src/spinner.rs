@@ -1,56 +1,53 @@
-//! v126-style "Fermenting…" spinner state.
+//! Honest streaming-status model for the spinner row.
 //!
-//! Mirrors the architecture from `cli.js` lines 233823-234022 (verb list)
-//! and 322930-323289 (frame cycle, stall thresholds, "almost done thinking"
-//! trigger). Pure formatting — the renderer reads `App` fields and calls
-//! into here; no mutation, no I/O.
-//!
-//! ## Pieces
-//!
-//! - **Frames**: 6-char cycle `[· ✢ * ✶ ✻ ✽]` (matches v126's default
-//!   spinner; ghostty variant unused here for simplicity).
-//! - **Verbs**: a 32-entry subset of v126's 177-verb list, picked by hash
-//!   of `frame_seed` so the verb is **stable for runs of the same seed**.
-//!   v126 randomizes per-render which feels chaotic in a TUI; we rotate
-//!   every ~2s instead by deriving the seed from `(elapsed.as_secs() / 2)`.
-//! - **Sub-status**: `almost done thinking` appears when **>=60s** has
-//!   passed since the last token (matches v126 `VW_=60s`, line 323283).
+//! Every string this module produces reflects something the stream
+//! actually told us — elapsed time, real token counts, real thinking
+//! tokens, measured throughput, or measured silence. There are no
+//! decorative verbs, no shimmer sweeps, no fabricated reassurance
+//! ("almost done thinking"), and no animation that runs when nothing is
+//! happening. The renderer reads `App` fields and asks this module to
+//! format them; this module is pure formatting — no mutation, no I/O.
 //!
 //! ## Format (one line)
 //!
 //! ```text
-//! * Fermenting… (5m 10s · ↓ 14.6k tokens · almost done thinking)
+//! ✦ Thinking · 1m04s · 1.2k thinking · 18 tok/s
+//! ✦ Responding · 1m22s · 2.4k tokens · 47 tok/s
 //! ```
+//!
+//! The glyph advances one frame per render tick *while streaming* — that
+//! cycle is the only motion, and it stops the instant the stream ends.
+//! When the wire has been genuinely silent for a while the renderer dims
+//! the row (see [`StatusSegments::dim`]) and a `quiet 47s` chip says so
+//! plainly, instead of tinting the verb red or claiming progress.
 
 use std::{sync::OnceLock, time::Duration};
 
-/// Pre-computed status row split into the four logical pieces the
-/// renderer needs to color independently. The shimmer animation only
-/// applies to the verb segment, so we hand it back separately rather
-/// than baking the full string and asking the renderer to re-parse it.
-///
-/// Mirrors v126's `<GlimmerMessage>` decomposition (cli.js around
-/// 322930 — Spinner/GlimmerMessage.tsx) where the message text is
-/// re-rendered per-grapheme so a sweep can light up ±1 cells.
+/// Pre-computed status row, split so the renderer can style the glyph,
+/// the phase label, and the trailing metadata independently without
+/// re-parsing a packed string.
 pub struct StatusSegments {
-    /// Spinner glyph (e.g. `*`) — accent color, no shimmer.
+    /// Spinner glyph for this frame (e.g. `✦`).
     pub glyph: &'static str,
-    /// Verb root (e.g. `Fermenting`) — accent base, shimmer overlay.
-    pub verb: &'static str,
-    /// Trailing parenthesised body (e.g. `(5m 10s · ↓ 14.6k tokens)`).
-    /// Rendered in muted color, no shimmer — it's metadata, not the
-    /// active label, so animating it would compete with the verb for
-    /// the user's eye.
+    /// Honest phase label: `Thinking`, `Responding`, or `Working`. The
+    /// renderer may override this with an in-progress task's `activeForm`
+    /// (which describes the *actual* work) — that's still honest, just
+    /// more specific.
+    pub label: &'static str,
+    /// Trailing metadata, already `·`-joined and prefixed with a leading
+    /// separator: e.g. ` · 1m04s · 2.4k tokens · 47 tok/s`. Rendered
+    /// muted — it's context, not the active label.
     pub body: String,
+    /// True once the wire has been silent past [`QUIET_DIM_SECS`]. The
+    /// renderer dims the glyph + label when set, so a stalled stream
+    /// reads as "quiet" rather than "actively working".
+    pub dim: bool,
 }
 
-/// Whether all UI animations should flatten to static colors. Honored by
-/// every shimmer/pulse/sweep helper in this module so a single
-/// `JFC_REDUCED_MOTION=1` flips the whole UI to a still image. Mirrors
-/// v126's `reducedMotion` prop threaded through every animated
-/// component (cli.js around `useReducedMotion`). The env var is cached
-/// because render code calls this on every frame and a running process's
-/// environment is not a live configuration channel.
+/// Whether all UI animation should flatten to a still image. Honored by
+/// the renderer's glyph cycle so `JFC_REDUCED_MOTION=1` freezes the
+/// spinner. Cached because render code calls this every frame and a
+/// running process's environment is not a live configuration channel.
 pub fn reduced_motion() -> bool {
     static REDUCED_MOTION: OnceLock<bool> = OnceLock::new();
     *REDUCED_MOTION.get_or_init(|| {
@@ -61,11 +58,9 @@ pub fn reduced_motion() -> bool {
     })
 }
 
-/// Linear-interpolate between two RGB triples with `t ∈ [0, 1]`.
-/// Mirrors v126's `interpolateColor` (Spinner/utils.ts:14). Used by
-/// the shimmer pass to blend the verb base color toward the accent
-/// at the cells covered by the glimmer index, so the sweep reads as
-/// a smooth highlight rather than a hard color flip.
+/// Linear-interpolate between two RGB triples with `t ∈ [0, 1]`. A plain
+/// numeric utility kept here because the renderer's `pulse_color` blends
+/// the glyph toward muted as the stream goes quiet.
 pub fn interpolate_rgb(c1: (u8, u8, u8), c2: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
     let t = t.clamp(0.0, 1.0);
     let lerp = |a: u8, b: u8| -> u8 {
@@ -76,217 +71,32 @@ pub fn interpolate_rgb(c1: (u8, u8, u8), c2: (u8, u8, u8), t: f32) -> (u8, u8, u
     (lerp(c1.0, c2.0), lerp(c1.1, c2.1), lerp(c1.2, c2.2))
 }
 
-/// HSL hue (0..360) → RGB. Mirrors v126's `hueToRgb` in
-/// Spinner/utils.ts:32. Used for rainbow gradient text where each
-/// char gets `hueToRgb((phase + i * step) % 360)` so the colors sweep
-/// along the text on each animation frame. Saturation 0.7 / lightness
-/// 0.6 match v126's voice-mode waveform parameters — bright enough
-/// to read as colorful, muted enough not to clash with surrounding
-/// muted prose.
-pub fn hue_to_rgb(hue: f32) -> (u8, u8, u8) {
-    let h = ((hue % 360.0) + 360.0) % 360.0;
-    let s = 0.7_f32;
-    let l = 0.6_f32;
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - (((h / 60.0) % 2.0) - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = if h < 60.0 {
-        (c, x, 0.0)
-    } else if h < 120.0 {
-        (x, c, 0.0)
-    } else if h < 180.0 {
-        (0.0, c, x)
-    } else if h < 240.0 {
-        (0.0, x, c)
-    } else if h < 300.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-    (
-        ((r + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((g + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((b + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
-}
+/// Spinner glyph cycle. A small star set — the user reads the star pulse
+/// as "Claude". The renderer advances it one frame per tick while
+/// streaming and holds it on a single frame otherwise.
+pub const FRAMES: &[&str] = &["·", "✢", "✦", "✶", "✻", "✽"];
 
-/// Compute the current glimmer-sweep index for a verb of `verb_width`
-/// cells. The index sweeps from `-10` to `verb_width + 10` over time
-/// — chars within ±1 of the index get the shimmer color, everything
-/// else stays at the base. The 10-cell pre/post overshoot is what
-/// makes the highlight slide *into* and *out of* the verb cleanly
-/// instead of teleporting at the edges.
-///
-/// `tick_ms` controls cycle speed. v126 uses 50ms during `requesting`
-/// (faster, more attention-grabbing) and 200ms during `tool-use`
-/// (calmer pulse). We mirror that — the renderer picks 50ms while
-/// streaming, 200ms while idle.
-pub fn glimmer_index(elapsed: Duration, verb_width: usize, tick_ms: u64) -> i32 {
-    if verb_width == 0 || tick_ms == 0 {
-        return -100;
-    }
-    let cycle_position = (elapsed.as_millis() / tick_ms as u128) as i64;
-    let cycle_length = verb_width as i64 + 20;
-    let pos = (cycle_position % cycle_length) - 10;
-    pos as i32
-}
-
-/// 6-frame spinner cycle. Matches v126's `nAH()` default (cli.js:170248).
-pub const FRAMES: &[&str] = &["·", "✢", "*", "✶", "✻", "✽"];
-
-/// Present-tense verb pool — expanded toward cli.js v143's `iD6` array
-/// (~100 entries). Cycled in 5-second buckets so the same word stays on
-/// screen long enough to read but the spinner doesn't feel stuck.
-pub const VERBS: &[&str] = &[
-    "Fermenting",
-    "Pondering",
-    "Cooking",
-    "Brewing",
-    "Mulling",
-    "Simmering",
-    "Crafting",
-    "Forging",
-    "Untangling",
-    "Synthesizing",
-    "Spelunking",
-    "Wrangling",
-    "Distilling",
-    "Marinating",
-    "Whittling",
-    "Plotting",
-    "Computing",
-    "Sketching",
-    "Excavating",
-    "Tinkering",
-    "Sculpting",
-    "Surfacing",
-    "Threading",
-    "Weaving",
-    "Polishing",
-    "Composing",
-    "Architecting",
-    "Calibrating",
-    "Mapping",
-    "Auditing",
-    "Reasoning",
-    "Investigating",
-    "Accomplishing",
-    "Brainstorming",
-    "Cogitating",
-    "Computing",
-    "Conjuring",
-    "Constructing",
-    "Crunching",
-    "Deliberating",
-    "Designing",
-    "Divining",
-    "Drafting",
-    "Dreaming",
-    "Engineering",
-    "Envisioning",
-    "Exploring",
-    "Extrapolating",
-    "Fashioning",
-    "Figuring",
-    "Finessing",
-    "Formulating",
-    "Generating",
-    "Germinating",
-    "Hatching",
-    "Hypothesizing",
-    "Iterating",
-    "Kneading",
-    "Loading",
-    "Manifesting",
-    "Moonwalking",
-    "Noodling",
-    "Optimizing",
-    "Orchestrating",
-    "Percolating",
-    "Piecing",
-    "Planning",
-    "Processing",
-    "Prototyping",
-    "Puzzling",
-    "Quilting",
-    "Refining",
-    "Researching",
-    "Resolving",
-    "Sautéing",
-    "Scheming",
-    "Spinning",
-    "Strategizing",
-    "Structuring",
-    "Studying",
-    "Stitching",
-    "Steeping",
-    "Surveying",
-    "Tessellating",
-    "Tracing",
-    "Translating",
-    "Unraveling",
-    "Working",
-];
-
-/// Past-tense verbs for finished agents. Mirrors cli.js v143's `rD6` array
-/// so completed sub-agent rows in the fan read with a finished tone ("Baked
-/// for 1m 5s") instead of stale present-tense ("Fermenting").
-#[allow(dead_code)]
-pub const VERBS_PAST: &[&str] = &[
-    "Baked",
-    "Brewed",
-    "Churned",
-    "Cogitated",
-    "Cooked",
-    "Crunched",
-    "Sautéed",
-    "Simmered",
-    "Worked",
-    "Wrought",
-];
-
-/// Picks a frame index from a tick counter. Caller is expected to bump the
-/// tick on every redraw — typically every 80ms (one `UiEvent::Tick`).
+/// Glyph for `tick`. Caller bumps the tick once per redraw while
+/// streaming; a held tick freezes the glyph.
 pub fn frame_for(tick: usize) -> &'static str {
     FRAMES[tick % FRAMES.len()]
 }
 
-/// Picks a verb based on the elapsed time so the verb stays stable for
-/// ~5-second windows (less jittery than per-frame randomization, and
-/// long enough that a glance at the spinner finds the same word it
-/// did a moment ago — 2s was too jumpy in practice).
-pub fn verb_for(elapsed: Duration) -> &'static str {
-    let bucket = (elapsed.as_secs() / 5) as usize;
-    VERBS[bucket % VERBS.len()]
-}
-
-/// Pick a past-tense verb deterministically from a task-id-ish seed.
-/// Completed agents in the fan row read "Baked for 1m 5s" instead of a
-/// stale present-tense "Fermenting" — matches cli.js v143's `rD6`/`XgH()`
-/// pair where each task captures its own past verb at completion.
-#[allow(dead_code)]
-pub fn verb_past_for(seed: &str) -> &'static str {
-    let h: usize = seed.bytes().map(|b| b as usize).sum();
-    VERBS_PAST[h % VERBS_PAST.len()]
-}
-
-/// Format an elapsed Duration as `XmYs` or `Xs`. Mirrors v126 `h4()`
-/// (line 323177). Sub-second always shows as `0s` so the line doesn't
-/// flicker between `0s` and missing.
+/// Format an elapsed duration compactly: `4s`, `47s`, `1m04s`, `61m01s`.
+/// Seconds are zero-padded in the minutes case so the clock doesn't jump
+/// width as it ticks (`1m09s` → `1m10s`, not `1m9s` → `1m10s`).
 pub fn fmt_elapsed(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     if secs >= 60 {
-        let m = secs / 60;
-        let s = secs % 60;
-        format!("{m}m {s}s")
+        format!("{}m{:02}s", secs / 60, secs % 60)
     } else {
         format!("{secs}s")
     }
 }
 
-/// Format a token count compactly: `1.4k`, `15k`, `234`. v126 uses `I4()`
-/// which clamps to 1 decimal for k/M. Below 1000 we show the raw count
-/// since exact small numbers are useful (e.g. `42 tokens` mid-stream).
+/// Format a token count compactly: `234`, `1.4k`, `15k`, `2.0M`. Below
+/// 1000 the exact count is useful mid-stream; above that we clamp to one
+/// decimal for k/M.
 pub fn fmt_tokens(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -299,149 +109,42 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// Sub-status string when the stream has been quiet a while. v126 has 4
-/// thresholds (`ZW_=15s`, `TW_=30s`, `vW_=45s`, `VW_=60s`). At the longest
-/// it appends "almost done thinking" — the user-facing reassurance.
-pub fn stall_status(time_since_last_token: Duration) -> Option<&'static str> {
-    let s = time_since_last_token.as_secs();
-    if s >= 60 {
-        Some("almost done thinking")
-    } else if s >= 45 {
-        Some("still thinking")
-    } else if s >= 30 {
-        Some("thinking")
-    } else if s >= 15 {
-        Some("warming up")
-    } else {
-        None
-    }
+/// Seconds of wire silence before the `quiet Ns` chip appears. Short
+/// gaps between deltas are normal, so we wait a beat before saying so.
+pub const QUIET_CHIP_SECS: u64 = 8;
+
+/// Seconds of wire silence before the renderer dims the row. Past this
+/// the stream has plausibly stalled; the dim is the honest "it's gone
+/// quiet" signal that replaces the old red "rusting" fade.
+pub const QUIET_DIM_SECS: u64 = 30;
+
+/// Honest silence chip: how long since the last text/reasoning delta.
+/// `None` while the stream is fresh. Says exactly what it knows ("quiet
+/// for N seconds") and never claims the model is "almost done".
+pub fn quiet_status(time_since_last_token: Duration) -> Option<String> {
+    let secs = time_since_last_token.as_secs();
+    (secs >= QUIET_CHIP_SECS).then(|| format!("quiet {}", fmt_elapsed(time_since_last_token)))
 }
 
-/// User-facing stream liveness chip. Token counts tell us how much has
-/// arrived; this tells us whether the SSE wire is still moving right now.
-pub fn stream_activity_status(time_since_last_stream_event: Duration) -> String {
-    let secs = time_since_last_stream_event.as_secs();
-    if secs <= 1 {
-        "stream active".to_string()
-    } else if secs < 10 {
-        format!("stream {secs}s ago")
-    } else {
-        format!("stream idle {}", fmt_elapsed(time_since_last_stream_event))
-    }
-}
-
-/// Past-tense verbs for the `Cooked for Nm Ns` post-turn marker. Sourced
-/// from v126 cli.js:233999-234008; falls back to "Worked" if the bucket
-/// math overflows. Same 2-second-window rotation as the live verb so the
-/// label stays stable for a glance even though the time-bucket changes
-/// across the duration.
-pub const COOKED_VERBS: &[&str] = &[
-    "Baked",
-    "Brewed",
-    "Churned",
-    "Cogitated",
-    "Cooked",
-    "Crunched",
-    "Sautéed",
-    "Worked",
-];
-
-/// Tips rotated under the spinner when no task is open. Mirrors v126
-/// cli.js:323851 (`Tip: ${WH}` fallback when `m` task is None) — gives
-/// the user something to read while waiting and surfaces less-obvious
-/// keybindings. Picked deterministically by elapsed-bucket so the tip
-/// is stable for ~10s windows.
-pub const TIPS: &[&str] = &[
-    "Press Esc to dismiss popups",
-    "Ctrl+B opens the sessions sidebar",
-    "Ctrl+P opens the command palette",
-    "Ctrl+M switches model",
-    "Ctrl+T opens the task panel",
-    "Ctrl+Y yanks the last assistant message",
-    "Type @ to autocomplete file paths",
-    "/compact summarizes long conversations",
-    "/check re-runs cargo diagnostics",
-    "/auto-mode on enables the LLM tool classifier",
-];
-
-/// Same as `tip_for_with_state(elapsed, false)` but skips popup-related tips when no popup is
-/// open. The "Press Esc to dismiss popups" tip used to surface even
-/// when nothing was dismissable, which read as a fake instruction —
-/// the user would scan the screen for a popup that didn't exist.
-pub fn tip_for_with_state(elapsed: Duration, any_popup_open: bool) -> &'static str {
-    // Build the visible tip set on demand. Tips containing "Esc"
-    // (popup-dismissal hints) are filtered out when no popup is open.
-    let visible: Vec<&'static str> = TIPS
-        .iter()
-        .copied()
-        .filter(|t| any_popup_open || !t.contains("Esc"))
-        .collect();
-    if visible.is_empty() {
-        return TIPS[0];
-    }
-    let bucket = (elapsed.as_secs() / 10) as usize;
-    visible[bucket % visible.len()]
-}
-
-/// Pick a past-tense verb for the post-turn duration footer. Mirrors v126
-/// cli.js:341376 (`${A} for ${w}` where `A = Av_() = zJ(hpH) ?? "Worked"`).
-/// Bucketed by 2-second windows of the elapsed duration so different
-/// turns get different verbs but a single turn's display is stable.
-pub fn cooked_verb_for(elapsed: Duration) -> &'static str {
-    let bucket = (elapsed.as_secs() / 2) as usize;
-    COOKED_VERBS[bucket % COOKED_VERBS.len()]
-}
-
-/// Format the post-turn marker shown under each completed assistant
-/// message. v126 cli.js:341376 — `<verb> for <duration>`.
-pub fn format_finished(elapsed: Duration) -> String {
-    format!("{} for {}", cooked_verb_for(elapsed), fmt_elapsed(elapsed))
-}
-
-/// Live token count for the spinner: the **maximum** of the wire-truth
-/// cumulative `output_tokens` and the chars-divided-by-4 estimate.
-///
-/// ## Why max, not "prefer wire"
-///
-/// Anthropic's `message_delta` events arrive in *batches* — typically one
-/// every few hundred ms with the count of all output tokens since the
-/// stream began. The chars/4 estimate, by contrast, updates on every
-/// SSE byte. If the spinner just preferred wire whenever non-zero, the
-/// counter would freeze at the last delta value (e.g. 7) for hundreds
-/// of ms and then jump (e.g. to 200) when the next delta arrived —
-/// what the user reported.
-///
-/// By taking the max, the counter advances fluidly with every chunk
-/// (estimate side) AND corrects upward when wire-truth catches up.
-/// Importantly: max is **monotonic** — the counter never moves
-/// backward, which would read as a bug to the user. (chars/4 tends to
-/// over-count whitespace + code fences slightly so it usually leads
-/// wire; the max picks whichever is larger at any instant.)
-pub fn live_token_count(wire_output: u64, char_estimate: u64) -> u64 {
-    wire_output.max(char_estimate)
-}
-
-/// Trailing window over which the live tokens/sec rate is measured. A short
-/// window self-smooths the bursty `message_delta` batches (Anthropic sends
-/// cumulative `output_tokens` every few hundred ms) while still reflecting
-/// *current* speed — unlike a lifetime cumulative average, which lags badly
-/// once a fast opening burst tapers off.
+/// Trailing window over which the live tokens/sec rate is measured. Short
+/// enough to reflect *current* speed (self-smoothing over the bursty
+/// `message_delta` batches) rather than a lifetime average that lags once
+/// a fast opening burst tapers.
 pub const TOKEN_RATE_WINDOW: Duration = Duration::from_secs(5);
 
-/// Minimum time span between the oldest and newest in-window sample before a
-/// rate is reported. Below this the denominator is too small to be stable
-/// (early-stream noise / a single delta), so we suppress the `tok/s` chip
-/// rather than flicker a wild number.
+/// Minimum spread between oldest and newest in-window sample before a rate
+/// is reported. Below this the denominator is too small to be stable, so
+/// the chip is suppressed rather than flickering a wild number.
 const TOKEN_RATE_MIN_SPAN: Duration = Duration::from_millis(1200);
 
 /// Floor below which the rate chip is hidden — a sub-1 tok/s reading is
-/// almost always a stalled tail, better communicated by the stall status.
+/// almost always a stalled tail, better communicated by the quiet chip.
 const TOKEN_RATE_FLOOR: f64 = 1.0;
 
-/// Drop samples older than `window` relative to the newest sample. `samples`
-/// is `(elapsed_from_stream_start, cumulative_token_count)`, monotonic in both
-/// coordinates. Kept pure (operates on `Duration`, not `Instant`) so it's unit
-/// testable without sleeping.
+/// Drop samples older than `TOKEN_RATE_WINDOW` relative to the newest.
+/// `samples` is `(elapsed_from_stream_start, cumulative_token_count)`,
+/// monotonic in both coordinates. Pure (operates on `Duration`) so it's
+/// unit-testable without sleeping.
 pub fn trim_token_samples(samples: &mut std::collections::VecDeque<(Duration, u64)>) {
     let Some(&(newest, _)) = samples.back() else {
         return;
@@ -457,13 +160,11 @@ pub fn trim_token_samples(samples: &mut std::collections::VecDeque<(Duration, u6
     }
 }
 
-/// Compute tokens/sec over the in-window samples: `Δtokens / Δseconds` between
-/// the oldest and newest retained sample. Returns `None` when there isn't
-/// enough spread to be meaningful (so the caller hides the chip). Self-
-/// smoothing by construction — no EMA needed.
+/// Tokens/sec over the in-window samples: `Δtokens / Δseconds` between the
+/// oldest and newest retained sample. `None` when there isn't enough
+/// spread to be meaningful (so the caller hides the chip).
 pub fn windowed_token_rate(samples: &std::collections::VecDeque<(Duration, u64)>) -> Option<f64> {
-    let (&(oldest_t, oldest_tok), &(newest_t, newest_tok)) =
-        samples.front().zip(samples.back())?;
+    let (&(oldest_t, oldest_tok), &(newest_t, newest_tok)) = samples.front().zip(samples.back())?;
     let span = newest_t.saturating_sub(oldest_t);
     if span < TOKEN_RATE_MIN_SPAN {
         return None;
@@ -473,172 +174,93 @@ pub fn windowed_token_rate(samples: &std::collections::VecDeque<(Duration, u64)>
     (rate >= TOKEN_RATE_FLOOR).then_some(rate)
 }
 
-/// Live-vs-finished thinking signal for `format_status`. Mirrors v126's
-/// `thinkingStatus` prop on the spinner component (cli.js:323189): the
-/// model is either *currently* producing reasoning, *has finished*
-/// reasoning (and we know the duration), or hasn't reasoned this turn.
+/// Live-vs-finished thinking signal. The model is either *currently*
+/// producing reasoning, or it *has finished* (and we know how long it
+/// took). `None` means it didn't use extended thinking this turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingStatus {
-    /// Reasoning chunks are arriving — show `thinking…`.
+    /// Reasoning chunks are arriving — the phase label reads `Thinking`.
     Live,
-    /// Reasoning ended; first text byte has arrived. Display
-    /// `thought for Ns` instead of the live verb.
+    /// Reasoning ended; text has started. We show a `thought Ns` chip.
     Done(Duration),
 }
 
-/// Compose the full status line shown above the input bar:
-/// `"* Fermenting… (5m 10s · ↓ 14.6k tokens · almost done thinking)"`.
-///
-/// Returns just the *content* — the renderer wraps it in styled spans.
-///
-/// `thinking` overrides `time_since_last_token`'s stall messages while
-/// the model is actively thinking, and shows a `thought for Ns` chip
-/// once thinking has ended.
-/// Decomposed form of `format_status` — same inputs, but returns the
-/// glyph / verb / parens-body separately so the renderer can shimmer
-/// just the verb without re-parsing a packed string.
+/// Build the honest status row. `thinking` selects the phase label and
+/// which token counter leads; `output_tokens` / `thinking_tokens` /
+/// `token_rate` come straight off the wire; `time_since_last_token`
+/// drives the quiet chip and the `dim` flag.
 pub fn status_segments(
     tick: usize,
     elapsed: Duration,
     output_tokens: u64,
     token_rate: Option<f64>,
     time_since_last_token: Duration,
-    time_since_last_stream_event: Option<Duration>,
     thinking: Option<ThinkingStatus>,
     thinking_tokens: u64,
 ) -> StatusSegments {
+    let label = match thinking {
+        Some(ThinkingStatus::Live) => "Thinking",
+        Some(ThinkingStatus::Done(_)) => "Responding",
+        None if output_tokens > 0 => "Responding",
+        None => "Working",
+    };
+
     let mut parts: Vec<String> = vec![fmt_elapsed(elapsed)];
-    // Display server-authoritative thinking tokens during redacted-thinking phases
-    // (shown separately from output tokens to match cli.js pattern).
-    if thinking_tokens > 0 {
-        parts.push(format!("⟳ {} thinking", fmt_tokens(thinking_tokens)));
-    }
-    if output_tokens > 0 {
-        parts.push(format!("↓ {} tokens", fmt_tokens(output_tokens)));
-        // Windowed tokens/sec (computed by the caller from a trailing sample
-        // window) — reflects *current* speed, not a lifetime average that
-        // lags after a fast opening burst. `None` means "not enough spread
-        // yet", so the chip is simply omitted.
+    let push_rate = |parts: &mut Vec<String>| {
         if let Some(rate) = token_rate {
             parts.push(format!("{rate:.0} tok/s"));
         }
-    }
-    if let Some(d) = time_since_last_stream_event {
-        parts.push(stream_activity_status(d));
-    }
+    };
+
     match thinking {
         Some(ThinkingStatus::Live) => {
-            // Reuse the main spinner's star cycle (`· ✢ * ✶ ✻ ✽`) for
-            // the live-thinking glyph too instead of the braille
-            // dots. The user said the star pulse is what reads as
-            // "Claude" to them; mixing in braille split the visual
-            // language. Single source of truth, single glyph family.
-            let glyph = frame_for(tick + 3);
-            let phase = match elapsed.as_secs() {
-                0..=11 => "planning",
-                12..=29 => "considering",
-                _ => "drafting",
-            };
-            parts.push(format!("thinking {glyph} {phase}"));
+            if thinking_tokens > 0 {
+                parts.push(format!("{} thinking", fmt_tokens(thinking_tokens)));
+                push_rate(&mut parts);
+            }
         }
         Some(ThinkingStatus::Done(d)) => {
-            let secs = d.as_secs().max(1);
-            parts.push(format!("thought for {secs}s"));
-            if let Some(s) = stall_status(time_since_last_token) {
-                parts.push(s.to_string());
+            parts.push(format!("thought {}s", d.as_secs().max(1)));
+            if output_tokens > 0 {
+                parts.push(format!("{} tokens", fmt_tokens(output_tokens)));
+                push_rate(&mut parts);
             }
         }
         None => {
-            if let Some(s) = stall_status(time_since_last_token) {
-                parts.push(s.to_string());
+            if output_tokens > 0 {
+                parts.push(format!("{} tokens", fmt_tokens(output_tokens)));
+                push_rate(&mut parts);
             }
         }
     }
+
+    if let Some(q) = quiet_status(time_since_last_token) {
+        parts.push(q);
+    }
+
     StatusSegments {
         glyph: frame_for(tick),
-        verb: verb_for(elapsed),
-        body: format!("({})", parts.join(" · ")),
+        label,
+        body: format!(" · {}", parts.join(" · ")),
+        dim: time_since_last_token.as_secs() >= QUIET_DIM_SECS,
     }
 }
 
-#[allow(dead_code)]
-pub fn format_status(
-    tick: usize,
-    elapsed: Duration,
-    output_tokens: u64,
-    token_rate: Option<f64>,
-    time_since_last_token: Duration,
-    time_since_last_stream_event: Option<Duration>,
-    thinking: Option<ThinkingStatus>,
-    thinking_tokens: u64,
-) -> String {
-    let mut parts: Vec<String> = vec![fmt_elapsed(elapsed)];
-    if thinking_tokens > 0 {
-        parts.push(format!("⟳ {} thinking", fmt_tokens(thinking_tokens)));
-    }
-    if output_tokens > 0 {
-        parts.push(format!("↓ {} tokens", fmt_tokens(output_tokens)));
-        // Windowed tokens/sec — see `status_segments` for the rationale.
-        if let Some(rate) = token_rate {
-            parts.push(format!("{rate:.0} tok/s"));
-        }
-    }
-    if let Some(d) = time_since_last_stream_event {
-        parts.push(stream_activity_status(d));
-    }
-    // Thinking signal beats stall_status while live (mid-reasoning the
-    // wire is silent for tens of seconds and the user would otherwise
-    // see "almost done thinking" the whole time). Once thinking ended,
-    // show the duration chip; *also* layer stall_status on top of that
-    // when the post-thinking text stream goes quiet for >=15s.
-    match thinking {
-        Some(ThinkingStatus::Live) => {
-            // Reuse the star cycle (`· ✢ * ✶ ✻ ✽`) here too — keeps
-            // the live-thinking row in the same visual language as
-            // the main spinner glyph instead of mixing in braille
-            // dots that read as a separate animation system.
-            let glyph = frame_for(tick + 3);
-            let phase = match elapsed.as_secs() {
-                0..=11 => "planning",
-                12..=29 => "considering",
-                _ => "drafting",
-            };
-            parts.push(format!("thinking {glyph} {phase}"));
-        }
-        Some(ThinkingStatus::Done(d)) => {
-            let secs = d.as_secs().max(1);
-            parts.push(format!("thought for {secs}s"));
-            if let Some(s) = stall_status(time_since_last_token) {
-                parts.push(s.to_string());
-            }
-        }
-        None => {
-            if let Some(s) = stall_status(time_since_last_token) {
-                parts.push(s.to_string());
-            }
-        }
-    }
-    format!(
-        "{} {}… ({})",
-        frame_for(tick),
-        verb_for(elapsed),
-        parts.join(" · ")
-    )
+/// Post-turn footer shown dim under each completed assistant message:
+/// just the honest elapsed time. The caller may append the turn's cost
+/// (`2m04s · $0.04`). No decorative past-tense verb.
+pub fn format_finished(elapsed: Duration) -> String {
+    fmt_elapsed(elapsed)
 }
 
-/// Compact-mode spinner body. Mirrors v126's `setStreamMode("compacting")`
-/// UI: braille spinner + verb + elapsed + magnitude + live output.
+/// Compact-mode status body. Same honest, paren-free shape as the
+/// streaming row: glyph + `Compacting` + elapsed + input magnitude +
+/// live summary output.
 ///
-/// - `pre_tokens` — pre-compact context size, shown as the input
-///   magnitude (`412k tokens`).
-/// - `output_chars` — cumulative summary text length collected so far
-///   from the streaming compact response. Divided by 4 to estimate
-///   tokens (same chars/4 heuristic as the regular streaming spinner).
-///   Mirrors v126's `addResponseLength` callback in PB7
-///   (cli.js:396989) — fires on every text_delta during summarization.
-///
-/// Without the live output piece, a 1m+ compact looks like a frozen
-/// UI even though the API is happily streaming summary text.
+/// - `pre_tokens` — pre-compact context size (`412k tokens`).
+/// - `output_chars` — cumulative summary text length, divided by 4 for a
+///   token estimate. Without it a 1m+ compact looks frozen even though
+///   the API is streaming summary text.
 pub fn format_compact_status(
     tick: usize,
     elapsed: Duration,
@@ -650,10 +272,9 @@ pub fn format_compact_status(
         parts.push(format!("{} tokens", fmt_tokens(pre_tokens)));
     }
     if output_chars > 0 {
-        let out_tokens = output_chars / 4;
-        parts.push(format!("↓ {} tokens", fmt_tokens(out_tokens)));
+        parts.push(format!("↓ {} tokens", fmt_tokens(output_chars / 4)));
     }
-    format!("{} Compacting… ({})", frame_for(tick), parts.join(" · "))
+    format!("{} Compacting · {}", frame_for(tick), parts.join(" · "))
 }
 
 #[cfg(test)]
@@ -668,10 +289,11 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_format_minutes_normal() {
-        assert_eq!(fmt_elapsed(Duration::from_secs(60)), "1m 0s");
-        assert_eq!(fmt_elapsed(Duration::from_secs(310)), "5m 10s");
-        assert_eq!(fmt_elapsed(Duration::from_secs(3661)), "61m 1s");
+    fn elapsed_format_minutes_zero_padded_normal() {
+        assert_eq!(fmt_elapsed(Duration::from_secs(60)), "1m00s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(64)), "1m04s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(310)), "5m10s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(3661)), "61m01s");
     }
 
     #[test]
@@ -686,84 +308,163 @@ mod tests {
     }
 
     #[test]
-    fn stall_status_thresholds_match_v126_normal() {
-        assert_eq!(stall_status(Duration::from_secs(0)), None);
-        assert_eq!(stall_status(Duration::from_secs(14)), None);
-        assert_eq!(stall_status(Duration::from_secs(15)), Some("warming up"));
-        assert_eq!(stall_status(Duration::from_secs(29)), Some("warming up"));
-        assert_eq!(stall_status(Duration::from_secs(30)), Some("thinking"));
-        assert_eq!(stall_status(Duration::from_secs(44)), Some("thinking"));
-        assert_eq!(
-            stall_status(Duration::from_secs(45)),
-            Some("still thinking")
-        );
-        assert_eq!(
-            stall_status(Duration::from_secs(59)),
-            Some("still thinking")
-        );
-        assert_eq!(
-            stall_status(Duration::from_secs(60)),
-            Some("almost done thinking")
-        );
-        assert_eq!(
-            stall_status(Duration::from_secs(600)),
-            Some("almost done thinking")
-        );
-    }
-
-    #[test]
     fn frame_cycle_wraps_robust() {
         assert_eq!(frame_for(0), "·");
-        assert_eq!(frame_for(1), "✢");
+        assert_eq!(frame_for(2), "✦");
         assert_eq!(frame_for(5), "✽");
         assert_eq!(frame_for(6), "·"); // wraps
         assert_eq!(frame_for(usize::MAX), FRAMES[usize::MAX % FRAMES.len()]);
     }
 
     #[test]
-    fn verb_changes_every_five_seconds_robust() {
-        // Bucket widened from 2s → 5s after the 2s cadence felt jumpy
-        // in practice (the user's complaint: spinner verb out of sync
-        // with the per-second elapsed clock). 5s windows let a glance
-        // back at the spinner find the same word it did a moment ago.
-        let v0 = verb_for(Duration::from_secs(0));
-        let v4 = verb_for(Duration::from_secs(4));
-        let v5 = verb_for(Duration::from_secs(5));
-        assert_eq!(v0, v4, "verb stable within a 5s window");
-        assert_ne!(v0, v5, "verb advances at the 5s boundary");
+    fn quiet_status_is_honest_normal() {
+        // Fresh / brief gaps say nothing.
+        assert_eq!(quiet_status(Duration::from_secs(0)), None);
+        assert_eq!(quiet_status(Duration::from_secs(7)), None);
+        // Past the threshold it states the measured silence — and never
+        // fabricates "almost done thinking".
+        assert_eq!(
+            quiet_status(Duration::from_secs(8)).as_deref(),
+            Some("quiet 8s")
+        );
+        assert_eq!(
+            quiet_status(Duration::from_secs(62)).as_deref(),
+            Some("quiet 1m02s")
+        );
     }
 
     #[test]
-    fn format_status_includes_all_pieces_normal() {
-        let s = format_status(
+    fn status_responding_shows_tokens_and_rate_normal() {
+        let s = status_segments(
             2,
-            Duration::from_secs(310),
-            14_600,
+            Duration::from_secs(82),
+            2_400,
             Some(47.0),
-            Duration::from_secs(70),
-            Some(Duration::from_secs(0)),
+            Duration::from_secs(1),
             None,
             0,
         );
-        assert!(s.contains("…"), "verb ellipsis missing: {s}");
-        assert!(s.contains("5m 10s"), "elapsed missing: {s}");
-        assert!(s.contains("14k tokens"), "token line missing: {s}");
-        assert!(s.contains("stream active"), "stream liveness missing: {s}");
-        assert!(
-            s.contains("almost done thinking"),
-            "stall hint missing: {s}"
-        );
-        assert!(s.contains("47 tok/s"), "rate chip missing: {s}");
+        assert_eq!(s.label, "Responding");
+        assert_eq!(s.glyph, frame_for(2));
+        assert!(s.body.contains("1m22s"), "elapsed missing: {}", s.body);
+        assert!(s.body.contains("2.4k tokens"), "tokens missing: {}", s.body);
+        assert!(s.body.contains("47 tok/s"), "rate missing: {}", s.body);
+        assert!(!s.dim, "fresh stream should not be dim");
     }
 
-    // --- windowed_token_rate / trim_token_samples ---
+    #[test]
+    fn status_live_thinking_shows_thinking_tokens_normal() {
+        let s = status_segments(
+            0,
+            Duration::from_secs(64),
+            0,
+            Some(18.0),
+            Duration::from_secs(2),
+            Some(ThinkingStatus::Live),
+            1_200,
+        );
+        assert_eq!(s.label, "Thinking");
+        assert!(s.body.contains("1m04s"), "elapsed missing: {}", s.body);
+        assert!(
+            s.body.contains("1.2k thinking"),
+            "thinking tokens missing: {}",
+            s.body
+        );
+        assert!(
+            s.body.contains("18 tok/s"),
+            "thinking rate missing: {}",
+            s.body
+        );
+        // While thinking we never show output `tokens`.
+        assert!(
+            !s.body.contains(" tokens"),
+            "should not show output tokens: {}",
+            s.body
+        );
+    }
+
+    #[test]
+    fn status_done_thinking_shows_duration_then_output_normal() {
+        let s = status_segments(
+            0,
+            Duration::from_secs(60),
+            5_000,
+            Some(40.0),
+            Duration::from_secs(0),
+            Some(ThinkingStatus::Done(Duration::from_secs(12))),
+            0,
+        );
+        assert_eq!(s.label, "Responding");
+        assert!(
+            s.body.contains("thought 12s"),
+            "thought chip missing: {}",
+            s.body
+        );
+        assert!(
+            s.body.contains("5.0k tokens"),
+            "output tokens missing: {}",
+            s.body
+        );
+    }
+
+    #[test]
+    fn status_done_thinking_floors_to_one_second_robust() {
+        let s = status_segments(
+            0,
+            Duration::from_secs(5),
+            100,
+            None,
+            Duration::from_secs(0),
+            Some(ThinkingStatus::Done(Duration::from_millis(400))),
+            0,
+        );
+        assert!(
+            s.body.contains("thought 1s"),
+            "expected 1s floor: {}",
+            s.body
+        );
+    }
+
+    #[test]
+    fn status_working_before_any_output_robust() {
+        let s = status_segments(
+            0,
+            Duration::from_secs(2),
+            0,
+            None,
+            Duration::from_secs(0),
+            None,
+            0,
+        );
+        assert_eq!(s.label, "Working");
+        assert!(!s.body.contains("tokens"), "no token chip yet: {}", s.body);
+        assert!(s.body.contains("2s"));
+    }
+
+    #[test]
+    fn status_dims_and_chips_when_quiet_normal() {
+        let s = status_segments(
+            0,
+            Duration::from_secs(90),
+            500,
+            None,
+            Duration::from_secs(47),
+            None,
+            0,
+        );
+        assert!(s.dim, "47s of silence should dim the row");
+        assert!(
+            s.body.contains("quiet 47s"),
+            "quiet chip missing: {}",
+            s.body
+        );
+    }
 
     #[test]
     fn windowed_rate_basic_normal() {
         let mut samples = std::collections::VecDeque::new();
         samples.push_back((Duration::from_millis(0), 0u64));
         samples.push_back((Duration::from_millis(2000), 100u64));
-        // 100 tokens in 2s = 50 tok/s
         let rate = windowed_token_rate(&samples).expect("should produce a rate");
         assert!((rate - 50.0).abs() < 0.1, "expected 50 tok/s, got {rate}");
     }
@@ -775,10 +476,11 @@ mod tests {
             samples.push_back((Duration::from_millis(t), tok));
         }
         trim_token_samples(&mut samples);
-        // newest=10s, TOKEN_RATE_WINDOW=5s → cutoff=5s; t=0,1,2 stale but
-        // trim keeps ≥2 entries so at least oldest+newest survive
         assert!(samples.len() >= 2, "must keep ≥2 samples: {:?}", samples);
-        assert_eq!(*samples.back().unwrap(), (Duration::from_millis(10_000), 500));
+        assert_eq!(
+            *samples.back().unwrap(),
+            (Duration::from_millis(10_000), 500)
+        );
     }
 
     #[test]
@@ -793,7 +495,6 @@ mod tests {
         let mut samples = std::collections::VecDeque::new();
         samples.push_back((Duration::from_millis(0), 0u64));
         samples.push_back((Duration::from_millis(500), 100u64));
-        // 500ms < TOKEN_RATE_MIN_SPAN (1200ms) → None
         assert!(windowed_token_rate(&samples).is_none());
     }
 
@@ -805,238 +506,29 @@ mod tests {
     }
 
     #[test]
-    fn format_status_omits_tokens_when_zero_robust() {
-        let s = format_status(
-            0,
-            Duration::from_secs(3),
-            0,
-            None,
-            Duration::from_secs(0),
-            None,
-            None,
-            0,
-        );
-        assert!(
-            !s.contains("tokens"),
-            "should hide token suffix when 0: {s}"
-        );
-        assert!(s.contains("3s"));
+    fn format_finished_is_just_elapsed_normal() {
+        assert_eq!(format_finished(Duration::from_secs(310)), "5m10s");
+        assert_eq!(format_finished(Duration::from_secs(3)), "3s");
     }
 
     #[test]
-    fn format_status_omits_stall_when_fresh_robust() {
-        let s = format_status(
-            0,
-            Duration::from_secs(5),
-            100,
-            None,
-            Duration::from_secs(2),
-            None,
-            None,
-            0,
-        );
-        assert!(
-            !s.contains("thinking"),
-            "fresh stream shouldn't say 'thinking': {s}"
-        );
-    }
-
-    // Live thinking: spinner shows `thinking` instead of stall messages.
-    #[test]
-    fn format_status_live_thinking_shows_thinking_normal() {
-        let s = format_status(
-            0,
-            Duration::from_secs(20),
-            500,
-            None,
-            Duration::from_secs(20),
-            Some(Duration::from_secs(20)),
-            Some(ThinkingStatus::Live),
-            0,
-        );
-        assert!(s.contains("thinking"), "expected live thinking: {s}");
-        assert!(
-            s.contains("stream idle 20s"),
-            "live thinking should expose stream idleness: {s}"
-        );
-        // While live, we suppress stall messages so a 20s gap doesn't
-        // double-display "warming up · thinking".
-        assert!(
-            !s.contains("warming up"),
-            "live thinking should hide stall: {s}"
-        );
-    }
-
-    // Done thinking: spinner shows `thought for Ns`. Mirrors v126's
-    // `thought for ${Math.max(1, Math.round(G / 1e3))}s` formatter.
-    #[test]
-    fn format_status_done_thinking_shows_duration_normal() {
-        let s = format_status(
-            0,
-            Duration::from_secs(60),
-            5_000,
-            None,
-            Duration::from_secs(0),
-            Some(Duration::from_secs(1)),
-            Some(ThinkingStatus::Done(Duration::from_secs(12))),
-            0,
-        );
-        assert!(s.contains("thought for 12s"), "expected duration: {s}");
-    }
-
-    // Sub-second thinking still renders as `thought for 1s` (v126 floors
-    // to 1).
-    #[test]
-    fn format_status_done_thinking_floors_to_one_second_robust() {
-        let s = format_status(
-            0,
-            Duration::from_secs(5),
-            100,
-            None,
-            Duration::from_secs(0),
-            None,
-            Some(ThinkingStatus::Done(Duration::from_millis(400))),
-            0,
-        );
-        assert!(s.contains("thought for 1s"), "expected 1s floor: {s}");
-    }
-
-    // Compact spinner shows the verb, elapsed, AND pre-compact token
-    // magnitude — without this last piece a 60s compact looks frozen.
-    #[test]
-    fn format_compact_status_includes_pre_tokens_normal() {
-        let s = format_compact_status(0, Duration::from_secs(8), 412_000, 0);
+    fn format_compact_status_includes_pieces_normal() {
+        let s = format_compact_status(0, Duration::from_secs(15), 412_000, 4_800);
         assert!(s.contains("Compacting"), "verb missing: {s}");
-        assert!(s.contains("8s"), "elapsed missing: {s}");
+        assert!(s.contains("15s"), "elapsed missing: {s}");
         assert!(s.contains("412k tokens"), "pre-token chip missing: {s}");
+        assert!(
+            s.contains("↓ 1.2k tokens"),
+            "output token chip missing: {s}"
+        );
     }
 
-    // When pre_tokens is 0 (e.g. a brand-new session compacting trivial
-    // content, or the renderer hasn't recomputed yet) drop the chip
-    // rather than showing a useless `0 tokens`.
     #[test]
-    fn format_compact_status_omits_chip_when_pre_zero_robust() {
+    fn format_compact_status_omits_empty_chips_robust() {
         let s = format_compact_status(0, Duration::from_secs(2), 0, 0);
         assert!(s.contains("Compacting"), "verb missing: {s}");
         assert!(s.contains("2s"), "elapsed missing: {s}");
         assert!(!s.contains("0 tokens"), "shouldn't show 0-token chip: {s}");
-    }
-
-    // Live output during compact streaming: `output_chars` divided by 4
-    // gives the token estimate (matches the regular streaming spinner's
-    // chars/4 fallback). Mirrors v126's PB7 addResponseLength feed.
-    #[test]
-    fn format_compact_status_shows_live_output_tokens_normal() {
-        // 4_800 chars ≈ 1.2k tokens (4_800 / 4 = 1200).
-        let s = format_compact_status(0, Duration::from_secs(15), 412_000, 4_800);
-        assert!(s.contains("Compacting"), "verb missing: {s}");
-        assert!(s.contains("412k tokens"), "pre-token chip missing: {s}");
-        assert!(s.contains("↓"), "down-arrow missing: {s}");
-        assert!(s.contains("1.2k tokens"), "output token chip missing: {s}");
-    }
-
-    // Robust: 0 output_chars (just started, no chunks yet) drops the
-    // ↓ chip — same shape as the regular spinner before any token
-    // arrives.
-    #[test]
-    fn format_compact_status_omits_output_chip_when_zero_robust() {
-        let s = format_compact_status(0, Duration::from_secs(3), 100_000, 0);
         assert!(!s.contains("↓"), "shouldn't show empty output chip: {s}");
-    }
-
-    #[test]
-    fn live_token_count_takes_max_normal() {
-        // Behavior changed from "prefer wire" → "take max". Reason:
-        // wire-truth arrives in batches (one `message_delta` every few
-        // hundred ms); the estimate updates per-byte. With prefer-wire,
-        // the counter froze between deltas and jumped on each one (the
-        // user-reported "jumps from 7 to 200"). Max keeps the counter
-        // fluid AND monotonic.
-        assert_eq!(
-            live_token_count(150, 200),
-            200,
-            "estimate higher → estimate wins"
-        );
-        assert_eq!(live_token_count(200, 150), 200, "wire higher → wire wins");
-        assert_eq!(live_token_count(0, 200), 200, "no wire yet → estimate");
-        assert_eq!(live_token_count(200, 0), 200, "no estimate → wire");
-    }
-
-    #[test]
-    fn live_token_count_zero_when_both_zero_robust() {
-        // Pre-stream / first-frame state — nothing to show, no panic.
-        assert_eq!(live_token_count(0, 0), 0);
-    }
-
-    #[test]
-    fn live_token_count_monotonic_across_arrivals_robust() {
-        // Simulate a typical stream: chunks come in, then a delayed
-        // wire delta arrives at a *lower* value than the current
-        // estimate (the over-counting pattern). Counter must never
-        // visibly drop.
-        let mut last = 0u64;
-        for (wire, est) in [(0, 5), (0, 50), (0, 100), (40, 100), (40, 150), (200, 150)] {
-            let n = live_token_count(wire, est);
-            assert!(
-                n >= last,
-                "count went backward: prev={last} now={n} (wire={wire} est={est})"
-            );
-            last = n;
-        }
-    }
-
-    #[test]
-    fn cooked_verb_in_pool_normal() {
-        // Whatever verb comes back must be from the v126 pool — bucket
-        // wraparound math should never produce a string outside the array.
-        for secs in [0u64, 1, 2, 7, 60, 600, 3600, 86_400] {
-            let v = cooked_verb_for(Duration::from_secs(secs));
-            assert!(
-                COOKED_VERBS.contains(&v),
-                "elapsed={secs}s → {v:?} not in COOKED_VERBS"
-            );
-        }
-    }
-
-    #[test]
-    fn cooked_verb_changes_across_buckets_normal() {
-        // Different turn durations should sometimes pick different verbs
-        // — otherwise every assistant turn would always say "Cooked".
-        let mut seen = std::collections::HashSet::new();
-        for secs in 0..32 {
-            seen.insert(cooked_verb_for(Duration::from_secs(secs)));
-        }
-        assert!(
-            seen.len() >= 4,
-            "expected at least 4 distinct verbs across 32s window, got {seen:?}"
-        );
-    }
-
-    #[test]
-    fn cooked_verb_stable_within_bucket_robust() {
-        // The 2-second bucket from cli.js means `0s` and `1s` should pick
-        // the same verb (display stability for the brief moment between
-        // 0s and 1s of elapsed when the message just resolved).
-        assert_eq!(
-            cooked_verb_for(Duration::from_secs(0)),
-            cooked_verb_for(Duration::from_secs(1))
-        );
-    }
-
-    #[test]
-    fn format_finished_matches_v126_layout_normal() {
-        // v126 cli.js:341376: `${A} for ${w}` where w is "Xm Ys" or "Ns".
-        let s = format_finished(Duration::from_secs(310));
-        assert!(s.contains(" for 5m 10s"), "got: {s}");
-        assert!(
-            COOKED_VERBS.iter().any(|v| s.starts_with(v)),
-            "must start with a verb from the pool; got: {s}"
-        );
-    }
-
-    #[test]
-    fn format_finished_short_duration_robust() {
-        let s = format_finished(Duration::from_secs(3));
-        assert!(s.ends_with(" for 3s"), "short-duration format: {s}");
     }
 }

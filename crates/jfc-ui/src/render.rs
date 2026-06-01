@@ -43,7 +43,7 @@ pub(crate) use agents::format_subagent_counters;
 pub(crate) use agents::format_token_count;
 pub(crate) use overlays::{current_slash_prefix, slash_matches};
 pub use session_sidebar::ordered_sidebar_sessions;
-pub(crate) use visual::{DiffStats, collect_diff_stats, pulse_color_pub, truncate_str};
+pub(crate) use visual::{DiffStats, collect_diff_stats, truncate_str};
 
 // Internal cross-module helpers — visible to all render submodules via `use super::*`
 pub use visual::*;

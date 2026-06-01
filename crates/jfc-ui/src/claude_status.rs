@@ -17,8 +17,6 @@ pub struct ClaudeStatusSnapshot {
     pub incidents: Vec<ClaudeIncidentStatus>,
     #[allow(dead_code)]
     pub fetched_at: Instant,
-    pub bytes_in: u64,
-    pub bytes_out: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -175,14 +173,8 @@ async fn fetch_summary(client: &reqwest::Client) -> anyhow::Result<ClaudeStatusS
         anyhow::bail!("status.claude.com returned HTTP {status}");
     }
 
-    let bytes_in = bytes.len() as u64;
     let summary: SummaryResponse = serde_json::from_slice(&bytes)?;
-    Ok(summary.into_snapshot(bytes_in, estimate_outbound_bytes(SUMMARY_URL)))
-}
-
-fn estimate_outbound_bytes(url: &str) -> u64 {
-    // Approximate one small HTTPS GET: request line + Host/User-Agent/Accept headers.
-    url.len() as u64 + 96
+    Ok(summary.into_snapshot())
 }
 
 fn is_api_or_code_component(component: &ClaudeComponentStatus) -> bool {
@@ -211,7 +203,7 @@ struct SummaryResponse {
 }
 
 impl SummaryResponse {
-    fn into_snapshot(self, bytes_in: u64, bytes_out: u64) -> ClaudeStatusSnapshot {
+    fn into_snapshot(self) -> ClaudeStatusSnapshot {
         ClaudeStatusSnapshot {
             indicator: self.status.indicator,
             description: self.status.description,
@@ -233,8 +225,6 @@ impl SummaryResponse {
                 })
                 .collect(),
             fetched_at: Instant::now(),
-            bytes_in,
-            bytes_out,
         }
     }
 }
@@ -277,8 +267,6 @@ mod tests {
                 impact: Some("major".to_owned()),
             }],
             fetched_at: Instant::now(),
-            bytes_in: 1024,
-            bytes_out: 128,
         };
 
         assert_eq!(snapshot.short_badge(), "status API partial outage");

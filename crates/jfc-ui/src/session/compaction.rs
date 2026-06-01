@@ -134,10 +134,26 @@ pub(super) fn is_empty_assistant_placeholder(msg: &ChatMessage) -> bool {
     msg.role == Role::Assistant
         && !msg.queued
         && msg.attachments.is_empty()
-        && msg
-            .parts
-            .iter()
-            .all(|part| matches!(part, MessagePart::Text(text) if text.trim().is_empty()))
+        && !msg.parts.iter().any(part_has_meaningful_content)
+}
+
+/// Whether a part carries content worth keeping. Mirrors the `EmptyMessage`
+/// branch of `validate_turn_invariants_inner` so the repair pass strips
+/// *exactly* what the invariant flags. The earlier version only recognised
+/// non-empty `Text`, so an assistant turn whose sole part was an empty
+/// `Reasoning("")` (or `Advisor("")`) survived repair, leaving the
+/// transcript permanently invalid — every save re-logged "empty assistant
+/// message at index N" and load reported "still violates after repair".
+fn part_has_meaningful_content(part: &MessagePart) -> bool {
+    match part {
+        MessagePart::Text(s) | MessagePart::Reasoning(s) | MessagePart::Advisor(s) => {
+            !s.trim().is_empty()
+        }
+        MessagePart::RedactedThinking(_)
+        | MessagePart::Tool(_)
+        | MessagePart::TaskStatus(_)
+        | MessagePart::CompactBoundary { .. } => true,
+    }
 }
 
 pub(super) fn persistent_session_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -512,6 +528,35 @@ mod placeholder_tests {
             cost_usd: None,
         });
         assert!(!is_empty_assistant_placeholder(&msg));
+    }
+
+    // Robust: an assistant turn whose only part is an empty `Reasoning("")`
+    // (or `Advisor("")`) is empty per `validate_turn_invariants` but the old
+    // Text-only placeholder check missed it, so it survived repair and the
+    // transcript stayed permanently invalid (the recurring "empty assistant
+    // message at index N · still violates after repair" in the logs). It must
+    // now be recognized as a placeholder and stripped.
+    #[test]
+    fn empty_reasoning_only_assistant_is_placeholder_robust() {
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts = vec![MessagePart::Reasoning(String::new())];
+        assert!(
+            is_empty_assistant_placeholder(&msg),
+            "an empty-reasoning-only assistant must be stripped to satisfy the invariant"
+        );
+
+        // A *non-empty* reasoning-only turn is real content — keep it.
+        let mut thinking = ChatMessage::assistant(String::new());
+        thinking.parts = vec![MessagePart::Reasoning("let me think…".into())];
+        assert!(!is_empty_assistant_placeholder(&thinking));
+
+        // Mixed empties (empty text + empty reasoning) → still a placeholder.
+        let mut mixed = ChatMessage::assistant(String::new());
+        mixed.parts = vec![
+            MessagePart::Text(String::new()),
+            MessagePart::Reasoning("   ".into()),
+        ];
+        assert!(is_empty_assistant_placeholder(&mixed));
     }
 
     // Robust: the exact ses_20260528_200646.json shape — user (76) →

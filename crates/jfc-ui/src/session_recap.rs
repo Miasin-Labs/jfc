@@ -69,8 +69,10 @@ pub fn generate_recap(messages_since_last_interaction: &[RecapMessage]) -> Optio
         return None;
     }
 
+    // Plain, label-prefixed lines — no emoji, no box rules. The renderer
+    // styles them; the strings just state what the stream actually did.
     let mut lines: Vec<String> = Vec::new();
-    lines.push("━━━ While you were away ━━━".to_string());
+    lines.push("While you were away".to_string());
 
     // Tool call summary
     if !tool_calls.is_empty() {
@@ -85,18 +87,18 @@ pub fn generate_recap(messages_since_last_interaction: &[RecapMessage]) -> Optio
                 }
             })
             .collect();
-        lines.push(format!("🔧 Tools: {}", summary.join(", ")));
+        lines.push(format!("Tools: {}", summary.join(", ")));
     }
 
     // File changes
     if !files_changed.is_empty() {
         let file_list: Vec<&str> = files_changed.iter().map(|s| s.as_str()).collect();
         if file_list.len() <= 5 {
-            lines.push(format!("📝 Files changed: {}", file_list.join(", ")));
+            lines.push(format!("Files: {}", file_list.join(", ")));
         } else {
             let shown: Vec<&str> = file_list[..3].to_vec();
             lines.push(format!(
-                "📝 Files changed: {} (+{} more)",
+                "Files: {} (+{} more)",
                 shown.join(", "),
                 file_list.len() - 3
             ));
@@ -105,9 +107,9 @@ pub fn generate_recap(messages_since_last_interaction: &[RecapMessage]) -> Optio
 
     // Errors
     if !errors.is_empty() {
-        lines.push(format!("⚠️  Errors: {}", errors.len()));
+        lines.push(format!("Errors: {}", errors.len()));
         for err in errors.iter().take(3) {
-            lines.push(format!("   • {err}"));
+            lines.push(format!("  · {err}"));
         }
     }
 
@@ -118,10 +120,8 @@ pub fn generate_recap(messages_since_last_interaction: &[RecapMessage]) -> Optio
         } else {
             snippet.clone()
         };
-        lines.push(format!("💬 Last: {truncated}"));
+        lines.push(format!("Last: {truncated}"));
     }
-
-    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string());
 
     Some(lines.join("\n"))
 }

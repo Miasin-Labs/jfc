@@ -28,18 +28,39 @@ pub(crate) async fn handle_tick(
     app.spinner_frame = (app.spinner_frame + 1) % crate::app::SPINNER.len();
     app.check_stream_watchdog();
 
-    // Windowed tokens/sec sampling: push one (elapsed, live_token_count) point
-    // per tick while streaming, then trim to TOKEN_RATE_WINDOW. The render path
-    // reads the window each frame; we mutate it here because tick.rs has `&mut
-    // App` while the renderer only has `&App`.
-    if app.is_streaming {
-        if let Some(started) = app.streaming_started_at {
-            let elapsed = started.elapsed();
-            let estimate = app.streaming_response_bytes as u64 / 4;
-            let live = crate::spinner::live_token_count(app.last_usage_output as u64, estimate);
-            app.token_rate_samples.push_back((elapsed, live));
-            crate::spinner::trim_token_samples(&mut app.token_rate_samples);
+    // Windowed tokens/sec sampling: push one (elapsed, count) point per tick
+    // while streaming, then trim to TOKEN_RATE_WINDOW. The render path reads
+    // the window each frame; we mutate it here because tick.rs has `&mut App`
+    // while the renderer only has `&App`.
+    //
+    // We sample whichever counter is live this phase — thinking tokens while
+    // the model is reasoning, output tokens once it's responding — so the
+    // `tok/s` chip honestly reflects the work actually happening. At the
+    // thinking→responding hand-off the live count drops (output starts below
+    // the thinking total); we clear the window then so the rate is always
+    // measured within a single phase rather than across the discontinuity.
+    if app.is_streaming
+        && let Some(started) = app.streaming_started_at
+    {
+        let elapsed = started.elapsed();
+        let thinking_live = app.thinking_started_at.is_some() && app.thinking_ended_at.is_none();
+        let count = if thinking_live {
+            app.streaming_thinking_tokens
+        } else {
+            // The `responseLengthRef` accumulator (bytes/4) is already
+            // wire-corrected in the usage handler, so it's the live output
+            // count — sample it directly for the tok/s window.
+            app.streaming_response_bytes as u64 / 4
+        };
+        if app
+            .token_rate_samples
+            .back()
+            .is_some_and(|&(_, last)| count < last)
+        {
+            app.token_rate_samples.clear();
         }
+        app.token_rate_samples.push_back((elapsed, count));
+        crate::spinner::trim_token_samples(&mut app.token_rate_samples);
     }
 
     // Detached background workers update their progress in

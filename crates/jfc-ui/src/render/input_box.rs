@@ -8,17 +8,14 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
     // Up to 4 cells reserved for the prompt + an animation tail
     // (currently only used by `:comet` mode).
     //
-    // Prompt mode selector via `JFC_PROMPT_CHAR`:
-    //   :comet     — comet `☄` with streak tail (default)
-    //   :moon      — moon phases ○◐●◑ cycle while streaming
-    //   :dice      — dice faces ⚀⚁⚂⚃⚄⚅ shuffle while streaming
-    //   :notes     — music notes ♩♪♫♬ cycle while streaming
-    //   :hourglass — `⌛` ↔ `⌚` flip every 800ms
-    //   :atom      — atom `⚛` (just color pulse, no shape change)
-    //   <any single char> — that char as a static glyph (color pulse)
+    // Prompt glyph: a static `❯` chevron by default — honest, zero
+    // animation, reads instantly as "type here". Power users can still
+    // opt into a different glyph or an animated preset via JFC_PROMPT_CHAR:
+    //   :comet / :moon / :dice / :notes / :hourglass / :atom — presets
+    //   <any single char> — that char as a static glyph
     // Edit mode overrides any choice with `✎` (pencil).
     let in_edit_mode = app.editing_message_idx.is_some();
-    let raw_setting = std::env::var("JFC_PROMPT_CHAR").unwrap_or_else(|_| ":comet".to_string());
+    let raw_setting = std::env::var("JFC_PROMPT_CHAR").unwrap_or_else(|_| "❯".to_string());
     let mode = parse_prompt_mode(&raw_setting);
     let now_ms = app.launched_at.elapsed().as_millis();
     let streaming_for_anim = app.is_streaming && !crate::spinner::reduced_motion();
@@ -38,12 +35,25 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
         (t.accent, t.border)
     };
 
-    // Edit-mode badge in the title (top border) so the user can't
-    // miss the editing state. Title is otherwise empty.
+    // Edit-mode / vim-mode badge in the title (top border) so the user
+    // can't miss the editing state. Title is otherwise empty.
     let title_line = if let Some(idx) = app.editing_message_idx {
         Line::from(Span::styled(
             format!(" editing #{idx} · Esc to cancel "),
             Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ))
+    } else if let Some(vim) = app.vim.as_ref() {
+        // Mode color tracks vim convention: Normal=accent, Insert=success,
+        // Visual=warning. A steady tag, no animation.
+        let mode = vim.mode;
+        let color = match mode {
+            crate::input::vim::VimMode::Insert => t.success,
+            crate::input::vim::VimMode::Visual => t.warning,
+            _ => t.accent,
+        };
+        Line::from(Span::styled(
+            format!(" {} ", mode.tag()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ))
     } else {
         Line::from("")
@@ -118,24 +128,15 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
     let (lines, cursor_row, cursor_col) = input_soft_wrapped_lines(app, content_width);
     let visible_rows = inner.height.max(1) as usize;
     let start = cursor_row.saturating_add(1).saturating_sub(visible_rows);
-    // Rainbow gradient for slash-command and @mention prefixes — gives
-    // those tokens a visible "specialness" so the user sees that
-    // they'll route somewhere distinct (a slash command, a file
-    // mention) rather than be sent as plain text. Phase rotates with
-    // wallclock so the gradient gently flows through the chars on
-    // each redraw. Reduced-motion holds the phase at 0 so the colors
-    // stay still but the gradient is still applied — readable, just
-    // not animated.
-    let rainbow_phase = if crate::spinner::reduced_motion() {
-        0.0_f32
-    } else {
-        (app.launched_at.elapsed().as_millis() as f32 / 25.0) % 360.0
-    };
+    // Slash-command and @mention tokens get one accent color (bold) so
+    // the user can see they'll route somewhere distinct — a slash command,
+    // a file mention — rather than be sent as plain text. A flat color,
+    // not the old wallclock-driven rainbow that animated for no reason.
     let visible = lines
         .iter()
         .skip(start)
         .take(visible_rows)
-        .map(|line| Line::from(input_line_to_spans(line, t, rainbow_phase)))
+        .map(|line| Line::from(input_line_to_spans(line, t)))
         .collect::<Vec<_>>();
 
     // `.wrap(Wrap{trim:false})` — without it, ratatui falls back to

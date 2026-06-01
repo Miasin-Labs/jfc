@@ -290,28 +290,6 @@ pub(super) fn effort_status_badge(app: &App) -> String {
     }
 }
 
-#[allow(dead_code)]
-pub(super) fn claude_status_footer(app: &App) -> String {
-    if let Some(status) = app.claude_status.as_ref() {
-        let age = status.age_secs();
-        let net = format_bytes(status.bytes_in.saturating_add(status.bytes_out));
-        if let Some(outage) = status.outage_context() {
-            format!(
-                " · {} · {}s · net {}",
-                super::truncate_str(&outage, 36),
-                age,
-                net
-            )
-        } else {
-            format!(" · status ok · {}s · net {}", age, net)
-        }
-    } else if app.claude_status_error.is_some() {
-        " · status offline".to_owned()
-    } else {
-        String::new()
-    }
-}
-
 /// Friendly short label for a provider id. Anthropic providers are common
 /// enough that we collapse `anthropic-oauth` to just `OAuth`; bedrock and
 /// openwebui get their own short labels.
@@ -337,13 +315,3 @@ pub(super) fn provider_accent(provider: &str) -> Color {
     }
 }
 
-#[allow(dead_code)]
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}kB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}

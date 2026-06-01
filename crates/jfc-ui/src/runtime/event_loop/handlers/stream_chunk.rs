@@ -24,16 +24,11 @@ pub(crate) fn handle_chunk(app: &mut App, text: Option<String>, reasoning: Optio
             "first stream byte — connection producing output"
         );
     }
-    // Reset the stall clock on every chunk so the spinner's
-    // sub-status (`warming up` / `thinking` / `almost done`)
-    // reflects time-since-last-byte, not time-since-stream-start.
+    // Reset the quiet clock on every chunk so the spinner's `quiet Ns`
+    // chip (and the row-dim past 30s) reflects time-since-last-byte, not
+    // time-since-stream-start.
     let now = std::time::Instant::now();
     app.streaming_last_token_at = Some(now);
-    // Stamp for the right-edge token-rain animation. The
-    // renderer reads this each frame and lights one cell
-    // in the rain column with intensity proportional to
-    // recency (full at 0ms, dark at 800ms+).
-    app.last_token_arrival = Some(now);
     // v126 responseLengthRef: accumulate ALL content bytes for the
     // spinner's chars/4 token estimate.
     if let Some(ref t) = text {
@@ -176,9 +171,9 @@ pub(crate) fn handle_redacted_thinking(app: &mut App, data: String) {
 pub(crate) fn handle_thinking_tokens(app: &mut App, tokens: u32) {
     app.record_stream_activity();
     let now = std::time::Instant::now();
-    // Reset the stall clock — an estimate ping is wire activity, same as a
-    // visible delta. Without this a long silent-thinking phase would trip the
-    // "almost done thinking" stall hint while the model is actively working.
+    // Reset the quiet clock — an estimate ping is wire activity, same as a
+    // visible delta. Without this a long silent-thinking phase would wrongly
+    // trip the `quiet Ns` chip + row-dim while the model is actively working.
     app.streaming_last_token_at = Some(now);
     // Mark the thinking phase live if no visible reasoning byte set it. Only
     // on the first estimate, and only before any text byte ended thinking, so

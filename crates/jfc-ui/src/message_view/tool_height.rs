@@ -14,12 +14,12 @@ pub(super) fn tool_block_height(tool: &ToolCall, inner_w: usize) -> usize {
         return 1;
     }
 
-    let cont = bash_continuation_lines(tool).len();
     let content_w = inner_w.saturating_sub(2);
+    let cont = bash_continuation_lines(tool, content_w).len();
     1 + cont + tool_content_height_with_tool(tool, content_w)
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // test-only public shim over the pub(super) height query
 pub fn tool_block_height_pub(tool: &ToolCall, inner_w: usize) -> usize {
     tool_block_height(tool, inner_w)
 }

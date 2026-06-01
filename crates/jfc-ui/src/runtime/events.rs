@@ -209,6 +209,10 @@ pub enum StreamEvent {
     /// Used by the CompactionDone handler to add overhead to the post-
     /// compact approx_tokens gauge.
     SystemPromptLen(usize),
+    /// Byte length of the memory-recall block injected into this turn's system
+    /// prompt (only sent when > 0). Surfaced to the user as a brief "recalled
+    /// memory" toast so they can see context was pulled in.
+    MemoryRecalled(usize),
     /// Per-request control metadata captured after tools and permission
     /// filtering are known. The event loop uses this to tell a valid prose
     /// answer from a narration-only failure on agentic prompts.

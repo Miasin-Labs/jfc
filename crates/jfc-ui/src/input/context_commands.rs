@@ -589,7 +589,24 @@ pub(super) async fn cmd_temp(
     } else {
         match crate::exploration::parse_temperature(arg) {
             Ok(value) => {
-                let msg = app.temperature_state.set(value);
+                let mut msg = app.temperature_state.set(value);
+                // The pin is silently dropped for request shapes that lock
+                // sampling — the Anthropic OAuth/subscription API, and any
+                // request with extended thinking on (Anthropic requires
+                // temperature=1 there). Say so, so `/temp` isn't a mystery
+                // no-op; point the user at `/effort` for those shapes.
+                match app.provider.name() {
+                    "anthropic-oauth" => msg.push_str(
+                        "\n\n⚠ The Anthropic OAuth/subscription API locks sampling — \
+                         this temperature won't be sent. Use `/effort` to steer reasoning depth.",
+                    ),
+                    "anthropic" | "bedrock" | "vertex" => msg.push_str(
+                        "\n\nNote: temperature is ignored while extended thinking is active \
+                         (Anthropic requires temperature=1); it applies only when thinking is \
+                         off. `/effort` controls thinking depth.",
+                    ),
+                    _ => {}
+                }
                 app.messages.push(ChatMessage::assistant(msg));
             }
             Err(reason) => {

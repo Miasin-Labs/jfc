@@ -1,5 +1,5 @@
 use super::*;
-pub fn input_line_to_spans(line: &str, t: Theme, phase: f32) -> Vec<Span<'static>> {
+pub fn input_line_to_spans(line: &str, t: Theme) -> Vec<Span<'static>> {
     if line.is_empty() {
         return vec![Span::raw("")];
     }
@@ -18,31 +18,27 @@ pub fn input_line_to_spans(line: &str, t: Theme, phase: f32) -> Vec<Span<'static
             .find(char::is_whitespace)
             .unwrap_or(trimmed_start.len());
         let token = &trimmed_start[..token_end];
-        for (i, ch) in token.chars().enumerate() {
-            let hue = (phase + i as f32 * 18.0) % 360.0;
-            let (r, g, b) = crate::spinner::hue_to_rgb(hue);
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(r, g, b))
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
+        // Slash commands get one honest accent color, bold — enough to
+        // mark the token as special without the per-char rainbow sweep
+        // (which animated off `phase` for no informational reason).
+        spans.push(Span::styled(
+            token.to_string(),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        ));
         let rest = &trimmed_start[token_end..];
         if !rest.is_empty() {
-            spans.extend(highlight_mentions_in(rest, t, phase));
+            spans.extend(highlight_mentions_in(rest, t));
         }
     } else {
-        spans.extend(highlight_mentions_in(trimmed_start, t, phase));
+        spans.extend(highlight_mentions_in(trimmed_start, t));
     }
     spans
 }
 
-/// Tokenize prose, color any `@token` (mention) with the same rainbow
-/// gradient as the leading slash command, but with a phase offset so
-/// each mention reads as its own colored token rather than blending
-/// in with the slash prefix.
-pub fn highlight_mentions_in(s: &str, t: Theme, phase: f32) -> Vec<Span<'static>> {
+/// Tokenize prose and color any `@token` (mention) in the accent color,
+/// bold — so a file/agent mention reads as a distinct reference rather
+/// than plain text. One flat color, no animated gradient.
+pub fn highlight_mentions_in(s: &str, t: Theme) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut buf = String::new();
     let chars: Vec<char> = s.chars().collect();
@@ -60,16 +56,12 @@ pub fn highlight_mentions_in(s: &str, t: Theme, phase: f32) -> Vec<Span<'static>
                 token.push(chars[i]);
                 i += 1;
             }
-            for (j, ch) in token.chars().enumerate() {
-                let hue = (phase + 60.0 + j as f32 * 18.0) % 360.0;
-                let (r, g, b) = crate::spinner::hue_to_rgb(hue);
-                spans.push(Span::styled(
-                    ch.to_string(),
-                    Style::default()
-                        .fg(Color::Rgb(r, g, b))
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
+            // One honest accent color for the whole `@mention`, bold —
+            // marks it as a reference without the animated rainbow gradient.
+            spans.push(Span::styled(
+                token,
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            ));
         } else {
             buf.push(c);
             i += 1;
@@ -79,261 +71,6 @@ pub fn highlight_mentions_in(s: &str, t: Theme, phase: f32) -> Vec<Span<'static>
         spans.push(Span::styled(buf, t.style_text_primary));
     }
     spans
-}
-
-/// Enumerate every cell along the border of `area` in clockwise
-/// order, starting at the top-left corner. Used by the border-comet
-/// painter to walk the perimeter at a steady speed regardless of
-/// rect aspect ratio.
-#[allow(dead_code)]
-pub fn perimeter_cells(area: Rect) -> Vec<(u16, u16)> {
-    // Per-frame cache: the input dock + status bar reuse the same Rect on
-    // back-to-back frames. Without this, every frame allocated and filled a
-    // ~2 × (w + h) Vec just to walk the same perimeter — pure waste during
-    // idle/streaming where geometry is fixed. Invalidate on Rect change
-    // (resize, layout shift); LRU-of-1 is enough since paint_border_comets
-    // is the only non-test caller.
-    type CometCache = std::cell::RefCell<Option<(Rect, Vec<(u16, u16)>)>>;
-    thread_local! {
-        static LAST: CometCache = const { std::cell::RefCell::new(None) };
-    }
-    LAST.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if let Some((cached_area, cached_cells)) = slot.as_ref()
-            && *cached_area == area
-        {
-            return cached_cells.clone();
-        }
-        let cells = compute_perimeter_cells(area);
-        *slot = Some((area, cells.clone()));
-        cells
-    })
-}
-
-#[allow(dead_code)]
-pub fn compute_perimeter_cells(area: Rect) -> Vec<(u16, u16)> {
-    let mut cells: Vec<(u16, u16)> = Vec::new();
-    if area.width < 2 || area.height < 2 {
-        return cells;
-    }
-    let right = area.x + area.width - 1;
-    let bottom = area.y + area.height - 1;
-    for x in area.x..=right {
-        cells.push((x, area.y));
-    }
-    for y in (area.y + 1)..=bottom {
-        cells.push((right, y));
-    }
-    if right > area.x {
-        for x in (area.x..right).rev() {
-            cells.push((x, bottom));
-        }
-    }
-    if bottom > area.y + 1 {
-        for y in ((area.y + 1)..bottom).rev() {
-            cells.push((area.x, y));
-        }
-    }
-    cells
-}
-
-/// Configuration for `paint_border_comets`. All knobs that callers
-/// might want to vary at runtime live here so the painter stays
-/// declarative — pass a struct, get a render.
-#[allow(dead_code)]
-pub struct CometConfig {
-    /// Number of comets evenly spaced around the perimeter. 1..=4.
-    pub(crate) count: u32,
-    /// Lap duration in ms — full perimeter traversal time. Lower
-    /// = faster comets. Drives by streaming velocity in the input
-    /// renderer; can be hard-overridden via env.
-    pub(crate) lap_ms: u128,
-    /// Trail length in cells. 6 is the standard comet shape.
-    pub(crate) trail_len: usize,
-    /// Resting border color (the comet fades to this at the tail end).
-    pub(crate) base: Color,
-    /// Comet head color (the lead cell blends fully to this).
-    pub(crate) head: Color,
-    /// When true, comets at odd indices counter-rotate (go
-    /// counter-clockwise) so a count=2 setup produces two comets
-    /// going opposite directions, meeting at corners.
-    pub(crate) counter_rotate: bool,
-    /// Reverse the clockwise base direction. Combined with
-    /// `counter_rotate`, this lets the tool-use signal flip every
-    /// comet's direction at once.
-    pub(crate) reverse_base: bool,
-}
-
-/// Paint N border comets traveling around the rectangle's perimeter
-/// at a steady speed. Each comet is a `trail_len`-cell trail (head
-/// at brightest blend toward `head` color, tail fading to `base`).
-#[allow(dead_code)]
-pub fn paint_border_comets(f: &mut Frame, area: Rect, cfg: &CometConfig) {
-    // O(1) early exit: skip perimeter computation and buffer writes when
-    // there is no animation to show (no comets configured, or zero-length
-    // trail). Callers pass count=0 when neither streaming nor compaction
-    // is active, so this is the common idle-frame path.
-    if cfg.count == 0 || cfg.trail_len == 0 {
-        return;
-    }
-    let perim = perimeter_cells(area);
-    if perim.is_empty() {
-        return;
-    }
-    let total = perim.len();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let head_pos_signed = ((now_ms * total as u128) / cfg.lap_ms.max(1)) as i64;
-
-    let buf = f.buffer_mut();
-
-    for c in 0..cfg.count {
-        // Direction: even-indexed comets follow the base direction;
-        // odd-indexed comets reverse if `counter_rotate` is set.
-        // `reverse_base` flips the base on top of that.
-        let counter = cfg.counter_rotate && c % 2 == 1;
-        let direction_positive = match (cfg.reverse_base, counter) {
-            (false, false) => true,
-            (true, false) => false,
-            (false, true) => false,
-            (true, true) => true,
-        };
-        // Even spacing around the perimeter.
-        let offset = (c as usize * total) / cfg.count.max(1) as usize;
-        // Position of this comet's head this frame.
-        let head_idx = if direction_positive {
-            ((head_pos_signed + offset as i64).rem_euclid(total as i64)) as usize
-        } else {
-            ((-head_pos_signed + offset as i64).rem_euclid(total as i64)) as usize
-        };
-        for trail in 0..cfg.trail_len {
-            // Trail cells trail "behind" the head along its
-            // direction of travel.
-            let pos = if direction_positive {
-                (head_idx + total - trail) % total
-            } else {
-                (head_idx + trail) % total
-            };
-            let (x, y) = perim[pos];
-            if x >= buf.area().right() || y >= buf.area().bottom() {
-                continue;
-            }
-            // Squared falloff: head bright, tail dies off quickly.
-            let pct = trail as f32 / cfg.trail_len as f32;
-            let intensity = (1.0 - pct).powi(2);
-            let blended = pulse_color(cfg.base, cfg.head, intensity);
-            let cell = &mut buf[(x, y)];
-            let mut style = cell.style();
-            style.fg = Some(blended);
-            cell.set_style(style);
-        }
-    }
-}
-
-/// Compute the comet config from the current app state. Centralizes
-/// all the "what color, what speed, which direction" logic in one
-/// place so the input renderer just calls this once.
-#[allow(dead_code)]
-pub fn comet_config_from_state(app: &App, t: Theme, count: u32) -> CometConfig {
-    // Bash-mode detection: the user is composing a shell command
-    // (input starts with `!`). Mirrors v126's bash-mode prompt
-    // indicator. Color goes warning so the comets clearly signal
-    // "this isn't a normal prompt".
-    let bash_mode = app
-        .textarea
-        .lines()
-        .iter()
-        .next()
-        .map(|line| line.trim_start().starts_with('!'))
-        .unwrap_or(false);
-
-    // Tool-use detection: any tool currently `Running` in the most
-    // recent assistant turn (the streaming placeholder OR the last
-    // committed message). Drives the reverse-direction +
-    // warning-color override so the user sees "the model is
-    // executing something" at a glance.
-    let any_tool_running = app.messages.iter().rev().take(2).any(|m| {
-        m.parts.iter().any(|p| {
-            if let MessagePart::Tool(tc) = p {
-                matches!(tc.status, ToolStatus::Running | ToolStatus::Pending)
-            } else {
-                false
-            }
-        })
-    }) || !app.pending_tool_calls.is_empty();
-
-    let head_color = if bash_mode {
-        // Bash mode trumps tool-use coloring — it's the highest-
-        // signal state because it's the user's explicit choice.
-        t.warning
-    } else if any_tool_running {
-        t.warning
-    } else {
-        t.accent
-    };
-
-    // Speed = streaming velocity. Compute a rough tokens/sec rate
-    // from the cumulative output and the turn elapsed time. Map to
-    // a lap_ms with a few buckets so the speed change is
-    // perceptible (smooth interpolation reads as "did it just
-    // change?"). Resting (idle) sits at 3500ms.
-    let now = std::time::Instant::now();
-    let elapsed = app
-        .turn_started_at
-        .or(app.streaming_started_at)
-        .map(|t0| now.duration_since(t0))
-        .unwrap_or_default();
-    let secs = elapsed.as_secs_f64().max(0.5);
-    let live = app
-        .last_usage_output
-        .max((app.streaming_response_bytes / 4) as u32);
-    let rate = (live as f64) / secs;
-    let mut lap_ms: u128 = if !app.is_streaming {
-        3500
-    } else if rate > 60.0 {
-        1200 // hot: fast laps
-    } else if rate > 30.0 {
-        2000 // warm
-    } else {
-        3500 // cold / first chunks
-    };
-    // Hard env override wins regardless.
-    if let Some(forced) = std::env::var("JFC_BORDER_COMET_SPEED")
-        .ok()
-        .and_then(|s| s.parse::<u128>().ok())
-    {
-        lap_ms = forced.max(200);
-    }
-
-    let trail_len: usize = std::env::var("JFC_BORDER_COMET_TRAIL")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(6)
-        .clamp(2, 12);
-
-    // Counter-rotation is opt-in (matches v126's "two flames
-    // chasing" pattern). Off by default — single-direction reads
-    // calmer for an idle prompt.
-    let counter_rotate = matches!(
-        std::env::var("JFC_BORDER_COMET_COUNTER").as_deref(),
-        Ok("1") | Ok("true")
-    );
-
-    CometConfig {
-        count,
-        lap_ms,
-        trail_len,
-        base: t.border,
-        head: head_color,
-        counter_rotate,
-        // Tool-use reverses the base direction so the comets visibly
-        // change which way they're going — strong signal that the
-        // model is doing something the user can't see (running a
-        // tool offscreen or in a long bash).
-        reverse_base: any_tool_running && !bash_mode,
-    }
 }
 
 /// Prompt-character animation mode. Selects which glyph (or glyph
@@ -424,13 +161,6 @@ pub fn prompt_mode_frame(mode: &PromptMode, streaming: bool, ms: u128) -> &'stat
             ""
         }
     }
-}
-
-/// Public form for cross-module callers (sparkle in message_view, etc.)
-/// — the private `pulse_color` is preferred inside this file for
-/// brevity.
-pub fn pulse_color_pub(c1: Color, c2: Color, t: f32) -> Color {
-    pulse_color(c1, c2, t)
 }
 
 /// Linear-interpolate between two ratatui Colors at `t ∈ [0, 1]`.
@@ -630,7 +360,7 @@ pub fn truncate_cells(s: &str, max: usize) -> String {
 /// long namespace) survives. Used by the sidebar's cwd display so
 /// the user sees `…/active/jfc` on a narrow column rather than the
 /// useless `~/RustProjec…` head.
-#[allow(dead_code)]
+#[allow(dead_code)] // test-only helper (sidebar tail-trunc path)
 pub fn tail_truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();

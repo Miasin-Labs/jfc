@@ -349,6 +349,75 @@ pub(super) fn search_bar(f: &mut Frame, app: &App) {
     );
 }
 
+/// Ctrl+R reverse-history search overlay: a query header plus a windowed
+/// list of matching past prompts, the selected one ribboned in accent.
+pub(super) fn prompt_search_overlay(f: &mut Frame, app: &App) {
+    let Some(s) = &app.prompt_search else {
+        return;
+    };
+    let t = app.theme;
+    let area = f.area();
+    if area.width < 24 || area.height < 6 {
+        return;
+    }
+    const MAX_ROWS: usize = 6;
+    let shown = s.results.len().min(MAX_ROWS);
+    let h = shown as u16 + 1; // +1 header row
+    let overlay = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(h + 3),
+        width: area.width,
+        height: h,
+    };
+    f.render_widget(Clear, overlay);
+
+    let header = if s.results.is_empty() {
+        format!("  ⌕ history  {}▏  (no matches · Esc)", s.query)
+    } else {
+        format!(
+            "  ⌕ history  {}▏  ({}/{} · ↑↓ · Enter loads · Esc)",
+            s.query,
+            s.selected + 1,
+            s.results.len()
+        )
+    };
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        header,
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+    ))];
+
+    // Window the results so the selected row stays visible.
+    let start = if s.selected < MAX_ROWS {
+        0
+    } else {
+        s.selected - (MAX_ROWS - 1)
+    };
+    let body_w = (overlay.width as usize).saturating_sub(4);
+    for (ri, &idx) in s.results.iter().enumerate().skip(start).take(shown) {
+        let is_sel = ri == s.selected;
+        let text = s.all.get(idx).map(String::as_str).unwrap_or("");
+        // Flatten newlines so a multi-line prompt reads on one row.
+        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = super::truncate_str(&flat, body_w);
+        let (prefix, style) = if is_sel {
+            (
+                "▌ ",
+                Style::default().fg(t.text_primary).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("  ", Style::default().fg(t.text_muted))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(t.accent)),
+            Span::styled(trimmed, style),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(t.surface)),
+        overlay,
+    );
+}
+
 /// Centered keybinding overlay toggled by `?`. Groups bindings by
 /// context — Input bar, Transcript, Task view, Picker/Palette, Leader
 /// chord, ESC behavior — so the user can find the chord they need

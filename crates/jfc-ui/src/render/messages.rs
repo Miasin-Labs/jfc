@@ -129,41 +129,15 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
     );
 
     if app.messages.is_empty() && app.streaming_text.is_empty() {
-        // Boot sweep: for the first ~1.4s after launch, ripple a star
-        // cascade across the placeholder so the empty session has a
-        // moment of life. After the sweep settles, the placeholder
-        // reads as a calm muted prompt. Reduced-motion skips
-        // straight to the settled state.
-        let boot_age = app.launched_at.elapsed();
-        let boot_active =
-            boot_age < std::time::Duration::from_millis(1400) && !crate::spinner::reduced_motion();
+        // Static placeholder — no boot animation. The empty session is a
+        // calm muted prompt that settles immediately; a star cascade
+        // rippling across the headline on every launch was decoration the
+        // session didn't earn.
         const HEADLINE: &str = "What can I help you with?";
-        let headline_spans: Vec<Span<'static>> = if boot_active {
-            // Sweep one bright cell across the headline. Cell width
-            // sweeps left-to-right in 1100ms, then a 300ms tail
-            // settles. Lit cell uses accent + bold; the rest stays
-            // text_muted.
-            let sweep_progress = (boot_age.as_millis() as f32 / 1100.0).min(1.0);
-            let cursor = (sweep_progress * HEADLINE.chars().count() as f32) as i32;
-            HEADLINE
-                .chars()
-                .enumerate()
-                .map(|(i, ch)| {
-                    let dist = (i as i32 - cursor).abs();
-                    let style = if dist <= 1 {
-                        t.style_accent_bold
-                    } else {
-                        t.style_text_muted
-                    };
-                    Span::styled(ch.to_string(), style)
-                })
-                .collect()
-        } else {
-            vec![Span::styled(
-                HEADLINE.to_string(),
-                Style::default().fg(t.text_muted),
-            )]
-        };
+        let headline_spans: Vec<Span<'static>> = vec![Span::styled(
+            HEADLINE.to_string(),
+            Style::default().fg(t.text_muted),
+        )];
         let placeholder = Paragraph::new(vec![
             Line::from(""),
             Line::from(headline_spans),
@@ -223,32 +197,9 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
             scrollbar.render(area, f.buffer_mut(), &mut state);
         }
 
-        // Token rain: a single cell at the bottom-right of the
-        // border that lights up briefly each time a token arrives.
-        // Reads as a tiny pulse counter — the user can see *that
-        // tokens are flowing* without staring at the verb. Renders
-        // only while streaming (idle = dark cell so it doesn't add
-        // visual noise to a settled session). Reduced-motion skips
-        // entirely so the cell stays at the static border glyph.
-        if app.is_streaming
-            && !crate::spinner::reduced_motion()
-            && area.height >= 2
-            && area.width >= 2
-            && let Some(when) = app.last_token_arrival
-        {
-            let age_ms = when.elapsed().as_millis() as f32;
-            if age_ms < 800.0 {
-                let intensity = 1.0 - (age_ms / 800.0);
-                let cx = area.x + area.width.saturating_sub(1);
-                let cy = area.y + area.height.saturating_sub(2);
-                if cx < f.buffer_mut().area().right() && cy < f.buffer_mut().area().bottom() {
-                    let cell = &mut f.buffer_mut()[(cx, cy)];
-                    cell.set_symbol("●");
-                    let blended = pulse_color(t.border, t.accent, intensity);
-                    cell.set_style(Style::default().fg(blended));
-                }
-            }
-        }
+        // (The "token rain" border cell that pulsed on each arriving token
+        // lived here — removed. It faked liveness in the corner of the
+        // frame; the spinner row already reports real token flow.)
     }
 
     // Commit the freshly-computed values back to App. By this point both
@@ -261,6 +212,46 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
     app.total_lines_key = total_lines_key_v;
     app.viewport_height = viewport_h_v;
     app.scroll_offset = scroll_v;
+
+    // "While you were away" recap band, drawn over the top of the transcript
+    // on return from a long autonomous run. Ephemeral + dismissable (Esc /
+    // next submit), so overlaying the top few rows is fine — no scroll-math
+    // entanglement.
+    if let Some(recap) = app.away_recap.as_deref() {
+        away_recap_band(f, t, inner, recap);
+    }
+}
+
+/// Render the away-recap as a left-ribboned band over the top of `inner`.
+/// First line is the bold "While you were away" header; the rest are muted
+/// detail rows. A solid surface bg keeps it readable over the transcript.
+fn away_recap_band(f: &mut Frame, t: crate::theme::Theme, inner: Rect, recap: &str) {
+    let recap_lines: Vec<&str> = recap.lines().collect();
+    if recap_lines.is_empty() || inner.height == 0 {
+        return;
+    }
+    let h = (recap_lines.len() as u16).min(inner.height);
+    let band = Rect { height: h, ..inner };
+    let lines: Vec<Line<'static>> = recap_lines
+        .iter()
+        .enumerate()
+        .take(h as usize)
+        .map(|(i, l)| {
+            let body_style = if i == 0 {
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.text_secondary)
+            };
+            Line::from(vec![
+                Span::styled("▌ ", Style::default().fg(t.accent)),
+                Span::styled((*l).to_string(), body_style),
+            ])
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(t.surface)),
+        band,
+    );
 }
 
 /// Build a `Line` for one agent row inside the workflow detail panel.
@@ -876,20 +867,19 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
     // before the user's submit ever fires the actual stream, so during
     // that window the spinner should read `Compacting…`, not a stale
     // `Fermenting…` from the previous turn.
-    let row1_elapsed: std::time::Duration;
-    // `verb_spans` is the verb portion of the spinner row, with the
-    // shimmer-sweep highlight applied per-character. The renderer
-    // assembles the final line as `glyph + verb_spans + body` so the
-    // shimmer animates only the active verb (mirroring v126's
-    // `<GlimmerMessage>`). For the compact path we keep the old
-    // single-string body since compaction has its own status format.
+    // `verb_spans` holds the phase label (and, for the recovery path, the
+    // retry status). The renderer assembles the final line as
+    // `glyph + verb_spans + body`. For the compact path we keep a single
+    // pre-formatted string since compaction has its own status shape.
     let mut verb_spans: Vec<Span<'static>> = Vec::new();
     let mut compact_body: Option<String> = None;
     let mut tail_body: String = String::new();
     let mut head_glyph: &'static str = "";
+    // True once the wire has gone quiet long enough that the row should
+    // read as stalled — the glyph + label render muted instead of accent.
+    let mut dim = false;
     if let Some(started) = app.compacting_started_at {
         let elapsed = now.duration_since(started);
-        row1_elapsed = elapsed;
         // Pass the pre-compact token count so the spinner shows
         // *what's being compacted*. `tool_ctx.approx_tokens` still
         // reflects the pre-compact estimate during the compact (it's
@@ -903,12 +893,6 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
             app.compacting_output_chars,
         ));
     } else if let Some(recovery) = app.network_recovery_status.as_ref() {
-        let elapsed = app
-            .turn_started_at
-            .or(app.streaming_started_at)
-            .map(|t| now.duration_since(t))
-            .unwrap_or_default();
-        row1_elapsed = elapsed;
         head_glyph = "!";
         let label = match recovery.status_code {
             Some(code) => format!("{code} {}", recovery.reason.label()),
@@ -949,38 +933,19 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         } else {
             std::time::Duration::default()
         };
-        let stream_idle = if stream_is_live {
-            app.last_stream_event_at.map(|t| now.duration_since(t))
-        } else {
-            None
-        };
-        // Anthropic SSE pushes cumulative `output_tokens` in every
-        // `message_delta` event (sse.rs:212-218 → StreamEvent::Usage →
-        // app.last_usage_output) — wire-truth, no estimation needed. OWUI /
-        // OpenAI providers only emit usage at `message_stop`; for those the
-        // wire value stays 0 mid-stream, so we fall back to chars/4 of the
-        // streamed text + reasoning. The first non-zero wire value beats the
-        // estimate; once the wire stops moving we keep the last known count.
-        let estimate = if stream_is_live {
+        // Live output token count = the `responseLengthRef` accumulator / 4.
+        // That accumulator already folds in the wire-truth correction (the
+        // usage handler floors it up to `output_tokens*4` on every
+        // `message_delta`) *and* keeps growing by streamed chars between
+        // those events — so reading it here gives a smooth, monotonic count
+        // with no per-frame `max(wire, estimate)` that would pin flat to wire
+        // and jump ~50 each batched delta. OWUI / OpenAI providers that only
+        // report usage at `message_stop` still get a live chars/4 count from
+        // the same accumulator.
+        let live_tokens = if stream_is_live {
             app.streaming_response_bytes as u64 / 4
         } else {
             0
-        };
-        let live_tokens = if stream_is_live {
-            crate::spinner::live_token_count(app.last_usage_output as u64, estimate)
-        } else {
-            0
-        };
-        // Windowed tokens/sec: sample (elapsed, live_tokens) into a trailing
-        // window each frame, then compute Δtokens/Δt over it. This reflects
-        // *current* throughput (self-smoothing over TOKEN_RATE_WINDOW) rather
-        // than the old lifetime average, which lagged once a fast opening
-        // burst tapered. `messages.rs` renders with `&App`, so we can't push
-        // here — sampling happens in the tick handler; here we only read.
-        let token_rate = if stream_is_live && live_tokens > 0 {
-            crate::spinner::windowed_token_rate(&app.token_rate_samples)
-        } else {
-            None
         };
         // Thinking signal — Some(Live) while reasoning is streaming,
         // Some(Done(d)) once we got the first text byte after thinking,
@@ -996,105 +961,48 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         } else {
             None
         };
-        row1_elapsed = elapsed;
+        // Windowed tokens/sec: the tick handler samples (elapsed, count)
+        // into a trailing window for whichever counter is live this phase
+        // — thinking tokens while reasoning, output tokens while
+        // responding — and we read Δcount/Δt over it here. Self-smoothing
+        // over TOKEN_RATE_WINDOW, so it reflects *current* throughput, not
+        // a lifetime average. We render with `&App`, so we can only read.
+        let token_rate = if stream_is_live {
+            crate::spinner::windowed_token_rate(&app.token_rate_samples)
+        } else {
+            None
+        };
         let segs = crate::spinner::status_segments(
             app.spinner_frame,
             elapsed,
             live_tokens,
             token_rate,
             stall,
-            stream_idle,
             thinking,
             app.streaming_thinking_tokens,
         );
         head_glyph = segs.glyph;
-        // Use the in-progress task's activeForm as the verb if available,
-        // matching Claude Code's behavior where the spinner shows what the
-        // model is actually doing rather than a random decorative verb.
-        let active_verb: std::borrow::Cow<'_, str> = {
+        dim = segs.dim;
+        // Honest phase label, unless an in-progress task names the actual
+        // work — its `activeForm` is more specific *and* still honest, so
+        // it wins. No random decorative verb, no shimmer sweep.
+        let label: std::borrow::Cow<'_, str> = {
             let tasks = app.task_store.list(jfc_session::DeletedFilter::Exclude);
             tasks
                 .iter()
                 .find(|t| t.status == jfc_session::TaskStatus::InProgress)
                 .and_then(|t| t.active_form.as_deref())
                 .map(|s| std::borrow::Cow::Owned(s.to_owned()))
-                .unwrap_or(std::borrow::Cow::Borrowed(segs.verb))
+                .unwrap_or(std::borrow::Cow::Borrowed(segs.label))
         };
-        let verb_width = active_verb.chars().count();
-        let reduced = crate::spinner::reduced_motion();
-
-        // Stalled intensity: blends 0 → 1 over 30s..120s of token
-        // silence. Mirrors v126's `stalledIntensity` prop on
-        // <GlimmerMessage>. Drives a base-color fade from
-        // text_secondary toward error so the verb visibly "rusts" as
-        // the wait grows. Capped at 1.0; clamped to 0 below 30s so
-        // routine pauses don't tint the verb.
-        let stall_secs = stall.as_secs_f32();
-        let stalled_intensity = ((stall_secs - 30.0) / 90.0).clamp(0.0, 1.0);
-        let base_color = if stalled_intensity > 0.0 {
-            pulse_color(t.text_secondary, t.error, stalled_intensity)
-        } else {
-            t.text_secondary
-        };
-
-        if reduced {
-            // Reduced-motion: single static span at base color. No
-            // sweep, no per-cell coloring. Still respects the stalled
-            // fade because that's information, not decoration.
-            verb_spans.push(Span::styled(
-                active_verb.to_string(),
-                Style::default().fg(base_color),
-            ));
-        } else {
-            // Multi-cell wave: instead of a hard ±1 cell sweep, use a
-            // 5-cell falloff window so the highlight reads as a soft
-            // pulse rolling through the verb. Each cell's blend
-            // intensity drops by distance-from-index so the center is
-            // brightest and edges fade smoothly into the base color.
-            let g_idx = crate::spinner::glimmer_index(elapsed, verb_width, 50);
-            const HALF: i32 = 2; // ±2 cells = 5-cell wave width
-            for (i, ch) in active_verb.chars().enumerate() {
-                let dist = (i as i32 - g_idx).abs();
-                let intensity = if dist > HALF {
-                    0.0
-                } else {
-                    // Cosine falloff: 1 at center, 0 at HALF + 1.
-                    // Smoother than linear (no edge kink).
-                    let pct = dist as f32 / (HALF as f32 + 0.5);
-                    0.5 + 0.5 * (1.0 - pct).max(0.0)
-                };
-                let mut style = if intensity > 0.05 {
-                    let blended = pulse_color(base_color, t.accent, intensity);
-                    let mut s = Style::default().fg(blended);
-                    if intensity > 0.7 {
-                        s = s.add_modifier(Modifier::BOLD);
-                    }
-                    s
-                } else {
-                    Style::default().fg(base_color)
-                };
-                // When stalled, suppress the bold so the verb reads
-                // as quiet/dim rather than still active. Important
-                // because BOLD on a red-tinted base reads as alarm.
-                if stalled_intensity > 0.5 {
-                    style = style.remove_modifier(Modifier::BOLD);
-                }
-                verb_spans.push(Span::styled(ch.to_string(), style));
-            }
-        }
-
-        // Marching dots: replace the static "…" with a 4-frame
-        // rotation `   ` → `.  ` → `.. ` → `...` so the user reads
-        // motion even on a frozen verb. 250ms per step keeps the
-        // tempo unhurried; reduced-motion collapses to a steady "…".
-        let dots_str = if reduced {
-            "…".to_string()
-        } else {
-            const PATTERNS: &[&str] = &["   ", ".  ", ".. ", "..."];
-            let phase = (elapsed.as_millis() / 250) as usize;
-            PATTERNS[phase % PATTERNS.len()].to_string()
-        };
-        tail_body = format!("{dots_str} {}", segs.body);
+        // Label color: secondary while live, muted once the stream has
+        // gone quiet (the honest "stalled" tint — dimmer, not redder).
+        let label_color = if dim { t.text_muted } else { t.text_secondary };
+        verb_spans.push(Span::styled(
+            label.into_owned(),
+            Style::default().fg(label_color),
+        ));
+        tail_body = segs.body;
     };
     // The `· N agents…` fanout badge that used to live here is gone — the
     // agent fan's `agents  ●N ○N ✓N ✗N` summary line (just below the
@@ -1107,27 +1015,15 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         // isn't a free-rotating spinner during compact.
         vec![Span::styled(body, Style::default().fg(t.text_secondary))]
     } else {
-        // Star glyph color pulses between accent and warning so the
-        // sphincter reads as a *living* element instead of a flat
-        // bullet. Phase derives from elapsed milliseconds (~1Hz cycle)
-        // so the pulse stays smooth even when the spinner_frame ticks
-        // at a different rate than the wallclock — running the pulse
-        // off the spinner_frame would jitter on slow-redraw frames.
-        // Reduced-motion: hold the glyph at full accent color so
-        // there's still a visual focal point but no animation.
-        let glyph_color = if crate::spinner::reduced_motion() {
-            t.accent
-        } else {
-            let phase_ms = (row1_elapsed.as_millis() % 1200) as f32 / 1200.0;
-            // Triangle wave: 0 → 1 → 0 over the cycle. Smoother than
-            // a sawtooth, no need for sine's f32::sin pulled in here.
-            let intensity = if phase_ms < 0.5 {
-                phase_ms * 2.0
-            } else {
-                (1.0 - phase_ms) * 2.0
-            };
-            pulse_color(t.accent, t.warning, intensity)
-        };
+        // The glyph is the row's only motion: it cycles one frame per
+        // tick whenever this row is on screen — and the row is only drawn
+        // while a turn is actually live (streaming, compacting, running
+        // tools, or fanning subagents; see `show_spinner` in frame.rs).
+        // When the turn ends the row disappears entirely, so there's no
+        // free-running pulse on an idle screen. It holds accent while
+        // active and dims to muted once the wire has gone quiet, matching
+        // the label.
+        let glyph_color = if dim { t.text_muted } else { t.accent };
         let mut s = vec![Span::styled(
             format!("{} ", head_glyph),
             Style::default()
@@ -1142,44 +1038,29 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
     let row0 = Rect { height: 1, ..area };
     f.render_widget(Paragraph::new(line).style(Style::default().bg(t.bg)), row0);
 
-    // Row 1: "Next: <task subject>" if we have layout for it. Indent two
-    // cells so it aligns under the spinner frame's first character — same
-    // visual hierarchy as v126's nested status. Use dim/muted color so
-    // the verb on row 0 stays the dominant element.
-    if area.height >= 2 {
+    // Row 1: "Next: <task subject>" — only when there's a real next task.
+    // The old rotating-tip fallback was decorative filler (a keybinding
+    // carousel shown when nothing was queued); dropping it keeps the row
+    // honest — it appears iff there's actual upcoming work to name. The
+    // row collapses to nothing otherwise, so the spinner sits one line
+    // closer to the prompt when idle of tasks.
+    if area.height >= 2
+        && let Some(subj) = next_open_task_subject(app)
+    {
         let row1 = Rect {
             x: area.x,
             y: area.y + 1,
             width: area.width,
             height: 1,
         };
-        // v126 cli.js:323851 picks `Next: m.subject ?? Tip: WH` —
-        // task wins if there is one, else show a rotating tip so the
-        // user has something useful to read while the model thinks.
-        // The "dismiss popups" hint is filtered when nothing's open so
-        // it doesn't read as a misleading instruction (the user looked
-        // for the popup it was talking about and there wasn't one).
-        let any_popup_open = app.show_help
-            || app.show_model_picker
-            || app.show_sidebar
-            || app.transcript_search.is_some()
-            || app.slash_popup_selected.is_some()
-            || app.pending_approval.is_some();
-        let (prefix, body) = if let Some(subj) = next_open_task_subject(app) {
-            ("  □ Next: ".to_string(), subj)
-        } else {
-            (
-                "  □ Tip: ".to_string(),
-                crate::spinner::tip_for_with_state(row1_elapsed, any_popup_open).to_string(),
-            )
-        };
+        let prefix = "  □ Next: ";
         let max_body = (area.width as usize).saturating_sub(prefix.chars().count() + 1);
-        let trimmed: String = if body.chars().count() > max_body && max_body > 1 {
-            let mut out: String = body.chars().take(max_body.saturating_sub(1)).collect();
+        let trimmed: String = if subj.chars().count() > max_body && max_body > 1 {
+            let mut out: String = subj.chars().take(max_body.saturating_sub(1)).collect();
             out.push('…');
             out
         } else {
-            body
+            subj
         };
         let row1_line = Line::from(vec![
             Span::styled(prefix, Style::default().fg(t.text_muted)),
@@ -1192,9 +1073,9 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // The agent fan moved below the input — see `agent_fan_below_input`.
-    // Keeping the spinner row at 2 rows (verb + Next) means the
-    // "thinking" indicator stays glued to the prompt while the parallel
-    // work fan lives on the other side, where peripheral status belongs.
+    // Keeping the spinner row at 2 rows (label + Next) means the activity
+    // indicator stays glued to the prompt while the parallel work fan
+    // lives on the other side, where peripheral status belongs.
 }
 
 /// Pinned todo list above the input. Mirrors Claude Code's todo widget:

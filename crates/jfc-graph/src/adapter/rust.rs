@@ -1193,15 +1193,30 @@ fn extract_impl_edges(
                     name_to_node.get(type_name.as_str()),
                     name_to_node.get(trait_name.as_str()),
                 ) {
-                    edges.push((
-                        struct_data.id.clone(),
-                        trait_data.id.clone(),
-                        EdgeData {
-                            kind: EdgeKind::Implements,
-                            source_span: build_span(child, file_path),
-                            weight: 1.0,
-                        },
-                    ));
+                    // `name_to_node` is keyed by bare name (last-write-wins),
+                    // so when a trait's name collides with an enum variant (or
+                    // any other symbol) the lookup can return the wrong node
+                    // kind — e.g. resolving the trait to an `EnumVariant`. The
+                    // graph's `Implements` invariant (Struct|Enum → Trait|
+                    // Interface) then rejects the edge as malformed, logging
+                    // "edge rejected by graph invariant". Validate the resolved
+                    // kinds here and only emit a well-formed edge; a name
+                    // collision drops the (unrecoverable-from-this-map) edge
+                    // instead of attempting a corrupt insert.
+                    let source_ok = matches!(struct_data.kind, NodeKind::Struct | NodeKind::Enum);
+                    let target_ok =
+                        matches!(trait_data.kind, NodeKind::Trait | NodeKind::Interface);
+                    if source_ok && target_ok {
+                        edges.push((
+                            struct_data.id.clone(),
+                            trait_data.id.clone(),
+                            EdgeData {
+                                kind: EdgeKind::Implements,
+                                source_span: build_span(child, file_path),
+                                weight: 1.0,
+                            },
+                        ));
+                    }
                 }
             }
         } else {

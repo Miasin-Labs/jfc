@@ -277,14 +277,10 @@ pub(crate) async fn handle_stream_done(
         }
         if let (Some(start), Some(idx)) = (app.turn_started_at, app.streaming_assistant_idx) {
             let elapsed = std::time::Instant::now().duration_since(start);
-            let label = crate::spinner::format_finished(elapsed);
-            // v132 per-turn cost surfacing: append the
-            // turn's incremental cost to the elapsed footer
-            // so the user sees "Cooked for 2m / $0.04". We
-            // approximate per-turn cost from the most-
-            // recent message_delta usage (already populated
-            // into usage_by_model). Skipped when no model
-            // is registered (no pricing match).
+            // Honest, minimal footer: just how long the turn took (no
+            // decorative past-tense verb), plus the turn's incremental
+            // cost when we can price it — e.g. `took 2m04s · $0.04`.
+            let label = format!("took {}", crate::spinner::format_finished(elapsed));
             // Per-turn cost = cumulative-now minus the snapshot taken when
             // this user turn began. Without the baseline this showed the whole
             // session's running spend, not the turn's. saturating at 0 guards
@@ -292,7 +288,7 @@ pub(crate) async fn handle_stream_done(
             let turn_cost =
                 (crate::cost::total_cost(&app.usage_by_model) - app.turn_start_cost).max(0.0);
             let label = if turn_cost > 0.0 {
-                format!("{label} / {}", crate::cost::fmt_cost(turn_cost))
+                format!("{label} · {}", crate::cost::fmt_cost(turn_cost))
             } else {
                 label
             };

@@ -13,6 +13,58 @@ pub(super) async fn handle_submit(
     text: String,
     tx: &mpsc::Sender<crate::runtime::AppEvent>,
 ) -> anyhow::Result<()> {
+    // `# <fact>` quick-add: a prompt whose first non-space character is `#`
+    // is a memory note, not a turn. Append it to project memory (so the
+    // recall engine can surface it later) and stop — no stream, no model.
+    // Mirrors Claude Code's `#` shortcut. `#` alone (empty body) falls
+    // through and is sent normally.
+    {
+        let trimmed = text.trim_start();
+        let fact = trimmed.trim_start_matches('#').trim();
+        if trimmed.starts_with('#') && !fact.is_empty() {
+            let root = app
+                .git_root
+                .clone()
+                .flatten()
+                .unwrap_or_else(|| std::path::PathBuf::from(&app.cwd));
+            let toast_msg = match jfc_memory::create_memory(
+                jfc_memory::MemoryLevel::Project,
+                jfc_memory::MemoryType::Context,
+                jfc_memory::MemoryScope::Private,
+                fact,
+                &root,
+            ) {
+                Ok(path) => format!(
+                    "remembered → {}",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("memory")
+                ),
+                Err(e) => format!("memory save failed: {e}"),
+            };
+            crate::toast::push_with_cap(
+                &mut app.toasts,
+                crate::toast::Toast::new(crate::toast::ToastKind::Info, toast_msg),
+            );
+            // Clear the prompt; this was a note, not a turn.
+            app.textarea.select_all();
+            app.textarea.cut();
+            return Ok(());
+        }
+    }
+
+    // Expand any `[Pasted #N · …]` chips back to their full text so the model
+    // receives what the user actually pasted, then drop the stash for the next
+    // turn. A chip the user deleted simply won't match — harmless.
+    let text = if app.pasted_texts.is_empty() {
+        text
+    } else {
+        let mut expanded = text;
+        for (chip, content) in &app.pasted_texts {
+            expanded = expanded.replace(chip.as_str(), content);
+        }
+        app.pasted_texts.clear();
+        expanded
+    };
+
     tracing::info!(
         target: "jfc::input",
         text_len = text.len(),
@@ -628,6 +680,8 @@ pub(super) async fn handle_submit(
     app.streaming_last_token_at = Some(now);
     app.turn_started_at = Some(now);
     app.turn_start_cost = crate::cost::total_cost(&app.usage_by_model);
+    // Fresh user turn → start a new per-turn edited-files set for `/turn-diff`.
+    app.turn_edited_files.clear();
     app.pending_classifications = 0;
     app.agentic_turn_count = 0;
     // A genuine user submit resets the self-continuation budget — the human

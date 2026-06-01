@@ -24,6 +24,29 @@ pub(crate) fn handle_stream_usage(
     // baseline before adding.
     let partial_input_only =
         output_tokens == 0 && cache_read_tokens == 0 && cache_write_tokens == 0;
+    // Floor the `responseLengthRef` accumulator up to the wire-truth output
+    // count so the spinner's `bytes/4` token estimate is corrected upward and
+    // then keeps growing by chars from there — cli.js's `i54` reducer
+    // (`Math.max($, responseLengthBaseline + outputTokens*4)`). Doing the
+    // correction *in the accumulator* (instead of `max(wire, bytes/4)` fresh
+    // each render frame) is what stops the count from pinning flat to wire and
+    // jumping ~50 every batched `message_delta`. Skip partial/metadata-only
+    // events (output_tokens == 0): they carry no output count to floor against.
+    if !partial_input_only {
+        // A new sub-stream restarts the message's cumulative `output_tokens`
+        // lower than the last event we saw → snapshot the accumulator as the
+        // baseline so the floor continues from what prior sub-streams built.
+        if output_tokens < app.last_usage_output {
+            app.streaming_response_baseline = app.streaming_response_bytes;
+        }
+        // Self-heal a stale baseline left by a turn-boundary reset that zeroed
+        // `streaming_response_bytes` without clearing the baseline.
+        if app.streaming_response_baseline > app.streaming_response_bytes {
+            app.streaming_response_baseline = 0;
+        }
+        let wire_floor = app.streaming_response_baseline + output_tokens as usize * 4;
+        app.streaming_response_bytes = app.streaming_response_bytes.max(wire_floor);
+    }
     app.last_usage_input = input_tokens;
     app.last_usage_output = output_tokens;
     // v126's tokenCountWithEstimation uses input + cache_creation +
@@ -214,5 +237,85 @@ mod tests {
 
         let usage = app.messages[0].usage.as_ref().expect("usage");
         assert_eq!(usage.total_context_tokens(), 122_000);
+    }
+
+    // --- responseLengthRef accumulator floor (spinner token count) ---
+
+    #[test]
+    fn usage_floors_response_accumulator_to_wire_normal() {
+        // The displayed count is `streaming_response_bytes / 4`. A batched
+        // `message_delta` reporting 200 output tokens must floor the
+        // accumulator up to 200*4 = 800 bytes so the count reads 200 — even
+        // if only a few chars have streamed so far.
+        let mut app = test_app();
+        app.streaming_response_bytes = 40; // 10 tokens of chars so far
+        handle_stream_usage(&mut app, 1_000, 200, 0, 0);
+        assert_eq!(app.streaming_response_bytes, 800);
+        assert_eq!(app.streaming_response_bytes / 4, 200);
+    }
+
+    #[test]
+    fn char_growth_continues_above_wire_floor_normal() {
+        // After a wire floor to 200 tokens (800 bytes), streamed chars keep
+        // adding *on top* — the count advances smoothly, it does not pin flat
+        // to the next wire delta. This is the anti-"jumps by 50" guarantee.
+        let mut app = test_app();
+        handle_stream_usage(&mut app, 1_000, 200, 0, 0); // floor → 800
+        app.streaming_response_bytes += 120; // 30 tokens of chars arrive → 920
+        assert_eq!(app.streaming_response_bytes / 4, 230);
+        // Next batched delta (210 tokens) is *below* the char-grown
+        // accumulator, so it must NOT pull the count back down to 210.
+        handle_stream_usage(&mut app, 1_000, 210, 0, 0);
+        assert_eq!(
+            app.streaming_response_bytes, 920,
+            "wire must not lower a char-led count"
+        );
+        assert_eq!(app.streaming_response_bytes / 4, 230);
+    }
+
+    #[test]
+    fn baseline_carries_across_substreams_robust() {
+        // Sub-stream 1 reaches 200 output tokens (800 bytes). Sub-stream 2
+        // restarts `output_tokens` at a lower cumulative; the baseline must
+        // snapshot the accumulator so sub-stream 2's floor continues from it
+        // rather than collapsing back to its own small count.
+        let mut app = test_app();
+        handle_stream_usage(&mut app, 1_000, 200, 0, 0); // → 800
+        // New sub-stream: output restarts at 50 (< previous 200).
+        handle_stream_usage(&mut app, 1_000, 50, 0, 0);
+        assert_eq!(
+            app.streaming_response_baseline, 800,
+            "baseline snapshots prior accumulator"
+        );
+        // 50 more tokens this sub-stream → floor = 800 + 50*4 = 1000.
+        assert_eq!(app.streaming_response_bytes, 1_000);
+        assert_eq!(app.streaming_response_bytes / 4, 250);
+    }
+
+    #[test]
+    fn stale_baseline_self_heals_after_turn_reset_robust() {
+        // A turn boundary zeros `streaming_response_bytes` but (defensively)
+        // may leave a stale baseline. The next usage event must clamp the
+        // baseline back to 0 rather than over-flooring the fresh turn.
+        let mut app = test_app();
+        app.streaming_response_baseline = 5_000; // stale from a prior turn
+        app.streaming_response_bytes = 0; // fresh turn
+        handle_stream_usage(&mut app, 1_000, 30, 0, 0);
+        assert_eq!(
+            app.streaming_response_baseline, 0,
+            "stale baseline self-heals"
+        );
+        assert_eq!(app.streaming_response_bytes, 120); // 30*4, not 5000+120
+    }
+
+    #[test]
+    fn partial_usage_leaves_accumulator_untouched_robust() {
+        // An input-only metadata event (output_tokens == 0) carries no output
+        // count, so it must not touch the accumulator or baseline.
+        let mut app = test_app();
+        app.streaming_response_bytes = 640; // 160 tokens of content
+        handle_stream_usage(&mut app, 50_000, 0, 0, 0);
+        assert_eq!(app.streaming_response_bytes, 640);
+        assert_eq!(app.streaming_response_baseline, 0);
     }
 }

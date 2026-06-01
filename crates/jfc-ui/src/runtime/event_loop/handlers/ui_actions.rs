@@ -38,44 +38,55 @@ pub(crate) async fn handle_submit(
     text: String,
     tx: &EventSender,
 ) -> anyhow::Result<()> {
-    // Away-recap: if user has been away > 5 min, generate a summary
-    // of what happened while they were gone and prepend as system reminder.
+    // A fresh submit dismisses any lingering away-recap from the previous
+    // idle period (the away block below may immediately set a new one).
+    app.away_recap = None;
+    // Away-recap: if the agent worked autonomously for > 5 min while the
+    // user was gone, surface an honest user-facing banner of what happened
+    // ("Tools: …, Files: …, Errors: N") at the top of the transcript. This
+    // is for the *user* to re-orient on return — it is not injected into the
+    // model's context (the model already has the full transcript).
     let away = app.last_user_activity_at.elapsed();
     if away >= crate::session_recap::AWAY_THRESHOLD && !app.idle_return_shown {
+        use crate::types::{MessagePart, Role, ToolInput};
         let start_idx = app.interaction_message_idx.min(app.messages.len());
         let since: Vec<crate::session_recap::RecapMessage> = app.messages[start_idx..]
             .iter()
             .map(|m| {
                 let text_preview = m.parts.iter().find_map(|p| match p {
-                    crate::types::MessagePart::Text(t) if !t.is_empty() => {
+                    MessagePart::Text(t) if !t.is_empty() => {
                         Some(t.chars().take(160).collect::<String>())
                     }
                     _ => None,
                 }).unwrap_or_default();
                 let tool_calls: Vec<String> = m.parts.iter().filter_map(|p| match p {
-                    crate::types::MessagePart::Tool(t) => Some(t.kind.label().to_string()),
+                    MessagePart::Tool(t) => Some(t.kind.label().to_string()),
+                    _ => None,
+                }).collect();
+                // Surface which files the agent actually touched (Edit/Write/
+                // MultiEdit/NotebookEdit carry a `file_path`).
+                let files_changed: Vec<String> = m.parts.iter().filter_map(|p| match p {
+                    MessagePart::Tool(t) => match &t.input {
+                        ToolInput::Edit { file_path, .. }
+                        | ToolInput::Write { file_path, .. } => Some(file_path.clone()),
+                        _ => None,
+                    },
                     _ => None,
                 }).collect();
                 let had_error = m.parts.iter().any(|p| matches!(p,
-                    crate::types::MessagePart::Tool(t) if t.status == crate::types::ExecutionStatus::Failed
+                    MessagePart::Tool(t) if t.status == crate::types::ExecutionStatus::Failed
                 ));
                 crate::session_recap::RecapMessage {
-                    is_assistant: m.role == crate::types::Role::Assistant,
+                    is_assistant: m.role == Role::Assistant,
                     tool_calls,
                     had_error,
-                    files_changed: Vec::new(),
+                    files_changed,
                     text_preview,
                 }
             })
             .collect();
         if let Some(recap) = crate::session_recap::generate_recap(&since) {
-            crate::system_reminder::append_to_last_user(
-                &mut app.messages,
-                &format!(
-                    "Welcome back — recap of work while you were away ({}m):\n\n{recap}",
-                    away.as_secs() / 60
-                ),
-            );
+            app.away_recap = Some(format!("{recap}\n(away {}m · Esc to dismiss)", away.as_secs() / 60));
         }
         app.idle_return_shown = true;
     }

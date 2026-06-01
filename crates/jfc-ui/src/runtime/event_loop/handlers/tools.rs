@@ -137,15 +137,16 @@ pub(crate) fn handle_tool_result(
                     crate::notifications::notify_tool_failed(tc.kind.label(), &result.output);
                 }
                 let new_status = tc.status;
-                // Sparkle on success: stamp the tool
-                // id so the renderer can flash a `✦`
-                // for ~600ms next to its gutter, then
-                // fade. Failures intentionally don't
-                // sparkle — celebration on red would
-                // be confusing.
+                // Record files this turn touched (Edit/Write) so `/turn-diff`
+                // can scope a diff to just this agentic step. Only on success.
                 if matches!(new_status, ToolStatus::Completed) {
-                    app.recent_tool_completion =
-                        Some((tc.id.as_str().to_owned(), std::time::Instant::now()));
+                    match &tc.input {
+                        crate::types::ToolInput::Edit { file_path, .. }
+                        | crate::types::ToolInput::Write { file_path, .. } => {
+                            app.turn_edited_files.insert(file_path.clone());
+                        }
+                        _ => {}
+                    }
                 }
                 // Reset plan verification when new tasks are
                 // created so the next factory cycle re-verifies.

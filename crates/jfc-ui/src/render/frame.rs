@@ -5,8 +5,8 @@ use super::messages::{agent_fan_below_input, subagent_footer};
 use super::messages::{spinner_row, tasks_pinned_row};
 use super::model_picker::model_picker;
 use super::overlays::{
-    diagnostic_panel, diagnostic_row, help_overlay, mention_popup, search_bar, slash_popup,
-    toast_overlay,
+    diagnostic_panel, diagnostic_row, help_overlay, mention_popup, prompt_search_overlay,
+    search_bar, slash_popup, toast_overlay,
 };
 use super::palette::palette;
 use super::session_picker::session_picker;
@@ -350,6 +350,10 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         search_bar(f, app);
     }
 
+    if app.prompt_search.is_some() {
+        prompt_search_overlay(f, app);
+    }
+
     // Slash-command autocomplete: opens above the input bar when
     // the user has typed `/<prefix>` and there are matching commands.
     if let Some(prefix) = current_slash_prefix(app) {
@@ -358,5 +362,105 @@ pub fn frame(f: &mut Frame, app: &mut App) {
 
     if app.pending_approval.is_some() {
         approval(f, app);
+    }
+
+    // Copy-on-select: paint the drag highlight, or (on button-up) read the
+    // covered cells straight out of the just-painted buffer and copy them.
+    apply_text_selection(f, app);
+}
+
+/// Column span `[c0, c1)` of the selection on `row`, in terminal-selection
+/// semantics: the first row runs from the anchor column to the right edge,
+/// the last row from the left edge to the head column (inclusive), middle
+/// rows are full-width, and a single-row selection is just anchor→head.
+fn selection_row_span(
+    row: u16,
+    start: (u16, u16),
+    end: (u16, u16),
+    left: u16,
+    right: u16,
+) -> (u16, u16) {
+    let (c0, c1) = if start.1 == end.1 {
+        (start.0, end.0.saturating_add(1))
+    } else if row == start.1 {
+        (start.0, right)
+    } else if row == end.1 {
+        (left, end.0.saturating_add(1))
+    } else {
+        (left, right)
+    };
+    (c0.clamp(left, right), c1.clamp(left, right))
+}
+
+fn apply_text_selection(f: &mut Frame, app: &mut App) {
+    let Some(sel) = app.text_selection else {
+        return;
+    };
+    let Some(area) = *app.messages_rect.borrow() else {
+        app.text_selection = None;
+        return;
+    };
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    // Body bounds inside the rounded border (1-cell border + the scrollbar
+    // gutter on the right are excluded so we don't copy frame glyphs).
+    let top = area.y.saturating_add(1);
+    let bottom = area.y + area.height - 1; // exclusive (bottom border row)
+    let left = area.x.saturating_add(1);
+    let right = area.x + area.width - 1; // exclusive (right border / scrollbar)
+
+    let (start, end) = sel.ordered();
+    let r0 = start.1.max(top);
+    let r1 = end.1.min(bottom.saturating_sub(1));
+    if r0 > r1 {
+        if sel.finalize {
+            app.text_selection = None;
+        }
+        return;
+    }
+
+    if sel.finalize {
+        let mut rows: Vec<String> = Vec::new();
+        {
+            let buf = f.buffer_mut();
+            let bounds = *buf.area();
+            for row in r0..=r1 {
+                let (c0, c1) = selection_row_span(row, start, end, left, right);
+                let mut line = String::new();
+                for col in c0..c1 {
+                    if col < bounds.right() && row < bounds.bottom() {
+                        line.push_str(buf[(col, row)].symbol());
+                    }
+                }
+                rows.push(line.trim_end().to_string());
+            }
+        }
+        let text = rows.join("\n");
+        app.text_selection = None;
+        if !text.trim().is_empty() {
+            crate::runtime::copy_to_clipboard(&text, "select");
+            crate::toast::push_with_cap(
+                &mut app.toasts,
+                crate::toast::Toast::new(
+                    crate::toast::ToastKind::Info,
+                    format!("copied {} chars", text.chars().count()),
+                ),
+            );
+        }
+        return;
+    }
+
+    // Live highlight: reverse-video the covered cells.
+    let buf = f.buffer_mut();
+    let bounds = *buf.area();
+    for row in r0..=r1 {
+        let (c0, c1) = selection_row_span(row, start, end, left, right);
+        for col in c0..c1 {
+            if col < bounds.right() && row < bounds.bottom() {
+                let cell = &mut buf[(col, row)];
+                cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+            }
+        }
     }
 }

@@ -1236,7 +1236,7 @@ mod helper_tests {
             ToolOutput::Empty,
             ToolKind::Bash,
         );
-        assert!(bash_continuation_lines(&t).is_empty());
+        assert!(bash_continuation_lines(&t, 80).is_empty());
     }
 
     #[test]
@@ -1251,9 +1251,45 @@ mod helper_tests {
             ToolKind::Bash,
         );
         assert_eq!(
-            bash_continuation_lines(&t),
+            bash_continuation_lines(&t, 80),
             vec!["second".to_string(), "third".to_string()]
         );
+    }
+
+    #[test]
+    fn bash_continuation_lines_wraps_long_single_line_normal() {
+        // A long single-line command (no `\n`) spills into wrapped rows so
+        // the whole invocation is visible instead of truncated to "…RUS…".
+        let command = "a".repeat(50);
+        let t = dummy_tool(
+            ToolInput::Bash {
+                command: command.clone(),
+                timeout: None,
+                workdir: None,
+            },
+            ToolOutput::Empty,
+            ToolKind::Bash,
+        );
+        // content_w = 20 → wrap_w = 18 → 50 chars = 18 + 18 + 14 = 3 rows.
+        let rows = bash_continuation_lines(&t, 20);
+        assert_eq!(rows.len(), 3, "got: {rows:?}");
+        assert_eq!(rows.iter().map(|r| r.len()).collect::<Vec<_>>(), vec![18, 18, 14]);
+        assert_eq!(rows.concat(), command, "wrapped rows must reconstruct the command");
+    }
+
+    #[test]
+    fn bash_continuation_lines_short_single_line_empty_robust() {
+        // A short command that fits the title produces no continuation rows.
+        let t = dummy_tool(
+            ToolInput::Bash {
+                command: "echo hi".into(),
+                timeout: None,
+                workdir: None,
+            },
+            ToolOutput::Empty,
+            ToolKind::Bash,
+        );
+        assert!(bash_continuation_lines(&t, 80).is_empty());
     }
 
     #[test]
@@ -1267,7 +1303,7 @@ mod helper_tests {
             ToolOutput::Empty,
             ToolKind::Read,
         );
-        assert!(bash_continuation_lines(&t).is_empty());
+        assert!(bash_continuation_lines(&t, 80).is_empty());
     }
 
     // --- wrap_styled_line --------------------------------------------

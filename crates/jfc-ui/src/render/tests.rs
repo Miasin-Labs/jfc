@@ -447,15 +447,6 @@ mod pure_helper_tests {
         assert_eq!(pulse_color(c1, c2, 0.5), Color::Rgb(10, 10, 10));
     }
 
-    // --- pulse_color_pub (public wrapper) ----------------------------
-
-    #[test]
-    fn pulse_color_pub_matches_private_normal() {
-        let c1 = Color::Rgb(20, 40, 60);
-        let c2 = Color::Rgb(100, 120, 140);
-        assert_eq!(pulse_color_pub(c1, c2, 0.25), pulse_color(c1, c2, 0.25),);
-    }
-
     // --- tail_truncate -----------------------------------------------
 
     #[test]
@@ -647,165 +638,6 @@ mod pure_helper_tests {
         );
     }
 
-    // --- comet_config_from_state -------------------------------------
-
-    #[test]
-    fn comet_config_idle_uses_accent_color_normal() {
-        // Default idle app: head color = theme accent, lap_ms = 3500.
-        let app = fake_app();
-        let cfg = comet_config_from_state(&app, app.theme, 1);
-        assert_eq!(cfg.count, 1);
-        assert_eq!(cfg.head, app.theme.accent);
-        assert_eq!(cfg.base, app.theme.border);
-        assert!(!cfg.reverse_base, "idle should not reverse base");
-    }
-
-    #[test]
-    fn comet_config_bash_mode_uses_warning_normal() {
-        // Input starting with `!` → bash-mode → warning color.
-        let mut app = fake_app();
-        app.textarea = TextArea::from(vec!["!ls".to_string()]);
-        let cfg = comet_config_from_state(&app, app.theme, 2);
-        assert_eq!(cfg.head, app.theme.warning);
-        assert!(
-            !cfg.reverse_base,
-            "bash mode wins over tool-running, no reverse"
-        );
-    }
-
-    #[test]
-    fn comet_config_running_tool_reverses_robust() {
-        // A running tool in the latest message → reverse_base = true,
-        // warning color.
-        let mut app = fake_app();
-        let tool = ToolCall {
-            id: "t1".into(),
-            kind: ToolKind::Bash,
-            status: ToolStatus::Running,
-            input: ToolInput::Bash {
-                command: "sleep 1".into(),
-                timeout: None,
-                workdir: None,
-            },
-            output: ToolOutput::Empty,
-            display: crate::types::ToolDisplayState::DEFAULT,
-            elapsed_ms: None,
-            started_at: None,
-            thought_signature: None,
-        };
-        app.messages.push(ChatMessage {
-            role: Role::Assistant,
-            parts: vec![MessagePart::Tool(tool)],
-            agent_name: None,
-            model_name: None,
-            cost_tier: None,
-            elapsed: None,
-            usage: None,
-            queued: false,
-            attachments: Vec::new(),
-        });
-        let cfg = comet_config_from_state(&app, app.theme, 1);
-        assert_eq!(cfg.head, app.theme.warning);
-        assert!(cfg.reverse_base, "tool-running should reverse direction");
-    }
-
-    #[test]
-    fn comet_config_trail_clamped_robust() {
-        // Trail is clamped to 2..=12 even with extreme env values.
-        // Default (no env) is 6.
-        let app = fake_app();
-        // Make sure no env var pollutes this test.
-        unsafe {
-            std::env::remove_var("JFC_BORDER_COMET_TRAIL");
-        }
-        let cfg = comet_config_from_state(&app, app.theme, 1);
-        assert!((2..=12).contains(&cfg.trail_len));
-    }
-
-    // --- perimeter_cells ---------------------------------------------
-
-    #[test]
-    fn perimeter_cells_3x3_rect_normal() {
-        // 3x3 rect: 8 perimeter cells (no interior).
-        let cells = perimeter_cells(Rect {
-            x: 0,
-            y: 0,
-            width: 3,
-            height: 3,
-        });
-        assert_eq!(cells.len(), 8);
-        // First cell = top-left; last cell = (0,1) (left edge bottom-up
-        // skipping bottom-left already added).
-        assert_eq!(cells[0], (0, 0));
-    }
-
-    #[test]
-    fn perimeter_cells_walks_clockwise_from_topleft_normal() {
-        // 4x4: top edge L→R, right top→bottom, bottom R→L, left bottom→top.
-        let cells = perimeter_cells(Rect {
-            x: 0,
-            y: 0,
-            width: 4,
-            height: 4,
-        });
-        // 4*4 = 16 total cells; perimeter = 4*4 - 2*2 = 12.
-        assert_eq!(cells.len(), 12);
-        assert_eq!(cells[0], (0, 0));
-        // After top edge (4 cells), we should be on the right edge.
-        assert_eq!(cells[4], (3, 1));
-    }
-
-    #[test]
-    fn perimeter_cells_too_small_returns_empty_robust() {
-        // Width or height < 2 → empty (no meaningful perimeter).
-        let cells = perimeter_cells(Rect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 5,
-        });
-        assert!(cells.is_empty());
-        let cells = perimeter_cells(Rect {
-            x: 0,
-            y: 0,
-            width: 5,
-            height: 1,
-        });
-        assert!(cells.is_empty());
-    }
-
-    #[test]
-    fn perimeter_cells_offset_rect_robust() {
-        // Non-zero origin: the cells should reflect the absolute coords.
-        let cells = perimeter_cells(Rect {
-            x: 10,
-            y: 20,
-            width: 3,
-            height: 3,
-        });
-        assert!(cells.contains(&(10, 20)));
-        assert!(cells.contains(&(12, 22)));
-        // Interior cell (11, 21) must NOT be in the perimeter.
-        assert!(!cells.contains(&(11, 21)));
-    }
-
-    #[test]
-    fn perimeter_cells_2x2_no_duplicates_robust() {
-        // The smallest valid rect: 2x2. Each corner is one cell;
-        // none should be duplicated.
-        let cells = perimeter_cells(Rect {
-            x: 0,
-            y: 0,
-            width: 2,
-            height: 2,
-        });
-        let mut sorted = cells.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), cells.len(), "duplicates: {cells:?}");
-        assert_eq!(cells.len(), 4);
-    }
-
     // --- input_visual_line_count + input_soft_wrapped_lines ----------
 
     #[test]
@@ -870,34 +702,37 @@ mod pure_helper_tests {
     #[test]
     fn input_line_spans_empty_returns_one_raw_normal() {
         let t = Theme::dark();
-        let spans = input_line_to_spans("", t, 0.0);
+        let spans = input_line_to_spans("", t);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "");
     }
 
     #[test]
-    fn input_line_spans_slash_command_colors_each_char_normal() {
-        // Every char of the slash token gets its own colored span (rainbow).
+    fn input_line_spans_slash_command_one_accent_span_normal() {
+        // The slash token is a single accent-colored span (flat, no
+        // per-char rainbow).
         let t = Theme::dark();
-        let spans = input_line_to_spans("/help", t, 0.0);
-        // The leading `/` plus each char → 5 styled spans with no rest.
-        assert_eq!(spans.len(), 5);
+        let spans = input_line_to_spans("/help", t);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "/help");
     }
 
     #[test]
     fn input_line_spans_slash_with_args_keeps_rest_normal() {
-        // After the slash token, the rest goes through highlight_mentions_in.
+        // `/cmd` token span + the rest (" arg1 " prefix + "@user" mention).
         let t = Theme::dark();
-        let spans = input_line_to_spans("/cmd arg1 @user", t, 0.0);
-        // At minimum one span per char in `/cmd` plus one or more for the rest.
-        assert!(spans.len() > 4);
+        let spans = input_line_to_spans("/cmd arg1 @user", t);
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "/cmd arg1 @user");
+        // token + prefix + mention = 3 spans.
+        assert_eq!(spans.len(), 3);
     }
 
     #[test]
     fn input_line_spans_plain_text_falls_through_to_mentions_robust() {
         // No slash → just `highlight_mentions_in` output.
         let t = Theme::dark();
-        let spans = input_line_to_spans("hello world", t, 0.0);
+        let spans = input_line_to_spans("hello world", t);
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "hello world");
     }
@@ -906,7 +741,7 @@ mod pure_helper_tests {
     fn input_line_spans_leading_whitespace_preserved_robust() {
         // Indent before a slash command must be preserved verbatim.
         let t = Theme::dark();
-        let spans = input_line_to_spans("   /help", t, 0.0);
+        let spans = input_line_to_spans("   /help", t);
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "   /help");
     }
@@ -916,18 +751,18 @@ mod pure_helper_tests {
     #[test]
     fn highlight_mentions_no_at_returns_one_span_normal() {
         let t = Theme::dark();
-        let spans = highlight_mentions_in("just plain text", t, 0.0);
+        let spans = highlight_mentions_in("just plain text", t);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "just plain text");
     }
 
     #[test]
-    fn highlight_mentions_at_token_gets_per_char_spans_normal() {
-        // `@cole` at the start → 5 styled spans (one per char). With
+    fn highlight_mentions_at_token_one_accent_span_normal() {
+        // `@cole` at the start → one accent-colored span (flat). With an
         // empty prefix there's no leading text span.
         let t = Theme::dark();
-        let spans = highlight_mentions_in("@cole", t, 0.0);
-        assert_eq!(spans.len(), 5);
+        let spans = highlight_mentions_in("@cole", t);
+        assert_eq!(spans.len(), 1);
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "@cole");
     }
@@ -937,7 +772,7 @@ mod pure_helper_tests {
         // Only `@` after whitespace (or at start) is a mention; mid-word
         // `@` (e.g. email) doesn't trigger.
         let t = Theme::dark();
-        let spans = highlight_mentions_in("user@example.com", t, 0.0);
+        let spans = highlight_mentions_in("user@example.com", t);
         // Exactly one prefix span (no mention split).
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "user@example.com");
@@ -945,10 +780,10 @@ mod pure_helper_tests {
 
     #[test]
     fn highlight_mentions_text_then_mention_robust() {
-        // "hi @cole" → ["hi "] + 5 chars of "@cole" = 6 spans.
+        // "hi @cole" → ["hi "] prefix + ["@cole"] mention = 2 spans.
         let t = Theme::dark();
-        let spans = highlight_mentions_in("hi @cole", t, 0.0);
-        assert_eq!(spans.len(), 6);
+        let spans = highlight_mentions_in("hi @cole", t);
+        assert_eq!(spans.len(), 2);
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "hi @cole");
     }

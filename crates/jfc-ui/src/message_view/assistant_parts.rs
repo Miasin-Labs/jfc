@@ -1,208 +1,16 @@
 use super::core::RenderItem;
 use super::*;
 
-#[allow(dead_code)]
-pub(super) fn render_assistant_text_lines<'a>(
-    text: &'a str,
-    t: &'a Theme,
-    width: usize,
-    convention: jfc_provider::StreamConvention,
-) -> Vec<Line<'static>> {
-    use crate::inline_tools::{self, Segment as InlineSeg};
-    use jfc_provider::StreamConvention as SC;
-
-    let needs_inline = matches!(convention, SC::InlineXmlTags)
-        || (matches!(convention, SC::AnthropicNative | SC::OpenAiNative)
-            && inline_tools::contains_inline_tools(text));
-
-    if !needs_inline {
-        return markdown::to_lines(text, t, width);
-    }
-
-    let mut lines = Vec::new();
-    for seg in inline_tools::parse(text) {
-        match seg {
-            InlineSeg::Text(s) => {
-                if !s.trim().is_empty() {
-                    lines.extend(markdown::to_lines(&s, t, width));
-                }
-            }
-            InlineSeg::ToolCall { raw_body, parsed } => {
-                let header = match parsed {
-                    Some(p) => format!("▸ {} · {}", p.name, truncate_str(&p.summary, 80)),
-                    None => format!("▸ tool_call · {}", truncate_str(&raw_body, 80)),
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(String::from("┌─ "), Style::default().fg(t.border)),
-                    Span::styled(header, Style::default().fg(t.accent)),
-                ]));
-            }
-            InlineSeg::ToolResult(body) => {
-                let total = body.lines().count();
-                let mut emitted = 0usize;
-                for ln in body.lines().take(6) {
-                    let clean = sanitize_terminal_text(ln);
-                    let truncated = truncate_str(&clean, width.saturating_sub(4).max(20));
-                    lines.push(Line::from(vec![
-                        Span::styled(String::from("│ "), Style::default().fg(t.border)),
-                        Span::styled(truncated, Style::default().fg(t.text_secondary)),
-                    ]));
-                    emitted += 1;
-                }
-                if total > emitted {
-                    lines.push(Line::from(vec![
-                        Span::styled(String::from("│ "), Style::default().fg(t.border)),
-                        Span::styled(
-                            format!("… {} more lines", total - emitted),
-                            Style::default()
-                                .fg(t.text_muted)
-                                .add_modifier(Modifier::ITALIC),
-                        ),
-                    ]));
-                }
-                lines.push(Line::from(Span::styled(
-                    String::from("└─"),
-                    Style::default().fg(t.border),
-                )));
-            }
-        }
-    }
-    lines
-}
-
-#[allow(dead_code)]
-fn streaming_task_footer_lines(app: &App, t: &Theme) -> Vec<Line<'static>> {
-    use jfc_session::{DeletedFilter, TaskStatus};
-
-    let tasks = app.task_store.list(DeletedFilter::Exclude);
-    if tasks.is_empty() {
-        return Vec::new();
-    }
-
-    let counts = app.task_store.counts();
-
-    let completed_ids: std::collections::HashSet<String> = tasks
-        .iter()
-        .filter(|tk| tk.status == TaskStatus::Completed)
-        .map(|tk| tk.id.as_str().to_owned())
-        .collect();
-
-    let fade_dur = std::time::Duration::from_secs(30);
-    let now = std::time::Instant::now();
-    let recently_completed: Vec<&jfc_session::Task> = tasks
-        .iter()
-        .filter(|tk| {
-            tk.status == TaskStatus::Completed
-                && app
-                    .task_completion_times
-                    .get(&tk.id)
-                    .is_some_and(|&t| now.duration_since(t) < fade_dur)
-        })
-        .collect();
-
-    let open_tasks: Vec<&jfc_session::Task> = tasks
-        .iter()
-        .filter(|tk| matches!(tk.status, TaskStatus::Pending | TaskStatus::InProgress))
-        .collect();
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let max_visible = 5usize;
-    let mut visible = 0usize;
-
-    for tk in open_tasks.iter().chain(recently_completed.iter()) {
-        if visible >= max_visible {
-            break;
-        }
-        visible += 1;
-
-        let is_recently_completed = tk.status == TaskStatus::Completed;
-
-        let (icon, icon_style) = match tk.status {
-            TaskStatus::Pending => ("□ ", Style::default().fg(t.text_muted)),
-            TaskStatus::InProgress => ("▣ ", Style::default().fg(t.accent)),
-            TaskStatus::Completed => (
-                "✓ ",
-                Style::default().fg(t.success).add_modifier(Modifier::DIM),
-            ),
-            _ => ("✗ ", Style::default().fg(t.error)),
-        };
-
-        let subj_style = if is_recently_completed {
-            Style::default()
-                .fg(t.text_muted)
-                .add_modifier(Modifier::CROSSED_OUT | Modifier::DIM)
-        } else if tk.status == TaskStatus::InProgress {
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(t.text_secondary)
-        };
-
-        let mut spans = vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(icon, icon_style),
-            Span::styled(tk.subject.clone(), subj_style),
-        ];
-
-        if let Some(owner) = &tk.owner {
-            spans.push(Span::styled(
-                format!(" (@{owner})"),
-                Style::default()
-                    .fg(t.text_muted)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-        }
-
-        if !tk.blocked_by.is_empty() {
-            let open_blockers: Vec<&str> = tk
-                .blocked_by
-                .iter()
-                .filter(|id| !completed_ids.contains(id.as_str()))
-                .map(|id| id.as_str())
-                .collect();
-            if !open_blockers.is_empty() {
-                spans.push(Span::styled(
-                    format!(" ▸ blocked by {}", open_blockers.join(", ")),
-                    Style::default().fg(t.text_muted),
-                ));
-            }
-        }
-
-        lines.push(Line::from(spans));
-    }
-
-    let total_open = counts.pending + counts.in_progress;
-    if total_open > visible || counts.completed > 0 {
-        let overflow_open = total_open.saturating_sub(visible);
-        let mut parts: Vec<String> = Vec::new();
-        if overflow_open > 0 {
-            parts.push(format!("+{overflow_open} pending"));
-        }
-        if counts.completed > 0 {
-            parts.push(format!("{} completed", counts.completed));
-        }
-        if !parts.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("    … {}", parts.join(", ")),
-                Style::default()
-                    .fg(t.text_muted)
-                    .add_modifier(Modifier::ITALIC),
-            )));
-        }
-    }
-
-    lines
-}
-
 pub(super) fn push_reasoning_lines<'a>(
     items: &mut Vec<RenderItem<'a>>,
     text: &'a str,
     expanded: bool,
-    key: usize,
     t: &Theme,
 ) {
     if expanded {
+        // Header: just `∴ Thinking` with a quiet collapse hint. The old
+        // `[Ctrl+O to collapse | key=N]` leaked an internal render index
+        // (`key=N`) into the chat — debug noise the user never needed.
         items.push(RenderItem::TextLine(Line::from(vec![
             Span::styled(
                 "∴ Thinking",
@@ -210,10 +18,7 @@ pub(super) fn push_reasoning_lines<'a>(
                     .fg(t.text_muted)
                     .add_modifier(Modifier::ITALIC),
             ),
-            Span::styled(
-                format!(" [Ctrl+O to collapse | key={}]", key),
-                Style::default().fg(t.text_muted),
-            ),
+            Span::styled("  ctrl+o to collapse", Style::default().fg(t.text_muted)),
         ])));
         // Reasoning ribbon: each thinking line gets a `┃` prefix in
         // `t.reasoning_fg` so the block visually nests inside the
@@ -513,7 +318,7 @@ mod reasoning_preview_tests {
     fn collapsed_preview(text: &str) -> String {
         let mut items: Vec<RenderItem<'_>> = Vec::new();
         let theme = crate::theme::Theme::dark();
-        push_reasoning_lines(&mut items, text, false, 0, &theme);
+        push_reasoning_lines(&mut items, text, false, &theme);
         // The single line we pushed has two spans; the second contains the
         // preview. Concatenate the visible text so tests can assert on it.
         match items.into_iter().next() {

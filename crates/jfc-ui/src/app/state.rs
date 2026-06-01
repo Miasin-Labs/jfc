@@ -47,6 +47,43 @@ pub struct TranscriptSearch {
     pub cursor: usize,
 }
 
+/// Ctrl+R reverse-history search over past user prompts (bash-style).
+/// `all` is every prior prompt newest-first; `results` are indices into it
+/// matching `query`; `selected` indexes into `results`.
+#[derive(Debug, Clone, Default)]
+pub struct PromptSearch {
+    pub query: String,
+    pub all: Vec<String>,
+    pub results: Vec<usize>,
+    pub selected: usize,
+}
+
+impl PromptSearch {
+    /// The currently-highlighted prompt, if any.
+    pub fn selected_text(&self) -> Option<&str> {
+        self.results
+            .get(self.selected)
+            .and_then(|&i| self.all.get(i))
+            .map(String::as_str)
+    }
+
+    /// Recompute `results` for the current `query` (case-insensitive
+    /// substring), clamping `selected` into range.
+    pub fn refilter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.results = self
+            .all
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| q.is_empty() || s.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+        if self.selected >= self.results.len() {
+            self.selected = self.results.len().saturating_sub(1);
+        }
+    }
+}
+
 /// Priority levels for the message queue. Higher priority messages
 /// are drained first. Mirrors CC 2.1.144's `getCommandsByMaxPriority`
 /// which supports "now" (jump the queue), "next" (drain between tool
@@ -263,6 +300,29 @@ pub struct NetworkRecoveryStatus {
     pub updated_at: Instant,
 }
 
+/// An in-progress / just-released mouse selection over the transcript, in
+/// terminal cell coordinates. `anchor` is where the drag began, `head` the
+/// current cursor cell. `dragged` flips true once the cursor actually moves,
+/// distinguishing a real selection from a plain click. `finalize` is set on
+/// button-up so the next render extracts + copies the text exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextSelection {
+    pub anchor: (u16, u16),
+    pub head: (u16, u16),
+    pub dragged: bool,
+    pub finalize: bool,
+}
+
+impl TextSelection {
+    /// Normalized (top-left, bottom-right) cell span in reading order, so the
+    /// renderer can walk rows top-to-bottom regardless of drag direction.
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        let (a, h) = (self.anchor, self.head);
+        // Order by row, then column.
+        if (a.1, a.0) <= (h.1, h.0) { (a, h) } else { (h, a) }
+    }
+}
+
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const IDLE_TICK_MS: u64 = 80;
 pub const ANIM_TICK_MS: u64 = 33;
@@ -374,11 +434,29 @@ pub struct App {
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
     pub streaming_reasoning: String,
-    /// v126-style cumulative byte counter for ALL streamed response content:
-    /// text deltas + thinking deltas + tool input JSON deltas. Divided by 4
-    /// for the spinner's token estimate (matches v126's `responseLengthRef.current / 4`).
-    /// Reset at the start of each streaming turn.
+    /// v126 `responseLengthRef`: a single monotonic "response length"
+    /// accumulator, displayed as `/4` for the spinner's live token count.
+    /// It grows two ways, mirroring cli.js's `i54` reducer:
+    ///   * **chars** — every text/reasoning/tool-input delta adds its byte
+    ///     length (smooth, per-delta growth);
+    ///   * **wire floor** — each `message_delta` usage event floors it up to
+    ///     `streaming_response_baseline + output_tokens*4`, the char-equivalent
+    ///     of the server's cumulative output count.
+    ///
+    /// Because chars keep adding *on top of* each wire correction, the
+    /// displayed `bytes/4` advances smoothly instead of pinning flat to wire
+    /// and jumping ~50 every time a batched usage delta lands. Reset at the
+    /// start of each streaming turn; persists across a turn's sub-streams.
     pub streaming_response_bytes: usize,
+    /// `responseLengthRef` value captured at the start of the current
+    /// sub-stream (cli.js `responseLengthBaseline`). The wire floor is
+    /// `baseline + output_tokens*4` because `output_tokens` is the *current
+    /// message's* cumulative count, which restarts at 0 each sub-stream — the
+    /// baseline carries forward what earlier sub-streams already accumulated.
+    /// Captured when a usage event reports fewer output tokens than the last
+    /// (a new message began); self-heals to 0 if it ever exceeds the live
+    /// accumulator (a missed turn-boundary reset).
+    pub streaming_response_baseline: usize,
     /// Server-authoritative cumulative thinking token count from `thinking_delta.estimated_tokens`.
     /// Populated during extended-thinking phases (live thinking) or redacted-thinking blocks.
     /// Reset at the start of each streaming turn. Displayed separately from output tokens.
@@ -430,6 +508,12 @@ pub struct App {
     /// same points `turn_started_at` is set to a fresh `Some(now)`, so it
     /// survives across agentic-loop sub-streams within one turn.
     pub turn_start_cost: f64,
+    /// Files the assistant edited during the current user turn (Edit/Write
+    /// `file_path`s), accumulated as tools complete and reset on each fresh
+    /// user submit. Drives `/turn-diff`, which scopes a `git diff` to just
+    /// these paths so you can review one agentic step in isolation from the
+    /// whole working tree.
+    pub turn_edited_files: std::collections::BTreeSet<String>,
     /// Number of API round-trips in the current user turn (incremented each
     /// time `continue_agentic_loop` fires). Resets on each user submission.
     /// Used to enforce a max-turns safety limit (default 200, matching CC
@@ -461,10 +545,11 @@ pub struct App {
     /// down-arrow decrements. Mirrors v126's `useArrowKeyHistory`
     /// behavior — a quality-of-life win for resend/edit workflows.
     pub history_cursor: Option<usize>,
-    /// Wall-clock instant of the most recent text/reasoning delta. Used by
-    /// the spinner to detect stalls (`>=15s` → "warming up", up to `>=60s`
-    /// → "almost done thinking"). Mirrors v126 `timeSinceLastToken` (cli.js
-    /// line 323162).
+    /// Wall-clock instant of the most recent text/reasoning delta. The
+    /// spinner derives its honest silence signal from this: a `quiet Ns`
+    /// chip past `QUIET_CHIP_SECS` (8s) and a row-dim past `QUIET_DIM_SECS`
+    /// (30s). No fabricated "almost done" reassurance — just measured
+    /// time-since-last-byte.
     pub streaming_last_token_at: Option<Instant>,
     /// Trailing window of `(elapsed_since_stream_start, live_token_count)`
     /// samples used to compute the windowed tokens/sec rate shown in the
@@ -490,6 +575,10 @@ pub struct App {
     /// When any component changes, `message_view_total_lines` is recomputed.
     pub total_lines_key: (usize, usize, usize),
     pub textarea: TextArea<'static>,
+    /// Vim modal-editing state for the prompt. `None` = vim off (default,
+    /// plain insert editing); `Some` = on, toggled by `/vim`. Routes the
+    /// default text-input path through `input::vim` and makes Esc mode-aware.
+    pub vim: Option<crate::input::vim::VimState>,
     pub show_palette: bool,
     pub palette_input: String,
     pub palette_selected: usize,
@@ -557,6 +646,8 @@ pub struct App {
     /// search bar at the bottom of the screen, the match highlight
     /// in messages, and the n/N navigation all key off this.
     pub transcript_search: Option<TranscriptSearch>,
+    /// Ctrl+R reverse-history search overlay (None = closed).
+    pub prompt_search: Option<PromptSearch>,
     /// Slash-command autocomplete popup state. `Some(idx)` while the
     /// user is typing a command and the popup is open. None when the
     /// popup is dismissed.
@@ -613,6 +704,12 @@ pub struct App {
     /// the next drag delta can advance scroll_offset by the
     /// difference. Reset on Down / Up so a fresh drag starts cleanly.
     pub drag_anchor_y: Option<u16>,
+    /// In-progress / just-finished mouse text selection over the transcript.
+    /// Drag inside the messages area paints a reverse-video highlight; on
+    /// button-up the renderer reads the selected buffer cells, copies them to
+    /// the clipboard (OSC 52-aware), and clears the selection. `None` when no
+    /// selection is active.
+    pub text_selection: Option<TextSelection>,
     /// Per-turn token usage history (input + output) for the
     /// sparkline rendered in the info sidebar. Pushed each time a
     /// `StreamUsage` event lands at end-of-turn. Capped at the last
@@ -855,16 +952,6 @@ pub struct App {
     /// to 0 each time the panel is opened so the user always lands at
     /// the top of the list regardless of where they were before.
     pub diagnostic_panel_scroll: usize,
-    /// Most recently completed tool — drives the sparkle (✦) flash
-    /// next to its gutter for ~600ms after the result lands. `None`
-    /// after the sparkle's TTL elapses or when no tool has completed
-    /// this session.
-    pub recent_tool_completion: Option<(String, std::time::Instant)>,
-    /// Last token-arrival timestamp — drives the right-edge token
-    /// rain animation. Each `StreamChunk` stamps it; the renderer
-    /// reads it to highlight one cell in the rain column with a
-    /// fading intensity proportional to age.
-    pub last_token_arrival: Option<std::time::Instant>,
     /// First-launch timestamp for the boot sweep animation. Set in
     /// `App::new`; the placeholder renderer uses it to drive a brief
     /// star cascade across "What can I help you with?" on session
@@ -1007,6 +1094,12 @@ pub struct App {
     /// submitted ChatMessage's `attachments` field. Replaces the old
     /// `pending_attachments → push_pending_tool_attachment` global queue.
     pub pasted_images: Vec<crate::attachments::PastedContent>,
+    /// Large text pastes collapsed to `[Pasted #N · …]` chips: `(chip_token,
+    /// full_text)`. The chip keeps the input box clean; on submit each chip
+    /// in the prompt is expanded back to its full text. Cleared per submit.
+    pub pasted_texts: Vec<(String, String)>,
+    /// Monotonic id for `[Pasted #N · …]` chips.
+    pub paste_counter: u32,
     /// Monotonically incrementing counter for paste IDs within a session.
     pub image_counter: u32,
     /// How many detached background agents transitioned to
@@ -1146,6 +1239,11 @@ pub struct App {
     pub interaction_message_idx: usize,
     /// Whether the idle-return toast has been shown this idle period.
     pub idle_return_shown: bool,
+    /// User-facing "while you were away" recap banner. Set when the user
+    /// returns and submits after `session_recap::AWAY_THRESHOLD` of the
+    /// agent working autonomously; rendered as a dismissable band at the top
+    /// of the transcript and cleared on the next submit or Esc.
+    pub away_recap: Option<String>,
     /// Files pinned into the system prompt (survive compaction).
     /// Auto-populated from files that are re-read after every compaction.
     #[allow(dead_code)]
@@ -1280,6 +1378,7 @@ impl App {
             streaming_text: String::new(),
             streaming_reasoning: String::new(),
             streaming_response_bytes: 0,
+            streaming_response_baseline: 0,
             streaming_thinking_tokens: 0,
             pending_context_hint_tokens_saved: None,
             network_recovery_status: None,
@@ -1295,6 +1394,7 @@ impl App {
             thinking_ended_at: None,
             turn_started_at: None,
             turn_start_cost: 0.0,
+            turn_edited_files: std::collections::BTreeSet::new(),
             agentic_turn_count: 0,
             self_continuation_count: 0,
             empty_billed_resend_count: 0,
@@ -1306,6 +1406,7 @@ impl App {
             total_lines: 0,
             total_lines_key: (0, 0, 0),
             textarea,
+            vim: None,
             show_palette: false,
             palette_input: String::new(),
             palette_selected: 0,
@@ -1331,6 +1432,7 @@ impl App {
             git_branch_last_refresh: None,
             tool_group_expanded: std::collections::HashSet::new(),
             transcript_search: None,
+            prompt_search: None,
             slash_popup_selected: None,
             last_session_save_at: None,
             path_yank_cursor: 0,
@@ -1343,6 +1445,7 @@ impl App {
             messages_rect: std::cell::RefCell::new(None),
             toasts_rect: std::cell::RefCell::new(None),
             drag_anchor_y: None,
+            text_selection: None,
             token_history: std::collections::VecDeque::with_capacity(TOKEN_HISTORY_CAP),
             last_active_agent_task: None,
             interrupt_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1416,8 +1519,6 @@ impl App {
             diagnostics: Vec::new(),
             show_diagnostic_panel: false,
             diagnostic_panel_scroll: 0,
-            recent_tool_completion: None,
-            last_token_arrival: None,
             launched_at: std::time::Instant::now(),
             delivered_diagnostics: std::collections::HashSet::new(),
             usage_apply_baseline: (0, 0, 0, 0),
@@ -1448,6 +1549,8 @@ impl App {
             viewing_task_id: None,
             viewing_task_expanded: std::collections::HashMap::new(),
             pasted_images: Vec::new(),
+            pasted_texts: Vec::new(),
+            paste_counter: 0,
             image_counter: 0,
             background_tasks_completed_since_last_turn: 0,
             observed_bg_terminal_transition_this_process: false,
@@ -1485,6 +1588,7 @@ impl App {
             last_user_activity_at: std::time::Instant::now(),
             last_user_interaction_at: std::time::Instant::now(),
             interaction_message_idx: 0,
+            away_recap: None,
             idle_return_shown: false,
             pinned_files: Vec::new(),
             post_compact_reads: std::collections::HashMap::new(),

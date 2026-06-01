@@ -18,6 +18,12 @@ use super::assistant_parts::{push_advisor_lines, push_reasoning_lines, push_task
 use super::tool_blocks::{render_tool_block, tool_kind_color};
 use super::tool_height::tool_block_height;
 
+/// Columns reserved at the left of a user message for the `▌` ribbon + a
+/// space. User text is *wrapped* this much narrower (in the item builder)
+/// and then *rendered* shifted right by the same amount, so the two widths
+/// always agree — no re-wrap, no right-edge clip.
+pub const MSG_USER_INDENT: u16 = 2;
+
 pub struct MessageView<'a> {
     pub app: &'a App,
     /// Optional precomputed render items + total height. Lets `render::messages`
@@ -51,9 +57,6 @@ pub struct RenderCtx<'a> {
     pub tool_group_expanded: &'a std::collections::HashSet<String>,
     pub render_cache: &'a RefCell<crate::render_cache::RenderCache>,
     pub theme: crate::theme::Theme,
-    pub launched_at: std::time::Instant,
-    #[allow(dead_code)]
-    pub diagnostics: &'a [crate::diagnostics::DiagnosticEntry],
     /// Brief mode: when true, plain `MessagePart::Text` parts on assistant
     /// messages are suppressed from rendering so only `SendUserMessage` tool
     /// output reaches the user. Mirrors Claude Code v2.1.142+ `brief_mode`.
@@ -71,8 +74,6 @@ impl<'a> RenderCtx<'a> {
             tool_group_expanded: &app.tool_group_expanded,
             render_cache: &app.render_cache,
             theme: app.theme,
-            launched_at: app.launched_at,
-            diagnostics: &app.diagnostics,
             brief_mode: app.brief_mode
                 || crate::feature_gates::pewter_owl_brief_enabled(app.model.as_str(), false),
         }
@@ -85,7 +86,6 @@ impl<'a> RenderCtx<'a> {
             std::sync::OnceLock::new();
         static EMPTY_GROUPS: std::sync::OnceLock<std::collections::HashSet<String>> =
             std::sync::OnceLock::new();
-        static EMPTY_DIAG: &[crate::diagnostics::DiagnosticEntry] = &[];
         Self {
             messages,
             streaming_idx: None,
@@ -94,8 +94,6 @@ impl<'a> RenderCtx<'a> {
             tool_group_expanded: EMPTY_GROUPS.get_or_init(std::collections::HashSet::new),
             render_cache: &app.render_cache,
             theme: app.theme,
-            launched_at: app.launched_at,
-            diagnostics: EMPTY_DIAG,
             brief_mode: false,
         }
     }
@@ -132,7 +130,7 @@ pub fn build_render_items_pub<'a>(ctx: &'a RenderCtx<'a>, inner_w: usize) -> Vec
 /// markdown rendering is cached in `RenderCache`, the rest is
 /// O(parts). The previous "fast-path predictor" was a premature
 /// optimization that traded ~ms per frame for permanent drift bugs.
-#[allow(dead_code)]
+#[allow(dead_code)] // exercised by the test suite; the bin reaches it via the shared inner.
 pub fn message_view_total_lines(app: &App, inner_w: usize) -> usize {
     build_render_items_inner(&RenderCtx::from_app(app), inner_w)
         .iter()
@@ -204,6 +202,7 @@ impl Widget for MessageView<'_> {
         // color + bold on the role label is the entire visual
         // differentiation, no per-row decoration.
         struct Scope {
+            role: Role,
             is_streaming_placeholder: bool,
         }
         let mut scope: Option<Scope> = None;
@@ -233,10 +232,11 @@ impl Widget for MessageView<'_> {
             // simple.
             match item {
                 RenderItem::MessageStart {
-                    role: _,
+                    role,
                     is_streaming_placeholder,
                 } => {
                     scope = Some(Scope {
+                        role: *role,
                         is_streaming_placeholder: *is_streaming_placeholder,
                     });
                     last_streaming_cursor = None;
@@ -249,22 +249,15 @@ impl Widget for MessageView<'_> {
                     // the cursor entirely — the gutter already gives
                     // a static "this message is in flight" signal.
                     if let Some((cx, cy, _w)) = last_streaming_cursor.take()
-                        && !crate::spinner::reduced_motion()
                         && cx < buf.area().right()
                         && cy < buf.area().bottom()
                     {
-                        let elapsed_ms = self.app.launched_at.elapsed().as_millis();
-                        let phase = (elapsed_ms % 1200) as f32 / 1200.0;
-                        let intensity = if phase < 0.5 {
-                            phase * 2.0
-                        } else {
-                            (1.0 - phase) * 2.0
-                        };
-                        let cursor_color =
-                            crate::render::pulse_color_pub(t.text_muted, t.accent, intensity);
+                        // Static accent caret marking where text is landing.
+                        // No blink/pulse — it's a position cue, not a
+                        // liveness animation (the spinner row covers that).
                         let cell = &mut buf[(cx, cy)];
                         cell.set_symbol("▋");
-                        cell.set_style(Style::default().fg(cursor_color));
+                        cell.set_style(Style::default().fg(t.accent));
                     }
                     scope = None;
                     continue;
@@ -292,13 +285,30 @@ impl Widget for MessageView<'_> {
             last_visible_item = Some(item_idx);
             last_visible_line = Some(lines_skipped + item_scroll_skip + render_h as usize);
 
-            // No left-side inset: items render at full width. The
-            // earlier 2-column gutter strip is gone — color + bold
-            // on the role label carries the message-block identity.
+            // User messages get a flat accent ribbon (`▌`) down the left
+            // and a 2-col indent so the speaker reads at a glance without
+            // any background fill (terminals band bg gradients badly, and
+            // a solid tint is the decoration we keep stripping). Assistant
+            // and everything else render flush-left at full width.
+            let user_ribbon = matches!(
+                scope,
+                Some(Scope {
+                    role: Role::User,
+                    ..
+                })
+            );
+            let (item_x, item_w) = if user_ribbon {
+                (
+                    area.x + MSG_USER_INDENT,
+                    width.saturating_sub(MSG_USER_INDENT),
+                )
+            } else {
+                (area.x, width)
+            };
             let item_area = Rect {
-                x: area.x,
+                x: item_x,
                 y,
-                width,
+                width: item_w,
                 height: render_h,
             };
             // Hit-region: each clickable item registers its area so
@@ -322,6 +332,18 @@ impl Widget for MessageView<'_> {
                 _ => {}
             }
             item.render_with_skip(self.app, item_area, buf, t, item_scroll_skip);
+
+            // Paint the user-message ribbon: a flat `▌` in accent at the
+            // left edge of every row this item occupies. Static (no pulse)
+            // — it's a structural speaker marker, not a liveness animation.
+            if user_ribbon && area.x < buf.area().right() {
+                let ribbon_bottom = (y + render_h).min(buf.area().bottom());
+                for ry in y..ribbon_bottom {
+                    let cell = &mut buf[(area.x, ry)];
+                    cell.set_symbol("▌");
+                    cell.set_style(Style::default().fg(t.accent));
+                }
+            }
 
             // For streaming-placeholder scopes, remember the bottom
             // row's last-content column so MessageEnd can drop a
@@ -421,7 +443,6 @@ pub enum RenderItem<'a> {
     /// has no idea where one message ends and the next begins; it
     /// just sees a flat stream of TextLine / ToolBlock / Blank.
     MessageStart {
-        #[allow(dead_code)]
         role: Role,
         is_streaming_placeholder: bool,
     },
@@ -661,16 +682,11 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
             Role::User => Line::from(Span::styled("you", t.user_label())),
             Role::Assistant => {
                 let mut spans = Vec::new();
-                if is_streaming_placeholder && !crate::spinner::reduced_motion() {
-                    let phase = (ctx.launched_at.elapsed().as_millis() % 1200) as f32 / 1200.0;
-                    let intensity = if phase < 0.5 {
-                        phase * 2.0
-                    } else {
-                        (1.0 - phase) * 2.0
-                    };
-                    let dot_color =
-                        crate::render::pulse_color_pub(t.text_muted, t.accent, intensity);
-                    spans.push(Span::styled("● ", Style::default().fg(dot_color)));
+                // Static accent dot marks *which* message is in flight. No
+                // pulse — the spinner row already carries the live activity
+                // signal; a second pulsing element just competed with it.
+                if is_streaming_placeholder {
+                    spans.push(Span::styled("● ", Style::default().fg(t.accent)));
                 }
                 spans.push(Span::styled("assistant", t.asst_label()));
                 Line::from(spans)
@@ -743,6 +759,15 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                         p += 1;
                         continue;
                     }
+                    // User messages render inside a 2-col ribbon indent (see
+                    // `MSG_USER_INDENT` in the widget), so they must *wrap* at
+                    // that narrower width — otherwise the indented render rect
+                    // would re-wrap or clip them. Assistant text uses full width.
+                    let content_w = if msg.role == Role::User {
+                        inner_w.saturating_sub(MSG_USER_INDENT as usize)
+                    } else {
+                        inner_w
+                    };
                     let lines = if is_streaming_placeholder {
                         // Streaming fast path: recompute every frame without
                         // syntect. Cost is ~5µs/KB (pulldown-cmark only) vs
@@ -752,18 +777,18 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                         // the same placeholder body before the next stream
                         // chunk can mutate it.
                         let theme = t;
-                        let width = inner_w as u16;
+                        let width = content_w as u16;
                         let mut cache = ctx.render_cache.borrow_mut();
                         if let Some(lines) = cache.get_streaming(idx, width, text) {
                             lines.to_vec()
                         } else {
-                            let lines = markdown::to_lines_streaming(text, &theme, inner_w);
+                            let lines = markdown::to_lines_streaming(text, &theme, content_w);
                             cache.set_streaming(idx, width, text, lines.clone());
                             lines
                         }
                     } else {
                         let mut cache = ctx.render_cache.borrow_mut();
-                        let width = inner_w as u16;
+                        let width = content_w as u16;
                         let theme = t;
                         cache
                             .get_or_insert_with(text, width, |t_text, w| {
@@ -776,7 +801,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                     }
                 }
                 MessagePart::Reasoning(text) => {
-                    push_reasoning_lines(&mut items, text, reasoning_expanded, idx, &t);
+                    push_reasoning_lines(&mut items, text, reasoning_expanded, &t);
                 }
                 MessagePart::Tool(tool) => {
                     items.push(RenderItem::ToolBlock(tool));
@@ -798,6 +823,13 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                     push_advisor_lines(&mut items, text, &t);
                 }
                 MessagePart::RedactedThinking(data) => {
+                    // Not a jfc choice and not recoverable: Anthropic returns
+                    // these blocks *encrypted* when a reasoning span trips its
+                    // safety classifier — the plaintext is not in the response.
+                    // We keep the ciphertext so it can be replayed on the next
+                    // request (thinking continuity), but there's nothing to
+                    // display. Full (non-redacted) thinking is already what we
+                    // request; this is the server withholding a span.
                     items.push(RenderItem::TextLine(Line::from(vec![
                         Span::styled(
                             "∴ Redacted thinking",
@@ -807,7 +839,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                         ),
                         Span::styled(
                             format!(
-                                " — provider withheld plaintext ({} bytes preserved)",
+                                " — encrypted by the provider; not shown ({} bytes kept for continuity)",
                                 data.len()
                             ),
                             Style::default().fg(t.text_muted),

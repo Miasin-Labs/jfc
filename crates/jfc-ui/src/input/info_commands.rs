@@ -61,6 +61,106 @@ pub(super) async fn cmd_diff(
     }
 }
 
+/// `/vim` — toggle modal (vim) editing of the prompt. On enable you start in
+/// Normal mode; Esc returns to Normal from Insert/Visual.
+pub(super) async fn cmd_vim(
+    app: &mut App,
+    _parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    let now_on = app.vim.is_none();
+    app.vim = if now_on {
+        Some(crate::input::vim::VimState::default())
+    } else {
+        None
+    };
+    crate::toast::push_with_cap(
+        &mut app.toasts,
+        crate::toast::Toast::new(
+            crate::toast::ToastKind::Info,
+            if now_on {
+                "vim mode on — Normal mode (i to insert, Esc to return)".to_string()
+            } else {
+                "vim mode off".to_string()
+            },
+        ),
+    );
+}
+
+/// `/turn-diff` (`/td`) — show a `git diff` scoped to only the files the
+/// assistant edited during the current user turn, so a single agentic step
+/// can be reviewed without the noise of the whole working tree.
+pub(super) async fn cmd_turn_diff(
+    app: &mut App,
+    _parts: &[&str],
+    text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    app.messages.push(ChatMessage::user(text.to_owned()));
+    if app.turn_edited_files.is_empty() {
+        app.messages.push(ChatMessage::assistant(
+            "No files edited this turn yet — `/turn-diff` has nothing to show.".into(),
+        ));
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let files: Vec<String> = app.turn_edited_files.iter().cloned().collect();
+    // `git diff HEAD -- <files>` shows tracked-file changes; brand-new files
+    // (created by Write) won't appear, so list those separately.
+    let mut args: Vec<String> = vec!["diff".into(), "HEAD".into(), "--".into()];
+    args.extend(files.iter().cloned());
+    let diff = std::process::Command::new("git")
+        .args(&args)
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let new_files: Vec<&String> = files
+        .iter()
+        .filter(|f| {
+            std::process::Command::new("git")
+                .args(["ls-files", "--error-unmatch", f])
+                .current_dir(&cwd)
+                .output()
+                .map(|o| !o.status.success())
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let mut body = format!(
+        "**Turn diff** — {} file{} edited this turn:\n\n```diff\n",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" }
+    );
+    if diff.trim().is_empty() && new_files.is_empty() {
+        body.push_str("(edits were reverted, or match HEAD — nothing to show)\n");
+    } else {
+        // Cap to keep a giant diff from flooding the transcript.
+        const CAP: usize = 12_000;
+        if diff.len() > CAP {
+            body.push_str(&diff[..diff.floor_char_boundary(CAP)]);
+            body.push_str("\n… (truncated; run `git diff HEAD` for the rest)\n");
+        } else {
+            body.push_str(&diff);
+        }
+    }
+    body.push_str("```\n");
+    if !new_files.is_empty() {
+        body.push_str("\n_New files this turn:_ ");
+        body.push_str(
+            &new_files
+                .iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        body.push('\n');
+    }
+    app.messages.push(ChatMessage::assistant(body));
+}
+
 pub(super) async fn cmd_timeline(
     app: &mut App,
     _parts: &[&str],

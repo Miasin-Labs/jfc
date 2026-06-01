@@ -17,8 +17,21 @@ impl App {
             .background_tasks
             .values()
             .any(|bt| bt.status.is_alive());
+        // The spinner row must *animate* exactly when it is *shown*, or its
+        // glyph freezes between input events (the "dots only move when I move
+        // the cursor" jank, most visible while a foreground bash tool runs).
+        // These mirror `show_spinner` in `render::frame`: a turn is in flight
+        // (covers the whole agentic loop, including tool waits), tools are
+        // queued, or a compaction is running — none of which set
+        // `is_streaming`, so without them the tick loop drops to the idle
+        // cadence and stops redrawing mid-turn.
+        let turn_active = self.turn_started_at.is_some()
+            || self.compacting_started_at.is_some()
+            || !self.pending_tool_calls.is_empty()
+            || self.network_recovery_status.is_some();
         let dominated = self.launched_at.elapsed() < std::time::Duration::from_millis(1500)
             || self.is_streaming
+            || turn_active
             || any_alive_background
             || self.scroll_velocity.abs() > 0.5
             || self

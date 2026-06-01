@@ -25,6 +25,7 @@ mod session_picker;
 mod slash_commands;
 mod submit;
 mod support;
+pub(crate) mod vim;
 mod task_commands;
 mod theme_picker;
 mod worktree_commands;

@@ -108,11 +108,17 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
     }
 
     let has_thinking = opts.adaptive_thinking || opts.thinking_budget.is_some();
-    if !has_thinking && let Some(temp) = opts.temperature {
-        body["temperature"] = serde_json::Value::from(temp);
-    }
-    if let Some(top_p) = opts.top_p {
-        body["top_p"] = serde_json::Value::from(top_p);
+    // Anthropic rejects sampling overrides while extended thinking is on:
+    // `temperature` may only be 1, and `top_p`/`top_k` must be unset. We drop
+    // BOTH here so a configured `top_p` doesn't 400 the request the moment
+    // thinking is enabled (previously only `temperature` was gated).
+    if !has_thinking {
+        if let Some(temp) = opts.temperature {
+            body["temperature"] = serde_json::Value::from(temp);
+        }
+        if let Some(top_p) = opts.top_p {
+            body["top_p"] = serde_json::Value::from(top_p);
+        }
     }
 
     if !opts.tools.is_empty() || opts.advisor_model.is_some() {

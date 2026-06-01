@@ -64,6 +64,11 @@ pub async fn handle_key(
         return result;
     }
 
+    // ─── Prompt history search (Ctrl+R) ──────────────────────────────────
+    if let Some(result) = handle_prompt_search_keys(app, key) {
+        return result;
+    }
+
     // ─── Jump-to navigation (Ctrl+G prefix) ──────────────────────────────
     if app.jump_armed
         && let Some(t) = app.jump_armed_at
@@ -188,16 +193,20 @@ pub async fn handle_key(
         }
     }
 
-    // Image chip atomic delete: when Backspace is pressed and the cursor is
-    // immediately after `]` of an `[Image #N]` token, delete the entire
-    // chip as one unit (10+ chars) instead of requiring per-char deletion.
+    // Chip atomic delete: when Backspace is pressed and the cursor sits
+    // immediately after `]` of an `[Image #N]` or `[Pasted #N · …]` token,
+    // delete the whole chip as one unit instead of char-by-char.
     if key.code == KeyCode::Backspace {
         let cursor = app.textarea.cursor();
         let (row, col) = (cursor.0, cursor.1);
         if let Some(line) = app.textarea.lines().get(row) {
             let byte_col = line.char_indices().nth(col).map_or(line.len(), |(i, _)| i);
             let before_cursor = &line[..byte_col];
-            if let Some(start) = before_cursor.rfind("[Image #") {
+            let chip_start = [before_cursor.rfind("[Image #"), before_cursor.rfind("[Pasted #")]
+                .into_iter()
+                .flatten()
+                .max();
+            if let Some(start) = chip_start {
                 let chip = &before_cursor[start..];
                 if chip.ends_with(']') {
                     let chip_len = chip.len();
@@ -215,9 +224,35 @@ pub async fn handle_key(
         }
     }
 
-    app.textarea.input(key);
+    // Vim mode owns the prompt when enabled: Normal-mode keys are commands,
+    // Insert-mode keys type. Split-borrow `vim` (Clone) from `textarea` so
+    // both can be mutated. Plain insert editing when vim is off.
+    if let Some(mut state) = app.vim.clone() {
+        crate::input::vim::handle_key(&mut state, &mut app.textarea, key);
+        app.vim = Some(state);
+    } else {
+        app.textarea.input(key);
+    }
     update_mention_state_after_input(app);
     Ok(false)
+}
+
+/// Whether message `idx` carries a `Reasoning` part — i.e. there's a
+/// `∴ Thinking` block Ctrl+O can collapse/expand.
+fn message_has_reasoning(app: &App, idx: usize) -> bool {
+    app.messages.get(idx).is_some_and(|m| {
+        m.parts
+            .iter()
+            .any(|p| matches!(p, crate::types::MessagePart::Reasoning(_)))
+    })
+}
+
+/// Index of the most recent message that has a reasoning block, if any.
+/// Ctrl+O targets this when nothing is actively streaming.
+fn last_reasoning_message_idx(app: &App) -> Option<usize> {
+    (0..app.messages.len())
+        .rev()
+        .find(|&i| message_has_reasoning(app, i))
 }
 
 fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::runtime::AppEvent>) {
@@ -435,62 +470,39 @@ async fn handle_command_keys(
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
-            // Retry: re-submit the most recent user prompt as a fresh
-            // turn. Useful after a stream error or when the model's
-            // response wasn't useful and the user wants another roll
-            // of the dice. The retry is a *new* turn — we don't strip
-            // the prior assistant response, so the conversation
-            // history reflects "I asked twice" rather than rewriting
-            // history.
-            if app.is_streaming
-                || !app.pending_tool_calls.is_empty()
-                || app.pending_approval.is_some()
-            {
+            // Ctrl+R opens reverse-history search over past prompts (bash
+            // convention). The top match is the most recent prompt, so
+            // Ctrl+R then Enter still gives you the old "retry last" — but
+            // now you can fuzz back to any earlier prompt too.
+            let mut all: Vec<String> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for m in app.messages.iter().rev() {
+                if !m.role_is_user() || m.is_compact_boundary() {
+                    continue;
+                }
+                if let Some(text) = m.parts.iter().find_map(|p| match p {
+                    MessagePart::Text(s) if !s.is_empty() && !s.starts_with('/') => Some(s.clone()),
+                    _ => None,
+                }) && seen.insert(text.clone())
+                {
+                    all.push(text);
+                }
+            }
+            if all.is_empty() {
                 crate::toast::push_with_cap(
                     &mut app.toasts,
                     crate::toast::Toast::new(
-                        crate::toast::ToastKind::Warning,
-                        "retry: still in flight, finish or interrupt first".to_string(),
+                        crate::toast::ToastKind::Info,
+                        "no prompt history to search".to_string(),
                     ),
                 );
-                return Some(Ok(false));
-            }
-            // Walk back for the most recent user prompt that wasn't
-            // a slash command or a compact boundary.
-            let last_prompt: Option<String> = app
-                .messages
-                .iter()
-                .rev()
-                .find(|m| {
-                    m.role_is_user()
-                        && !m.is_compact_boundary()
-                        && m.parts
-                            .iter()
-                            .any(|p| matches!(p, MessagePart::Text(s) if !s.starts_with('/')))
-                })
-                .and_then(|m| {
-                    m.parts.iter().find_map(|p| match p {
-                        MessagePart::Text(s) if !s.is_empty() => Some(s.clone()),
-                        _ => None,
-                    })
-                });
-            match last_prompt {
-                Some(text) => {
-                    let _ = tx
-                        .send(crate::runtime::AppEvent::Ui(
-                            crate::runtime::UiEvent::Submit(text),
-                        ))
-                        .await;
-                }
-                None => {
-                    crate::toast::push_with_cap(
-                        &mut app.toasts,
-                        crate::toast::Toast::new(
-                            crate::toast::ToastKind::Info,
-                            "no prompt to retry".to_string(),
-                        ),
-                    );
-                }
+            } else {
+                let mut search = crate::app::PromptSearch {
+                    all,
+                    ..Default::default()
+                };
+                search.refilter();
+                app.prompt_search = Some(search);
             }
             Some(Ok(false))
         }
@@ -695,14 +707,29 @@ async fn handle_command_keys(
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
-            // Ctrl+O is v126's universal "expand" key (cli.js:338038
-            // advertises `(ctrl+o to expand)` on the diagnostic row).
-            // Priority: when the diagnostic panel is closeable from
-            // here OR diagnostics exist, that wins — toggling the
-            // diagnostic-expansion panel is the primary affordance.
-            // Falls back to thinking-toggle otherwise.
+            // Ctrl+O toggles the reasoning ("∴ Thinking") block on the
+            // streaming / most-recent assistant message — that's what the
+            // inline `ctrl+o to collapse` hint advertises, so the toggle
+            // must win. Previously *any* existing diagnostic hijacked this
+            // key and opened the diagnostic panel instead, so the hint lied
+            // in every session that had a warning. Now diagnostics are only
+            // the fallback when there's no reasoning block to toggle, and
+            // closing an open panel still takes precedence.
+            //
+            // Default-state fix: the renderer treats a missing entry as
+            // *expanded* (`unwrap_or(true)`), so the toggle must seed `true`
+            // before flipping — otherwise the first press seeded `false` and
+            // flipped back to `true`, a visible no-op (the block stayed open
+            // while the hint said "collapse").
+            let target = app
+                .streaming_assistant_idx
+                .filter(|&i| message_has_reasoning(app, i))
+                .or_else(|| last_reasoning_message_idx(app));
             if app.show_diagnostic_panel {
                 app.show_diagnostic_panel = false;
+            } else if let Some(idx) = target {
+                let entry = app.reasoning_expanded.entry(idx).or_insert(true);
+                *entry = !*entry;
             } else if !app.diagnostics.is_empty() {
                 app.show_diagnostic_panel = true;
                 // Reset scroll on open so the user always lands at the
@@ -718,13 +745,6 @@ async fn handle_command_keys(
                     app.delivered_diagnostics
                         .insert(crate::diagnostics::entry_key(entry));
                 }
-            } else if let Some(idx) = app.streaming_assistant_idx {
-                let entry = app.reasoning_expanded.entry(idx).or_insert(false);
-                *entry = !*entry;
-            } else if !app.messages.is_empty() {
-                let last_idx = app.messages.len() - 1;
-                let entry = app.reasoning_expanded.entry(last_idx).or_insert(false);
-                *entry = !*entry;
             }
             Some(Ok(false))
         }
@@ -779,20 +799,20 @@ async fn handle_command_keys(
         // h/j/k/l for scroll, g/G for top/bottom. Only fire when the
         // input bar is empty — typing actual prose with `j` shouldn't
         // jump the transcript.
-        (KeyModifiers::NONE, KeyCode::Char('j')) if !input_has_text(app) => {
+        (KeyModifiers::NONE, KeyCode::Char('j')) if !input_has_text(app) && app.vim.is_none() => {
             app.scroll_down(1);
             Some(Ok(false))
         }
-        (KeyModifiers::NONE, KeyCode::Char('k')) if !input_has_text(app) => {
+        (KeyModifiers::NONE, KeyCode::Char('k')) if !input_has_text(app) && app.vim.is_none() => {
             app.scroll_up(1);
             Some(Ok(false))
         }
-        (KeyModifiers::NONE, KeyCode::Char('G')) if !input_has_text(app) => {
+        (KeyModifiers::NONE, KeyCode::Char('G')) if !input_has_text(app) && app.vim.is_none() => {
             app.scroll_to_bottom();
             app.follow_bottom = true;
             Some(Ok(false))
         }
-        (KeyModifiers::NONE, KeyCode::Char('g')) if !input_has_text(app) => {
+        (KeyModifiers::NONE, KeyCode::Char('g')) if !input_has_text(app) && app.vim.is_none() => {
             // Lone `g` jumps to top. v126 / Vim use `gg` (double-g)
             // for safety, but the input-empty gate already prevents
             // typos here so a single `g` is fine.
@@ -801,17 +821,17 @@ async fn handle_command_keys(
             Some(Ok(false))
         }
 
-        (KeyModifiers::NONE, KeyCode::Char('?')) if !input_has_text(app) => {
+        (KeyModifiers::NONE, KeyCode::Char('?')) if !input_has_text(app) && app.vim.is_none() => {
             // `?` toggles the help overlay. Gated on empty input so
             // the user can still type a literal `?` mid-message.
             app.show_help = !app.show_help;
             Some(Ok(false))
         }
-        (KeyModifiers::SHIFT, KeyCode::Char('?')) if !input_has_text(app) => {
+        (KeyModifiers::SHIFT, KeyCode::Char('?')) if !input_has_text(app) && app.vim.is_none() => {
             app.show_help = !app.show_help;
             Some(Ok(false))
         }
-        (KeyModifiers::NONE, KeyCode::Char('o')) if !input_has_text(app) => {
+        (KeyModifiers::NONE, KeyCode::Char('o')) if !input_has_text(app) && app.vim.is_none() => {
             // In the subagent task view (`viewing_task_id.is_some()`),
             // `o` toggles expansion of the most recent long entry in
             // `BackgroundTask.messages`. In the main chat it falls
@@ -932,6 +952,27 @@ async fn handle_command_keys(
             Some(Ok(false))
         }
         (KeyModifiers::NONE, KeyCode::Esc) => {
+            // In vim, Esc from any non-Normal mode returns to Normal and is
+            // consumed here (so it doesn't also clear the input). Esc *in*
+            // Normal mode falls through to the app behavior below (dismiss
+            // popups, clear input).
+            if app
+                .vim
+                .as_ref()
+                .is_some_and(|s| s.mode != crate::input::vim::VimMode::Normal)
+            {
+                app.textarea.cancel_selection();
+                if let Some(s) = app.vim.as_mut() {
+                    s.mode = crate::input::vim::VimMode::Normal;
+                    s.pending = ratatui_textarea::Input::default();
+                }
+                return Some(Ok(false));
+            }
+            // Dismiss the "while you were away" recap band first if it's up.
+            if app.away_recap.is_some() {
+                app.away_recap = None;
+                return Some(Ok(false));
+            }
             if app.show_help {
                 app.show_help = false;
                 return Some(Ok(false));
@@ -1259,6 +1300,66 @@ async fn handle_enter_submit(
 /// Transcript-search (`Ctrl+F`) key handling. Active only while
 /// `app.transcript_search` is set; returns `Some(Ok(false))` for every
 /// key in that mode and `None` otherwise. Extracted from `handle_key`.
+/// Ctrl+R reverse-history search modal. Consumes all keys while open.
+/// Char/Backspace edit the query; Up/Down (and Ctrl+R) move the selection;
+/// Enter loads the highlighted prompt into the input (the user can then edit
+/// or submit); Esc cancels.
+fn handle_prompt_search_keys(
+    app: &mut App,
+    key: event::KeyEvent,
+) -> Option<anyhow::Result<bool>> {
+    app.prompt_search.as_ref()?;
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) => {
+            app.prompt_search = None;
+        }
+        (_, KeyCode::Enter) => {
+            if let Some(s) = app.prompt_search.take()
+                && let Some(text) = s.selected_text().map(str::to_owned)
+            {
+                app.textarea.select_all();
+                app.textarea.cut();
+                app.textarea.insert_str(&text);
+            }
+        }
+        (_, KeyCode::Backspace) => {
+            if let Some(s) = app.prompt_search.as_mut() {
+                s.query.pop();
+                s.refilter();
+            }
+        }
+        // Ctrl+R again, or Down, steps to the next (older) match.
+        (KeyModifiers::CONTROL, KeyCode::Char('r')) | (_, KeyCode::Down) => {
+            if let Some(s) = app.prompt_search.as_mut()
+                && !s.results.is_empty()
+            {
+                s.selected = (s.selected + 1) % s.results.len();
+            }
+        }
+        (_, KeyCode::Up) => {
+            if let Some(s) = app.prompt_search.as_mut()
+                && !s.results.is_empty()
+            {
+                s.selected = if s.selected == 0 {
+                    s.results.len() - 1
+                } else {
+                    s.selected - 1
+                };
+            }
+        }
+        (m, KeyCode::Char(c))
+            if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
+            if let Some(s) = app.prompt_search.as_mut() {
+                s.query.push(c);
+                s.refilter();
+            }
+        }
+        _ => {}
+    }
+    Some(Ok(false))
+}
+
 fn handle_transcript_search_keys(
     app: &mut App,
     key: event::KeyEvent,

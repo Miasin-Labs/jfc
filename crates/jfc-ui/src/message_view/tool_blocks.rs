@@ -466,27 +466,9 @@ pub(super) fn render_tool_block(
     // the sidebar gutters had. v126's actual tool rendering uses
     // just title-line + indent; mirroring that here.
 
-    // Sparkle on tool complete: when this tool just finished
-    // successfully, flash a `✦` next to the title for 600ms with a
-    // fade. Reduced-motion skips it. Now sits at column 0 (where
-    // the gutter used to be) since there's no bar to compete with.
-    if skip == 0
-        && matches!(tool.status, crate::types::ToolStatus::Completed)
-        && !crate::spinner::reduced_motion()
-        && let Some((id, when)) = &app.recent_tool_completion
-        && id == &tool.id
-    {
-        let age = when.elapsed();
-        if age < std::time::Duration::from_millis(600) {
-            let intensity = 1.0 - (age.as_millis() as f32 / 600.0);
-            if area.x < buf.area().right() {
-                let cell = &mut buf[(area.x, area.y)];
-                cell.set_symbol("✦");
-                let blended = crate::render::pulse_color_pub(t.bg, t.accent, intensity);
-                cell.set_style(Style::default().fg(blended));
-            }
-        }
-    }
+    // (The 600ms `✦` completion-flash that pulsed here is removed — the
+    // tool's status icon already shows completion; a fading sparkle was
+    // celebratory decoration, not information.)
 
     let title_spans = build_title_spans(
         tool,
@@ -904,7 +886,7 @@ pub fn tool_status_icon_animated(
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // test-only helper
 pub(super) fn border_color_for_status(tool: &ToolCall, t: &Theme) -> Color {
     // Idle is Task-only territory but still valid on the unified
     // ExecutionStatus enum — render with the same accent as Running
@@ -920,25 +902,50 @@ pub(super) fn border_color_for_status(tool: &ToolCall, t: &Theme) -> Color {
     }
 }
 
-#[allow(dead_code)]
-fn render_tool_content_clipped(app: &App, tool: &ToolCall, area: Rect, t: Theme, buf: &mut Buffer) {
-    render_tool_content_with_skip(app, tool, area, t, buf, 0);
-}
-
-/// Lines 2+ of a multi-line Bash command (the heredoc body, the `&&`
-/// chain wrapped, etc.) — the title only shows line 1 due to the
-/// title-width cap. Without rendering the rest, a `cat > file << 'EOF'\n
-/// <... source ...>\nEOF` invocation would only ever show the `cat >`
-/// line, hiding what was actually written. Mirrors v126's behavior of
-/// showing the full command body as part of the tool block.
-pub(super) fn bash_continuation_lines(tool: &ToolCall) -> Vec<String> {
-    if let ToolInput::Bash { command, .. } = &tool.input {
-        let lines: Vec<&str> = command.lines().collect();
-        if lines.len() > 1 {
-            return lines.iter().skip(1).map(|s| (*s).to_owned()).collect();
+/// Body rows that show the *rest* of a Bash command under its title, each
+/// rendered with a `┆ ` prefix. The title only has room for a one-line
+/// preview, so without this a long invocation reads as `Bash(… RUS…)` with
+/// the tail lost. We spill into wrapped continuation rows when the command
+/// doesn't fit:
+///   * multi-line command → lines 2..N (line 1 is the title), each wrapped;
+///   * single long line   → the whole command, wrapped (title shows a preview);
+///   * single short line   → nothing (the title already shows it in full).
+///
+/// `content_w` is the body width (`inner_w - 2`); both the height query and
+/// the renderer pass the *same* value so the wrapped row count agrees and the
+/// scroll math stays exact. Rows wrap to `content_w - 2` to leave room for the
+/// `┆ ` prefix.
+pub(super) fn bash_continuation_lines(tool: &ToolCall, content_w: usize) -> Vec<String> {
+    let ToolInput::Bash { command, .. } = &tool.input else {
+        return Vec::new();
+    };
+    let src_lines: Vec<&str> = command.lines().collect();
+    let spill: Vec<&str> = if src_lines.len() > 1 {
+        src_lines[1..].to_vec()
+    } else if src_lines.first().map_or(0, |l| l.chars().count()) > content_w {
+        src_lines.clone()
+    } else {
+        return Vec::new();
+    };
+    let wrap_w = content_w.saturating_sub(2).max(8);
+    let mut out = Vec::new();
+    for line in spill {
+        if line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        // Hard char-wrap: bash commands are effectively ASCII, so char count
+        // tracks display width, and a deterministic chunking keeps the height
+        // query and the render in lockstep.
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let end = (i + wrap_w).min(chars.len());
+            out.push(chars[i..end].iter().collect());
+            i = end;
         }
     }
-    Vec::new()
+    out
 }
 
 fn render_tool_content_with_skip(
@@ -952,11 +959,11 @@ fn render_tool_content_with_skip(
     if area.height == 0 {
         return;
     }
-    // For multi-line Bash commands, show the rest of the command body
-    // before the output. Each continuation line is prefixed with `┆ ` in
-    // muted color so it visually nests under the title and reads as
-    // continuation of the same invocation.
-    let bash_cont = bash_continuation_lines(tool);
+    // Show the rest of a Bash command (wrapped) before its output, each
+    // continuation row prefixed with `┆ ` in muted color so it nests under
+    // the title. Width must match `tool_block_height`'s query (`area.width`
+    // here == the height path's `content_w`) so the row count agrees.
+    let bash_cont = bash_continuation_lines(tool, area.width as usize);
     let mut local_skip = skip;
     let mut content_y = area.y;
     let mut remaining_h = area.height;

@@ -4,7 +4,7 @@
 
 use crossterm::event::{Event, KeyEventKind};
 
-use crate::app::App;
+use crate::app::{App, TextSelection};
 use crate::runtime::EventSender;
 use crate::types::*;
 use crate::{attachments, input, message_view, toast};
@@ -56,9 +56,28 @@ pub(crate) async fn handle_term_event(
                 }
             };
             // Always insert the text — it may be a path or
-            // contextual prose alongside the image.
+            // contextual prose alongside the image. A *large* paste
+            // collapses to a `[Pasted #N · …]` chip so it doesn't flood
+            // the prompt; the full text is restored on submit.
             if !attached_image || !text.is_empty() {
-                app.textarea.insert_str(&text);
+                const PASTE_LINE_THRESHOLD: usize = 8;
+                const PASTE_CHAR_THRESHOLD: usize = 400;
+                let n_lines = text.lines().count();
+                let n_chars = text.chars().count();
+                if n_lines > PASTE_LINE_THRESHOLD || n_chars > PASTE_CHAR_THRESHOLD {
+                    app.paste_counter += 1;
+                    let id = app.paste_counter;
+                    let label = if n_lines > 1 {
+                        format!("{n_lines} lines")
+                    } else {
+                        format!("{n_chars} chars")
+                    };
+                    let chip = format!("[Pasted #{id} · {label}]");
+                    app.pasted_texts.push((chip.clone(), text.clone()));
+                    app.textarea.insert_str(&chip);
+                } else {
+                    app.textarea.insert_str(&text);
+                }
             }
         }
         Event::Mouse(mouse) => {
@@ -82,14 +101,41 @@ async fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, _tx: &
             app.scroll_down(3);
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            // Drag-scroll: convert vertical delta into
-            // scroll_offset adjustments. Anchor on the
-            // first Drag event and re-anchor on every
-            // subsequent one so the next delta is one
-            // row's worth, not cumulative. Up-drag scrolls
-            // up (look at older content); down-drag
-            // scrolls down. Gated to the messages area —
-            // dragging in the input bar still selects.
+            // Drag inside the transcript extends a text selection (copy-on-
+            // select). The renderer paints the highlight and, on button-up,
+            // copies the covered cells. Drag-scroll is gone — the scroll
+            // wheel, scrollbar, and keyboard already cover scrolling, and
+            // selection is the higher-value gesture here.
+            if let Some(sel) = app.text_selection.as_mut() {
+                sel.head = (mouse.column, mouse.row);
+                if sel.head != sel.anchor {
+                    sel.dragged = true;
+                }
+            }
+        }
+        MouseEventKind::Up(_) => {
+            app.drag_anchor_y = None;
+            match app.text_selection {
+                // A real drag: hand off to the renderer to extract + copy the
+                // covered cells (it has the buffer; this handler does not).
+                Some(sel) if sel.dragged => {
+                    app.text_selection = Some(TextSelection {
+                        finalize: true,
+                        ..sel
+                    });
+                }
+                // No drag → it was a click. Run the click action now (on
+                // release, standard click semantics) and drop the selection.
+                Some(_) => {
+                    app.text_selection = None;
+                    handle_left_click(app, mouse).await;
+                }
+                None => {}
+            }
+        }
+        // Press anchors a potential selection but defers the click action to
+        // release, so starting a drag doesn't also fire a click (e.g. yank).
+        MouseEventKind::Down(MouseButton::Left) => {
             let in_messages = app.messages_rect.borrow().as_ref().is_some_and(|r| {
                 mouse.column >= r.x
                     && mouse.column < r.x + r.width
@@ -97,29 +143,15 @@ async fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, _tx: &
                     && mouse.row < r.y + r.height
             });
             if in_messages {
-                if let Some(anchor) = app.drag_anchor_y {
-                    let delta = mouse.row as i32 - anchor as i32;
-                    if delta > 0 {
-                        app.scroll_up(delta as usize);
-                    } else if delta < 0 {
-                        app.scroll_down((-delta) as usize);
-                    }
-                }
-                app.drag_anchor_y = Some(mouse.row);
+                app.text_selection = Some(TextSelection {
+                    anchor: (mouse.column, mouse.row),
+                    head: (mouse.column, mouse.row),
+                    dragged: false,
+                    finalize: false,
+                });
+            } else {
+                handle_left_click(app, mouse).await;
             }
-        }
-        MouseEventKind::Up(_) => {
-            app.drag_anchor_y = None;
-        }
-        // Left-click on the message pane copies the assistant
-        // message under the cursor to the clipboard. ratatui
-        // doesn't expose hit-testing, so we approximate: any
-        // click outside the input area + sidebar copies the
-        // most recent assistant text. (Full message-by-position
-        // hit detection would require tracking each message's
-        // y-range during render, which is the next iteration.)
-        MouseEventKind::Down(MouseButton::Left) => {
-            handle_left_click(app, mouse).await;
         }
         _ => {}
     }

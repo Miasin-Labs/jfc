@@ -13,6 +13,9 @@ pub(super) struct PreparedStreamRequest {
     pub(super) opts: StreamOptions,
     pub(super) system_prompt_tokens: usize,
     pub(super) metadata: StreamRequestMetadata,
+    /// Byte length of the memory-recall block injected into the system prompt
+    /// this turn (0 = no recall). Surfaced to the user as "recalled memory".
+    pub(super) recalled_memory_chars: usize,
 }
 
 fn normalize_thinking_display(value: &str) -> Option<&'static str> {
@@ -244,6 +247,9 @@ pub(super) async fn prepare_stream_request(
     model: &ModelId,
     overrides: StreamRequestOverrides,
 ) -> PreparedStreamRequest {
+    // Filled in below if a memory-recall block is injected this turn; surfaced
+    // to the user. Declared at function scope so it outlives the recall block.
+    let mut recalled_memory_chars = 0usize;
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
@@ -422,6 +428,9 @@ Do not use a colon before tool calls.";
         } else if let Some(memories_section) = crate::memory::render_memories_section(&memories) {
             system_prompt.push_str(&memories_section);
         }
+        // Remember how much recalled-memory context we injected so the UI can
+        // tell the user a recall happened this turn.
+        recalled_memory_chars = recall_block.as_ref().map_or(0, |b| b.len());
         if let Some(memory_store_section) = sdk_memory_store_prompt_section().await {
             system_prompt.push_str(&memory_store_section);
         }
@@ -877,6 +886,7 @@ Do not use a colon before tool calls.";
             action_expected,
             tool_choice: overrides.tool_choice,
         },
+        recalled_memory_chars,
     }
 }
 

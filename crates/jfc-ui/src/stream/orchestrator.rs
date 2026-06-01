@@ -63,6 +63,12 @@ pub async fn stream_response(
     let _ = tx.try_send(AppEvent::Stream(StreamEvent::SystemPromptLen(
         prepared.system_prompt_tokens,
     )));
+    // Tell the user when this turn pulled in recalled memory.
+    if prepared.recalled_memory_chars > 0 {
+        let _ = tx.try_send(AppEvent::Stream(StreamEvent::MemoryRecalled(
+            prepared.recalled_memory_chars,
+        )));
+    }
     if tx
         .send(AppEvent::Stream(StreamEvent::RequestMetadata(
             prepared.metadata.clone(),
