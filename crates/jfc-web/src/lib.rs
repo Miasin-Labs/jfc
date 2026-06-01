@@ -1,18 +1,33 @@
 //! Web search backends for the `WebSearch` tool.
 //!
-//! Supports four search backends, selected by query prefix:
+//! Backends are selected by a query prefix (`prefix:` or `prefix `). With no
+//! prefix the query routes to Google CSE (general web), falling back to Brave
+//! Search if no Google keys are configured.
 //!
-//! | Prefix | Backend | Example |
-//! |--------|---------|---------|
-//! | *(none)* | Google CSE | `rust async traits` |
-//! | `arxiv:` | arXiv API | `arxiv: transformer attention mechanism` |
-//! | `scholar:` | Semantic Scholar | `scholar: attention is all you need` |
-//! | `papers:` | arXiv + S2 BFF in parallel, deduped | `papers: graph neural networks` |
+//! | Prefix | Backend | Key? | Example |
+//! |--------|---------|------|---------|
+//! | *(none)* | Google CSE → Brave fallback | optional | `rust async traits` |
+//! | `edu:` | Google CSE scoped to academic TLDs worldwide | optional | `edu: dark matter detection` |
+//! | `gov:` | Google CSE scoped to `.gov` / `.gov.*` | optional | `gov: inflation report` |
+//! | `arxiv:` | arXiv API | no | `arxiv: transformer attention` |
+//! | `scholar:` | Semantic Scholar (Graph API → BFF) | optional | `scholar: attention is all you need` |
+//! | `openalex:` | OpenAlex (250M+ works, institutions + countries) | no | `openalex: graph neural networks` |
+//! | `crossref:` | Crossref (160M+ DOIs) | no | `crossref: attention is all you need` |
+//! | `pubmed:` | PubMed / NCBI E-utilities (biomedical) | optional | `pubmed: CRISPR off-target` |
+//! | `doaj:` | Directory of Open Access Journals | no | `doaj: open peer review` |
+//! | `core:` | CORE (290M+ OA full texts) | yes | `core: federated learning` |
+//! | `unpaywall:` | Unpaywall — resolve a DOI to free OA PDFs | no (email) | `unpaywall: 10.1038/nature12373` |
+//! | `papers:` | arXiv + S2 + OpenAlex in parallel, deduped | mixed | `papers: graph neural networks` |
+//! | `brave:` | Brave Search (independent index) | yes | `brave: rust web framework` |
+//! | `tavily:` | Tavily (LLM-oriented search) | yes | `tavily: latest llm benchmarks` |
+//! | `exa:` | Exa (neural/semantic search) | yes | `exa: papers like AlphaFold` |
+//! | `ddg:` | DuckDuckGo Instant Answer (facts/definitions) | no | `ddg: what is a monad` |
+//! | `wiki:` | Wikipedia / MediaWiki search | no | `wiki: transformer model` |
 //!
 //! ## Google CSE
 //! Reads API keys from `~/.config/google-search-mcp/config.toml` (shared
 //! with the standalone google-cse-mcp-rs server). Falls back to
-//! `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` env vars.
+//! `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` env vars, then to Brave Search.
 //!
 //! ## arXiv
 //! Uses the public Atom feed API at `export.arxiv.org`. No API key needed.
@@ -20,6 +35,16 @@
 //! ## Semantic Scholar
 //! Uses the public Graph API. Optional `SEMANTIC_SCHOLAR_API_KEY` env var
 //! or `~/.config/academic-papers-mcp/config.toml` for higher rate limits.
+//!
+//! ## OpenAlex / Crossref / PubMed / Unpaywall
+//! All key-free. A contact email (`OPENALEX_EMAIL` / `CROSSREF_EMAIL` env, or
+//! `~/.config/academic-papers-mcp/config.toml`) opts into the faster "polite
+//! pool"; absence just uses the default pool.
+//!
+//! ## Key-based web backends
+//! Brave (`BRAVE_API_KEY`), Tavily (`TAVILY_API_KEY`), Exa (`EXA_API_KEY`),
+//! and CORE (`CORE_API_KEY`) read their keys from the environment and return a
+//! clear setup error when the key is missing.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -29,35 +54,95 @@ use serde::Deserialize;
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
+/// Strip a `prefix:` or `prefix ` selector from the front of `query`,
+/// returning the trimmed remainder when it matches.
+fn match_prefix<'a>(query: &'a str, prefix: &str) -> Option<&'a str> {
+    let colon = format!("{prefix}:");
+    let space = format!("{prefix} ");
+    query
+        .strip_prefix(&colon)
+        .or_else(|| query.strip_prefix(&space))
+        .map(str::trim)
+}
+
 /// Route a search query to the appropriate backend based on prefix.
 pub async fn search(query: &str, max_results: usize) -> Result<String, String> {
-    if let Some(q) = query
-        .strip_prefix("arxiv:")
-        .or_else(|| query.strip_prefix("arxiv "))
-    {
-        search_arxiv(q.trim(), max_results).await
-    } else if let Some(q) = query
-        .strip_prefix("scholar:")
-        .or_else(|| query.strip_prefix("scholar "))
-    {
-        search_semantic_scholar(q.trim(), max_results).await
-    } else if let Some(q) = query
-        .strip_prefix("papers:")
-        .or_else(|| query.strip_prefix("papers "))
-    {
-        search_papers_combined(q.trim(), max_results).await
+    if let Some(q) = match_prefix(query, "arxiv") {
+        search_arxiv(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "scholar") {
+        search_semantic_scholar(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "openalex") {
+        search_openalex(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "crossref") {
+        search_crossref(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "pubmed") {
+        search_pubmed(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "doaj") {
+        search_doaj(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "core") {
+        search_core(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "unpaywall") {
+        search_unpaywall(q).await
+    } else if let Some(q) = match_prefix(query, "papers") {
+        search_papers_combined(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "brave") {
+        search_brave(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "tavily") {
+        search_tavily(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "exa") {
+        search_exa(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "ddg") {
+        search_duckduckgo(q).await
+    } else if let Some(q) = match_prefix(query, "wiki") {
+        search_wikipedia(q, max_results).await
+    } else if let Some(q) = match_prefix(query, "edu") {
+        search_google(&scoped_query(q, EDU_TLDS), max_results).await
+    } else if let Some(q) = match_prefix(query, "gov") {
+        search_google(&scoped_query(q, GOV_TLDS), max_results).await
     } else {
         search_google(query, max_results).await
     }
+}
+
+/// Academic top-level domains worldwide, for the `edu:` prefix. Capped to a
+/// reasonable count so the assembled `site:` OR-group stays within Google
+/// CSE's query-length limit.
+const EDU_TLDS: &[&str] = &[
+    ".edu",     // USA
+    ".ac.uk",   // United Kingdom
+    ".ac.jp",   // Japan
+    ".edu.cn",  // China
+    ".edu.au",  // Australia
+    ".ac.in",   // India
+    ".ac.kr",   // South Korea
+    ".edu.tw",  // Taiwan
+    ".ac.nz",   // New Zealand
+    ".ac.za",   // South Africa
+    ".edu.br",  // Brazil
+    ".edu.sg",  // Singapore
+];
+
+/// Government top-level domains, for the `gov:` prefix.
+const GOV_TLDS: &[&str] = &[".gov", ".gov.uk", ".gc.ca", ".gov.au", ".europa.eu"];
+
+/// Build a Google query restricted to a set of TLDs via a `site:` OR-group.
+fn scoped_query(query: &str, tlds: &[&str]) -> String {
+    let group = tlds
+        .iter()
+        .map(|t| format!("site:{t}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("{query} ({group})")
 }
 
 /// Run arXiv and Semantic Scholar (BFF) searches concurrently and merge
 /// results, deduplicating by arXiv ID / DOI / normalized title.
 async fn search_papers_combined(query: &str, max_results: usize) -> Result<String, String> {
     let per_backend = max_results.max(3); // each backend returns up to N, then we cap
-    let (arxiv_res, s2_res) = tokio::join!(
+    let (arxiv_res, s2_res, openalex_res) = tokio::join!(
         search_arxiv_entries(query, per_backend),
         search_s2_via_bff_entries(query, per_backend),
+        search_openalex_entries(query, per_backend),
     );
 
     let mut entries: Vec<PaperEntry> = Vec::new();
@@ -88,6 +173,7 @@ async fn search_papers_combined(query: &str, max_results: usize) -> Result<Strin
 
     let mut arxiv_count = 0;
     let mut s2_count = 0;
+    let mut openalex_count = 0;
     let mut errors = Vec::new();
 
     match arxiv_res {
@@ -110,10 +196,20 @@ async fn search_papers_combined(query: &str, max_results: usize) -> Result<Strin
         Err(e) => errors.push(format!("S2 BFF: {e}")),
     }
 
+    match openalex_res {
+        Ok(openalex_entries) => {
+            openalex_count = openalex_entries.len();
+            for e in openalex_entries {
+                push_unique(&mut entries, &mut seen, e);
+            }
+        }
+        Err(e) => errors.push(format!("OpenAlex: {e}")),
+    }
+
     entries.truncate(max_results);
 
     let mut out = format!(
-        "Papers: \"{query}\" — {} unique results (arXiv: {arxiv_count}, S2: {s2_count})\n",
+        "Papers: \"{query}\" — {} unique results (arXiv: {arxiv_count}, S2: {s2_count}, OpenAlex: {openalex_count})\n",
         entries.len()
     );
     if !errors.is_empty() {
@@ -308,11 +404,21 @@ struct GoogleApiError {
 
 async fn search_google(query: &str, max_results: usize) -> Result<String, String> {
     let pool = key_pool();
-    let key = pool.next().ok_or_else(|| {
-        "No Google CSE API keys configured. Set GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX \
-         env vars, or create ~/.config/google-search-mcp/config.toml"
-            .to_string()
-    })?;
+    let key = match pool.next() {
+        Some(k) => k,
+        None => {
+            // No Google keys — fall back to Brave Search if it's configured,
+            // otherwise surface a setup error covering both options.
+            tracing::info!("No Google CSE keys, attempting Brave Search fallback");
+            return brave_results(query, max_results).await.map_err(|brave_err| {
+                format!(
+                    "No Google CSE API keys configured (set GOOGLE_CSE_API_KEY + \
+                     GOOGLE_CSE_CX or ~/.config/google-search-mcp/config.toml), and \
+                     Brave fallback unavailable: {brave_err}"
+                )
+            });
+        }
+    };
 
     let num = max_results.clamp(1, 10);
     let client = http_client()?;
@@ -992,4 +1098,1033 @@ async fn search_s2_via_bff_entries(query: &str, limit: usize) -> Result<Vec<Pape
     }
 
     Ok(entries)
+}
+
+// ── Shared formatting helpers ───────────────────────────────────────────────
+
+/// Truncate `text` to at most ~200 chars on a UTF-8 char boundary.
+fn truncate_abstract(text: &str) -> String {
+    if text.len() > 200 {
+        // Char-boundary safe — web abstracts carry multi-byte UTF-8.
+        format!("{}...", &text[..text.floor_char_boundary(200)])
+    } else {
+        text.to_string()
+    }
+}
+
+/// Render a list of `PaperEntry` into the standard human-readable block used
+/// by all paper backends.
+fn format_paper_entries(header: &str, entries: &[PaperEntry]) -> String {
+    let mut out = format!("{header}\n\n");
+    if entries.is_empty() {
+        out.push_str("No results found.\n");
+        return out;
+    }
+    for (i, e) in entries.iter().enumerate() {
+        out.push_str(&format!("{}. {}", i + 1, e.title));
+        if let Some(y) = &e.year {
+            out.push_str(&format!(" ({y})"));
+        }
+        out.push_str(&format!("  [{}]\n", e.source));
+        if !e.authors.is_empty() {
+            out.push_str(&format!("   Authors: {}\n", e.authors.join(", ")));
+        }
+        if let Some(v) = &e.venue {
+            out.push_str(&format!("   Venue: {v}\n"));
+        }
+        if let Some(c) = e.citations {
+            out.push_str(&format!("   Citations: {c}\n"));
+        }
+        if let Some(u) = &e.url {
+            out.push_str(&format!("   URL: {u}\n"));
+        }
+        if let Some(p) = &e.pdf {
+            out.push_str(&format!("   PDF: {p}\n"));
+        }
+        if !e.abstract_text.is_empty() {
+            out.push_str(&format!("   {}\n", truncate_abstract(&e.abstract_text)));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Look up an optional contact email for the academic "polite pools". Checks
+/// the given env vars in order, then `academic-papers-mcp/config.toml`.
+fn polite_pool_email(env_vars: &[&str]) -> Option<String> {
+    for var in env_vars {
+        if let Ok(v) = std::env::var(var)
+            && !v.is_empty()
+        {
+            return Some(v);
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    let path = PathBuf::from(home).join(".config/academic-papers-mcp/config.toml");
+    let content = std::fs::read_to_string(&path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        for key in ["polite_pool_email", "contact_email", "email"] {
+            if let Some(rest) = line.strip_prefix(key) {
+                let rest = rest.trim().strip_prefix('=')?.trim().trim_matches('"');
+                if !rest.is_empty() {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// OpenAlex (key-free; surfaces author institutions + country codes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Decode OpenAlex's inverted-index abstract back into plain text.
+fn openalex_abstract(inverted: Option<&serde_json::Value>) -> String {
+    let Some(map) = inverted.and_then(|v| v.as_object()) else {
+        return String::new();
+    };
+    let mut positioned: Vec<(u64, &str)> = Vec::new();
+    for (word, positions) in map {
+        if let Some(arr) = positions.as_array() {
+            for p in arr {
+                if let Some(idx) = p.as_u64() {
+                    positioned.push((idx, word.as_str()));
+                }
+            }
+        }
+    }
+    positioned.sort_by_key(|(idx, _)| *idx);
+    positioned
+        .into_iter()
+        .map(|(_, w)| w)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn openalex_to_paper(work: &serde_json::Value) -> PaperEntry {
+    let title = work
+        .get("display_name")
+        .or_else(|| work.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+
+    let year = work
+        .get("publication_year")
+        .and_then(|v| v.as_u64())
+        .map(|y| y.to_string());
+
+    // Authors annotated with their institution + ISO country code — the key
+    // signal for "which universities / countries published this".
+    let authors: Vec<String> = work
+        .get("authorships")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let name = a
+                        .get("author")
+                        .and_then(|au| au.get("display_name"))
+                        .and_then(|v| v.as_str())?;
+                    let inst = a
+                        .get("institutions")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|i| {
+                            let n = i.get("display_name").and_then(|v| v.as_str())?;
+                            let cc = i
+                                .get("country_code")
+                                .and_then(|v| v.as_str())
+                                .map(|c| format!(", {c}"))
+                                .unwrap_or_default();
+                            Some(format!(" ({n}{cc})"))
+                        })
+                        .unwrap_or_default();
+                    Some(format!("{name}{inst}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let venue = work
+        .get("primary_location")
+        .and_then(|v| v.get("source"))
+        .and_then(|v| v.get("display_name"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let citations = work.get("cited_by_count").and_then(|v| v.as_u64());
+
+    let doi = work
+        .get("doi")
+        .and_then(|v| v.as_str())
+        .map(|d| d.trim_start_matches("https://doi.org/").to_string());
+
+    let pdf = work
+        .get("best_oa_location")
+        .or_else(|| work.get("primary_location"))
+        .and_then(|v| v.get("pdf_url"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let abstract_text = openalex_abstract(work.get("abstract_inverted_index"));
+
+    PaperEntry {
+        title,
+        authors,
+        year,
+        venue,
+        citations,
+        url: work
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        pdf,
+        abstract_text,
+        arxiv_id: None,
+        doi,
+        source: "OpenAlex",
+    }
+}
+
+async fn search_openalex_entries(
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<PaperEntry>, String> {
+    let per_page = max_results.clamp(1, 25).to_string();
+    let client = http_client()?;
+
+    let mut req = client
+        .get("https://api.openalex.org/works")
+        .query(&[("search", query), ("per_page", per_page.as_str())]);
+    if let Some(email) = polite_pool_email(&["OPENALEX_EMAIL", "CROSSREF_EMAIL"]) {
+        req = req.query(&[("mailto", email.as_str())]);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("OpenAlex request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("OpenAlex returned HTTP {}", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("Response read: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("JSON parse: {e}"))?;
+
+    Ok(parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(openalex_to_paper).collect())
+        .unwrap_or_default())
+}
+
+async fn search_openalex(query: &str, max_results: usize) -> Result<String, String> {
+    let entries = search_openalex_entries(query, max_results).await?;
+    Ok(format_paper_entries(
+        &format!("OpenAlex: \"{query}\" — {} results", entries.len()),
+        &entries,
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Crossref (key-free; authoritative DOI metadata)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn crossref_to_paper(item: &serde_json::Value) -> PaperEntry {
+    let title = item
+        .get("title")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+
+    let authors: Vec<String> = item
+        .get("author")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let given = a.get("given").and_then(|v| v.as_str()).unwrap_or("");
+                    let family = a.get("family").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = format!("{given} {family}").trim().to_string();
+                    if name.is_empty() { None } else { Some(name) }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // year: published.date-parts[0][0]
+    let year = item
+        .get("published")
+        .or_else(|| item.get("issued"))
+        .and_then(|v| v.get("date-parts"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_u64())
+        .map(|y| y.to_string());
+
+    let venue = item
+        .get("container-title")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let citations = item.get("is-referenced-by-count").and_then(|v| v.as_u64());
+    let doi = item.get("DOI").and_then(|v| v.as_str()).map(String::from);
+    let url = doi.as_ref().map(|d| format!("https://doi.org/{d}"));
+
+    let abstract_text = item
+        .get("abstract")
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            // Crossref abstracts contain JATS XML tags; strip them crudely.
+            let mut out = String::with_capacity(s.len());
+            let mut in_tag = false;
+            for c in s.chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => out.push(c),
+                    _ => {}
+                }
+            }
+            out.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .unwrap_or_default();
+
+    PaperEntry {
+        title,
+        authors,
+        year,
+        venue,
+        citations,
+        url,
+        pdf: None,
+        abstract_text,
+        arxiv_id: None,
+        doi,
+        source: "Crossref",
+    }
+}
+
+async fn search_crossref(query: &str, max_results: usize) -> Result<String, String> {
+    let rows = max_results.clamp(1, 25).to_string();
+    let client = http_client()?;
+
+    let mut req = client
+        .get("https://api.crossref.org/works")
+        .query(&[("query", query), ("rows", rows.as_str())]);
+    if let Some(email) = polite_pool_email(&["CROSSREF_EMAIL", "OPENALEX_EMAIL"]) {
+        req = req.query(&[("mailto", email.as_str())]);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Crossref request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Crossref returned HTTP {}", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("Response read: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("JSON parse: {e}"))?;
+
+    let entries: Vec<PaperEntry> = parsed
+        .get("message")
+        .and_then(|v| v.get("items"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(crossref_to_paper).collect())
+        .unwrap_or_default();
+
+    Ok(format_paper_entries(
+        &format!("Crossref: \"{query}\" — {} results", entries.len()),
+        &entries,
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PubMed / NCBI E-utilities (biomedical)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_pubmed(query: &str, max_results: usize) -> Result<String, String> {
+    let retmax = max_results.clamp(1, 20).to_string();
+    let client = http_client()?;
+    let api_key = std::env::var("NCBI_API_KEY").ok().filter(|k| !k.is_empty());
+
+    // Step 1: esearch → list of PMIDs.
+    let mut esearch = client
+        .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi")
+        .query(&[
+            ("db", "pubmed"),
+            ("term", query),
+            ("retmax", retmax.as_str()),
+            ("retmode", "json"),
+        ]);
+    if let Some(k) = &api_key {
+        esearch = esearch.query(&[("api_key", k.as_str())]);
+    }
+    let esearch_resp = esearch
+        .send()
+        .await
+        .map_err(|e| format!("PubMed esearch failed: {e}"))?;
+    if !esearch_resp.status().is_success() {
+        return Err(format!("PubMed esearch HTTP {}", esearch_resp.status()));
+    }
+    let esearch_json: serde_json::Value = esearch_resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let total = esearch_json
+        .pointer("/esearchresult/count")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let ids: Vec<String> = esearch_json
+        .pointer("/esearchresult/idlist")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if ids.is_empty() {
+        return Ok(format!("PubMed: \"{query}\" — {total} total results\n\nNo results found.\n"));
+    }
+
+    // Step 2: esummary → metadata for the PMIDs.
+    let id_csv = ids.join(",");
+    let mut esummary = client
+        .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi")
+        .query(&[("db", "pubmed"), ("id", id_csv.as_str()), ("retmode", "json")]);
+    if let Some(k) = &api_key {
+        esummary = esummary.query(&[("api_key", k.as_str())]);
+    }
+    let esummary_json: serde_json::Value = esummary
+        .send()
+        .await
+        .map_err(|e| format!("PubMed esummary failed: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let result = esummary_json.get("result");
+    let mut out = format!("PubMed: \"{query}\" — {total} total results\n\n");
+    for (i, pmid) in ids.iter().enumerate() {
+        let Some(doc) = result.and_then(|r| r.get(pmid)) else {
+            continue;
+        };
+        let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+        let journal = doc.get("fulljournalname").and_then(|v| v.as_str()).unwrap_or("");
+        let pubdate = doc.get("pubdate").and_then(|v| v.as_str()).unwrap_or("");
+        let authors: Vec<&str> = doc
+            .get("authors")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        out.push_str(&format!("{}. {title}\n", i + 1));
+        if !authors.is_empty() {
+            out.push_str(&format!("   Authors: {}\n", authors.join(", ")));
+        }
+        if !journal.is_empty() {
+            out.push_str(&format!("   Journal: {journal} ({pubdate})\n"));
+        }
+        out.push_str(&format!("   URL: https://pubmed.ncbi.nlm.nih.gov/{pmid}/\n\n"));
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DOAJ — Directory of Open Access Journals (key-free)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_doaj(query: &str, max_results: usize) -> Result<String, String> {
+    let page_size = max_results.clamp(1, 25).to_string();
+    let client = http_client()?;
+    let encoded = urlencoding_minimal(query);
+
+    let resp = client
+        .get(format!(
+            "https://doaj.org/api/search/articles/{encoded}"
+        ))
+        .query(&[("pageSize", page_size.as_str())])
+        .send()
+        .await
+        .map_err(|e| format!("DOAJ request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("DOAJ returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let total = parsed.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let entries: Vec<PaperEntry> = parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|r| {
+                    let b = r.get("bibjson").unwrap_or(r);
+                    let title = b.get("title").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                    let year = b.get("year").and_then(|v| v.as_str()).map(String::from);
+                    let venue = b
+                        .get("journal")
+                        .and_then(|j| j.get("title"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let authors = b
+                        .get("author")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|a| a.get("name").and_then(|v| v.as_str()).map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let abstract_text = b
+                        .get("abstract")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let url = b
+                        .get("link")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|l| l.get("url"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let doi = b
+                        .get("identifier")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| {
+                            arr.iter().find(|id| {
+                                id.get("type").and_then(|t| t.as_str()) == Some("doi")
+                            })
+                        })
+                        .and_then(|id| id.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    PaperEntry {
+                        title,
+                        authors,
+                        year,
+                        venue,
+                        citations: None,
+                        url,
+                        pdf: None,
+                        abstract_text,
+                        arxiv_id: None,
+                        doi,
+                        source: "DOAJ",
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(format_paper_entries(
+        &format!("DOAJ: \"{query}\" — {total} total results"),
+        &entries,
+    ))
+}
+
+/// Minimal percent-encoding for a path segment (DOAJ takes the query in-path).
+fn urlencoding_minimal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE — 290M+ open-access full texts (free API key)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_core(query: &str, max_results: usize) -> Result<String, String> {
+    let key = std::env::var("CORE_API_KEY").ok().filter(|k| !k.is_empty()).ok_or_else(|| {
+        "CORE requires a free API key. Set CORE_API_KEY (register at https://core.ac.uk/services/api)".to_string()
+    })?;
+    let limit = max_results.clamp(1, 25);
+    let client = http_client()?;
+
+    let resp = client
+        .post("https://api.core.ac.uk/v3/search/works")
+        .bearer_auth(&key)
+        .json(&serde_json::json!({ "q": query, "limit": limit }))
+        .send()
+        .await
+        .map_err(|e| format!("CORE request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("CORE returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let total = parsed.get("totalHits").and_then(|v| v.as_u64()).unwrap_or(0);
+    let entries: Vec<PaperEntry> = parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|w| {
+                    let title = w.get("title").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                    let year = w.get("yearPublished").and_then(|v| v.as_u64()).map(|y| y.to_string());
+                    let authors = w
+                        .get("authors")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|a| a.get("name").and_then(|v| v.as_str()).map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let abstract_text = w.get("abstract").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let doi = w.get("doi").and_then(|v| v.as_str()).map(String::from);
+                    let pdf = w.get("downloadUrl").and_then(|v| v.as_str()).map(String::from);
+                    PaperEntry {
+                        title,
+                        authors,
+                        year,
+                        venue: None,
+                        citations: w.get("citationCount").and_then(|v| v.as_u64()),
+                        url: doi.as_ref().map(|d| format!("https://doi.org/{d}")),
+                        pdf,
+                        abstract_text,
+                        arxiv_id: None,
+                        doi,
+                        source: "CORE",
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(format_paper_entries(
+        &format!("CORE: \"{query}\" — {total} total results"),
+        &entries,
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Unpaywall — resolve a DOI to free, legal OA PDF locations (key-free, email)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_unpaywall(doi: &str) -> Result<String, String> {
+    // Accept a bare DOI or a doi.org URL; Unpaywall is a lookup, not search.
+    let doi = doi
+        .trim()
+        .trim_start_matches("https://doi.org/")
+        .trim_start_matches("http://doi.org/")
+        .trim_start_matches("doi:")
+        .trim();
+    if doi.is_empty() || !doi.contains('/') {
+        return Err(
+            "Unpaywall resolves a DOI to its open-access PDFs. Pass a DOI, e.g. \
+             `unpaywall: 10.1038/nature12373`."
+                .to_string(),
+        );
+    }
+
+    // Unpaywall requires a contact email; fall back to a project default.
+    let email = polite_pool_email(&["UNPAYWALL_EMAIL", "OPENALEX_EMAIL", "CROSSREF_EMAIL"])
+        .unwrap_or_else(|| "jfc-web@users.noreply.github.com".to_string());
+
+    let client = http_client()?;
+    let resp = client
+        .get(format!("https://api.unpaywall.org/v2/{doi}"))
+        .query(&[("email", email.as_str())])
+        .send()
+        .await
+        .map_err(|e| format!("Unpaywall request failed: {e}"))?;
+
+    if resp.status() == 404 {
+        return Ok(format!("Unpaywall: DOI {doi} not found.\n"));
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Unpaywall returned HTTP {}", resp.status()));
+    }
+    let p: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+    let year = p.get("year").and_then(|v| v.as_u64());
+    let journal = p.get("journal_name").and_then(|v| v.as_str()).unwrap_or("");
+    let is_oa = p.get("is_oa").and_then(|v| v.as_bool()).unwrap_or(false);
+    let oa_status = p.get("oa_status").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+    let mut out = format!("Unpaywall: {doi}\n\n{title}");
+    if let Some(y) = year {
+        out.push_str(&format!(" ({y})"));
+    }
+    out.push('\n');
+    if !journal.is_empty() {
+        out.push_str(&format!("Journal: {journal}\n"));
+    }
+    out.push_str(&format!(
+        "Open access: {} (status: {oa_status})\n",
+        if is_oa { "yes" } else { "no" }
+    ));
+    out.push_str(&format!("DOI: https://doi.org/{doi}\n\n"));
+
+    if let Some(locations) = p.get("oa_locations").and_then(|v| v.as_array())
+        && !locations.is_empty()
+    {
+        out.push_str("OA locations:\n");
+        for loc in locations {
+            let pdf = loc
+                .get("url_for_pdf")
+                .and_then(|v| v.as_str())
+                .or_else(|| loc.get("url").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let host = loc.get("host_type").and_then(|v| v.as_str()).unwrap_or("");
+            let version = loc.get("version").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = loc
+                .get("repository_institution")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" — {s}"))
+                .unwrap_or_default();
+            out.push_str(&format!("- [{host}/{version}{repo}] {pdf}\n"));
+        }
+    } else if !is_oa {
+        out.push_str("No open-access copy found.\n");
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Brave Search (independent index; free API key)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn brave_results(query: &str, max_results: usize) -> Result<String, String> {
+    let key = std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.is_empty()).ok_or_else(|| {
+        "Brave Search requires an API key. Set BRAVE_API_KEY (free tier at https://brave.com/search/api/)".to_string()
+    })?;
+    let count = max_results.clamp(1, 20).to_string();
+    let client = http_client()?;
+
+    let resp = client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .header("Accept", "application/json")
+        .header("X-Subscription-Token", key)
+        .query(&[("q", query), ("count", count.as_str())])
+        .send()
+        .await
+        .map_err(|e| format!("Brave request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Brave returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let mut out = format!("Brave Search: \"{query}\"\n\n");
+    let results = parsed.pointer("/web/results").and_then(|v| v.as_array());
+    match results {
+        Some(items) if !items.is_empty() => {
+            for (i, item) in items.iter().enumerate() {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = item.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                out.push_str(&format!("{}. {title}\n   URL: {url}\n   {desc}\n\n", i + 1));
+            }
+        }
+        _ => out.push_str("No results found.\n"),
+    }
+    Ok(out)
+}
+
+async fn search_brave(query: &str, max_results: usize) -> Result<String, String> {
+    brave_results(query, max_results).await
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tavily (LLM-oriented search; free API key)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_tavily(query: &str, max_results: usize) -> Result<String, String> {
+    let key = std::env::var("TAVILY_API_KEY").ok().filter(|k| !k.is_empty()).ok_or_else(|| {
+        "Tavily requires an API key. Set TAVILY_API_KEY (free tier at https://tavily.com)".to_string()
+    })?;
+    let limit = max_results.clamp(1, 20);
+    let client = http_client()?;
+
+    let resp = client
+        .post("https://api.tavily.com/search")
+        .json(&serde_json::json!({
+            "api_key": key,
+            "query": query,
+            "max_results": limit,
+            "include_answer": true,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Tavily request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Tavily returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let mut out = format!("Tavily: \"{query}\"\n\n");
+    if let Some(answer) = parsed.get("answer").and_then(|v| v.as_str())
+        && !answer.is_empty()
+    {
+        out.push_str(&format!("Answer: {answer}\n\n"));
+    }
+    let results = parsed.get("results").and_then(|v| v.as_array());
+    match results {
+        Some(items) if !items.is_empty() => {
+            for (i, item) in items.iter().enumerate() {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                out.push_str(&format!(
+                    "{}. {title}\n   URL: {url}\n   {}\n\n",
+                    i + 1,
+                    truncate_abstract(content)
+                ));
+            }
+        }
+        _ => out.push_str("No results found.\n"),
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Exa (neural/semantic search; free API key)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_exa(query: &str, max_results: usize) -> Result<String, String> {
+    let key = std::env::var("EXA_API_KEY").ok().filter(|k| !k.is_empty()).ok_or_else(|| {
+        "Exa requires an API key. Set EXA_API_KEY (free tier at https://exa.ai)".to_string()
+    })?;
+    let limit = max_results.clamp(1, 20);
+    let client = http_client()?;
+
+    let resp = client
+        .post("https://api.exa.ai/search")
+        .header("x-api-key", key)
+        .json(&serde_json::json!({
+            "query": query,
+            "numResults": limit,
+            "contents": { "text": { "maxCharacters": 300 } },
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Exa request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Exa returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let mut out = format!("Exa: \"{query}\"\n\n");
+    let results = parsed.get("results").and_then(|v| v.as_array());
+    match results {
+        Some(items) if !items.is_empty() => {
+            for (i, item) in items.iter().enumerate() {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                out.push_str(&format!(
+                    "{}. {title}\n   URL: {url}\n   {}\n\n",
+                    i + 1,
+                    truncate_abstract(text)
+                ));
+            }
+        }
+        _ => out.push_str("No results found.\n"),
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DuckDuckGo Instant Answer (key-free; facts/definitions, not full SERP)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_duckduckgo(query: &str) -> Result<String, String> {
+    let client = http_client()?;
+    let resp = client
+        .get("https://api.duckduckgo.com/")
+        .query(&[
+            ("q", query),
+            ("format", "json"),
+            ("no_html", "1"),
+            ("skip_disambig", "1"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("DuckDuckGo request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("DuckDuckGo returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let mut out = format!("DuckDuckGo Instant Answer: \"{query}\"\n\n");
+    let mut any = false;
+
+    let heading = parsed.get("Heading").and_then(|v| v.as_str()).unwrap_or("");
+    let abstract_text = parsed.get("AbstractText").and_then(|v| v.as_str()).unwrap_or("");
+    let abstract_url = parsed.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("");
+    if !abstract_text.is_empty() {
+        any = true;
+        if !heading.is_empty() {
+            out.push_str(&format!("{heading}\n"));
+        }
+        out.push_str(&format!("{abstract_text}\n"));
+        if !abstract_url.is_empty() {
+            out.push_str(&format!("Source: {abstract_url}\n"));
+        }
+        out.push('\n');
+    }
+
+    if let Some(answer) = parsed.get("Answer").and_then(|v| v.as_str())
+        && !answer.is_empty()
+    {
+        any = true;
+        out.push_str(&format!("Answer: {answer}\n\n"));
+    }
+
+    if let Some(topics) = parsed.get("RelatedTopics").and_then(|v| v.as_array()) {
+        let related: Vec<(&str, &str)> = topics
+            .iter()
+            .filter_map(|t| {
+                let text = t.get("Text").and_then(|v| v.as_str())?;
+                let url = t.get("FirstURL").and_then(|v| v.as_str()).unwrap_or("");
+                Some((text, url))
+            })
+            .take(8)
+            .collect();
+        if !related.is_empty() {
+            any = true;
+            out.push_str("Related:\n");
+            for (text, url) in related {
+                out.push_str(&format!("- {text}\n  {url}\n"));
+            }
+            out.push('\n');
+        }
+    }
+
+    if !any {
+        out.push_str(
+            "No instant answer. DuckDuckGo's API only returns facts/definitions, \
+             not a full result list — use the default (Google) backend for general queries.\n",
+        );
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Wikipedia / MediaWiki search (key-free)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn search_wikipedia(query: &str, max_results: usize) -> Result<String, String> {
+    let limit = max_results.clamp(1, 20).to_string();
+    let client = http_client()?;
+
+    let resp = client
+        .get("https://en.wikipedia.org/w/api.php")
+        .query(&[
+            ("action", "query"),
+            ("list", "search"),
+            ("srsearch", query),
+            ("srlimit", limit.as_str()),
+            ("format", "json"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Wikipedia request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Wikipedia returned HTTP {}", resp.status()));
+    }
+    let parsed: serde_json::Value = resp
+        .text()
+        .await
+        .map_err(|e| format!("Response read: {e}"))
+        .and_then(|b| serde_json::from_str(&b).map_err(|e| format!("JSON parse: {e}")))?;
+
+    let total = parsed
+        .pointer("/query/searchinfo/totalhits")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let hits = parsed.pointer("/query/search").and_then(|v| v.as_array());
+
+    let mut out = format!("Wikipedia: \"{query}\" — {total} total hits\n\n");
+    match hits {
+        Some(items) if !items.is_empty() => {
+            for (i, item) in items.iter().enumerate() {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+                let snippet = item
+                    .get("snippet")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        // Strip the <span class="searchmatch"> markup MediaWiki injects.
+                        let mut clean = String::with_capacity(s.len());
+                        let mut in_tag = false;
+                        for c in s.chars() {
+                            match c {
+                                '<' => in_tag = true,
+                                '>' => in_tag = false,
+                                _ if !in_tag => clean.push(c),
+                                _ => {}
+                            }
+                        }
+                        clean
+                    })
+                    .unwrap_or_default();
+                let slug = title.replace(' ', "_");
+                out.push_str(&format!(
+                    "{}. {title}\n   URL: https://en.wikipedia.org/wiki/{slug}\n   {snippet}\n\n",
+                    i + 1
+                ));
+            }
+        }
+        _ => out.push_str("No results found.\n"),
+    }
+    Ok(out)
 }

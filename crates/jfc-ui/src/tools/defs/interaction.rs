@@ -76,13 +76,31 @@ fn web_search_def() -> ToolDef {
         name: "WebSearch".into(),
         description: "Search the web for `query`. Returns a ranked list of \
             results with title, URL, and snippet. Combine with `WebFetch` \
-            to read promising hits. \
-            Prefix the query to select a backend: \
-            `arxiv: <query>` searches arXiv papers (free, no key needed); \
-            `scholar: <query>` searches Semantic Scholar (optional API key, falls back to BFF); \
-            `papers: <query>` queries arXiv + Semantic Scholar in parallel and \
-            deduplicates results by arXiv ID / DOI / title; \
-            no prefix uses Google Custom Search Engine."
+            to read promising hits. No prefix uses Google Custom Search \
+            Engine (falling back to Brave if no Google key is set). \
+            Prefix the query to select a backend:\n\
+            • `edu: <query>` — Google scoped to academic TLDs worldwide \
+            (.edu, .ac.uk, .ac.jp, .edu.cn, .edu.au, .ac.in, .ac.kr, …); \
+            great for finding university/library/open-courseware pages.\n\
+            • `gov: <query>` — Google scoped to government domains (.gov, .gov.uk, …).\n\
+            • `arxiv: <query>` — arXiv papers (free, no key).\n\
+            • `scholar: <query>` — Semantic Scholar (optional key, BFF fallback).\n\
+            • `openalex: <query>` — OpenAlex; 250M+ works with author \
+            institutions + country codes (free, no key).\n\
+            • `crossref: <query>` — Crossref DOI metadata (free, no key).\n\
+            • `pubmed: <query>` — PubMed/NCBI biomedical literature (free).\n\
+            • `doaj: <query>` — Directory of Open Access Journals (free).\n\
+            • `core: <query>` — CORE 290M+ OA full texts (free key: CORE_API_KEY).\n\
+            • `unpaywall: <DOI>` — resolve a DOI to its free, legal open-access \
+            PDF locations across repositories (free, no key).\n\
+            • `papers: <query>` — arXiv + Semantic Scholar + OpenAlex in \
+            parallel, deduplicated by arXiv ID / DOI / title.\n\
+            • `brave: <query>` — Brave independent index (key: BRAVE_API_KEY).\n\
+            • `tavily: <query>` — Tavily LLM-oriented search (key: TAVILY_API_KEY).\n\
+            • `exa: <query>` — Exa neural/semantic search (key: EXA_API_KEY).\n\
+            • `ddg: <query>` — DuckDuckGo Instant Answer; facts/definitions \
+            only, not a full SERP (free, no key).\n\
+            • `wiki: <query>` — Wikipedia/MediaWiki article search (free, no key)."
             .into(),
         input_schema: serde_json::json!({
             "type": "object",
