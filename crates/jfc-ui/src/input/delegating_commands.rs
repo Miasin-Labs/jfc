@@ -142,6 +142,21 @@ pub(super) async fn cmd_audit(
     app.messages.push(ChatMessage::assistant(body));
 }
 
+/// `/commands` — the unified command/tool list, generated from the single
+/// CommandSpec metadata layer across CLI, slash, and tool surfaces.
+pub(super) async fn cmd_commands(
+    app: &mut App,
+    _parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<AppEvent>>,
+) {
+    let body = format!(
+        "Commands across all surfaces:\n{}",
+        crate::command_spec::render_all()
+    );
+    app.messages.push(ChatMessage::assistant(body));
+}
+
 /// `/changes [show|test|apply|revert <id> [-- <cmd>]]` — review surface for
 /// agent change-sets. Bare `/changes` lists; subcommands operate on one id.
 pub(super) async fn cmd_changes(

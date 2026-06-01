@@ -322,6 +322,7 @@ slash_commands! {
         "/cost" ["/stats"] "show session cost / token usage" => cmd_cost,
         "/audit" [] "show the runtime audit ledger (agent actions)" => cmd_audit,
         "/changes" [] "list/show/apply/revert agent change-sets" => cmd_changes,
+        "/commands" [] "unified command/tool list across CLI, slash, and tools" => cmd_commands,
         "/status" [] "show current session status" => cmd_status,
         "/bug" [] "file a bug report with session context" => cmd_bug,
         "/rewind" [] "rewind the transcript to an earlier checkpoint" => cmd_rewind,
