@@ -809,4 +809,138 @@ mod tests {
         let store = ChangeStore::open_project(root).unwrap();
         assert_eq!(store.get(&id).unwrap().state, ChangeState::Abandoned);
     }
+
+    /// Build an Approved change-set whose `branch` is a REAL git branch
+    /// carrying one extra commit (a new file), so `apply_change` has something
+    /// to merge. Returns the change-set id and the file the branch adds.
+    async fn approved_change_with_real_branch(root: &Path) -> (String, jfc_changeset::AgentChangeSet)
+    {
+        init_repo(root).await;
+        // Create a feature branch with a distinct commit, then return to the
+        // base branch so apply's `git merge <branch>` has a real merge to do.
+        let base = {
+            let out = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["checkout", "-q", "-b", "jfc/feature"], root).await;
+        std::fs::write(root.join("feature.txt"), "from the agent branch\n").unwrap();
+        git(&["add", "."], root).await;
+        git(&["commit", "-q", "-m", "agent change"], root).await;
+        git(&["checkout", "-q", &base], root).await;
+
+        // Persist an Approved change-set pointing at that branch.
+        let mut store = ChangeStore::open_project(root).unwrap();
+        let mut cs = jfc_changeset::AgentChangeSet::open(
+            "base",
+            "jfc/feature",
+            root.to_string_lossy().to_string(),
+            1,
+        );
+        cs.mark_ready(Vec::new(), "feature.txt added", 2).unwrap();
+        cs.record_test_run(
+            jfc_changeset::TestRun {
+                command: "true".into(),
+                exit_code: 0,
+                duration_ms: 1,
+                finished_at_ms: 3,
+            },
+            3,
+        )
+        .unwrap();
+        cs.approve(
+            jfc_changeset::Approval::Human {
+                user: "cole".into(),
+                at_ms: 4,
+            },
+            4,
+        )
+        .unwrap();
+        let id = cs.id.clone();
+        store.upsert(cs.clone()).unwrap();
+        (id, cs)
+    }
+
+    // Normal — the full apply→revert git round-trip (the gap that was only
+    // unit-tested before). apply_change does a REAL `git merge` that lands the
+    // branch's file in the base; revert_change does a REAL `git revert` that
+    // removes it again. Both state transitions and git effects are asserted.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn changeset_apply_revert_round_trip_normal() {
+        crate::sandbox::reset_active_bash_sandbox_for_test();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let (id, _cs) = approved_change_with_real_branch(root).await;
+
+        // The branch's file is NOT in the base checkout yet.
+        assert!(
+            !root.join("feature.txt").exists(),
+            "feature.txt must not exist before apply"
+        );
+
+        // APPLY: real git merge. State Approved→Applied, file now in base.
+        let apply_msg = apply_change(root, &id).await;
+        assert!(apply_msg.contains("applied"), "apply said: {apply_msg}");
+        assert!(
+            root.join("feature.txt").exists(),
+            "apply must merge feature.txt into the base checkout"
+        );
+        assert_eq!(
+            ChangeStore::open_project(root)
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .state,
+            ChangeState::Applied
+        );
+
+        // REVERT: real git revert of the merge. State Applied→Reverted, file
+        // removed from the base checkout again.
+        let revert_msg = revert_change(root, &id).await;
+        assert!(revert_msg.contains("reverted"), "revert said: {revert_msg}");
+        assert!(
+            !root.join("feature.txt").exists(),
+            "revert must undo the merge — feature.txt should be gone"
+        );
+        assert_eq!(
+            ChangeStore::open_project(root)
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .state,
+            ChangeState::Reverted
+        );
+    }
+
+    // Robust: revert refuses a change that was never applied (only an Applied
+    // change can be reverted) — no git is touched.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn revert_refuses_unapplied_change_robust() {
+        crate::sandbox::reset_active_bash_sandbox_for_test();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let (id, _cs) = approved_change_with_real_branch(root).await;
+        // Approved but not applied → revert must refuse.
+        let msg = revert_change(root, &id).await;
+        assert!(
+            msg.contains("only an Applied change can be reverted"),
+            "revert said: {msg}"
+        );
+        assert_eq!(
+            ChangeStore::open_project(root)
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .state,
+            ChangeState::Approved,
+            "state unchanged after refused revert"
+        );
+    }
 }
