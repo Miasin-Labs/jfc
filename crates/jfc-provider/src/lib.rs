@@ -731,6 +731,15 @@ impl StreamOptions {
         self.narration_summaries = enabled;
         self
     }
+
+    /// Enable the `thinking-token-count-2026-05-13` beta so the server reports
+    /// per-delta thinking token estimates (`thinking_delta.estimated_tokens`).
+    /// Without this the field is never present on the wire and the spinner's
+    /// thinking-token chip stays at 0.
+    pub fn thinking_token_count(mut self, enabled: bool) -> Self {
+        self.thinking_token_count = enabled;
+        self
+    }
 }
 
 /// Non-streaming response for use by compaction and other single-shot API calls.

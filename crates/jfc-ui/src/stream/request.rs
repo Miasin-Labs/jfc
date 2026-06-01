@@ -858,6 +858,10 @@ Do not use a colon before tool calls.";
     if opts.adaptive_thinking || opts.thinking_budget.is_some() {
         let display = thinking_display.unwrap_or_else(|| "summarized".into());
         opts = opts.thinking_display(display);
+        // Request server-authoritative thinking token estimates so the spinner
+        // can show a live thinking-token chip. Only meaningful when thinking is
+        // active; the API otherwise streams thinking_delta without estimates.
+        opts = opts.thinking_token_count(true);
     }
 
     PreparedStreamRequest {

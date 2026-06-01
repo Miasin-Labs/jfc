@@ -392,6 +392,9 @@ fn build_beta_header(options: &StreamOptions) -> String {
         betas.push(',');
         betas.push_str(NARRATION_SUMMARIES_BETA);
     }
+    if options.thinking_token_count {
+        betas.push_str(",thinking-token-count-2026-05-13");
+    }
     append_custom_betas(&mut betas, &options.custom_betas);
     super::anthropic_oauth::append_env_betas(&mut betas);
     betas
@@ -442,6 +445,18 @@ mod tests {
     fn build_beta_header_omits_narration_summaries_by_default_robust() {
         let header = build_beta_header(&opts("claude-opus-4-7"));
         assert!(!header.contains(NARRATION_SUMMARIES_BETA));
+    }
+
+    #[test]
+    fn build_beta_header_includes_thinking_token_count_normal() {
+        let header = build_beta_header(&opts("claude-opus-4-7").thinking_token_count(true));
+        assert!(header.contains("thinking-token-count-2026-05-13"));
+    }
+
+    #[test]
+    fn build_beta_header_omits_thinking_token_count_by_default_robust() {
+        let header = build_beta_header(&opts("claude-opus-4-7"));
+        assert!(!header.contains("thinking-token-count"));
     }
 
     // Normal: anthropic_error_type recognises the canonical shape

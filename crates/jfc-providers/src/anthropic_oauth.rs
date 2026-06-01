@@ -122,6 +122,7 @@ impl GatedCapability {
 /// then layers per-request betas (`fast-mode`, `task-budgets`) when the
 /// caller asked for the feature *and* the account hasn't been marked
 /// `Some(false)` on the corresponding capability.
+#[allow(clippy::too_many_arguments)]
 fn build_beta_header(
     caps: &super::anthropic_accounts::AccountCapabilities,
     fast_mode: bool,
@@ -130,6 +131,7 @@ fn build_beta_header(
     eager_input_streaming: bool,
     strict_tool_schemas: bool,
     narration_summaries: bool,
+    thinking_token_count: bool,
     custom_betas: &[String],
     model: &str,
 ) -> String {
@@ -161,6 +163,9 @@ fn build_beta_header(
     if narration_summaries {
         header.push(',');
         header.push_str(NARRATION_SUMMARIES_BETA);
+    }
+    if thinking_token_count {
+        header.push_str(",thinking-token-count-2026-05-13");
     }
     for beta in custom_betas {
         let beta = beta.trim();
@@ -1487,6 +1492,7 @@ impl Provider for AnthropicOAuthProvider {
         let want_eager_input_streaming = options.eager_input_streaming;
         let want_strict_tool_schemas = options.strict_tool_schemas;
         let want_narration_summaries = options.narration_summaries;
+        let want_thinking_token_count = options.thinking_token_count;
         let custom_betas = options.custom_betas.clone();
 
         // Two nested loops:
@@ -1554,6 +1560,7 @@ impl Provider for AnthropicOAuthProvider {
                     want_eager_input_streaming,
                     want_strict_tool_schemas,
                     want_narration_summaries,
+                    want_thinking_token_count,
                     &custom_betas,
                     &options.model,
                 );
@@ -1937,6 +1944,7 @@ impl Provider for AnthropicOAuthProvider {
         let want_eager_input_streaming = options.eager_input_streaming;
         let want_strict_tool_schemas = options.strict_tool_schemas;
         let want_narration_summaries = options.narration_summaries;
+        let want_thinking_token_count = options.thinking_token_count;
         let custom_betas = options.custom_betas.clone();
         let mgr = self.account_manager().await?;
         let total_wait_started = std::time::Instant::now();
@@ -1989,6 +1997,7 @@ impl Provider for AnthropicOAuthProvider {
                     want_eager_input_streaming,
                     want_strict_tool_schemas,
                     want_narration_summaries,
+                    want_thinking_token_count,
                     &custom_betas,
                     &options.model,
                 );
@@ -2570,6 +2579,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
             "claude-opus-4-7",
         );
@@ -2590,6 +2600,7 @@ mod tests {
             &caps,
             true,
             true,
+            false,
             false,
             false,
             false,
@@ -2617,6 +2628,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
             "claude-opus-4-7",
         );
@@ -2635,6 +2647,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 &[],
                 "claude-opus-4-7"
             )
@@ -2646,6 +2659,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -2667,6 +2681,7 @@ mod tests {
             true,
             true,
             false,
+            false,
             &["custom-beta-2099-01-01".to_owned()],
             "claude-opus-4-7",
         );
@@ -2686,6 +2701,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             &[],
             "claude-opus-4-7",
         );
@@ -2697,6 +2713,7 @@ mod tests {
         let caps = super::super::anthropic_accounts::AccountCapabilities::default();
         let header = build_beta_header(
             &caps,
+            false,
             false,
             false,
             false,
@@ -2750,6 +2767,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
             "claude-opus-4-8",
         );
@@ -2764,6 +2782,7 @@ mod tests {
         let caps = super::super::anthropic_accounts::AccountCapabilities::default();
         let header = build_beta_header(
             &caps,
+            false,
             false,
             false,
             false,
