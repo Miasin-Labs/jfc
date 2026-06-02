@@ -183,18 +183,45 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
                 "Auto-compacting (prompt exceeded model window)…",
             ),
         );
-        // Try to recover the last user prompt so we can
+        // Try to recover the last *genuine* user prompt so we can
         // re-queue it after compaction.
-        let last_user_text = app
+        //
+        // Skip compact-boundary messages: `ChatMessage::compact_boundary`
+        // is `Role::User` (it has to be, so the summary lands as user
+        // context), so a naive `rfind(Role::User)` on a transcript that
+        // already ends on a boundary would grab the summary's "This session
+        // is being continued…" prose and replay *that* as the user's prompt.
+        // Join every non-empty text part rather than just the first, so a
+        // structured multi-text user message isn't silently truncated to its
+        // opening block. Binary attachments can't ride along
+        // `UiEvent::Submit(String)`, but they are not lost from context: the
+        // original user message (with its attachments) stays in `app.messages`
+        // and survives into the preserved tail of the compacted transcript —
+        // the re-queue only re-drives the turn, it does not re-upload.
+        let last_user = app
             .messages
             .iter()
-            .rfind(|m| matches!(m.role, types::Role::User))
-            .and_then(|m| {
-                m.parts.iter().find_map(|p| match p {
-                    types::MessagePart::Text(t) if !t.trim().is_empty() => Some(t.clone()),
+            .rfind(|m| matches!(m.role, types::Role::User) && !m.is_compact_boundary());
+        if let Some(att_count) = last_user.map(|m| m.attachments.len()).filter(|n| *n > 0) {
+            tracing::debug!(
+                target: "jfc::stream",
+                attachments = att_count,
+                "auto-compact re-queue: attachments remain in the preserved transcript; \
+                 the re-driven turn re-sends text only"
+            );
+        }
+        let last_user_text = last_user.and_then(|m| {
+            let joined = m
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    types::MessagePart::Text(t) if !t.trim().is_empty() => Some(t.as_str()),
                     _ => None,
                 })
-            });
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (!joined.trim().is_empty()).then_some(joined)
+        });
         if let Some(text) = last_user_text {
             let tx_compact = tx.clone();
             tokio::spawn(async move {

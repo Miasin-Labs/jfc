@@ -479,11 +479,28 @@ pub async fn compact(
 
                 if !restored_files.is_empty() {
                     let restore_text = restored_files.join("\n\n");
-                    let restore_msg = ChatMessage::assistant(format!(
+                    // Place restored files as a *user-role* context block
+                    // immediately after the summary boundary, mirroring
+                    // Claude/OpenClaude's [boundary, summary, file-context,
+                    // kept messages] shape (compact.ts:333). Two earlier bugs
+                    // are fixed here:
+                    //   1. Role was `assistant`, which made the model treat
+                    //      restored file contents as *its own prior output*
+                    //      rather than supplied context — the summary boundary
+                    //      itself is `Role::User`, so the file context belongs
+                    //      on the user side too.
+                    //   2. It was appended *after* `to_preserve` (the recent
+                    //      tail), so the freshest restored-file context landed
+                    //      at the very end where it could shadow the actual
+                    //      last turn. Inserting at index 1 keeps it adjacent to
+                    //      the summary and ahead of the preserved tail.
+                    // `merge_consecutive_same_role` collapses the boundary +
+                    // restore pair on the wire (no tool_result between them).
+                    let restore_msg = ChatMessage::user(format!(
                         "[Post-compact context restoration — recently accessed files:]\n\n{}",
                         restore_text
                     ));
-                    compacted.push(restore_msg);
+                    compacted.insert(1, restore_msg);
                     // Recompute post_tokens with the restored files included
                     let post_tokens = estimate_tokens(&compacted);
                     tool_ctx.approx_tokens = post_tokens;

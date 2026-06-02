@@ -122,6 +122,15 @@ pub(super) async fn handle_done(
         // `apply_cumulative` would treat the post-compact
         // input as a negative delta and stall.
         app.usage_apply_baseline = (0, 0, 0, 0);
+        // Repin to the bottom of the freshly-compacted transcript. The whole
+        // message vec was just replaced, so any prior `scroll_offset` indexes
+        // into a buffer that no longer exists; leaving `follow_bottom` false
+        // (the user had scrolled up before a post-response or manual /compact)
+        // would strand them mid-buffer staring at stale rows. Claude/OpenClaude
+        // likewise repin on this transition — compaction is a hard transcript
+        // reset, not an ordinary append. The content-addressed render cache
+        // self-invalidates by text hash, so no explicit clear is needed.
+        app.scroll_to_bottom();
     }
     app.compacting_started_at = None;
     app.compacting_output_chars = 0;
