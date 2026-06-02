@@ -44,6 +44,20 @@ pub struct Theme {
     pub reasoning_bg: Color,
     pub reasoning_fg: Color,
 
+    // ── Derived semantic status tokens ───────────────────────────────
+    // Populated by `with_cached_styles` (blended from existing slots) so all
+    // bundled themes get coherent values with no per-constructor tuning.
+    /// Calm, de-emphasized accent for *activity* state (running agents, mode
+    /// flags) — distinct from the alerting `warning` gold and the bright
+    /// interactive `accent`. The status row used to render all of these gold,
+    /// which inflated the meaning of "warning".
+    pub accent_secondary: Color,
+    /// Color for the running cost figure — the one number worth watching.
+    /// Kept on the `warning` hue (gold reads as "attention, not error"), but
+    /// named so the status row no longer shares the raw `warning` slot with
+    /// six unrelated segments.
+    pub cost_signal: Color,
+
     // ── Precomputed styles (hot-path cache) ──────────────────────────
     pub style_text_secondary: Style,
     pub style_text_muted: Style,
@@ -179,6 +193,12 @@ impl Theme {
     }
 
     fn with_cached_styles(mut self) -> Self {
+        // Derive the semantic status tokens from existing slots so every
+        // bundled theme stays coherent automatically. `accent_secondary` is
+        // the accent pulled ~45% toward muted — present but calm, for activity
+        // state; `cost_signal` rides the warning hue (gold = "watch this").
+        self.accent_secondary = blend(self.accent, self.text_muted, 0.45);
+        self.cost_signal = self.warning;
         self.style_text_secondary = Style::default().fg(self.text_secondary);
         self.style_text_muted = Style::default().fg(self.text_muted);
         self.style_error = Style::default().fg(self.error);
@@ -219,6 +239,8 @@ impl Theme {
             code_number: Color::Rgb(255, 180, 100),
             reasoning_bg: Color::Rgb(30, 30, 45),
             reasoning_fg: Color::Rgb(120, 130, 160),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -257,6 +279,8 @@ impl Theme {
             code_number: Color::Rgb(180, 90, 30),
             reasoning_bg: Color::Rgb(238, 234, 226),
             reasoning_fg: Color::Rgb(110, 100, 85),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -295,6 +319,8 @@ impl Theme {
             code_number: Color::Rgb(203, 75, 22),
             reasoning_bg: Color::Rgb(7, 54, 66),
             reasoning_fg: Color::Rgb(147, 161, 161),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -334,6 +360,8 @@ impl Theme {
             code_number: Color::Rgb(250, 179, 135), // Peach
             reasoning_bg: Color::Rgb(49, 50, 68),
             reasoning_fg: Color::Rgb(166, 173, 200),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -372,6 +400,8 @@ impl Theme {
             code_number: Color::Rgb(255, 158, 100),
             reasoning_bg: Color::Rgb(36, 40, 59),
             reasoning_fg: Color::Rgb(154, 165, 206),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -410,6 +440,8 @@ impl Theme {
             code_number: Color::Rgb(189, 147, 249),
             reasoning_bg: Color::Rgb(50, 52, 68),
             reasoning_fg: Color::Rgb(180, 180, 200),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -453,6 +485,8 @@ impl Theme {
             code_number: Color::Rgb(180, 142, 173), // nord15
             reasoning_bg: Color::Rgb(59, 66, 82),
             reasoning_fg: Color::Rgb(180, 188, 200),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -491,6 +525,8 @@ impl Theme {
             code_number: Color::Rgb(211, 134, 155),  // purple
             reasoning_bg: Color::Rgb(60, 56, 54),
             reasoning_fg: Color::Rgb(189, 174, 147),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -529,6 +565,8 @@ impl Theme {
             code_number: Color::Rgb(174, 129, 255),
             reasoning_bg: Color::Rgb(48, 49, 41),
             reasoning_fg: Color::Rgb(207, 207, 194),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -567,6 +605,8 @@ impl Theme {
             code_number: Color::Rgb(255, 180, 84),
             reasoning_bg: Color::Rgb(20, 25, 31),
             reasoning_fg: Color::Rgb(150, 158, 170),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -605,6 +645,8 @@ impl Theme {
             code_number: Color::Rgb(235, 188, 186), // rose
             reasoning_bg: Color::Rgb(31, 29, 46),
             reasoning_fg: Color::Rgb(180, 175, 210),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -643,6 +685,8 @@ impl Theme {
             code_number: Color::Rgb(209, 154, 102),
             reasoning_bg: Color::Rgb(45, 49, 58),
             reasoning_fg: Color::Rgb(160, 168, 182),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -682,6 +726,8 @@ impl Theme {
             code_number: Color::Rgb(5, 80, 174),
             reasoning_bg: Color::Rgb(243, 246, 249),
             reasoning_fg: Color::Rgb(80, 88, 100),
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -721,6 +767,8 @@ impl Theme {
             code_number: Color::Rgb(222, 40, 110),     // #de286e — Number
             reasoning_bg: Color::Rgb(27, 27, 41),      // #1b1b29
             reasoning_fg: Color::Rgb(161, 161, 221),   // #a1a1dd — soft lavender
+            accent_secondary: Color::Reset,
+            cost_signal: Color::Reset,
             style_text_secondary: Style::default(),
             style_text_muted: Style::default(),
             style_error: Style::default(),
@@ -871,7 +919,7 @@ mod tests {
     /// using a 16-color or palette index would produce the wrong contrast
     /// against neighbouring slots that *are* RGB.
     fn assert_all_slots_rgb(theme: &Theme, name: &str) {
-        let slots: [(&str, Color); 21] = [
+        let slots: [(&str, Color); 23] = [
             ("bg", theme.bg),
             ("surface", theme.surface),
             ("surface_raised", theme.surface_raised),
@@ -893,6 +941,10 @@ mod tests {
             ("code_number", theme.code_number),
             ("reasoning_bg", theme.reasoning_bg),
             ("reasoning_fg", theme.reasoning_fg),
+            // Derived semantic tokens — must resolve to RGB (blended from
+            // RGB slots) so the status row's activity/cost colors are real.
+            ("accent_secondary", theme.accent_secondary),
+            ("cost_signal", theme.cost_signal),
         ];
         for (slot_name, color) in slots {
             assert!(

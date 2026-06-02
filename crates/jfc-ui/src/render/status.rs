@@ -341,11 +341,12 @@ pub(super) fn pretty_provider_label(provider: &str) -> String {
 
 /// Accent color per provider so the live-stream pulse reads as
 /// "Bedrock-orange" / "OpenWebUI-teal" at a glance.
+/// Provider brand accent for the status dot + badge. Delegates to the
+/// canonical, fully-populated map in `model_picker` rather than keeping a
+/// second divergent subset (this used to only know 4 providers and fell back
+/// to gray for openai/gemini/litellm/…). Brand colors are identity, not
+/// theme-tinted, so they intentionally live in code, not the Theme struct.
 pub(super) fn provider_accent(provider: &str) -> Color {
-    match provider {
-        "anthropic" | "anthropic-oauth" | "bedrock" | "vertex" => Color::Rgb(204, 120, 50),
-        "openwebui" => Color::Rgb(100, 180, 200),
-        _ => Color::Gray,
-    }
+    super::model_picker::provider_color(provider)
 }
 
