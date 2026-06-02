@@ -228,7 +228,13 @@ impl LspClient {
         root_uri: &str,
         app_tx: mpsc::Sender<AppEvent>,
     ) -> Option<Self> {
-        let mut child: Child = match Command::new(server_cmd)
+        // Resolve the actual binary to exec. On rustup-managed setups the
+        // `rust-analyzer` on PATH (`~/.cargo/bin/rust-analyzer`) is a symlink
+        // to `rustup`, so every spawn pays a rustup proxy hop that re-resolves
+        // the directory's toolchain. `JFC_<SERVER>_PATH` lets the user point
+        // straight at the real toolchain binary and skip the shim.
+        let resolved = resolve_server_binary(server_cmd);
+        let mut child: Child = match Command::new(&resolved)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -241,6 +247,7 @@ impl LspClient {
                 tracing::info!(
                     target: "jfc::lsp",
                     server = server_cmd,
+                    binary = %resolved,
                     error = %e,
                     "spawn failed (binary likely not on PATH)"
                 );
@@ -677,6 +684,36 @@ pub fn build_exit() -> Value {
     })
 }
 
+/// Resolve the logical server name (`rust-analyzer`, `zls`) to the binary
+/// actually spawned. A per-server env override —
+/// `JFC_RUST_ANALYZER_PATH` / `JFC_ZLS_PATH`, or the generic
+/// `JFC_<UPPER_SNAKE>_PATH` — wins when set and non-empty; otherwise the
+/// bare command is returned for normal PATH resolution.
+///
+/// The motivating case: with rustup, `~/.cargo/bin/rust-analyzer` is a
+/// symlink to `rustup`, so each spawn is really a `rustup` proxy invocation
+/// that re-resolves the cwd's toolchain. Pointing the override at
+/// `~/.rustup/toolchains/<tk>/bin/rust-analyzer` skips that hop.
+fn resolve_server_binary(server_cmd: &str) -> String {
+    let env_key = format!(
+        "JFC_{}_PATH",
+        server_cmd.to_ascii_uppercase().replace('-', "_")
+    );
+    match std::env::var(&env_key) {
+        Ok(path) if !path.trim().is_empty() => {
+            tracing::debug!(
+                target: "jfc::lsp",
+                server = server_cmd,
+                env = %env_key,
+                binary = %path,
+                "using LSP binary override"
+            );
+            path
+        }
+        _ => server_cmd.to_owned(),
+    }
+}
+
 /// Detect which language server (if any) makes sense for the given
 /// directory by scanning for marker files. Returns `(cmd, args)` ready
 /// to pass to `Command::new`.
@@ -857,6 +894,33 @@ mod tests {
     fn detect_lsp_for_cwd_none_robust() {
         let dir = tempdir();
         assert!(detect_lsp_for_cwd(dir.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_server_binary_passes_through_without_override_normal() {
+        // No env set → bare command for normal PATH resolution. Use a unique
+        // server name so a stray real env var can't perturb the assertion.
+        assert_eq!(resolve_server_binary("zzz-fake-lsp"), "zzz-fake-lsp");
+    }
+
+    #[test]
+    fn resolve_server_binary_honors_env_override_robust() {
+        // SAFETY: single-threaded test; key is unique to this test.
+        let key = "JFC_RA_OVERRIDE_TEST_LSP_PATH";
+        unsafe { std::env::set_var(key, "/opt/toolchain/bin/ra-override-test-lsp") };
+        assert_eq!(
+            resolve_server_binary("ra-override-test-lsp"),
+            "/opt/toolchain/bin/ra-override-test-lsp",
+            "JFC_<SERVER>_PATH should override the bare command",
+        );
+        // Empty override is ignored (falls back to bare command).
+        unsafe { std::env::set_var(key, "   ") };
+        assert_eq!(
+            resolve_server_binary("ra-override-test-lsp"),
+            "ra-override-test-lsp",
+            "blank override must not shadow PATH resolution",
+        );
+        unsafe { std::env::remove_var(key) };
     }
 
     /// Tiny self-cleaning tempdir so we don't pull in `tempfile` just
