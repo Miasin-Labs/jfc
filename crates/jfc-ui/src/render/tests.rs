@@ -364,7 +364,9 @@ mod render_helpers_tests {
 mod pure_helper_tests {
     use super::input_box::{input_soft_wrapped_lines, input_visual_line_count};
     use super::model_picker::{provider_color, provider_label};
-    use super::status::{context_gauge_label, effort_status_badge, plan_badge};
+    use super::status::{
+        STATUS_FLOOR_PRIO, context_gauge_label, effort_status_badge, fit_segments, plan_badge,
+    };
     use super::*;
     use std::sync::Arc;
 
@@ -929,6 +931,52 @@ mod pure_helper_tests {
     #[test]
     fn plan_badge_passes_through_unknown_plan_robust() {
         assert_eq!(plan_badge(Some("startup"), None), Some("◆ startup".to_string()));
+    }
+
+    // --- fit_segments (status-row always-visible floor) ----------------
+
+    #[test]
+    fn fit_segments_keeps_all_when_room_normal() {
+        // prios: model(100) cost(95) cwd(45); plenty of width.
+        let keep = fit_segments(&[100, 95, 45], &[10, 8, 6], 5, 100);
+        assert_eq!(keep, vec![true, true, true]);
+    }
+
+    #[test]
+    fn fit_segments_drops_lowest_prio_context_first_normal() {
+        // Width fits only ~2 of 3 segments. The lowest-prio (cwd=45) goes
+        // first; the floor segments (model=100, cost=95) survive.
+        let keep = fit_segments(&[100, 95, 45], &[10, 10, 10], 0, 23);
+        assert_eq!(keep, vec![true, true, false]);
+    }
+
+    #[test]
+    fn fit_segments_preserves_floor_over_lower_prio_robust() {
+        // A below-floor "activity" segment (78) outranks cwd(45) but is still
+        // below the floor; under pressure both context segments drop before
+        // the floor cost(95) is ever touched.
+        // Widths force dropping until only ~1 segment fits.
+        let keep = fit_segments(&[95, 78, 45], &[10, 10, 10], 0, 13);
+        // cost (floor) kept; activity + cwd (both below floor) dropped.
+        assert_eq!(keep, vec![true, false, false]);
+    }
+
+    #[test]
+    fn fit_segments_drops_floor_only_as_last_resort_robust() {
+        // Two floor segments, impossibly narrow: the policy must still
+        // terminate, dropping the lower-priority floor segment rather than
+        // looping forever.
+        let keep = fit_segments(&[95, 100], &[10, 10], 0, 13);
+        // Only one fits; the higher-priority model(100) is kept.
+        assert_eq!(keep, vec![false, true]);
+    }
+
+    #[test]
+    fn fit_segments_floor_constant_matches_alert_band_normal() {
+        // Guard the contract the renderer relies on: cost(95)/approval(90)/
+        // status(92)/mcp(93) are floor; activity(78)/mode(85)/cwd(45) are not.
+        assert!(95 >= STATUS_FLOOR_PRIO && 90 >= STATUS_FLOOR_PRIO);
+        assert!(85 < STATUS_FLOOR_PRIO && 78 < STATUS_FLOOR_PRIO);
     }
 
     // --- provider_color / provider_label -----------------------------

@@ -71,7 +71,12 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     let provider_badge = pretty_provider_label(app.provider.name());
     let muted = Style::default().fg(t.text_muted);
     let sec = Style::default().fg(t.text_secondary);
-    let gold = Style::default().fg(t.warning);
+    // Semantic split (was all `warning` gold): `cost` rides the money hue,
+    // genuine alerts stay `warning`/`error`, and routine activity/mode/flag
+    // state uses the calm `accent_secondary` so it no longer screams.
+    let cost_style = Style::default().fg(t.cost_signal);
+    let alert = Style::default().fg(t.warning);
+    let activity = Style::default().fg(t.accent_secondary);
     let mut segs: Vec<StatusSeg> = Vec::new();
     macro_rules! push1 {
         ($s:expr, $style:expr, $prio:expr $(,)?) => {
@@ -93,7 +98,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("${:.2}", cost_total)
         };
-        push1!(cost_str, gold.add_modifier(Modifier::BOLD), 95);
+        push1!(cost_str, cost_style.add_modifier(Modifier::BOLD), 95);
     }
 
     // Problems / actionable state — high priority, coloured to draw the eye.
@@ -112,7 +117,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
     if let Some(status) = app.claude_status.as_ref() {
         if status.is_degraded() {
-            push1!(status.short_badge(), gold, 92);
+            push1!(status.short_badge(), alert, 92);
         }
     } else if app.claude_status_error.is_some() {
         push1!(
@@ -126,7 +131,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     if approval_count > 0 {
         push1!(
             format!("{approval_count} pending"),
-            gold.add_modifier(Modifier::BOLD),
+            alert.add_modifier(Modifier::BOLD),
             90,
         );
     }
@@ -155,7 +160,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("{alive_n} agents")
         };
-        push1!(s, gold, 78);
+        push1!(s, activity, 78);
     }
 
     // Mode flags.
@@ -163,10 +168,10 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         // Plain label — the mode word (Bypass / Auto / Plan) reads on its own;
         // the leading symbol was emoji-zoo noise.
-        push1!(app.permission_mode.label().to_owned(), gold, 85);
+        push1!(app.permission_mode.label().to_owned(), activity, 85);
     }
     if app.fast_mode {
-        push1!("fast".to_owned(), gold, 60);
+        push1!("fast".to_owned(), activity, 60);
     }
     if app.effort_state.current.is_some() {
         push1!(effort_status_badge(app), muted, 50);
@@ -178,7 +183,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         } else {
             "RC".to_owned()
         };
-        push1!(label, gold, 55);
+        push1!(label, activity, 55);
     }
 
     // Repo zone: branch · diff (green/red) · cwd. `⎇` stays — it's the
@@ -234,17 +239,13 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     // Drop the lowest-priority segment until the line fits.
-    loop {
-        let segs_w: usize = segs.iter().map(|s| SEP_W + seg_w(s)).sum();
-        if prefix_w + segs_w <= avail || segs.is_empty() {
-            break;
-        }
-        if let Some((i, _)) = segs.iter().enumerate().min_by_key(|(_, s)| s.prio) {
-            segs.remove(i);
-        } else {
-            break;
-        }
-    }
+    // Drop segments to fit, preserving the always-visible floor. See
+    // `fit_segments` for the policy.
+    let widths: Vec<usize> = segs.iter().map(|s| SEP_W + seg_w(s)).collect();
+    let prios: Vec<u8> = segs.iter().map(|s| s.prio).collect();
+    let keep = fit_segments(&prios, &widths, prefix_w, avail);
+    let mut keep_iter = keep.iter();
+    segs.retain(|_| *keep_iter.next().unwrap_or(&false));
 
     let kept_w: usize = segs.iter().map(|s| SEP_W + seg_w(s)).sum();
     let pad = avail.saturating_sub(prefix_w + kept_w);
@@ -348,5 +349,45 @@ pub(super) fn pretty_provider_label(provider: &str) -> String {
 /// theme-tinted, so they intentionally live in code, not the Theme struct.
 pub(super) fn provider_accent(provider: &str) -> Color {
     super::model_picker::provider_color(provider)
+}
+
+/// Priority at/above which a status segment is part of the always-visible
+/// floor: model identity, running cost, and genuine alerts (MCP down,
+/// degraded/unreachable status, pending approvals).
+pub(super) const STATUS_FLOOR_PRIO: u8 = 90;
+
+/// Decide which status segments survive in `avail` columns. Returns a keep
+/// mask parallel to `prios`/`widths`.
+///
+/// Policy: while the kept segments don't fit, drop the lowest-priority
+/// segment *below the floor* first — so narrow terminals shed context
+/// (cwd, branch, plan, effort, mode flags) before they ever touch the floor
+/// (`prio >= STATUS_FLOOR_PRIO`). Only once nothing below the floor remains
+/// do we drop the lowest floor segment, as a last resort on an extremely
+/// narrow width (better to truncate than render past the edge).
+pub(super) fn fit_segments(
+    prios: &[u8],
+    widths: &[usize],
+    prefix_w: usize,
+    avail: usize,
+) -> Vec<bool> {
+    let mut keep = vec![true; prios.len()];
+    loop {
+        let used: usize = (0..prios.len()).filter(|&i| keep[i]).map(|i| widths[i]).sum();
+        if prefix_w + used <= avail {
+            break;
+        }
+        // Lowest-priority kept segment below the floor; else lowest kept overall.
+        let pick = |floor_only: bool| {
+            (0..prios.len())
+                .filter(|&i| keep[i] && (!floor_only || prios[i] < STATUS_FLOOR_PRIO))
+                .min_by_key(|&i| prios[i])
+        };
+        match pick(true).or_else(|| pick(false)) {
+            Some(i) => keep[i] = false,
+            None => break,
+        }
+    }
+    keep
 }
 
