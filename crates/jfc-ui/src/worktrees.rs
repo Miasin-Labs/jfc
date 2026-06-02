@@ -385,7 +385,7 @@ pub fn create_tmux_session(agent_name: &str, worktree_path: &Path) -> Result<Str
             "-t",
             &session_name,
             "status-left",
-            &format!(" 🤖 {agent_name} "),
+            &format!(" ◆ {agent_name} "),
         ])
         .output();
 

@@ -2469,7 +2469,15 @@ async fn slash_theme_opens_picker_when_no_arg_robust() {
     run_slash_command(&mut app, "/theme").await;
     assert!(app.show_theme_picker);
     assert!(app.theme_picker_input.is_empty());
-    assert_eq!(app.theme_picker_selected, 0);
+    // Opening highlights the active theme (revert-on-cancel preview), so the
+    // selection is whichever row matches the current theme — always a valid
+    // in-bounds index, not hard-coded to 0.
+    let n = crate::theme::Theme::choices().len();
+    assert!(
+        app.theme_picker_selected < n,
+        "selection {} out of bounds (n={n})",
+        app.theme_picker_selected
+    );
 }
 
 #[tokio::test]

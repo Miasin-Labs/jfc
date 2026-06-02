@@ -109,7 +109,7 @@ pub(super) fn push_advisor_lines<'a>(items: &mut Vec<RenderItem<'a>>, text: &'a 
     items.push(RenderItem::TextLine(Line::from(vec![
         Span::styled("▎ ", Style::default().fg(t.accent)),
         Span::styled(
-            "ADVISOR:",
+            "Advisor:",
             Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         ),
     ])));

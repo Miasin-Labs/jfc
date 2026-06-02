@@ -527,7 +527,7 @@ impl<'a> RenderItem<'a> {
                 let plural = if *count == 1 {
                     kind_label.clone()
                 } else {
-                    format!("{}s", kind_label.to_lowercase())
+                    format!("{kind_label}s")
                 };
                 let row = Rect {
                     x: area.x,
@@ -636,8 +636,11 @@ fn strip_system_reminders(s: &str) -> String {
         if let Some(end) = rest[start..].find(CLOSE) {
             rest = &rest[start + end + CLOSE.len()..];
         } else {
-            // Unterminated tag — drop the opener and stop.
-            rest = &rest[start + OPEN.len()..];
+            // Unterminated tag — drop the opener AND everything after it.
+            // A reminder block that never closes is a system nudge whose
+            // payload is still reminder content, not something the user
+            // typed; keeping the tail would leak it as a fake "you" bubble.
+            rest = "";
             break;
         }
     }

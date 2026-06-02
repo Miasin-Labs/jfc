@@ -353,15 +353,16 @@ pub fn status_segments(
 
     match thinking {
         Some(ThinkingStatus::Live) => {
-            // Show live thinking duration (never frozen) instead of a static token count.
-            // The thinking phase duration lives in the elapsed timer, so it always moves.
-            parts.push(format!("thinking {}", fmt_elapsed(elapsed)));
-            // Show the cumulative thinking-token total (not a `~`-marked
-            // estimate) — the same honest count Claude Code surfaces. The
-            // server's running total may plateau at a steady state, but it's
-            // still the real count, so we present it plainly.
+            // The leading `elapsed` chip already shows the live duration (and
+            // during the Thinking phase that duration *is* the thinking time),
+            // so don't repeat it as a redundant `thinking {elapsed}` chip —
+            // that rendered the same number twice (`Thinking · 1m04s ·
+            // thinking 1m04s`). Show the cumulative thinking-token total
+            // instead: the same honest count Claude Code surfaces (not a
+            // `~`-marked estimate). The server's running total may plateau at
+            // a steady state, but it's still the real count.
             if thinking_tokens > 0 {
-                parts.push(format!("{} tokens", fmt_tokens(thinking_tokens)));
+                parts.push(format!("{} thinking", fmt_tokens(thinking_tokens)));
             }
             push_rate(&mut parts);
         }
@@ -603,16 +604,26 @@ mod tests {
             Some(ThinkingStatus::Live),
             1_200,
         );
+        // The leading elapsed chip shows the live duration once.
         assert!(s.body.contains("1m04s"), "elapsed missing: {}", s.body);
-        // Live thinking duration is shown (never frozen), e.g., "thinking 1m04s"
+        // Regression guard: the duration must NOT be repeated as a redundant
+        // `thinking {elapsed}` chip — that rendered "1m04s" twice
+        // (`Thinking · 1m04s · thinking 1m04s`).
         assert!(
-            s.body.contains("thinking 1m04s"),
-            "thinking duration missing: {}",
+            !s.body.contains("thinking 1m04s"),
+            "duration should not be doubled as a `thinking {{elapsed}}` chip: {}",
             s.body
         );
-        // Cumulative thinking-token total, no `~` estimate marker.
+        assert_eq!(
+            s.body.matches("1m04s").count(),
+            1,
+            "elapsed should appear exactly once: {}",
+            s.body
+        );
+        // Cumulative thinking-token total, rendered as `1.2k thinking`
+        // (matches the module-doc status line), no `~` estimate marker.
         assert!(
-            s.body.contains("1.2k tokens"),
+            s.body.contains("1.2k thinking"),
             "thinking token total missing: {}",
             s.body
         );

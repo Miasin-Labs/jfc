@@ -14,13 +14,7 @@ pub(super) async fn cmd_task_list(
     } else {
         let mut s = format!("**{} task(s):**\n\n", tasks.len());
         for t in &tasks {
-            let icon = match t.status {
-                jfc_session::TaskStatus::Pending => "□",
-                jfc_session::TaskStatus::InProgress => "▣",
-                jfc_session::TaskStatus::Completed => "✓",
-                jfc_session::TaskStatus::Failed => "✗",
-                jfc_session::TaskStatus::Deleted => "✗",
-            };
+            let icon = t.status.glyph();
             let owner = t
                 .owner
                 .as_deref()

@@ -1803,7 +1803,7 @@ mod helper_tests {
         tool.display = crate::types::ToolDisplayState::Expanded { pinned: true };
         let spans = build_title_spans(&tool, &t, "●", Style::default(), 80);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(combined.contains("📌"), "expected pin glyph: {combined:?}");
+        assert!(combined.contains("◆"), "expected pin glyph: {combined:?}");
     }
 
     #[test]

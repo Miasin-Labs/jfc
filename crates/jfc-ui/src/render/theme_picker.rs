@@ -67,7 +67,7 @@ pub(super) fn theme_picker(f: &mut Frame, app: &mut App) {
         .take(visible_rows)
         .map(|(idx, choice)| {
             let selected = idx == app.theme_picker_selected;
-            let marker = if selected { "›" } else { " " };
+            let marker = if selected { "▶" } else { " " };
             let sample_theme = crate::theme::Theme::by_name(choice.name).unwrap_or(t);
             Line::from(vec![
                 Span::styled(marker, Style::default().fg(t.accent)),

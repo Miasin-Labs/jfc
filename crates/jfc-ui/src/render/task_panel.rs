@@ -116,15 +116,13 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
     let rows: Vec<Row> = ordered
         .iter()
         .map(|(tk, depth)| {
-            let (icon, status_style) = match tk.status {
-                TaskStatus::Pending => ("□ pending", t.style_text_muted),
-                TaskStatus::InProgress => ("▣ in_progress", t.style_accent_bold),
-                TaskStatus::Completed => (
-                    "✓ completed",
-                    t.style_success.add_modifier(Modifier::CROSSED_OUT),
-                ),
-                _ => ("✗ deleted", t.style_error),
+            let status_style = match tk.status {
+                TaskStatus::Pending => t.style_text_muted,
+                TaskStatus::InProgress => t.style_accent_bold,
+                TaskStatus::Completed => t.style_success.add_modifier(Modifier::CROSSED_OUT),
+                _ => t.style_error,
             };
+            let icon = format!("{} {}", tk.status.glyph(), tk.status.label());
 
             let subj_style = if tk.status == TaskStatus::Completed {
                 t.style_text_muted.add_modifier(Modifier::CROSSED_OUT)

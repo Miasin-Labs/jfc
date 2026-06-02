@@ -573,7 +573,7 @@ pub(super) fn build_title_spans<'a>(
     ];
     if tool.display.is_pinned() {
         spans.push(Span::styled(
-            "📌 ",
+            "◆ ",
             Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
         ));
     }

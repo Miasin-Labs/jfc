@@ -733,13 +733,7 @@ pub(super) async fn cmd_cascade(
             if cascade.len() == 1 { "" } else { "s" }
         );
         for t in &cascade {
-            let status_marker = match t.status {
-                jfc_session::TaskStatus::Completed => "✓",
-                jfc_session::TaskStatus::InProgress => "⏵",
-                jfc_session::TaskStatus::Pending => "•",
-                jfc_session::TaskStatus::Failed => "✗",
-                jfc_session::TaskStatus::Deleted => "✗",
-            };
+            let status_marker = t.status.glyph();
             let file = t
                 .metadata
                 .as_ref()

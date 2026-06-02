@@ -330,7 +330,7 @@ async fn handle_inbox(
         });
     toast::push_with_cap(
         &mut app.toasts,
-        toast::Toast::new(toast::ToastKind::Info, format!("💬 {from}: {preview}")),
+        toast::Toast::new(toast::ToastKind::Info, format!("{from}: {preview}")),
     );
     // Persist so a session reload doesn't lose the message.
     if let Some(ref session_id) = app.current_session_id {

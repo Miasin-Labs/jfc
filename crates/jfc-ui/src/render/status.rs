@@ -301,8 +301,11 @@ pub(super) fn effort_status_badge(app: &App) -> String {
 pub(super) fn plan_badge(subscription: Option<&str>, seat: Option<&str>) -> Option<String> {
     let plan = subscription.map(pretty_plan_name);
     match (plan, seat) {
-        (Some(plan), Some(seat)) => Some(format!("{plan}·{seat}")),
-        (Some(plan), None) => Some(plan),
+        // A real subscription is branded with `◆` + Title Case so the plan
+        // (`◆ Max`) can't be misread as a second reasoning-effort level next
+        // to `effort high`. A bare seat id is internal — left unbranded.
+        (Some(plan), Some(seat)) => Some(format!("◆ {plan}·{seat}")),
+        (Some(plan), None) => Some(format!("◆ {plan}")),
         (None, Some(seat)) => Some(seat.to_owned()),
         (None, None) => None,
     }

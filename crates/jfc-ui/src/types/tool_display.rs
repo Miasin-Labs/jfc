@@ -12,7 +12,7 @@ pub enum ToolDisplayState {
     /// Default rendering: full content, capped at 80 lines (the
     /// preview cap). The user has not asked for either a one-line
     /// teaser or a raised cap. `pinned=true` resists auto-collapse
-    /// (e.g. on huge LargeText results) and surfaces the 📌 glyph.
+    /// (e.g. on huge LargeText results) and surfaces the ◆ glyph.
     Default { pinned: bool },
     /// One-line teaser only ("▶ N reads · click to expand").
     /// Set on huge outputs (LargeText that exceed COLLAPSE_LINES /

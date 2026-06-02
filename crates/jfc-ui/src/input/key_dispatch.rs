@@ -454,7 +454,7 @@ async fn handle_command_keys(
                 &mut app.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Success,
-                    format!("📋 {} ({}/{})", target, idx + 1, paths.len()),
+                    format!("{} ({}/{})", target, idx + 1, paths.len()),
                 ),
             );
             app.path_yank_cursor = app.path_yank_cursor.wrapping_add(1);
@@ -604,7 +604,7 @@ async fn handle_command_keys(
                         &mut app.toasts,
                         crate::toast::Toast::new(
                             crate::toast::ToastKind::Info,
-                            format!("📎 image attached ({}x{}, {} bytes)", w, h, att.bytes.len()),
+                            format!("image attached ({}x{}, {} bytes)", w, h, att.bytes.len()),
                         ),
                     );
                     app.image_counter += 1;

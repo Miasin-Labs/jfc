@@ -127,6 +127,33 @@ pub enum TaskStatus {
     Deleted,
 }
 
+impl TaskStatus {
+    /// Canonical single-cell status glyph. This is the single source of truth
+    /// for the task-status vocabulary — UI call sites (task panel, `/task`
+    /// listings, cascade summaries) must use this rather than re-deriving
+    /// their own glyph sets, which previously drifted apart.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            TaskStatus::Pending => "□",
+            TaskStatus::InProgress => "▣",
+            TaskStatus::Completed => "✓",
+            TaskStatus::Failed | TaskStatus::Deleted => "✗",
+        }
+    }
+
+    /// Lowercase status word matching the serde representation
+    /// (`pending`, `in_progress`, …). Used for status labels in listings.
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskStatus::Pending => "pending",
+            TaskStatus::InProgress => "in_progress",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Deleted => "deleted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: TodoTaskId,
