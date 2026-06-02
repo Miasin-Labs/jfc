@@ -228,6 +228,23 @@ fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::runtime::AppEv
         app.goal_evaluator_in_flight = false;
     }
 
+    // Zero the in-flight auto-mode classifier counter. Each classifier task
+    // races the (now-cancelled) cancel token and returns WITHOUT emitting a
+    // ClassifierDecision, so `pending_classifications` is never decremented —
+    // it would otherwise stay > 0 forever, wedging `pipeline_busy_for_submit`
+    // true so every later submit gets queued behind a turn that will never run
+    // (the "queue a message after cancelling and it never fires" bug). The
+    // aborted stream's StreamEvent::Error resets the rest of the pipeline; this
+    // counter has no such self-clearing event.
+    if app.pending_classifications > 0 {
+        tracing::info!(
+            target: "jfc::input::abort",
+            pending = app.pending_classifications,
+            "zeroing in-flight classifier counter on interrupt"
+        );
+        app.pending_classifications = 0;
+    }
+
     let killed = crate::bash_processes::terminate_all();
     if killed > 0 {
         tracing::info!(
@@ -1167,6 +1184,27 @@ async fn handle_enter_submit(
 /// (build_provider_messages* skips queued messages so they don't inflate
 /// the current turn).
 fn queue_prompt_for_later(app: &mut App, text: String) {
+    // Expand any `[Pasted #N · …]` chips to their full text BEFORE queuing —
+    // the non-queued submit path does this in `handle_submit`, but a queued
+    // prompt bypasses that, so without this the placeholder (and the eventually
+    // drained turn) would carry the literal chip token instead of what the user
+    // pasted. Only consume chips referenced in *this* text; later prompts keep
+    // theirs. Mirrors the expansion in `input/submit.rs`.
+    let text = if app.pasted_texts.is_empty() {
+        text
+    } else {
+        let mut expanded = text;
+        let mut remaining = Vec::new();
+        for (chip, content) in std::mem::take(&mut app.pasted_texts) {
+            if expanded.contains(&chip) {
+                expanded = expanded.replace(&chip, &content);
+            } else {
+                remaining.push((chip, content));
+            }
+        }
+        app.pasted_texts = remaining;
+        expanded
+    };
     let is_meta = text.starts_with('/');
     let glyph = if is_meta { "⚙" } else { "⏳" };
     tracing::info!(

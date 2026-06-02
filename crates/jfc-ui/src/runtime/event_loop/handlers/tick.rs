@@ -176,6 +176,31 @@ pub(crate) async fn handle_tick(
         needs_draw = true;
     }
 
+    // Idle-drain safety net for queued prompts. JFC's queue normally drains on
+    // stream Done/Error and CompactionDone, but those are one-shot events: if a
+    // turn ends through a path that doesn't fire one (e.g. a user interrupt
+    // whose aborted task never surfaces an Error, or any future gap), a queued
+    // prompt can strand with nothing to drain it — the "queue a message after
+    // cancelling and it never runs" bug. Claude Code avoids this by reading its
+    // command queue whenever the query loop goes idle; this mirrors that. The
+    // guard is strict: every in-flight signal must be clear, so this only ever
+    // fires when the app is genuinely idle with work waiting. `drain` sets
+    // `is_streaming` synchronously, so it can't double-fire on the next tick.
+    if !app.queued_prompts.is_empty()
+        && !app.is_streaming
+        && app.turn_started_at.is_none()
+        && app.pending_question.is_none()
+        && !app.pipeline_busy_for_submit()
+    {
+        tracing::warn!(
+            target: "jfc::ui::queue",
+            depth = app.queued_prompts.len(),
+            "idle-drain safety net: draining queued prompts the event path missed"
+        );
+        crate::runtime::drain_queued_prompts(app, tx).await;
+        needs_draw = true;
+    }
+
     // Speculative compaction: when the context reaches ~80% of the
     // compact threshold and we're idle (not streaming, not already
     // compacting), pre-set `force_compact_pending` so the next submit

@@ -370,7 +370,9 @@ impl PendingQuestion {
         &mut self.items[self.current]
     }
 
-    /// True once every question has a committed answer.
+    /// True once every question has a committed answer. (Exercised by tests;
+    /// the runtime path uses `advance_to_next_unanswered`'s return instead.)
+    #[allow(dead_code)]
     pub fn all_committed(&self) -> bool {
         self.items.iter().all(|i| i.answer.is_some())
     }
