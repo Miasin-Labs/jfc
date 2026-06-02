@@ -56,12 +56,18 @@ pub(super) fn approval(f: &mut Frame, app: &App) {
     // Check if the command is destructive and the gate is enabled.
     let is_destructive = is_tool_destructive(&pending.tool);
 
+    // Border/title color is a severity signal: destructive commands (rm -rf,
+    // force-push, …) get `error` red; ordinary approvals get `warning` gold.
+    // A static color for both would dull the signal so the user stops reading
+    // it on the genuinely dangerous ones.
+    let accent = if is_destructive { t.error } else { t.warning };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.warning))
+        .border_style(Style::default().fg(accent))
         .title(Span::styled(
             title,
-            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(t.surface));
 

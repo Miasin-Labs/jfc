@@ -226,6 +226,14 @@ async fn handle_palette_key(app: &mut App, key: event::KeyEvent) -> bool {
                 app.palette_selected += 1;
             }
         }
+        // Jump navigation, parity with the theme/model/session pickers.
+        KeyCode::Home => app.palette_selected = 0,
+        KeyCode::End => app.palette_selected = palette_items(app).len().saturating_sub(1),
+        KeyCode::PageUp => app.palette_selected = app.palette_selected.saturating_sub(5),
+        KeyCode::PageDown => {
+            let max = palette_items(app).len().saturating_sub(1);
+            app.palette_selected = (app.palette_selected + 5).min(max);
+        }
         KeyCode::Char(c) => {
             app.palette_input.push(c);
             app.palette_selected = 0;

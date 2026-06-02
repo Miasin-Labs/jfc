@@ -758,6 +758,21 @@ async fn palette_arrows_change_selection_normal() {
 }
 
 #[tokio::test]
+async fn palette_home_end_jump_selection_robust() {
+    let mut app = test_app();
+    app.show_palette = true;
+    let (tx, _rx) = channel();
+    // End jumps to the last item; Home back to the first. Parity with the
+    // theme/model/session pickers, which already support these keys.
+    handle_key(&mut app, key(KeyCode::End), &tx).await.unwrap();
+    let last = palette_items(&app).len().saturating_sub(1);
+    assert!(last > 0, "fixture should have multiple palette items");
+    assert_eq!(app.palette_selected, last);
+    handle_key(&mut app, key(KeyCode::Home), &tx).await.unwrap();
+    assert_eq!(app.palette_selected, 0);
+}
+
+#[tokio::test]
 async fn palette_esc_closes_robust() {
     let mut app = test_app();
     app.show_palette = true;
