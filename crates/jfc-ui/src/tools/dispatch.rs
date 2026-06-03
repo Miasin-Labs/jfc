@@ -1139,23 +1139,17 @@ pub async fn execute_tool(
             }
         }
         (ToolKind::StructuredOutput, ToolInput::StructuredOutput { data }) => {
-            // Validate the output is a JSON object (not null/array/primitive).
-            // Full JSON Schema validation happens when a schema is provided via
-            // the subagent `schema` parameter (stored in thread-local state).
-            if !data.is_object() {
-                ExecutionResult::failure(
-                    "StructuredOutput must be a JSON object. Got a non-object value.".to_string(),
-                )
-            } else {
-                match crate::tools::structured_output::validate_output(&data) {
-                    Ok(()) => ExecutionResult::success(format!(
-                        "Structured output provided successfully.\n{}",
-                        serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
-                    )),
-                    Err(errors) => ExecutionResult::failure(format!(
-                        "Output does not match required schema:\n{errors}"
-                    )),
-                }
+            // DSPy Assertions on the retry path: classify the payload as an
+            // AssertionOutcome and, on a hard violation, return *actionable*
+            // feedback (which field failed + re-emit instruction) so the agent's
+            // next-turn retry converges instead of seeing a bare error.
+            use crate::tools::structured_output::{format_retry_feedback, schema_outcome};
+            match format_retry_feedback(&schema_outcome(&data)) {
+                None => ExecutionResult::success(format!(
+                    "Structured output provided successfully.\n{}",
+                    serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                )),
+                Some(feedback) => ExecutionResult::failure(feedback),
             }
         }
         (ToolKind::WaitForMcpServers, ToolInput::WaitForMcpServers { timeout_ms }) => {
