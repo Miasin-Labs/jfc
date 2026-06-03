@@ -138,12 +138,51 @@ fn extract_tool_names_from_search_result(content: &str, names: &mut Vec<String>)
     }
 }
 
+/// Match tools to a user's intent for progressive disclosure.
+///
+/// Primary path: jfc-core's [`jfc_core::ToolIndex`] — a TF-IDF/cosine retriever
+/// over each tool's `name + description + schema`. This is the
+/// *Improving Tool Retrieval* / ToolRet recipe (the triple-convergence gap
+/// finding) made load-bearing: it ranks by term-weighted relevance rather than
+/// raw substring presence, so a query like "search the web for docs" surfaces
+/// `WebSearch` even when no token is a literal name substring.
+///
+/// The earlier hand-rolled [`intent_score`] substring scorer is retained as a
+/// deterministic fallback: if TF-IDF finds nothing (e.g. the intent shares no
+/// vocabulary with any tool), we fall back so progressive disclosure never
+/// silently advertises *fewer* tools than the substring heuristic would have.
 fn intent_tool_matches(intent: &str, all: &[ToolDef], limit: usize) -> Vec<String> {
     let terms = intent_terms(intent);
     if terms.is_empty() {
         return Vec::new();
     }
 
+    // Build the TF-IDF index over the full catalog, keyed by tool name.
+    let docs: Vec<(String, String)> = all
+        .iter()
+        .map(|tool| {
+            let schema = tool
+                .input_schema
+                .get("properties")
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            (
+                tool.name.clone(),
+                format!("{} {} {}", tool.name, tool.description, schema),
+            )
+        })
+        .collect();
+    let index = jfc_core::ToolIndex::build(docs);
+
+    // Query with the cleaned intent terms (stopwords already stripped).
+    let query = terms.join(" ");
+    let hits = index.search(&query, limit);
+    if !hits.is_empty() {
+        return hits.into_iter().map(|(name, _score)| name).collect();
+    }
+
+    // Fallback: the original substring scorer, so we never regress to fewer
+    // matches than before when TF-IDF and the query share no vocabulary.
     let mut scored: Vec<(usize, String)> = all
         .iter()
         .filter_map(|tool| {
@@ -374,5 +413,32 @@ mod tests {
         let names: Vec<&str> = selected.iter().map(|tool| tool.name.as_str()).collect();
 
         assert!(names.contains(&"WebSearch"));
+    }
+
+    // The TF-IDF retriever surfaces a tool by *description* relevance even when
+    // the intent shares no token with the tool's name — the substring scorer
+    // (`name.contains`) would miss this. Proves the jfc-core ToolIndex is the
+    // live ranker on the progressive-disclosure path.
+    #[test]
+    fn progressive_catalog_ranks_by_description_relevance_normal() {
+        let all = vec![
+            tool("Read", "read a file from disk"),
+            tool("ToolSearch", "discover tools"),
+            tool(
+                "post_bounty",
+                "register a coding bounty and let solver agents compete to win the reward",
+            ),
+            tool("run_coverage", "annotate functions with test coverage hit counts"),
+        ];
+
+        // "reward" / "compete" only appear in post_bounty's DESCRIPTION, never
+        // in any tool name — the substring name scorer would not surface it.
+        let selected = progressive_tool_defs(all, &[], Some("competition for a reward"));
+        let names: Vec<&str> = selected.iter().map(|tool| tool.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"post_bounty"),
+            "TF-IDF should surface post_bounty by description relevance, got {names:?}"
+        );
     }
 }
