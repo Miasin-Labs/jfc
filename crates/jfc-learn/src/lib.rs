@@ -19,6 +19,7 @@ pub mod trajectory;
 pub mod user_memory;
 pub mod variant_selector;
 pub mod verifier;
+pub mod workflow_opt;
 
 pub use auto_hints::{HintSource, RecallHint};
 pub use dreamer::{Dreamer, DreamerReport, DreamerTask};
@@ -34,5 +35,9 @@ pub use user_memory::{UserMemoryPipeline, UserObservation, UserProfile, UserProf
 pub use variant_selector::{
     CaseOutcome, CompileReport, EvalCase, PromptVariant, Teleprompter, VariantEvaluator,
     VariantScore,
+};
+pub use workflow_opt::{
+    WorkflowEvaluator, WorkflowOp, WorkflowOptimizer, WorkflowOutcome, WorkflowTask,
+    WorkflowVariant,
 };
 pub use verifier::{LlmVerifier, PromotionVerifier, VerifierContract, VerifierVerdict};
