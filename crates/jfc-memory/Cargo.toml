@@ -13,7 +13,7 @@ futures = { workspace = true }
 jfc-provider = { path = "../jfc-provider" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = "0.9"
+serde_yaml = { package = "serde_norway", version = "0.9" }
 tracing = { workspace = true }
 
 [dev-dependencies]

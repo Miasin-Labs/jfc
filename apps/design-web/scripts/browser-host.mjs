@@ -548,34 +548,39 @@ async function openPage(request) {
   const logs = [];
   const errors = [];
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({
-    viewport: request.viewport || DEFAULT_VIEWPORT,
-    deviceScaleFactor: request.device_scale_factor || 1
-  });
-  page.setDefaultTimeout(request.timeout_ms || DEFAULT_TIMEOUT_MS);
-  await page.addInitScript({ content: PREVIEW_RUNTIME_SOURCE });
-  page.on('console', (message) => {
-    logs.push({
-      type: message.type(),
-      text: message.text(),
-      location: message.location()
+  try {
+    const page = await browser.newPage({
+      viewport: request.viewport || DEFAULT_VIEWPORT,
+      deviceScaleFactor: request.device_scale_factor || 1
     });
-  });
-  page.on('pageerror', (error) => {
-    errors.push(String(error?.stack || error?.message || error));
-  });
-  page.on('requestfailed', (failedRequest) => {
-    errors.push(
-      `${failedRequest.method()} ${failedRequest.url()} failed: ${failedRequest.failure()?.errorText}`
-    );
-  });
+    page.setDefaultTimeout(request.timeout_ms || DEFAULT_TIMEOUT_MS);
+    await page.addInitScript({ content: PREVIEW_RUNTIME_SOURCE });
+    page.on('console', (message) => {
+      logs.push({
+        type: message.type(),
+        text: message.text(),
+        location: message.location()
+      });
+    });
+    page.on('pageerror', (error) => {
+      errors.push(String(error?.stack || error?.message || error));
+    });
+    page.on('requestfailed', (failedRequest) => {
+      errors.push(
+        `${failedRequest.method()} ${failedRequest.url()} failed: ${failedRequest.failure()?.errorText}`
+      );
+    });
 
-  await page.goto(request.url, {
-    waitUntil: request.wait_until || 'load',
-    timeout: request.timeout_ms || DEFAULT_TIMEOUT_MS
-  });
-  if (request.wait_ms) await page.waitForTimeout(request.wait_ms);
-  return { browser, page, logs, errors };
+    await page.goto(request.url, {
+      waitUntil: request.wait_until || 'load',
+      timeout: request.timeout_ms || DEFAULT_TIMEOUT_MS
+    });
+    if (request.wait_ms) await page.waitForTimeout(request.wait_ms);
+    return { browser, page, logs, errors };
+  } catch (error) {
+    await browser.close();
+    throw error;
+  }
 }
 
 async function makePptx(request, page) {

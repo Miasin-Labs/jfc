@@ -19,7 +19,7 @@
 //! <cache_root>/analysis/<analysis_kind>/<fingerprint_hex>.bin
 //! ```
 //!
-//! Each file is a bincode-serialized [`VersionedAnalysisEntry<V>`] tagged with
+//! Each file is a postcard-serialized [`VersionedAnalysisEntry<V>`] tagged with
 //! [`ANALYSIS_CACHE_SCHEMA_VERSION`]. Reads return `None` on schema mismatch
 //! after logging a `warn!`. Writes are atomic (tmp + rename).
 //!
@@ -39,7 +39,7 @@
 //!   per-file analysis entirely, cache misses trigger a recomputation that
 //!   feeds back into the cache.
 //! - Whole-graph chunk persistence (a `<cache_root>/graphs/<fp>.bin`
-//!   subdirectory holding bincoded `CodeGraph` partials) is planned but lives
+//!   subdirectory holding postcard-encoded `CodeGraph` partials) is planned but lives
 //!   outside this scaffold; it will reuse [`cache_root_for`] for path
 //!   discovery so test overrides flow through uniformly.
 
@@ -101,7 +101,7 @@ impl Fingerprint {
 ///
 /// Independent of [`crate::persistence::PERSISTENCE_SCHEMA_VERSION`]: those
 /// version the event log, this versions memoized values.
-pub const ANALYSIS_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const ANALYSIS_CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// Wire-format wrapper for on-disk analysis entries.
 ///
@@ -308,7 +308,7 @@ where
     ///
     /// - file not present (cache miss),
     /// - I/O error reading the file (logs `warn!`),
-    /// - bincode decode failure (logs `warn!`),
+    /// - postcard decode failure (logs `warn!`),
     /// - schema-version mismatch (logs `warn!`).
     pub fn load_disk<K: AnalysisKind>(&self, path: &Path, fp: Fingerprint) -> Option<V> {
         let _ = path; // reserved; see doc comment.
@@ -327,10 +327,8 @@ where
             }
         };
 
-        let cfg = bincode::config::standard();
-        let entry: VersionedAnalysisEntry<V> = match bincode::serde::decode_from_slice(&bytes, cfg)
-        {
-            Ok((value, _)) => value,
+        let entry: VersionedAnalysisEntry<V> = match postcard::from_bytes(&bytes) {
+            Ok(value) => value,
             Err(err) => {
                 warn!(
                     target = %target.display(),
@@ -368,8 +366,7 @@ where
             fs::create_dir_all(parent)?;
         }
 
-        let cfg = bincode::config::standard();
-        let bytes = bincode::serde::encode_to_vec(VersionedAnalysisEntry::wrap(value), cfg)
+        let bytes = postcard::to_stdvec(&VersionedAnalysisEntry::wrap(value))
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
 
         // POSIX `rename(2)` is atomic for files on the same filesystem; the
@@ -565,7 +562,7 @@ mod tests {
     }
 
     /// Stand-in for an SCC partition: `Vec<Vec<u32>>` round-trips trivially
-    /// through bincode + serde without dragging in graph types.
+    /// through postcard + serde without dragging in graph types.
     type Partition = Vec<Vec<u32>>;
 
     fn sample_partition() -> Partition {
@@ -631,8 +628,7 @@ mod tests {
             schema_version: ANALYSIS_CACHE_SCHEMA_VERSION + 1,
             value: sample_partition(),
         };
-        let cfg = bincode::config::standard();
-        let bytes = bincode::serde::encode_to_vec(&bogus, cfg).unwrap();
+        let bytes = postcard::to_stdvec(&bogus).unwrap();
 
         let target = tmp
             .path()

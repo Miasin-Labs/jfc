@@ -696,7 +696,7 @@ impl GraphSession {
         let mut remaining_files: Vec<(PathBuf, ExploreFileGroup)> = relevant_files
             .into_iter()
             .skip(files_included)
-            .chain(peripheral_files.into_iter())
+            .chain(peripheral_files)
             .collect();
         remaining_files.sort_by_key(|(_, group)| std::cmp::Reverse(group.score));
         let additional_files: Vec<(String, String)> = remaining_files
@@ -770,7 +770,7 @@ impl GraphSession {
                 .graph
                 .get_edges_from(&current)
                 .into_iter()
-                .chain(self.graph.get_edges_to(&current).into_iter())
+                .chain(self.graph.get_edges_to(&current))
             {
                 if !is_explore_edge(&edge.kind) {
                     continue;

@@ -110,18 +110,32 @@ mod tests {
     // execution would race on `set_var`/`remove_var` reads.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_env<F: FnOnce()>(key: &str, val: Option<&str>, body: F) {
+    // Takes ENV_LOCK once for the whole set: nesting `with_env` calls
+    // would self-deadlock on the non-reentrant mutex.
+    fn with_envs<F: FnOnce()>(vars: &[(&str, Option<&str>)], body: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(key).ok();
-        match val {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            None => unsafe { std::env::remove_var(key) },
-        }
+        let prev: Vec<Option<String>> = vars
+            .iter()
+            .map(|(key, val)| {
+                let prev = std::env::var(key).ok();
+                match val {
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+                prev
+            })
+            .collect();
         body();
-        match prev {
-            Some(p) => unsafe { std::env::set_var(key, p) },
-            None => unsafe { std::env::remove_var(key) },
+        for ((key, _), prev) in vars.iter().zip(prev) {
+            match prev {
+                Some(p) => unsafe { std::env::set_var(key, p) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
+    }
+
+    fn with_env<F: FnOnce()>(key: &str, val: Option<&str>, body: F) {
+        with_envs(&[(key, val)], body);
     }
 
     #[test]
@@ -145,16 +159,20 @@ mod tests {
 
     #[test]
     fn xdg_cache_home_is_honored() {
-        with_env(ENV_OVERRIDE, None, || {
-            with_env("XDG_CACHE_HOME", Some("/tmp/xdg-cache-test"), || {
+        with_envs(
+            &[
+                (ENV_OVERRIDE, None),
+                ("XDG_CACHE_HOME", Some("/tmp/xdg-cache-test")),
+            ],
+            || {
                 let resolved = resolve_data_dir(Path::new("/tmp/some-workspace"));
                 assert!(
                     resolved.starts_with("/tmp/xdg-cache-test/jfc-graph"),
                     "expected XDG_CACHE_HOME prefix, got {}",
                     resolved.display()
                 );
-            });
-        });
+            },
+        );
     }
 
     #[test]

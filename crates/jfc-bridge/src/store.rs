@@ -183,7 +183,13 @@ impl BridgeStore for MemoryBridgeStore {
             return Err(StoreError::SessionNotFound(session_id.to_owned()));
         }
         let now = now_ms();
-        let worker_epoch = req.worker_epoch.max(1);
+        // worker_epoch == 0 means "unspecified": preserve the existing
+        // worker's epoch instead of resetting it to 1.
+        let worker_epoch = if req.worker_epoch == 0 {
+            inner.workers.get(session_id).map_or(1, |w| w.worker_epoch)
+        } else {
+            req.worker_epoch
+        };
         let worker_id = req.worker_id.unwrap_or_else(|| worker_id.to_owned());
         if let Some(current) = inner.workers.get(session_id)
             && req.worker_epoch != 0

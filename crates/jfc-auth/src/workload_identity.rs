@@ -510,15 +510,29 @@ impl TokenCache {
         self.refresh_blocking().await
     }
 
-    /// Force a token refresh (blocking).
+    /// Force a token refresh (blocking). Always fetches, even if the cached
+    /// token is still fresh.
     pub async fn force_refresh(&self) -> Result<String> {
-        self.refresh_blocking().await
+        let mut state = self.inner.state.write().await;
+        let token = resolve_credentials(&self.inner.client, &self.inner.config).await?;
+        let access_token = token.access_token.clone();
+        state.token = Some(token);
+        state.refreshing = false;
+        Ok(access_token)
     }
 
     async fn refresh_blocking(&self) -> Result<String> {
+        // Hold the write lock across the fetch so concurrent callers queue
+        // behind one refresh instead of stampeding the token endpoint; the
+        // recheck under the lock returns the token a winner just installed.
+        let mut state = self.inner.state.write().await;
+        if let Some(ref token) = state.token
+            && !token.expires_within(FORCE_REFRESH_SECS)
+        {
+            return Ok(token.access_token.clone());
+        }
         let token = resolve_credentials(&self.inner.client, &self.inner.config).await?;
         let access_token = token.access_token.clone();
-        let mut state = self.inner.state.write().await;
         state.token = Some(token);
         state.refreshing = false;
         Ok(access_token)

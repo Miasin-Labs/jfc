@@ -42,7 +42,7 @@ use crate::nodes::{NodeData, NodeId};
 
 /// Current overlay-snapshot schema version. Bumped when the on-disk
 /// format changes.
-pub const OVERLAY_SCHEMA_VERSION: u32 = 1;
+pub const OVERLAY_SCHEMA_VERSION: u32 = 2;
 
 /// On-disk envelope.
 ///
@@ -151,7 +151,7 @@ pub fn load_base_snapshot(path: &Path) -> Result<LoadedSnapshot, OverlayError> {
     })
 }
 
-/// Save a graph snapshot using bincode (much faster than JSON for large graphs).
+/// Save a graph snapshot using postcard (much faster than JSON for large graphs).
 /// Used by the session cache to persist between jfc runs.
 pub fn save_snapshot_bincode(
     path: &Path,
@@ -183,27 +183,25 @@ pub fn save_snapshot_bincode(
         nodes,
         edges,
     };
-    let encoded =
-        bincode::serde::encode_to_vec(&snap, bincode::config::standard()).map_err(|e| {
-            OverlayError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+    let encoded = postcard::to_stdvec(&snap).map_err(|e| {
+        OverlayError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))
+    })?;
     fs::write(path, encoded)?;
     Ok(())
 }
 
-/// Load a bincode-serialized graph snapshot.
+/// Load a postcard-serialized graph snapshot.
 pub fn load_snapshot_bincode(path: &Path) -> Result<LoadedSnapshot, OverlayError> {
     let raw = fs::read(path)?;
-    let (snap, _): (OverlaySnapshot, _) =
-        bincode::serde::decode_from_slice(&raw, bincode::config::standard()).map_err(|e| {
-            OverlayError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+    let snap: OverlaySnapshot = postcard::from_bytes(&raw).map_err(|e| {
+        OverlayError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))
+    })?;
     if snap.schema_version != OVERLAY_SCHEMA_VERSION {
         return Err(OverlayError::SchemaMismatch {
             expected: OVERLAY_SCHEMA_VERSION,
@@ -404,7 +402,8 @@ mod tests {
     }
 
     #[test]
-    fn overlay_schema_version_is_one() {
-        assert_eq!(OVERLAY_SCHEMA_VERSION, 1);
+    fn overlay_schema_version_is_two() {
+        // Bumped 1 -> 2 when the snapshot wire format moved bincode -> postcard.
+        assert_eq!(OVERLAY_SCHEMA_VERSION, 2);
     }
 }

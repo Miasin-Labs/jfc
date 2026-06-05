@@ -230,9 +230,13 @@ impl FindingStore {
             context: "acquiring lock for flush".to_string(),
         })?;
 
-        let mut file = File::create(&self.findings_path).map_err(|e| AuditError::Io {
+        // Atomic write: serialize to a sibling tmp file, then rename over the
+        // target. A crash mid-flush leaves the previous findings.jsonl intact
+        // instead of a truncated/half-written file.
+        let tmp_path = self.findings_path.with_extension("jsonl.tmp");
+        let mut file = File::create(&tmp_path).map_err(|e| AuditError::Io {
             source: e,
-            context: "truncating findings.jsonl for flush".to_string(),
+            context: "creating findings.jsonl.tmp for flush".to_string(),
         })?;
 
         for finding in self.index.values() {
@@ -242,6 +246,16 @@ impl FindingStore {
                 context: "writing finding during flush".to_string(),
             })?;
         }
+
+        file.flush().map_err(|e| AuditError::Io {
+            source: e,
+            context: "flushing findings.jsonl.tmp".to_string(),
+        })?;
+        drop(file);
+        std::fs::rename(&tmp_path, &self.findings_path).map_err(|e| AuditError::Io {
+            source: e,
+            context: "atomically replacing findings.jsonl".to_string(),
+        })?;
 
         lock_file.unlock().map_err(|e| AuditError::Io {
             source: e,
