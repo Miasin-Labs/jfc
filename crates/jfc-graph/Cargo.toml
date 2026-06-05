@@ -25,7 +25,9 @@ tree-sitter-kotlin-sg = "0.4"
 tree-sitter-swift = "0.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
-postcard = { version = "1", features = ["use-std"] }
+# default-features off: drops `heapless-cas` -> heapless 0.7 -> the
+# archived atomic-polyfill (RUSTSEC-2023-0089); we only need std Vec I/O.
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 ignore = "0.4"
 thiserror = { workspace = true }
 tracing = { workspace = true }
