@@ -1331,6 +1331,14 @@ async fn verify_bounty_solution_rejects_broken_zig_build_robust() {
         suspicious: false,
     };
 
+    let zig_available = std::process::Command::new("zig")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !zig_available {
+        eprintln!("zig not installed; skipping");
+        return;
+    }
     let verification = verify_bounty_solution(cwd, "zig_bounty", &sol).await;
     assert!(!verification.passed, "broken zig build must fail");
     assert!(
