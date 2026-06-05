@@ -2458,14 +2458,23 @@ mod tests {
     }
 
     // Normal: a post-compaction savings hint above the 20k floor emits the
-    // context_hint block (context-hint-2026-04-09 parity).
+    // context_hint block — but ONLY while the context-hint-2026-04-09 beta
+    // is enabled. The API currently rejects the beta, so the gate is off and
+    // the body field must stay out (it would 400 otherwise).
     #[test]
     fn build_body_emits_context_hint_above_floor_normal() {
         let mut o = opts("claude-opus-4-8");
         o.context_hint_tokens_saved = Some(50_000);
         let body = build_body(vec![make_user_msg("hi")], &o, TEST_BH);
-        assert_eq!(body["context_hint"]["enabled"], true);
-        assert_eq!(body["context_hint"]["target_tokens_saved"], 50_000);
+        if CONTEXT_HINT_BETA_ENABLED {
+            assert_eq!(body["context_hint"]["enabled"], true);
+            assert_eq!(body["context_hint"]["target_tokens_saved"], 50_000);
+        } else {
+            assert!(
+                body.get("context_hint").is_none(),
+                "context_hint must not be sent while the beta gate is off"
+            );
+        }
     }
 
     // Robust: a trivial savings below the 20k floor must NOT emit the hint —
