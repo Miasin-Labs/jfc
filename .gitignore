@@ -39,3 +39,6 @@ core.*
 .jfc/*-heights.json
 # Per-crate runtime state dirs created when running jfc from a subdir.
 crates/**/.jfc/
+
+# Agent runtime state (exec-call captures)
+.code/
