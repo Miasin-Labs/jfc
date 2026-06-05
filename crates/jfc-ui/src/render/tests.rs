@@ -1044,7 +1044,7 @@ mod pure_helper_tests {
         };
         app.messages.push(ChatMessage {
             role: Role::Assistant,
-            parts: vec![MessagePart::Tool(tool)],
+            parts: vec![MessagePart::tool(tool)],
             agent_name: None,
             model_name: None,
             cost_tier: None,
@@ -1091,7 +1091,7 @@ mod pure_helper_tests {
             };
             app.messages.push(ChatMessage {
                 role: Role::Assistant,
-                parts: vec![MessagePart::Tool(tool)],
+                parts: vec![MessagePart::tool(tool)],
                 agent_name: None,
                 model_name: None,
                 cost_tier: None,
@@ -1140,7 +1140,7 @@ mod pure_helper_tests {
             };
             app.messages.push(ChatMessage {
                 role: Role::Assistant,
-                parts: vec![MessagePart::Tool(tool)],
+                parts: vec![MessagePart::tool(tool)],
                 agent_name: None,
                 model_name: None,
                 cost_tier: None,

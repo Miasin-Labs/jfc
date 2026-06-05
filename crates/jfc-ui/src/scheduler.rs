@@ -36,7 +36,8 @@ pub enum ToolBatch {
 /// Whether a tool kind is safe to run concurrently with other tools.
 ///
 /// Read-only tools that don't mutate the filesystem or have side effects are
-/// concurrency-safe. Write tools, shell commands, and patches are not.
+/// concurrency-safe. Write tools, shell commands, patches, and TaskDone
+/// verifications are not.
 pub fn is_concurrency_safe(kind: &ToolKind) -> bool {
     matches!(
         kind,
@@ -48,7 +49,6 @@ pub fn is_concurrency_safe(kind: &ToolKind) -> bool {
             | ToolKind::TaskCreate
             | ToolKind::TaskUpdate
             | ToolKind::TaskList
-            | ToolKind::TaskDone
             | ToolKind::Skill
             | ToolKind::ToolSearch
             | ToolKind::ToolSuggest
@@ -471,7 +471,6 @@ mod tests {
             ToolKind::TaskCreate,
             ToolKind::TaskUpdate,
             ToolKind::TaskList,
-            ToolKind::TaskDone,
             ToolKind::Skill,
             ToolKind::ToolSearch,
             ToolKind::ToolSuggest,
@@ -497,6 +496,7 @@ mod tests {
             ToolKind::Bash,
             ToolKind::ApplyPatch,
             ToolKind::Task,
+            ToolKind::TaskDone,
             ToolKind::MemoryCreate,
             ToolKind::MemoryDelete,
         ] {

@@ -21,7 +21,7 @@ pub enum MessagePart {
     Reasoning(String),
     /// Opaque redacted thinking blob from Anthropic. Round-tripped verbatim.
     RedactedThinking(String),
-    Tool(ToolCall),
+    Tool(Box<ToolCall>),
     TaskStatus(TaskStatusPart),
     CompactBoundary {
         pre_tokens: usize,
@@ -36,6 +36,14 @@ pub enum MessagePart {
 }
 
 impl MessagePart {
+    pub fn tool(tool: ToolCall) -> Self {
+        Self::Tool(Box::new(tool))
+    }
+
+    pub fn tool_boxed(tool: Box<ToolCall>) -> Self {
+        Self::Tool(tool)
+    }
+
     pub fn approx_text_len(&self) -> usize {
         match self {
             Self::Text(s) | Self::Reasoning(s) | Self::Advisor(s) => s.len(),

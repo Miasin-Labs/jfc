@@ -671,7 +671,9 @@ mod disk_io_tests {
         };
         let messages = vec![
             ChatMessage::user("run a command".into()),
-            ChatMessage::assistant_parts(vec![crate::types::MessagePart::Tool(tool)]),
+            ChatMessage::assistant_parts(vec![crate::types::MessagePart::tool_boxed(Box::new(
+                tool,
+            ))]),
         ];
         let id = SessionId::new("ses_20260506_142000");
         save_session(&id, &messages, Some("/tmp"), Some("opus")).await;

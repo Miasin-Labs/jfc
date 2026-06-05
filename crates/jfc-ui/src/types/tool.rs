@@ -96,7 +96,7 @@ pub fn sample_tool_harness_message() -> ChatMessage {
 
     ChatMessage::assistant_parts(vec![
         MessagePart::Reasoning("Increase default bash timeout from 2min to 5min.".into()),
-        MessagePart::Tool(ToolCall {
+        MessagePart::tool_boxed(Box::new(ToolCall {
             id: "edit-1".into(),
             kind: ToolKind::Edit,
             status: ToolStatus::Completed,
@@ -111,8 +111,8 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
-        }),
-        MessagePart::Tool(ToolCall {
+        })),
+        MessagePart::tool_boxed(Box::new(ToolCall {
             id: "bash-1".into(),
             kind: ToolKind::Bash,
             status: ToolStatus::Completed,
@@ -132,8 +132,8 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
-        }),
-        MessagePart::Tool(ToolCall {
+        })),
+        MessagePart::tool_boxed(Box::new(ToolCall {
             id: "read-1".into(),
             kind: ToolKind::Read,
             status: ToolStatus::Completed,
@@ -152,8 +152,8 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
-        }),
-        MessagePart::Tool(ToolCall {
+        })),
+        MessagePart::tool_boxed(Box::new(ToolCall {
             id: "write-1".into(),
             kind: ToolKind::Write,
             status: ToolStatus::Pending,
@@ -166,8 +166,8 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
-        }),
-        MessagePart::Tool(ToolCall {
+        })),
+        MessagePart::tool_boxed(Box::new(ToolCall {
             id: "search-1".into(),
             kind: ToolKind::Search,
             status: ToolStatus::Running,
@@ -184,8 +184,8 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
-        }),
-        MessagePart::Tool(ToolCall {
+        })),
+        MessagePart::tool_boxed(Box::new(ToolCall {
             id: "patch-1".into(),
             kind: ToolKind::ApplyPatch,
             status: ToolStatus::Completed,
@@ -203,8 +203,8 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
-        }),
-        MessagePart::Tool(ToolCall {
+        })),
+        MessagePart::tool_boxed(Box::new(ToolCall {
             id: "generic-1".into(),
             kind: ToolKind::Generic("Delegate".into()),
             status: ToolStatus::Failed,
@@ -216,7 +216,7 @@ pub fn sample_tool_harness_message() -> ChatMessage {
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
-        }),
+        })),
     ])
 }
 
@@ -565,7 +565,9 @@ mod tests {
     fn validate_turn_invariants_flags_orphan_tool_use_robust() {
         let msgs = vec![
             ChatMessage::user("run it".into()),
-            ChatMessage::assistant_parts(vec![MessagePart::Tool(pending_tool_call("tool_42"))]),
+            ChatMessage::assistant_parts(vec![MessagePart::tool_boxed(Box::new(
+                pending_tool_call("tool_42"),
+            ))]),
             ChatMessage::user("never mind".into()),
             ChatMessage::assistant("ok".into()),
         ];
@@ -587,7 +589,7 @@ mod tests {
             role: Role::User,
             parts: vec![
                 MessagePart::Text("hi".into()),
-                MessagePart::Tool(complete_tool_call("tool_99")),
+                MessagePart::tool_boxed(Box::new(complete_tool_call("tool_99"))),
             ],
             agent_name: None,
             model_name: None,

@@ -395,7 +395,7 @@ mod should_continue_loop_tests {
     use jfc_provider::{ProviderContent, ProviderRole};
 
     fn assistant_with_tool(status: ToolStatus) -> ChatMessage {
-        ChatMessage::assistant_parts(vec![MessagePart::Tool(ToolCall {
+        ChatMessage::assistant_parts(vec![MessagePart::tool(ToolCall {
             id: "toolu_x".into(),
             kind: ToolKind::Bash,
             status,
@@ -411,7 +411,7 @@ mod should_continue_loop_tests {
     }
 
     fn assistant_with_failed_tool_output(output: ToolOutput) -> ChatMessage {
-        ChatMessage::assistant_parts(vec![MessagePart::Tool(ToolCall {
+        ChatMessage::assistant_parts(vec![MessagePart::tool(ToolCall {
             id: "toolu_x".into(),
             kind: ToolKind::Write,
             status: ToolStatus::Failed,
@@ -878,7 +878,7 @@ mod pause_turn_end_to_end_tests {
             ChatMessage::user("research rust".into()),
             ChatMessage::assistant_parts(vec![
                 MessagePart::Text("Looking it up.".into()),
-                MessagePart::Tool(server_tool(
+                MessagePart::tool(server_tool(
                     "srvtoolu_1",
                     ToolStatus::Running,
                     ToolOutput::Empty,
@@ -982,7 +982,7 @@ mod pause_turn_end_to_end_tests {
             ChatMessage::user("research rust".into()),
             ChatMessage::assistant_parts(vec![
                 MessagePart::Text("Looking it up.".into()),
-                MessagePart::Tool(tool),
+                MessagePart::tool(tool),
             ]),
         ];
 
@@ -1046,7 +1046,7 @@ mod pause_turn_end_to_end_tests {
         app.messages = vec![
             ChatMessage::user("research rust then summarize".into()),
             ChatMessage::assistant("Sure, searching now.".into()),
-            ChatMessage::assistant_parts(vec![MessagePart::Tool(server_tool(
+            ChatMessage::assistant_parts(vec![MessagePart::tool(server_tool(
                 "srvtoolu_3",
                 ToolStatus::Running,
                 ToolOutput::Empty,
@@ -1139,12 +1139,12 @@ mod pause_turn_end_to_end_tests {
             ChatMessage::user("research rust and run ls".into()),
             ChatMessage::assistant_parts(vec![
                 MessagePart::Text("Searching and listing.".into()),
-                MessagePart::Tool(server_tool(
+                MessagePart::tool(server_tool(
                     "srvtoolu_mix",
                     ToolStatus::Running,
                     ToolOutput::Empty,
                 )),
-                MessagePart::Tool(local_tool),
+                MessagePart::tool(local_tool),
             ]),
         ];
 
@@ -1284,7 +1284,7 @@ mod stall_detection_tests {
     // should_continue_loop, not this guard.
     #[test]
     fn skips_tool_bearing_turns() {
-        let msg = ChatMessage::assistant_parts(vec![MessagePart::Tool(ToolCall {
+        let msg = ChatMessage::assistant_parts(vec![MessagePart::tool(ToolCall {
             id: "toolu_x".into(),
             kind: ToolKind::Bash,
             status: ToolStatus::Completed,

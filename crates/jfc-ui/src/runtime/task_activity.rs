@@ -123,7 +123,7 @@ mod tests {
     use jfc_core::{ToolInput, ToolKind};
 
     fn tool_msg(kind: ToolKind) -> ChatMessage {
-        ChatMessage::assistant_parts(vec![MessagePart::Tool(ToolCall {
+        ChatMessage::assistant_parts(vec![MessagePart::tool(ToolCall {
             id: "t".into(),
             kind,
             status: ToolStatus::Completed,

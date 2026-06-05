@@ -311,7 +311,7 @@ fn scan_path_refs_rejects_url_and_pure_numbers_robust() {
 
 #[test]
 fn collect_recent_paths_dedups_normal() {
-    let msg = ChatMessage::assistant_parts(vec![MessagePart::Tool(ToolCall {
+    let msg = ChatMessage::assistant_parts(vec![MessagePart::tool(ToolCall {
         id: "t1".into(),
         kind: ToolKind::Bash,
         status: ToolStatus::Completed,
@@ -582,7 +582,7 @@ async fn remote_orphaned_permission_response_recovers_unresolved_tool_robust() {
     let tool = make_tool("t_orphan", ToolKind::Bash);
     app.messages.push(ChatMessage::user("run".into()));
     app.messages
-        .push(ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)]));
+        .push(ChatMessage::assistant_parts(vec![MessagePart::tool(tool)]));
     let (tx, _rx) = channel();
 
     handle_remote_approval_response(&mut app, &tx, "t_orphan".into(), false);
@@ -1042,7 +1042,7 @@ async fn jump_armed_e_jumps_to_error_normal() {
     let mut app = test_app();
     // failed tool in messages → e jumps to it
     app.messages
-        .push(ChatMessage::assistant_parts(vec![MessagePart::Tool(
+        .push(ChatMessage::assistant_parts(vec![MessagePart::tool(
             ToolCall {
                 id: "t1".into(),
                 kind: ToolKind::Bash,
@@ -1774,7 +1774,7 @@ async fn shift_question_toggles_help_robust() {
 async fn lower_o_toggles_tool_expand_normal() {
     let mut app = test_app();
     app.messages
-        .push(ChatMessage::assistant_parts(vec![MessagePart::Tool(
+        .push(ChatMessage::assistant_parts(vec![MessagePart::tool(
             ToolCall {
                 id: "t".into(),
                 kind: ToolKind::Read,

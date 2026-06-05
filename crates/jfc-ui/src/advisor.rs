@@ -959,7 +959,9 @@ mod tests {
             exit_code: Some(0),
         };
 
-        let snap = render_snapshot(&[ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)])]);
+        let snap = render_snapshot(&[ChatMessage::assistant_parts(vec![MessagePart::tool_boxed(
+            Box::new(tool),
+        )])]);
 
         assert!(snap.contains("Assistant: [Tool: Bash - cargo check; status=completed]"));
         assert!(snap.contains("Tool result: exit: 0"));

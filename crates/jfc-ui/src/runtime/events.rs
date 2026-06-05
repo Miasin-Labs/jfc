@@ -189,11 +189,6 @@ pub enum UiEvent {
     },
 }
 
-// `StreamEvent::Tool(ToolCall)` is the dominant streaming payload (every
-// tool_use block on every turn flows through this variant). Boxing it would
-// trade a one-time heap alloc per tool for shrinking the *common* path's
-// variant size — net-negative when Tool is the most-constructed variant.
-// Same rationale on `ToolEvent` below.
 pub enum StreamEvent {
     Chunk {
         text: Option<String>,
@@ -208,7 +203,7 @@ pub enum StreamEvent {
     /// the thinking block for display (matching cli.js's thinking_tokens system
     /// events which surface token/sec stats during redacted-thinking phase).
     ThinkingTokens(u32),
-    Tool(ToolCall),
+    Tool(Box<ToolCall>),
     /// Opaque redacted thinking blob — store on message parts for round-tripping.
     RedactedThinking(String),
     /// API response message ID — stored for `diagnostics.previous_message_id`.
@@ -276,7 +271,7 @@ pub enum ToolEvent {
     /// runs; when false, the tool is dispatched immediately without prompting
     /// the user (auto-mode replaces the manual approval flow).
     ClassifierDecision {
-        tool: ToolCall,
+        tool: Box<ToolCall>,
         blocked: bool,
         reason: String,
     },

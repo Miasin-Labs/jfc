@@ -1017,7 +1017,7 @@ fn message_part_tool_carries_input_output_normal() {
         started_at: None,
         thought_signature: None,
     };
-    let part = MessagePart::Tool(tool);
+    let part = MessagePart::tool(tool);
     match part {
         MessagePart::Tool(tc) => {
             assert_eq!(tc.kind, ToolKind::Edit);

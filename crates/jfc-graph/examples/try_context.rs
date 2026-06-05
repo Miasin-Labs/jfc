@@ -62,6 +62,7 @@ fn main() {
         max_nodes: 15,
         include_code: false,
         traversal_depth: 1,
+        force_expand: false,
     };
     let result = session.context("how does the tool dispatch system work", opts);
     println!("intent       = {:?}", result.intent);
@@ -75,6 +76,7 @@ fn main() {
         max_nodes: 8,
         include_code: false,
         traversal_depth: 1,
+        force_expand: false,
     };
     let result = session.context("add a new caching layer", opts);
     println!("intent       = {:?}", result.intent);

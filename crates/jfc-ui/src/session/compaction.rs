@@ -284,7 +284,7 @@ mod coalesce_tests {
     }
 
     fn tool_part(id: &str) -> MessagePart {
-        MessagePart::Tool(ToolCall {
+        MessagePart::tool(ToolCall {
             id: ToolId::from(id),
             kind: ToolKind::Bash,
             status: ToolStatus::Completed,
@@ -631,7 +631,7 @@ mod terminalize_tests {
     };
 
     fn tool(id: &str, status: ToolStatus, output: ToolOutput) -> MessagePart {
-        MessagePart::Tool(ToolCall {
+        MessagePart::tool(ToolCall {
             id: crate::ids::ToolId::from(id),
             kind: ToolKind::Bash,
             status,

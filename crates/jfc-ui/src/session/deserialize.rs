@@ -47,7 +47,7 @@ pub(crate) fn deserialize_part(part: SerializedPart) -> MessagePart {
                 thought_signature,
             } = *tool;
             let tool_kind = ToolKind::from_name(&kind);
-            MessagePart::Tool(ToolCall {
+            MessagePart::tool(ToolCall {
                 id: crate::ids::ToolId::from(id),
                 kind: tool_kind,
                 status: deserialize_tool_status(&status),

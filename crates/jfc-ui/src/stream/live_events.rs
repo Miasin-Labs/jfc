@@ -301,7 +301,7 @@ pub(super) async fn drain_stream_events(
                     tool
                 };
                 let _ = tx
-                    .send(AppEvent::Stream(RuntimeStreamEvent::Tool(tool)))
+                    .send(AppEvent::Stream(RuntimeStreamEvent::Tool(Box::new(tool))))
                     .await;
             }
             StreamEvent::ServerToolResult {

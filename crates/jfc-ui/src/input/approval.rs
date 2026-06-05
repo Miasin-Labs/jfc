@@ -196,7 +196,7 @@ fn find_unresolved_tool_call(app: &App, tool_use_id: &str) -> Option<ToolCall> {
                 return None;
             };
             if tool.id.as_str() == tool_use_id && !tool.status.is_terminal() {
-                Some(tool.clone())
+                Some((**tool).clone())
             } else {
                 None
             }

@@ -493,7 +493,7 @@ mod tests {
         msgs.push(ChatMessage::user("hello".into()));
         // assistant tool_use turn — only the tool block matters
         let mut asst = ChatMessage::assistant(String::new());
-        asst.parts.push(MessagePart::Tool(dummy_pending("ls")));
+        asst.parts.push(MessagePart::tool(dummy_pending("ls")));
         msgs.push(asst);
         let pending = dummy_pending("rm -rf /");
         let tx = build_transcript(&msgs, &pending);

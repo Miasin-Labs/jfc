@@ -1423,7 +1423,7 @@ mod empty_billed_tests {
     }
 
     fn tool_part(id: &str) -> MessagePart {
-        MessagePart::Tool(ToolCall {
+        MessagePart::tool(ToolCall {
             id: ToolId::from(id),
             kind: ToolKind::Bash,
             status: ToolStatus::Completed,

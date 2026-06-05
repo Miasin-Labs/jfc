@@ -322,7 +322,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("run ls"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         // user, assistant(tool_use), user(tool_result)
@@ -361,7 +361,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("which one?"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         // No ToolUse / ToolResult block survives for the question.
@@ -402,7 +402,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("pick one"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         let has_tool_use = out
@@ -431,7 +431,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("run rm -rf /"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         let last = out.last().unwrap();
@@ -457,7 +457,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("hi"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         let last = out.last().unwrap();
@@ -490,7 +490,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("run"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         let last = out.last().unwrap();
@@ -519,7 +519,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("read x.rs"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         match &out.last().unwrap().content[0] {
@@ -541,7 +541,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("glob"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         match &out.last().unwrap().content[0] {
@@ -567,7 +567,7 @@ mod tests {
             user_msg("hi"),
             assistant_with_parts(vec![
                 MessagePart::Text("I'll run it.".into()),
-                MessagePart::Tool(tool),
+                MessagePart::tool(tool),
             ]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
@@ -653,7 +653,7 @@ mod tests {
             user_msg("search rust"),
             assistant_with_parts(vec![
                 MessagePart::Text("Looking it up.".into()),
-                MessagePart::Tool(tool),
+                MessagePart::tool(tool),
             ]),
         ];
         let out = build_provider_messages_for_pause_turn_resume(&msgs);
@@ -691,7 +691,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("hi"),
-            assistant_with_parts(vec![MessagePart::Tool(t1), MessagePart::Tool(t2)]),
+            assistant_with_parts(vec![MessagePart::tool(t1), MessagePart::tool(t2)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         // Tool-result message is the last (no synthetic-user trailer needed).
@@ -731,7 +731,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("search rust"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         // The KEY assertion: NO fabricated `ProviderContent::ToolResult`
@@ -786,7 +786,7 @@ mod tests {
         let _ = tool.mark_completed();
         let msgs = vec![
             user_msg("search rust"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         let assistant = out
@@ -851,7 +851,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("review this"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         let assistant = out
@@ -881,7 +881,7 @@ mod tests {
         );
         let msgs = vec![
             user_msg("search rust"),
-            assistant_with_parts(vec![MessagePart::Tool(tool)]),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
         ];
         let out = build_provider_messages_with_tool_results(&msgs);
         let has_server_tool_use = out.iter().any(|m| {

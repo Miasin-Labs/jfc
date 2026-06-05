@@ -265,7 +265,7 @@ fn completed_tool_batch_summary(app: &App) -> Option<(String, Vec<String>)> {
         .parts
         .iter()
         .filter_map(|part| match part {
-            MessagePart::Tool(tool) if tool.status.is_terminal() => Some(tool),
+            MessagePart::Tool(tool) if tool.status.is_terminal() => Some(tool.as_ref()),
             _ => None,
         })
         .collect();
@@ -883,7 +883,7 @@ mod tests {
         app.task_store = jfc_session::TaskStore::in_memory();
         app.messages.push(ChatMessage::user("run tool".into()));
         app.messages
-            .push(ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)]));
+            .push(ChatMessage::assistant_parts(vec![MessagePart::tool(tool)]));
         app.turn_started_at = Some(Instant::now());
         app.is_streaming = false;
         (app, tool_id)

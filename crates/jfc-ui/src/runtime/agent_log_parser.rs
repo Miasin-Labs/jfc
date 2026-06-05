@@ -149,7 +149,9 @@ pub(crate) fn parse_agent_log_to_chat_messages(lines: &[String]) -> Vec<ChatMess
                 thought_signature: None,
             };
             *tool_idx = tool_idx.saturating_add(1);
-            out.push(ChatMessage::assistant_parts(vec![MessagePart::Tool(tool)]));
+            out.push(ChatMessage::assistant_parts(vec![MessagePart::tool_boxed(
+                Box::new(tool),
+            )]));
         };
 
     for line in lines {

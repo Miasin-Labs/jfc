@@ -340,16 +340,24 @@ pub async fn execute_tool(
             history_query.as_deref(),
         ),
         (ToolKind::TaskDone, ToolInput::TaskDone { task_id }) => {
-            let result = execute_task_done(task_store.clone(), &task_id);
-            // Plan↔task reverse linkage: when a task that was materialized
-            // from a plan is marked done, advance the linked plan (and flip
-            // it to Done when every linked task is complete).
-            if !result.is_error()
-                && let Some(store) = task_store.as_ref()
+            let task_store_for_task = task_store.clone();
+            match tokio::task::spawn_blocking(move || {
+                let result = execute_task_done(task_store_for_task.clone(), &task_id);
+                // Plan↔task reverse linkage: when a task that was materialized
+                // from a plan is marked done, advance the linked plan (and flip
+                // it to Done when every linked task is complete).
+                if !result.is_error()
+                    && let Some(store) = task_store_for_task.as_ref()
+                {
+                    advance_linked_plans(store, &task_id);
+                }
+                result
+            })
+            .await
             {
-                advance_linked_plans(store, &task_id);
+                Ok(result) => result,
+                Err(err) => ExecutionResult::failure(format!("TaskDone worker panicked: {err}")),
             }
-            result
         }
         (ToolKind::TaskStop, ToolInput::TaskStop { task_id }) => execute_task_stop("", &task_id),
         (ToolKind::TaskGet, ToolInput::TaskGet { task_id }) => {

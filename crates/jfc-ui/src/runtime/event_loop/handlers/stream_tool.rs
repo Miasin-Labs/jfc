@@ -155,7 +155,7 @@ pub(crate) fn dispatch_pending_after_stream(app: &mut App, tx: &EventSender) -> 
 }
 
 /// Handle a new tool announced by the stream layer.
-pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: ToolCall) {
+pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Box<ToolCall>) {
     app.record_stream_activity();
     app.stream_lifecycle = None;
     // Trace every StreamTool entry so next-run diagnostics show
@@ -190,7 +190,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
             "route=terminal_on_arrival (no dispatch)"
         );
         if let Some(msg) = streaming_assistant_mut(app) {
-            msg.parts.push(MessagePart::Tool(tool));
+            msg.parts.push(MessagePart::tool_boxed(tool));
         }
     } else if matches!(
         tool.kind,
@@ -208,7 +208,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
         );
         emit_in_progress(tx, "add", vec![tool.id.as_str().to_owned()]);
         if let Some(msg) = streaming_assistant_mut(app) {
-            msg.parts.push(MessagePart::Tool(tool));
+            msg.parts.push(MessagePart::tool_boxed(tool));
         }
     } else if matches!(tool.kind, ToolKind::AskUserQuestion) {
         // AskUserQuestion is neither dispatched nor approval-gated: it opens an
@@ -227,11 +227,12 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                     .to_owned(),
             );
             if let Some(msg) = streaming_assistant_mut(app) {
-                msg.parts.push(MessagePart::Tool(tool));
+                msg.parts.push(MessagePart::tool_boxed(tool));
             }
         } else if let Some(pending) = crate::input::build_pending_question(&tool) {
             if let Some(msg) = streaming_assistant_mut(app) {
-                msg.parts.push(MessagePart::Tool(tool.clone()));
+                msg.parts
+                    .push(MessagePart::tool_boxed(Box::new((*tool).clone())));
             }
             emit_deferred_tool_use(tx, &tool, "awaiting_user_answer");
             tracing::info!(
@@ -248,7 +249,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 "AskUserQuestion requires a non-empty `options` array.".to_owned(),
             );
             if let Some(msg) = streaming_assistant_mut(app) {
-                msg.parts.push(MessagePart::Tool(tool));
+                msg.parts.push(MessagePart::tool_boxed(tool));
             }
         }
     } else if let Some(reason) = app.tool_denied_by_mode(&tool) {
@@ -270,7 +271,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
         let _ = tool.mark_failed();
         tool.output = ToolOutput::Text(format!("Denied by permission mode: {reason}"));
         if let Some(msg) = streaming_assistant_mut(app) {
-            msg.parts.push(MessagePart::Tool(tool));
+            msg.parts.push(MessagePart::tool_boxed(tool));
         }
     } else if app.auto_mode.enabled {
         // v126 auto-mode: when enabled, every tool call is sent to a
@@ -328,7 +329,8 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
         // ToolCall entry by id when ToolResult arrives, flipping
         // status to Complete/Failed and setting output.
         if let Some(msg) = streaming_assistant_mut(app) {
-            msg.parts.push(MessagePart::Tool(tool.clone()));
+            msg.parts
+                .push(MessagePart::tool_boxed(Box::new((*tool).clone())));
         }
         emit_deferred_tool_use(tx, &tool, "awaiting_approval");
         // First approvable tool fills `pending_approval`; every
@@ -344,7 +346,10 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 tool_id = %tool_id,
                 "modal_opened"
             );
-            app.pending_approval = Some(PendingApproval { tool, selected: 0 });
+            app.pending_approval = Some(PendingApproval {
+                tool: *tool,
+                selected: 0,
+            });
         } else {
             tracing::info!(
                 target: "jfc::ui::approval",
@@ -353,13 +358,14 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 queue_depth = app.approval_queue.len() + 1,
                 "queued_behind_modal"
             );
-            app.approval_queue.push_back(tool);
+            app.approval_queue.push_back(*tool);
         }
     } else {
         // Sandbox auto-approval toast (first time only per session).
         maybe_show_sandbox_toast(app);
         if let Some(msg) = streaming_assistant_mut(app) {
-            msg.parts.push(MessagePart::Tool(tool.clone()));
+            msg.parts
+                .push(MessagePart::tool_boxed(Box::new((*tool).clone())));
         }
         // Streaming tool execution v2 (gate: streaming-tool-exec):
         // Queue every local tool in model order, then eagerly dispatch only
@@ -377,7 +383,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 safe_for_eager = current_tool_is_safe,
                 "route=eager_queue (streaming-tool-exec ON, no approval needed)"
             );
-            app.pending_tool_calls.push(tool.clone());
+            app.pending_tool_calls.push((*tool).clone());
             let dispatched_ids = dispatch_eager_safe_prefix(app, tx);
             if !dispatched_ids.iter().any(|id| id == &current_tool_id) {
                 let reason = if current_tool_is_safe {
@@ -396,7 +402,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
                 "route=deferred_dispatch (streaming-tool-exec OFF, no approval needed)"
             );
             emit_deferred_tool_use(tx, &tool, "queued_for_stream_done");
-            app.pending_tool_calls.push(tool);
+            app.pending_tool_calls.push(*tool);
         }
     }
 }
@@ -405,7 +411,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: To
 pub(crate) async fn handle_classifier_decision(
     app: &mut App,
     tx: &EventSender,
-    mut tool: ToolCall,
+    mut tool: Box<ToolCall>,
     blocked: bool,
     reason: String,
 ) {
@@ -417,14 +423,15 @@ pub(crate) async fn handle_classifier_decision(
             "Auto-mode classifier blocked this tool call.\n\nReason: {reason}"
         ));
         if let Some(msg) = streaming_assistant_mut(app) {
-            msg.parts.push(MessagePart::Tool(tool));
+            msg.parts.push(MessagePart::tool_boxed(tool));
         }
     } else {
         if let Some(msg) = streaming_assistant_mut(app) {
-            msg.parts.push(MessagePart::Tool(tool.clone()));
+            msg.parts
+                .push(MessagePart::tool_boxed(Box::new((*tool).clone())));
         }
         emit_deferred_tool_use(tx, &tool, "queued_for_stream_done");
-        app.pending_tool_calls.push(tool);
+        app.pending_tool_calls.push(*tool);
     }
 
     // If the stream already finished while verdicts were outstanding (so
@@ -698,8 +705,14 @@ mod tests {
         app.streaming_assistant_idx = Some(0);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
-        handle_classifier_decision(&mut app, &tx, glob_tool("g1"), false, "allowed".to_owned())
-            .await;
+        handle_classifier_decision(
+            &mut app,
+            &tx,
+            Box::new(glob_tool("g1")),
+            false,
+            "allowed".to_owned(),
+        )
+        .await;
 
         assert_eq!(app.pending_classifications, 0);
         assert_eq!(app.pending_tool_calls.len(), 1);
@@ -729,8 +742,14 @@ mod tests {
         app.pending_classifications = 1;
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
-        handle_classifier_decision(&mut app, &tx, glob_tool("g1"), false, "allowed".to_owned())
-            .await;
+        handle_classifier_decision(
+            &mut app,
+            &tx,
+            Box::new(glob_tool("g1")),
+            false,
+            "allowed".to_owned(),
+        )
+        .await;
 
         assert_eq!(app.pending_classifications, 0);
         assert!(app.pending_tool_calls.is_empty());
