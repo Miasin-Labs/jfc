@@ -111,6 +111,9 @@ async fn handle_connection(
 
     let ws_stream = tokio_tungstenite::accept_hdr_async(
         stream,
+        // The callback signature (and thus the large ErrorResponse Err
+        // variant) is dictated by tungstenite's accept_hdr_async API.
+        #[allow(clippy::result_large_err)]
         move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
             // Check bearer token in Sec-WebSocket-Protocol header.
             let expected = format!("bearer.{token_owned}");
