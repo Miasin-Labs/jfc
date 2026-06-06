@@ -34,104 +34,66 @@ pub(super) struct PrintModeConfig {
     pub(super) max_turns: Option<u32>,
 }
 
-/// `--print` headless one-shot mode. Builds a minimal stream against
-/// the active provider and exits with the stream's stop_reason. Text
-/// output preserves the legacy behavior; JSON modes emit SDK-style
-/// events for scripted callers.
+/// `--print` headless one-shot mode, driven by the shared engine: the same
+/// `ops::submit_prompt` + `handle_engine_event` dispatch the TUI uses, with
+/// stream-json/text emission instead of rendering. This replaced a fully
+/// duplicated turn loop (own provider stream, own tool executor, own
+/// permission flow) as stage 4 of the jfc-engine extraction.
 pub(super) async fn run_print_mode(
     provider: std::sync::Arc<dyn jfc_provider::Provider>,
     model: jfc_provider::ModelId,
     prompt: String,
     config: PrintModeConfig,
 ) -> anyhow::Result<()> {
-    use futures::StreamExt;
-    use jfc_provider::{
-        ProviderContent, ProviderMessage, ProviderRole, StopReason, StreamEvent, StreamOptions,
+    use crate::app::{EngineState, PermissionMode};
+    use crate::runtime::{
+        ControlEvent, EngineEvent, FrontendDirective, StreamEvent as EngineStreamEvent, ToolEvent,
     };
 
     let parsed_input = parse_headless_input(&prompt, config.input_format);
-    let prompt = parsed_input.prompt.clone();
+    let prompt_text = parsed_input.prompt.clone();
     let mut recovered_permission_responses = parsed_input.permission_responses;
-    let mut messages = config
+
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel::<EngineEvent>(crate::runtime::APP_EVENT_BUFFER);
+    // Plan-mode tools / economy events reach the loop via the global sender,
+    // exactly as in the TUI (the old loop silently dropped them).
+    crate::tools::register_event_sender(tx.clone());
+
+    let mut state = EngineState::new(provider, model.clone());
+    // Print mode never persists sessions — the optional --session-mirror file
+    // is its own wire-level persistence below.
+    state.no_session_persistence = true;
+    state.custom_betas = config.custom_betas.clone();
+    state.fine_grained_tool_streaming = config.fine_grained_tool_streaming;
+    state.strict_tool_schemas = config.strict_tool_schemas;
+    let max_turns = config.max_turns.unwrap_or(10).max(1);
+    state.max_turns = Some(max_turns);
+    // Without a permission prompt endpoint every tool is auto-approved
+    // (legacy behavior). With one, the engine's standard permission gate
+    // applies and gated tools round-trip through the HTTP prompt below.
+    state.permission_mode = if config.permission_prompt_tool.is_some() {
+        PermissionMode::Default
+    } else {
+        PermissionMode::BypassPermissions
+    };
+
+    // Seed the transcript: session mirror first, then any stream-json input.
+    let mut seed = config
         .session_mirror
         .as_ref()
         .and_then(|path| load_mirror_messages(path).ok())
         .unwrap_or_default();
-    if parsed_input.messages.is_empty() {
-        messages.push(ProviderMessage {
-            role: ProviderRole::User,
-            content: vec![ProviderContent::Text(prompt.clone())],
-        });
-    } else {
-        messages.extend(parsed_input.messages);
-    }
-    let advisor_model = if matches!(
-        provider.stream_convention(),
-        jfc_provider::StreamConvention::AnthropicNative
-    ) && matches!(provider.name(), "anthropic" | "anthropic-oauth")
-    {
-        crate::advisor::active_server_advisor_model()
-    } else {
-        None
-    };
-    let mut opts = StreamOptions::new(model.clone())
-        .max_tokens(8192)
-        .custom_betas(config.custom_betas.clone());
-    let pewter_owl_header = crate::feature_gates::pewter_owl_header_enabled(model.as_str(), true);
-    let pewter_owl_tool = crate::feature_gates::pewter_owl_tool_enabled(model.as_str(), true);
-    let pewter_owl_brief = crate::feature_gates::pewter_owl_brief_enabled(model.as_str(), true);
-    if config.fine_grained_tool_streaming {
-        opts = opts.eager_input_streaming(true);
-    }
-    if config.strict_tool_schemas {
-        opts = opts.strict_tool_schemas(true);
-    }
-    if pewter_owl_header {
-        opts = opts.narration_summaries(true);
-    }
-    let mut advertised_tools = crate::tools::all_tool_defs_with_mcp().await;
-    crate::tools::apply_send_user_message_policy(
-        &mut advertised_tools,
-        pewter_owl_brief,
-        pewter_owl_tool,
-    );
-    opts = opts.tools(advertised_tools);
-    let mut system_prompt = String::new();
-    if pewter_owl_brief {
-        system_prompt.push_str(
-            "Plain assistant text is hidden from the main chat view. Put every \
-             substantive user-facing reply in `SendUserMessage`; use normal \
-             assistant text only for internal reasoning that can be omitted \
-             from the user's visible transcript.",
-        );
-    } else if pewter_owl_tool {
-        system_prompt.push_str(
-            "`SendUserMessage` is available for exact user-visible content \
-             between tool calls, such as generated snippets, specific values, \
-             and direct replies to mid-task user messages. Routine narration \
-             and final answers may remain normal assistant text.",
-        );
-    }
-    if let Some(advisor_model) = advisor_model {
-        if !system_prompt.is_empty() {
-            system_prompt.push_str("\n\n");
-        }
-        system_prompt.push_str(crate::advisor::SERVER_ADVISOR_SYSTEM_PROMPT);
-        opts = opts.advisor_model(advisor_model);
-    }
-    if !system_prompt.is_empty() {
-        opts = opts.system(system_prompt);
-    }
-    let mut stdout = std::io::stdout().lock();
-    let mut exit_code = 0;
-    let mut accumulated = String::new();
-    let mut stop_reason = Some("end_turn".to_owned());
-    let mut usage_totals = UsageTotals::default();
+    seed.extend(parsed_input.messages.clone());
+    state.messages = chat_messages_from_provider(&seed);
+
     let session_id = config
         .session_mirror
         .as_ref()
         .and_then(|path| load_mirror_session_id(path).ok().flatten())
         .unwrap_or_else(headless_session_id);
+
+    let mut stdout = std::io::stdout().lock();
     let mut mirror_events = Vec::new();
     if config.include_hook_events && config.output_format == HeadlessOutputFormat::StreamJson {
         emit_stream_json(
@@ -170,23 +132,29 @@ pub(super) async fn run_print_mode(
             serde_json::json!({"type": "hook", "hook": "before_stream", "session_id": &session_id}),
         )?;
     }
-    let max_turns = config.max_turns.unwrap_or(10).max(1);
-    for turn_idx in 0..max_turns {
-        let mut stream = provider
-            .stream(messages.clone(), &opts)
-            .await
-            .map_err(|e| anyhow::anyhow!("stream open failed: {e}"))?;
-        let mut turn_text = String::new();
-        let mut turn_content = Vec::new();
-        let mut pending_tools = Vec::new();
-        let mut tool_inputs: HashMap<usize, String> = HashMap::new();
-        let mut turn_stop_reason = StopReason::EndTurn;
 
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(StreamEvent::TextDelta { delta, .. }) => {
-                    accumulated.push_str(&delta);
-                    turn_text.push_str(&delta);
+    // Kick the first turn: a plain prompt goes through the full submit op;
+    // stream-json input that carried its own messages resumes the seeded
+    // transcript directly.
+    if parsed_input.messages.is_empty() {
+        crate::runtime::ops::submit_prompt(&mut state, &tx, prompt_text.clone(), Vec::new(), None)
+            .await?;
+    } else {
+        crate::runtime::ops::start_turn_from_transcript(&mut state, &tx, &prompt_text).await;
+    }
+
+    let mut accumulated = String::new();
+    let mut stop_reason: Option<String> = Some("end_turn".to_owned());
+    let mut usage_totals = UsageTotals::default();
+    let mut exit_code = 0;
+    let mut tool_use_index: usize = 0;
+
+    while let Some(ev) = rx.recv().await {
+        // ── 1. Wire emission (before dispatch consumes the event) ──
+        match &ev {
+            EngineEvent::Stream(EngineStreamEvent::Chunk { text, reasoning }) => {
+                if let Some(delta) = text {
+                    accumulated.push_str(delta);
                     match config.output_format {
                         HeadlessOutputFormat::Text => {
                             let _ = stdout.write_all(delta.as_bytes());
@@ -220,255 +188,217 @@ pub(super) async fn run_print_mode(
                         }
                     }
                 }
-                Ok(StreamEvent::ThinkingDelta { delta, .. }) => {
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "thinking_delta",
-                                "delta": delta,
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::ToolDelta { index, delta }) => {
-                    tool_inputs.entry(index).or_default().push_str(&delta);
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "tool_input_delta",
-                                "index": index,
-                                "delta": delta,
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::ToolDone {
-                    index,
-                    tool_name,
-                    tool_use_id,
-                    input_json,
-                    thought_signature,
-                }) => {
-                    if !turn_text.is_empty() {
-                        turn_content.push(ProviderContent::Text(std::mem::take(&mut turn_text)));
-                    }
-                    let input_json = if input_json.is_empty() {
-                        tool_inputs.remove(&index).unwrap_or_default()
-                    } else {
-                        input_json
-                    };
-                    let input = parse_json_or_string(&input_json);
-                    turn_content.push(ProviderContent::ToolUse {
-                        id: tool_use_id.clone(),
-                        name: tool_name.clone(),
-                        input: input.clone(),
-                        thought_signature,
-                    });
-                    pending_tools.push(HeadlessToolUse {
-                        id: tool_use_id.clone(),
-                        name: tool_name.clone(),
-                        input: input.clone(),
-                    });
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "tool_use",
-                                "index": index,
-                                "id": tool_use_id,
-                                "name": tool_name,
-                                "input": input,
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::ServerToolResult {
-                    tool_use_id,
-                    tool_kind,
-                    content,
-                }) => {
-                    if !turn_text.is_empty() {
-                        turn_content.push(ProviderContent::Text(std::mem::take(&mut turn_text)));
-                    }
-                    turn_content.push(ProviderContent::ServerToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        tool_kind: tool_kind.clone(),
-                        content: content.clone(),
-                    });
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "server_tool_result",
-                                "tool_use_id": tool_use_id,
-                                "tool_kind": tool_kind.wire_type(),
-                                "content": content,
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::RedactedThinkingDone { data, .. }) => {
-                    turn_content.push(ProviderContent::RedactedThinking { data: data.clone() });
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "redacted_thinking",
-                                "data": data,
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::ResponseMetadata {
-                    response_id,
-                    input_tokens,
-                }) => {
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "response_metadata",
-                                "response_id": response_id,
-                                "input_tokens": input_tokens,
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::Usage {
-                    input_tokens,
-                    output_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
-                }) => {
-                    usage_totals.add(
-                        input_tokens,
-                        output_tokens,
-                        cache_read_tokens,
-                        cache_write_tokens,
-                    );
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "usage",
-                                "usage": usage_totals.to_json(),
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::FallbackTriggered(info)) => {
-                    if config.output_format == HeadlessOutputFormat::StreamJson {
-                        emit_stream_json(
-                            &mut stdout,
-                            &mut mirror_events,
-                            &config,
-                            serde_json::json!({
-                                "type": "fallback_triggered",
-                                "original_model": info.original_model.as_str(),
-                                "fallback_model": info.fallback_model.as_str(),
-                                "reason": info.reason.to_string(),
-                            }),
-                        )?;
-                    }
-                }
-                Ok(StreamEvent::Error { message }) => {
-                    emit_headless_error(&mut stdout, &mut mirror_events, &config, &message)?;
-                    exit_code = 1;
-                    break;
-                }
-                Ok(StreamEvent::Done { stop_reason: r }) => {
-                    turn_stop_reason = r;
-                    break;
-                }
-                Ok(StreamEvent::TextDone { .. }) | Ok(StreamEvent::ThinkingDone { .. }) => {}
-                Err(e) => {
-                    emit_headless_error(&mut stdout, &mut mirror_events, &config, &e.to_string())?;
-                    exit_code = 1;
-                    break;
-                }
-            }
-        }
-
-        if !turn_text.is_empty() {
-            turn_content.push(ProviderContent::Text(turn_text));
-        }
-        if !turn_content.is_empty() {
-            messages.push(ProviderMessage {
-                role: ProviderRole::Assistant,
-                content: turn_content,
-            });
-        }
-        stop_reason = Some(stop_reason_wire(&turn_stop_reason));
-
-        if exit_code != 0 {
-            break;
-        }
-
-        match turn_stop_reason {
-            StopReason::ToolUse if !pending_tools.is_empty() => {
-                let mut results = Vec::with_capacity(pending_tools.len());
-                for tool in pending_tools {
-                    let result = execute_headless_tool(
-                        &tool,
-                        &config,
-                        &session_id,
-                        &mut recovered_permission_responses,
+                if reasoning.is_some()
+                    && config.output_format == HeadlessOutputFormat::StreamJson
+                {
+                    emit_stream_json(
                         &mut stdout,
                         &mut mirror_events,
-                    )
-                    .await?;
-                    results.push(ProviderContent::ToolResult {
-                        tool_use_id: tool.id,
-                        content: result.output,
-                        is_error: result.is_error,
-                    });
+                        &config,
+                        serde_json::json!({
+                            "type": "thinking_delta",
+                            "delta": reasoning.as_deref().unwrap_or_default(),
+                        }),
+                    )?;
                 }
-                messages.push(ProviderMessage {
-                    role: ProviderRole::User,
-                    content: results,
-                });
             }
-            StopReason::PauseTurn if turn_idx + 1 < max_turns => {
+            EngineEvent::Stream(EngineStreamEvent::ToolInputDelta { index, delta }) => {
                 if config.output_format == HeadlessOutputFormat::StreamJson {
                     emit_stream_json(
                         &mut stdout,
                         &mut mirror_events,
                         &config,
                         serde_json::json!({
-                            "type": "pause_turn_resume",
-                            "turn": turn_idx + 1,
+                            "type": "tool_input_delta",
+                            "index": index,
+                            "delta": delta,
                         }),
                     )?;
                 }
             }
-            StopReason::ToolUse | StopReason::PauseTurn => {
-                let message = format!(
-                    "headless agent loop stopped after {max_turns} turn(s) with stop_reason={}",
-                    stop_reason.as_deref().unwrap_or("unknown")
-                );
-                emit_headless_error(&mut stdout, &mut mirror_events, &config, &message)?;
-                exit_code = 1;
-                break;
+            EngineEvent::Stream(EngineStreamEvent::Tool(tool)) => {
+                if config.output_format == HeadlessOutputFormat::StreamJson {
+                    emit_stream_json(
+                        &mut stdout,
+                        &mut mirror_events,
+                        &config,
+                        serde_json::json!({
+                            "type": "tool_use",
+                            "index": tool_use_index,
+                            "id": tool.id.as_str(),
+                            "name": tool.kind.label(),
+                            "input": tool.input.to_value(),
+                        }),
+                    )?;
+                }
+                tool_use_index += 1;
             }
-            _ => break,
+            EngineEvent::Stream(EngineStreamEvent::ServerToolResult {
+                tool_use_id,
+                tool_kind,
+                content,
+            }) => {
+                if config.output_format == HeadlessOutputFormat::StreamJson {
+                    emit_stream_json(
+                        &mut stdout,
+                        &mut mirror_events,
+                        &config,
+                        serde_json::json!({
+                            "type": "server_tool_result",
+                            "tool_use_id": tool_use_id.as_str(),
+                            "tool_kind": tool_kind.wire_type(),
+                            "content": content,
+                        }),
+                    )?;
+                }
+            }
+            EngineEvent::Stream(EngineStreamEvent::RedactedThinking(data)) => {
+                if config.output_format == HeadlessOutputFormat::StreamJson {
+                    emit_stream_json(
+                        &mut stdout,
+                        &mut mirror_events,
+                        &config,
+                        serde_json::json!({
+                            "type": "redacted_thinking",
+                            "data": data,
+                        }),
+                    )?;
+                }
+            }
+            EngineEvent::Stream(EngineStreamEvent::ResponseId { id, input_tokens }) => {
+                if config.output_format == HeadlessOutputFormat::StreamJson {
+                    emit_stream_json(
+                        &mut stdout,
+                        &mut mirror_events,
+                        &config,
+                        serde_json::json!({
+                            "type": "response_metadata",
+                            "response_id": id,
+                            "input_tokens": input_tokens,
+                        }),
+                    )?;
+                }
+            }
+            EngineEvent::Stream(EngineStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            }) => {
+                usage_totals.add(
+                    *input_tokens,
+                    *output_tokens,
+                    *cache_read_tokens,
+                    *cache_write_tokens,
+                );
+                if config.output_format == HeadlessOutputFormat::StreamJson {
+                    emit_stream_json(
+                        &mut stdout,
+                        &mut mirror_events,
+                        &config,
+                        serde_json::json!({
+                            "type": "usage",
+                            "usage": usage_totals.to_json(),
+                        }),
+                    )?;
+                }
+            }
+            EngineEvent::Stream(EngineStreamEvent::FallbackTriggered {
+                original_model,
+                fallback_model,
+                reason,
+            }) => {
+                if config.output_format == HeadlessOutputFormat::StreamJson {
+                    emit_stream_json(
+                        &mut stdout,
+                        &mut mirror_events,
+                        &config,
+                        serde_json::json!({
+                            "type": "fallback_triggered",
+                            "original_model": original_model,
+                            "fallback_model": fallback_model,
+                            "reason": reason.to_string(),
+                        }),
+                    )?;
+                }
+            }
+            EngineEvent::Stream(EngineStreamEvent::Error(message)) => {
+                emit_headless_error(&mut stdout, &mut mirror_events, &config, message)?;
+                exit_code = 1;
+            }
+            EngineEvent::Stream(EngineStreamEvent::Done(reason)) => {
+                stop_reason = Some(stop_reason_wire(reason));
+                tool_use_index = 0;
+            }
+            EngineEvent::Tool(ToolEvent::Result { tool_id, result }) => {
+                if config.output_format == HeadlessOutputFormat::StreamJson {
+                    emit_stream_json(
+                        &mut stdout,
+                        &mut mirror_events,
+                        &config,
+                        serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": tool_id.as_str(),
+                            "content": &result.output,
+                            "is_error": result.is_error(),
+                        }),
+                    )?;
+                }
+            }
+            EngineEvent::Control(ControlEvent::Notice { .. }) => {
+                // Engine notices (memory recall, compaction milestones) are
+                // TUI toasts; print mode keeps the wire clean.
+            }
+            _ => {}
+        }
+
+        // ── 2. Dispatch through the shared engine pump ──
+        match crate::runtime::handle_engine_event(&mut state, &tx, ev).await? {
+            Some(FrontendDirective::SubmitPrompt(text)) => {
+                // Pre-submit compaction re-fired the prompt.
+                let _ = crate::runtime::ops::submit_prompt(&mut state, &tx, text, Vec::new(), None)
+                    .await?;
+            }
+            Some(FrontendDirective::RunCommand(_)) => {
+                // Slash commands are not supported in print mode (stage 8 of
+                // the extraction moves engine-pure commands into the engine).
+            }
+            None => {}
+        }
+        // Print mode has no viewport: view effects are meaningless here.
+        state.effects.clear();
+
+        // ── 3. Approval pump: resolve every parked tool via the HTTP
+        //       permission prompt (or recovered stream-json responses). ──
+        while let Some(pending_tool) = state.pending_approval.as_ref().map(|p| p.tool.clone()) {
+            let allowed = headless_permission_decision(
+                &pending_tool,
+                &config,
+                &session_id,
+                &mut recovered_permission_responses,
+                &mut stdout,
+                &mut mirror_events,
+            )
+            .await?;
+            crate::input::handle_remote_approval_response(
+                &mut state,
+                &tx,
+                pending_tool.id.as_str().to_owned(),
+                allowed,
+            );
+        }
+
+        // ── 4. Termination: the turn settled and nothing is in flight. ──
+        if !state.has_interruptible_work()
+            && state.pending_approval.is_none()
+            && state.approval_queue.is_empty()
+            && state.queued_prompts.is_empty()
+            && state.compacting_started_at.is_none()
+        {
+            break;
         }
     }
+
     if config.include_hook_events && config.output_format == HeadlessOutputFormat::StreamJson {
         emit_stream_json(
             &mut stdout,
@@ -512,9 +442,10 @@ pub(super) async fn run_print_mode(
     }
     let _ = stdout.flush();
     if let Some(path) = config.session_mirror {
+        let wire_messages = crate::stream::build_provider_messages(&state.messages);
         let mirror = serde_json::json!({
             "session_id": &session_id,
-            "messages": messages.iter().map(provider_message_to_json).collect::<Vec<_>>(),
+            "messages": wire_messages.iter().map(provider_message_to_json).collect::<Vec<_>>(),
             "events": mirror_events,
             "stop_reason": stop_reason.clone(),
             "usage": usage_totals.to_json(),
@@ -527,17 +458,212 @@ pub(super) async fn run_print_mode(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct HeadlessToolUse {
-    id: String,
-    name: String,
-    input: serde_json::Value,
+/// Best-effort reconstruction of an engine transcript from provider-wire
+/// messages (session mirror / stream-json input). Text, tool_use,
+/// tool_result, redacted-thinking, and server-tool-result blocks round-trip;
+/// anything else is dropped with a log.
+fn chat_messages_from_provider(
+    messages: &[jfc_provider::ProviderMessage],
+) -> Vec<crate::types::ChatMessage> {
+    use crate::types::{ChatMessage, MessagePart, Role, ToolOutput, ToolStatus};
+    use jfc_provider::{ProviderContent, ProviderRole};
+
+    let mut out: Vec<ChatMessage> = Vec::new();
+    for msg in messages {
+        match msg.role {
+            ProviderRole::User => {
+                // Tool results attach to the matching pending tool_use in the
+                // transcript; plain text becomes a user message.
+                let mut texts: Vec<String> = Vec::new();
+                for content in &msg.content {
+                    match content {
+                        ProviderContent::Text(t) => texts.push(t.clone()),
+                        ProviderContent::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => {
+                            let mut attached = false;
+                            'outer: for prev in out.iter_mut().rev() {
+                                for part in prev.parts.iter_mut() {
+                                    if let MessagePart::Tool(tc) = part
+                                        && tc.id.as_str() == tool_use_id
+                                    {
+                                        tc.output = ToolOutput::Text(content.clone());
+                                        tc.status = if *is_error {
+                                            ToolStatus::Failed
+                                        } else {
+                                            ToolStatus::Completed
+                                        };
+                                        attached = true;
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                            if !attached {
+                                tracing::warn!(
+                                    target: "jfc::headless",
+                                    tool_use_id,
+                                    "orphaned tool_result in seeded transcript; dropping"
+                                );
+                            }
+                        }
+                        other => {
+                            tracing::debug!(
+                                target: "jfc::headless",
+                                ?other,
+                                "unsupported user content in seeded transcript; dropping"
+                            );
+                        }
+                    }
+                }
+                if !texts.is_empty() {
+                    out.push(ChatMessage::user(texts.join("\n")));
+                }
+            }
+            ProviderRole::Assistant => {
+                let mut parts: Vec<MessagePart> = Vec::new();
+                for content in &msg.content {
+                    match content {
+                        ProviderContent::Text(t) => parts.push(MessagePart::Text(t.clone())),
+                        ProviderContent::RedactedThinking { data } => {
+                            parts.push(MessagePart::RedactedThinking(data.clone()));
+                        }
+                        ProviderContent::ToolUse {
+                            id, name, input, ..
+                        } => {
+                            let kind = crate::types::ToolKind::from_name(name);
+                            match crate::types::ToolInput::from_value(name, input.clone()) {
+                                Ok(tool_input) => {
+                                    parts.push(MessagePart::tool(
+                                        crate::types::ToolCall::new_pending(
+                                            crate::ids::ToolId::from(id.clone()),
+                                            kind,
+                                            tool_input,
+                                        ),
+                                    ));
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        target: "jfc::headless",
+                                        name,
+                                        %err,
+                                        "tool_use in seeded transcript failed schema parse; dropping"
+                                    );
+                                }
+                            }
+                        }
+                        other => {
+                            tracing::debug!(
+                                target: "jfc::headless",
+                                ?other,
+                                "unsupported assistant content in seeded transcript; dropping"
+                            );
+                        }
+                    }
+                }
+                if !parts.is_empty() {
+                    let mut m = ChatMessage::assistant(String::new());
+                    m.parts = parts;
+                    // ChatMessage::assistant seeds an empty Text part via the
+                    // constructor on some paths; ensure role stays correct.
+                    debug_assert_eq!(m.role, Role::Assistant);
+                    out.push(m);
+                }
+            }
+        }
+    }
+    out
 }
 
-#[derive(Debug, Clone)]
-struct HeadlessToolResult {
-    output: String,
-    is_error: bool,
+/// Resolve a parked tool approval for print mode: recovered stream-json
+/// permission responses first, then the `--permission-prompt-tool` HTTP
+/// round-trip, defaulting to allow when no endpoint is configured (matching
+/// the legacy headless flow).
+async fn headless_permission_decision(
+    tool: &crate::types::ToolCall,
+    config: &PrintModeConfig,
+    session_id: &str,
+    recovered_permission_responses: &mut HashMap<String, serde_json::Value>,
+    stdout: &mut impl Write,
+    mirror_events: &mut Vec<serde_json::Value>,
+) -> anyhow::Result<bool> {
+    let Some(prompt_tool) = config.permission_prompt_tool.as_deref() else {
+        return Ok(true);
+    };
+    let tool_id = tool.id.as_str();
+    if let Some(recovered) = recovered_permission_responses.remove(tool_id) {
+        let allowed = permission_response_allows(&recovered);
+        emit_stream_json(
+            stdout,
+            mirror_events,
+            config,
+            serde_json::json!({
+                "type": "permission_response",
+                "tool_use_id": tool_id,
+                "decision": if allowed { "allow" } else { "deny" },
+                "source": "input",
+                "response": recovered,
+            }),
+        )?;
+        return Ok(allowed);
+    }
+    let request = serde_json::json!({
+        "type": "permission_request",
+        "session_id": session_id,
+        "tool_name": prompt_tool,
+        "tool_use": {
+            "id": tool_id,
+            "name": tool.kind.label(),
+            "input": tool.input.to_value(),
+        },
+        "status": "requested",
+    });
+    emit_stream_json(stdout, mirror_events, config, request.clone())?;
+    let Some(url) = config.sdk_url.as_deref() else {
+        return Ok(false);
+    };
+    let client = reqwest::Client::new();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        client.post(url).json(&request).send(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("permission prompt timed out after 120s"))?
+    .map_err(|e| anyhow::anyhow!("permission prompt request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Ok(false);
+    }
+    let body = response.text().await.unwrap_or_default();
+    if body.trim().is_empty() {
+        emit_stream_json(
+            stdout,
+            mirror_events,
+            config,
+            serde_json::json!({
+                "type": "permission_response",
+                "tool_use_id": tool_id,
+                "decision": "allow",
+            }),
+        )?;
+        return Ok(true);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("permission prompt response was not JSON: {e}"))?;
+    let allowed = permission_response_allows(&parsed);
+    emit_stream_json(
+        stdout,
+        mirror_events,
+        config,
+        serde_json::json!({
+            "type": "permission_response",
+            "tool_use_id": tool_id,
+            "decision": if allowed { "allow" } else { "deny" },
+            "response": parsed,
+        }),
+    )?;
+    Ok(allowed)
 }
 
 #[derive(Debug, Default)]
@@ -571,195 +697,6 @@ impl UsageTotals {
         })
     }
 }
-
-async fn execute_headless_tool(
-    tool: &HeadlessToolUse,
-    config: &PrintModeConfig,
-    session_id: &str,
-    recovered_permission_responses: &mut HashMap<String, serde_json::Value>,
-    stdout: &mut impl Write,
-    mirror_events: &mut Vec<serde_json::Value>,
-) -> anyhow::Result<HeadlessToolResult> {
-    match request_headless_permission(
-        tool,
-        config,
-        session_id,
-        recovered_permission_responses,
-        stdout,
-        mirror_events,
-    )
-    .await?
-    {
-        PermissionDecision::Allow => {}
-        PermissionDecision::Deny(reason) => {
-            let output = format!("Permission denied for {}: {reason}", tool.name);
-            emit_stream_json(
-                stdout,
-                mirror_events,
-                config,
-                serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": &tool.id,
-                    "content": output,
-                    "is_error": true,
-                }),
-            )?;
-            return Ok(HeadlessToolResult {
-                output,
-                is_error: true,
-            });
-        }
-    }
-
-    let input = match crate::types::ToolInput::from_value(&tool.name, tool.input.clone()) {
-        Ok(input) => input,
-        Err(err) => {
-            let output = format!(
-                "Tool input for {} did not match the local schema: {err}",
-                tool.name
-            );
-            emit_stream_json(
-                stdout,
-                mirror_events,
-                config,
-                serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": &tool.id,
-                    "content": output,
-                    "is_error": true,
-                }),
-            )?;
-            return Ok(HeadlessToolResult {
-                output,
-                is_error: true,
-            });
-        }
-    };
-    let kind = crate::types::ToolKind::from_name(&tool.name);
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let result = crate::tools::execute_tool(kind, input, cwd, None, None, None).await;
-    let is_error = result.is_error();
-    let output = result.output;
-    emit_stream_json(
-        stdout,
-        mirror_events,
-        config,
-        serde_json::json!({
-            "type": "tool_result",
-            "tool_use_id": &tool.id,
-            "content": &output,
-            "is_error": is_error,
-        }),
-    )?;
-    Ok(HeadlessToolResult { output, is_error })
-}
-
-enum PermissionDecision {
-    Allow,
-    Deny(String),
-}
-
-async fn request_headless_permission(
-    tool: &HeadlessToolUse,
-    config: &PrintModeConfig,
-    session_id: &str,
-    recovered_permission_responses: &mut HashMap<String, serde_json::Value>,
-    stdout: &mut impl Write,
-    mirror_events: &mut Vec<serde_json::Value>,
-) -> anyhow::Result<PermissionDecision> {
-    let Some(prompt_tool) = config.permission_prompt_tool.as_deref() else {
-        return Ok(PermissionDecision::Allow);
-    };
-    if let Some(recovered) = recovered_permission_responses.remove(&tool.id) {
-        let allowed = permission_response_allows(&recovered);
-        emit_stream_json(
-            stdout,
-            mirror_events,
-            config,
-            serde_json::json!({
-                "type": "permission_response",
-                "tool_use_id": &tool.id,
-                "decision": if allowed { "allow" } else { "deny" },
-                "source": "input",
-                "response": recovered,
-            }),
-        )?;
-        return if allowed {
-            Ok(PermissionDecision::Allow)
-        } else {
-            Ok(PermissionDecision::Deny(
-                "permission response from input denied the tool".to_owned(),
-            ))
-        };
-    }
-    let request = serde_json::json!({
-        "type": "permission_request",
-        "session_id": session_id,
-        "tool_name": prompt_tool,
-        "tool_use": {
-            "id": &tool.id,
-            "name": &tool.name,
-            "input": &tool.input,
-        },
-        "status": "requested",
-    });
-    emit_stream_json(stdout, mirror_events, config, request.clone())?;
-    let Some(url) = config.sdk_url.as_deref() else {
-        return Ok(PermissionDecision::Deny(
-            "--permission-prompt-tool was set but --sdk-url was not provided".to_owned(),
-        ));
-    };
-    let client = reqwest::Client::new();
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        client.post(url).json(&request).send(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("permission prompt timed out after 120s"))?
-    .map_err(|e| anyhow::anyhow!("permission prompt request failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Ok(PermissionDecision::Deny(format!(
-            "permission prompt endpoint returned HTTP {status}"
-        )));
-    }
-    let body = response.text().await.unwrap_or_default();
-    if body.trim().is_empty() {
-        emit_stream_json(
-            stdout,
-            mirror_events,
-            config,
-            serde_json::json!({
-                "type": "permission_response",
-                "tool_use_id": &tool.id,
-                "decision": "allow",
-            }),
-        )?;
-        return Ok(PermissionDecision::Allow);
-    }
-    let parsed: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| anyhow::anyhow!("permission prompt response was not JSON: {e}"))?;
-    let allowed = permission_response_allows(&parsed);
-    emit_stream_json(
-        stdout,
-        mirror_events,
-        config,
-        serde_json::json!({
-            "type": "permission_response",
-            "tool_use_id": &tool.id,
-            "decision": if allowed { "allow" } else { "deny" },
-            "response": parsed,
-        }),
-    )?;
-    if allowed {
-        Ok(PermissionDecision::Allow)
-    } else {
-        Ok(PermissionDecision::Deny(
-            "permission prompt endpoint denied the tool".to_owned(),
-        ))
-    }
-}
-
 fn permission_response_allows(value: &serde_json::Value) -> bool {
     if value.as_bool().unwrap_or(false) {
         return true;
@@ -1115,14 +1052,6 @@ fn permission_response_id(value: &serde_json::Value) -> Option<String> {
                 .map(str::to_owned)
         })
 }
-
-fn parse_json_or_string(raw: &str) -> serde_json::Value {
-    if raw.trim().is_empty() {
-        return serde_json::json!({});
-    }
-    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!(raw))
-}
-
 fn stop_reason_wire(reason: &jfc_provider::StopReason) -> String {
     match reason {
         jfc_provider::StopReason::EndTurn => "end_turn".to_owned(),

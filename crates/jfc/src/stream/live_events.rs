@@ -157,14 +157,15 @@ pub(super) async fn drain_stream_events(
             }
             StreamEvent::ToolDelta { index, delta } => {
                 committed_output = true;
-                let byte_len = delta.len();
                 tool_accum.entry(index).or_default().2.push_str(&delta);
                 // Keep spinner byte estimate and stall timer live while
-                // providers stream input_json_delta fragments.
+                // providers stream input_json_delta fragments; headless
+                // frontends re-emit the delta text on the wire.
                 if tx
-                    .try_send(EngineEvent::Stream(RuntimeStreamEvent::ToolInputDelta(
-                        byte_len,
-                    )))
+                    .try_send(EngineEvent::Stream(RuntimeStreamEvent::ToolInputDelta {
+                        index,
+                        delta,
+                    }))
                     .is_err()
                 {
                     tracing::trace!(target: "jfc::stream", "ToolInputDelta dropped (buffer full)");
@@ -355,9 +356,10 @@ pub(super) async fn drain_stream_events(
                 input_tokens,
             } => {
                 let _ = tx
-                    .send(EngineEvent::Stream(RuntimeStreamEvent::ResponseId(
-                        response_id,
-                    )))
+                    .send(EngineEvent::Stream(RuntimeStreamEvent::ResponseId {
+                        id: response_id,
+                        input_tokens,
+                    }))
                     .await;
                 // Feed early input-token count so context estimates are
                 // available even if the stream aborts before message_delta.

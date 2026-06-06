@@ -227,10 +227,11 @@ pub enum StreamEvent {
         text: Option<String>,
         reasoning: Option<String>,
     },
-    /// Tool input JSON delta — streamed while the model builds tool_use arguments.
-    /// Carries the byte length so the spinner's token estimate stays live during
-    /// tool input streaming (matching v126's responseLengthRef accumulation).
-    ToolInputDelta(usize),
+    /// Tool input JSON delta — streamed while the model builds tool_use
+    /// arguments. Carries the provider block index and the delta text so
+    /// frontends can both keep token estimates live (TUI spinner) and emit
+    /// faithful wire events (headless stream-json).
+    ToolInputDelta { index: usize, delta: String },
     /// Server-authoritative thinking token estimate delta. Emitted on each
     /// `thinking_delta` event with `estimated_tokens` set. Accumulates across
     /// the thinking block for display (matching cli.js's thinking_tokens system
@@ -239,8 +240,13 @@ pub enum StreamEvent {
     Tool(Box<ToolCall>),
     /// Opaque redacted thinking blob — store on message parts for round-tripping.
     RedactedThinking(String),
-    /// API response message ID — stored for `diagnostics.previous_message_id`.
-    ResponseId(String),
+    /// API response metadata — the message ID (stored for
+    /// `diagnostics.previous_message_id`) plus the provider's early
+    /// input-token count when available (headless re-emits it on the wire).
+    ResponseId {
+        id: String,
+        input_tokens: Option<u64>,
+    },
     /// Anthropic-side `server_tool_result` block (e.g.
     /// `web_search_tool_result`) paired with a previously-dispatched
     /// `server_tool_use`. The event_loop handler finds the matching

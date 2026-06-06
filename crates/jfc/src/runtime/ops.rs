@@ -507,7 +507,6 @@ pub(crate) async fn submit_prompt(
             text.clone()
         };
 
-    let assistant_idx = state.messages.len() + 1;
     let mut user_msg = ChatMessage::user(display_text.clone());
     // Combine pasted images ([Image #N] refs) with @-mention binary files.
     let mut all_attachments = attachments;
@@ -693,6 +692,21 @@ pub(crate) async fn submit_prompt(
         }
     }
 
+    start_turn_from_transcript(state, tx, &display_text).await;
+    Ok(SubmitOutcome::Started)
+}
+
+/// Push a fresh assistant slot, reset per-turn streaming/turn-control state,
+/// persist the session, and spawn the stream over the CURRENT transcript.
+/// The shared tail of `submit_prompt`; also the entry point for frontends
+/// that seed the transcript externally (headless stream-json input,
+/// session-mirror resume).
+pub(crate) async fn start_turn_from_transcript(
+    state: &mut EngineState,
+    tx: &EventSender,
+    turn_text: &str,
+) {
+    let assistant_idx = state.messages.len();
     state.messages.push(ChatMessage::assistant(String::new()));
     state.streaming_text.clear();
     state.streaming_reasoning.clear();
@@ -769,7 +783,7 @@ pub(crate) async fn submit_prompt(
     // `state.model` — legacy behavior. The pinned model is also the fallback
     // for unmatched classes inside the router itself.
     let model = if let Some(ref router) = state.slate {
-        let (routed, class, rule_idx) = router.route_explained(&text, state.model.clone());
+        let (routed, class, rule_idx) = router.route_explained(turn_text, state.model.clone());
         tracing::info!(
             target: "jfc::slate",
             class = ?class,
@@ -783,7 +797,7 @@ pub(crate) async fn submit_prompt(
         state.model.clone()
     };
     let cfg = crate::config::load_arc();
-    state.exploration_state.begin_turn(&display_text, &cfg);
+    state.exploration_state.begin_turn(turn_text, &cfg);
     let tx = tx.clone();
     let interrupt = state.interrupt_flag.clone();
     // Fresh user submission resets any prior interrupt state — the user
@@ -846,5 +860,4 @@ pub(crate) async fn submit_prompt(
                 .await;
         }
     });
-    Ok(SubmitOutcome::Started)
 }

@@ -41,8 +41,11 @@ pub(crate) async fn handle_engine_event(
         EngineEvent::Stream(StreamEvent::Chunk { text, reasoning }) => {
             crate::runtime::event_loop::handlers::stream_chunk::handle_chunk(state, text, reasoning);
         }
-        EngineEvent::Stream(StreamEvent::ToolInputDelta(byte_len)) => {
-            crate::runtime::event_loop::handlers::stream_chunk::handle_tool_input_delta(state, byte_len);
+        EngineEvent::Stream(StreamEvent::ToolInputDelta { delta, .. }) => {
+            crate::runtime::event_loop::handlers::stream_chunk::handle_tool_input_delta(
+                state,
+                delta.len(),
+            );
         }
         EngineEvent::Stream(StreamEvent::ThinkingTokens(tokens)) => {
             crate::runtime::event_loop::handlers::stream_chunk::handle_thinking_tokens(state, tokens);
@@ -50,7 +53,7 @@ pub(crate) async fn handle_engine_event(
         EngineEvent::Stream(StreamEvent::RedactedThinking(data)) => {
             crate::runtime::event_loop::handlers::stream_chunk::handle_redacted_thinking(state, data);
         }
-        EngineEvent::Stream(StreamEvent::ResponseId(id)) => {
+        EngineEvent::Stream(StreamEvent::ResponseId { id, .. }) => {
             crate::runtime::event_loop::handlers::stream_chunk::handle_response_id(state, id);
         }
 
