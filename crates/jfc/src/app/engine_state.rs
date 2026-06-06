@@ -172,6 +172,9 @@ pub enum EngineEffect {
     /// Fresh tool output landed in the transcript — frontends reset
     /// path-yank-style cursors so shortcuts start from the newest refs.
     ToolOutputArrived,
+    /// The engine switched sessions (load/clear/continue) — frontends reset
+    /// per-session view state (task panel selection, drill-down, token gauge).
+    SessionSwitched,
 }
 
 pub struct EngineState {
@@ -1397,7 +1400,7 @@ impl EngineState {
         // Fast path: when running inside a landlock sandbox, permission
         // prompts add friction without security value — auto-approve
         // unless the user has explicitly opted out via config.
-        if crate::is_sandbox_active() {
+        if crate::sandbox::is_sandbox_active() {
             let auto_allow = crate::config::load_arc()
                 .permission_automation
                 .as_ref()

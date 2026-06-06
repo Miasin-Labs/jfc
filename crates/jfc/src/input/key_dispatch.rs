@@ -204,84 +204,9 @@ fn last_reasoning_message_idx(app: &App) -> Option<usize> {
 }
 
 pub(crate) fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::runtime::EngineEvent>) {
-    let already_requested = app.engine.cancel_token.is_cancelled()
-        || app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst);
-
-    let old_cancel = app.engine.cancel_token.clone();
-    app.engine.interrupt_flag
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    old_cancel.cancel();
-    app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+    // View bookkeeping: a real interrupt resets the double-Esc timer.
     app.last_esc_at = None;
-
-    if let Some(handle) = app.engine.active_stream_handle.take() {
-        handle.abort();
-    }
-
-    let denied_approvals = approval::deny_pending_and_queued(&mut app.engine, tx);
-
-    if app.engine.goal_evaluator_in_flight {
-        tracing::info!(
-            target: "jfc::input::abort",
-            "marking in-flight goal evaluator cancelled"
-        );
-        app.engine.goal_evaluator_in_flight = false;
-    }
-
-    // Zero the in-flight auto-mode classifier counter. Each classifier task
-    // races the (now-cancelled) cancel token and returns WITHOUT emitting a
-    // ClassifierDecision, so `pending_classifications` is never decremented —
-    // it would otherwise stay > 0 forever, wedging `pipeline_busy_for_submit`
-    // true so every later submit gets queued behind a turn that will never run
-    // (the "queue a message after cancelling and it never fires" bug). The
-    // aborted stream's StreamEvent::Error resets the rest of the pipeline; this
-    // counter has no such self-clearing event.
-    if app.engine.pending_classifications > 0 {
-        tracing::info!(
-            target: "jfc::input::abort",
-            pending = app.engine.pending_classifications,
-            "zeroing in-flight classifier counter on interrupt"
-        );
-        app.engine.pending_classifications = 0;
-    }
-
-    let killed = crate::bash_processes::terminate_all();
-    if killed > 0 {
-        tracing::info!(
-            target: "jfc::input::abort",
-            killed,
-            "SIGTERMed in-flight bash subprocesses"
-        );
-    }
-
-    if !app.engine.has_interruptible_work() {
-        app.engine.interrupt_flag
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    if already_requested {
-        tracing::debug!(
-            target: "jfc::input::abort",
-            denied_approvals,
-            "interrupt request ignored because cancellation is already in progress"
-        );
-        return;
-    }
-
-    crate::toast::push_with_cap(
-        &mut app.engine.toasts,
-        crate::toast::Toast::new(
-            crate::toast::ToastKind::Warning,
-            if killed > 0 {
-                format!(
-                    "⏹ Interrupted (killed {killed} process{})",
-                    if killed == 1 { "" } else { "es" }
-                )
-            } else {
-                "⏹ Interrupted".to_owned()
-            },
-        ),
-    );
+    crate::runtime::ops::interrupt(&mut app.engine, tx);
 }
 
 /// User-configured keybindings (`keybindings.toml`), checked before built-in

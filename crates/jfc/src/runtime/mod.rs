@@ -1,11 +1,14 @@
 mod agent_log_parser;
 mod background;
+pub(crate) mod bootstrap;
 pub(crate) mod event_loop;
 mod events;
 mod execution;
 mod factory;
 mod goal_loop;
+mod dispatch;
 mod network;
+pub(crate) mod ops;
 mod queue;
 mod stream_control;
 mod task_activity;
@@ -30,6 +33,7 @@ pub use jfc_core::{
 };
 #[cfg(test)]
 pub use jfc_core::{DiagnosticLevel, ToolOutcome};
+pub(crate) use dispatch::{FrontendDirective, handle_engine_event};
 pub(crate) use network::record_network_recovery;
 pub(crate) use queue::drain_queued_prompts;
 pub(crate) use stream_control::restart_stream_in_place;

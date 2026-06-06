@@ -163,48 +163,6 @@ pub(crate) fn handle_toast(state: &mut EngineState, kind: toast::ToastKind, text
     toast::push_with_cap(&mut state.toasts, toast::Toast::new(kind, text));
 }
 
-/// Handle `ControlEvent::LoadSession(session_id)`.
-pub(crate) async fn handle_load_session(app: &mut App, session_id: crate::ids::SessionId) {
-    // Session-picker selected. Reuse the same loader the
-    // sidebar's Enter handler calls so we share the
-    // cwd-refresh + title-update + scroll-to-bottom
-    // semantics. Errors land as a toast so the user
-    // doesn't lose the picker context.
-    tracing::info!(
-        target: "jfc::session_picker",
-        session_id = %session_id,
-        "LoadSession event received, fetching messages"
-    );
-    match crate::session::load_session(&session_id).await {
-        Some(messages) => {
-            app.engine.messages = messages;
-            let id_for_toast = session_id.clone();
-            app.switch_session(Some(session_id));
-            app.engine.streaming_text.clear();
-            app.engine.streaming_reasoning.clear();
-            app.engine.streaming_response_bytes = 0;
-            app.engine.streaming_assistant_idx = None;
-            app.engine.push_effect(crate::app::EngineEffect::ScrollToBottom);
-            toast::push_with_cap(
-                &mut app.engine.toasts,
-                toast::Toast::new(
-                    toast::ToastKind::Success,
-                    format!("Loaded session {id_for_toast}"),
-                ),
-            );
-        }
-        None => {
-            toast::push_with_cap(
-                &mut app.engine.toasts,
-                toast::Toast::new(
-                    toast::ToastKind::Error,
-                    format!("Failed to load session {session_id}"),
-                ),
-            );
-        }
-    }
-}
-
 /// Handle `FrontendEvent::PlanReview { plan }`.
 pub(crate) fn handle_exit_plan_mode(state: &mut EngineState, plan: String) {
     // Surface the plan as part of the existing assistant message

@@ -74,7 +74,7 @@ fn dispatch_approved_tools(state: &mut EngineState, tools: Vec<ToolCall>, tx: &m
     );
 }
 
-pub(super) fn deny_pending_and_queued(state: &mut EngineState, tx: &mpsc::Sender<EngineEvent>) -> usize {
+pub(crate) fn deny_pending_and_queued(state: &mut EngineState, tx: &mpsc::Sender<EngineEvent>) -> usize {
     let mut denied = Vec::new();
     if let Some(pending) = state.pending_approval.take() {
         denied.push(pending.tool);

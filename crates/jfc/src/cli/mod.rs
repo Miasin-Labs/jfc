@@ -21,11 +21,13 @@ mod logging;
 mod memory;
 mod plugin;
 mod policy;
-mod provider_bootstrap;
+
 mod rc;
 mod terminal;
 
-pub(crate) use provider_bootstrap::{
+// Provider bootstrap moved to the engine side (runtime/bootstrap.rs) so the
+// daemon worker and headless drivers share it without a cli dependency.
+pub(crate) use crate::runtime::bootstrap::{
     build_providers, provider_for_model, qualified_model_id, resolve_provider_model,
 };
 

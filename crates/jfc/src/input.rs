@@ -1,7 +1,6 @@
 use crossterm::event::{self, KeyCode, KeyModifiers};
 use ratatui::style::Style;
 use ratatui_textarea::{CursorMove, TextArea};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 mod account_commands;
@@ -66,9 +65,8 @@ use crate::runtime::{ControlEvent, EngineEvent};
 use crate::types::*;
 
 // Re-export the public functions from sub-modules
-pub(crate) use approval::handle_remote_approval_response;
+pub(crate) use approval::{deny_pending_and_queued, handle_remote_approval_response};
 pub use key_dispatch::handle_key;
-pub(crate) use key_dispatch::request_user_interrupt;
 pub(crate) use question::build_pending_question;
 pub(crate) use slash_commands::SLASH_COMMANDS;
 pub use slash_commands::run_slash_command;

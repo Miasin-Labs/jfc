@@ -105,19 +105,6 @@ pub mod sandbox;
 pub mod session_recap;
 pub mod slop_guard;
 
-/// Returns `true` when the landlock sandbox feature is enabled AND the
-/// sandbox was successfully initialized for this process. Used by the
-/// permission system to auto-approve tool calls without prompting.
-#[cfg(feature = "landlock-sandbox")]
-pub(crate) fn is_sandbox_active() -> bool {
-    sandbox::is_sandbox_active()
-}
-
-#[cfg(not(feature = "landlock-sandbox"))]
-pub(crate) fn is_sandbox_active() -> bool {
-    false
-}
-
 pub(crate) use cli::{
     CliRuntimeConfig, StartupSession, build_providers, provider_for_model, qualified_model_id,
     resolve_provider_model,

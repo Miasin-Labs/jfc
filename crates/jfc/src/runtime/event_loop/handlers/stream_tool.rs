@@ -18,7 +18,7 @@ static SANDBOX_TOAST_SHOWN: AtomicBool = AtomicBool::new(false);
 /// Push a one-time toast informing the user that tools are being auto-approved
 /// because the process is running inside a landlock sandbox.
 fn maybe_show_sandbox_toast(state: &mut EngineState) {
-    if crate::is_sandbox_active() && !SANDBOX_TOAST_SHOWN.swap(true, Ordering::Relaxed) {
+    if crate::sandbox::is_sandbox_active() && !SANDBOX_TOAST_SHOWN.swap(true, Ordering::Relaxed) {
         toast::push_with_cap(
             &mut state.toasts,
             toast::Toast::new(ToastKind::Info, "Tools auto-approved (sandboxed)"),
