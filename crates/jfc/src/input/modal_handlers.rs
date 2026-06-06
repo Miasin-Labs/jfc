@@ -179,7 +179,7 @@ async fn handle_sidebar_key(app: &mut App, key: event::KeyEvent) -> bool {
         }
         KeyCode::Enter => {
             if let Some(id) = ordered.get(app.session_selected).cloned()
-                && let Some(messages) = crate::session::load_session(&id).await
+                && let Some(messages) = jfc_engine::session::load_session(&id).await
             {
                 app.engine.messages = messages;
                 app.switch_session(Some(id));

@@ -24,8 +24,8 @@ pub(super) async fn run_policy_subcommand(sub: PolicySubcommand) -> anyhow::Resu
 }
 
 fn print_policy_status(json: bool) -> anyhow::Result<()> {
-    let effective = crate::config::load_managed_settings();
-    let sources = crate::config::managed_settings_sources();
+    let effective = jfc_engine::config::load_managed_settings();
+    let sources = jfc_engine::config::managed_settings_sources();
     if json {
         println!(
             "{}",
@@ -79,7 +79,7 @@ fn print_policy_status(json: bool) -> anyhow::Result<()> {
 }
 
 fn print_policy_sources(json: bool) -> anyhow::Result<()> {
-    let sources = crate::config::managed_settings_sources();
+    let sources = jfc_engine::config::managed_settings_sources();
     if json {
         println!("{}", serde_json::to_string_pretty(&sources)?);
     } else {
@@ -88,7 +88,7 @@ fn print_policy_sources(json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_sources_text(sources: &[crate::config::ManagedSettingsSource]) {
+fn print_sources_text(sources: &[jfc_engine::config::ManagedSettingsSource]) {
     println!("sources:");
     for source in sources {
         let path = source

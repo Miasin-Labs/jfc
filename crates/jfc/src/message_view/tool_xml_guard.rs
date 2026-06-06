@@ -25,7 +25,7 @@ use std::sync::LazyLock;
 /// left alone. Names are case-sensitive (`Bash`, `Read`, …) to match how the
 /// catalog advertises them and avoid colliding with lowercase HTML tags.
 static TOOL_NAMES: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    crate::tools::all_tool_defs()
+    jfc_engine::tools::all_tool_defs()
         .into_iter()
         .map(|d| d.name)
         .collect()

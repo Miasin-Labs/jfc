@@ -11,10 +11,8 @@ use std::io::Write;
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{
-    app::App,
-    types::{MessagePart, Role},
-};
+use crate::app::App;
+use jfc_core::{MessagePart, Role};
 
 /// Pull the rendered text of the last assistant message. Pure helper —
 /// no side effects, exposed at crate-vis for the `/copy last` path.

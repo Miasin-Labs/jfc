@@ -421,7 +421,7 @@ fn dedup_tool_list(tools: &mut Vec<String>) {
     tools.retain(|tool| seen.insert(tool.to_ascii_lowercase()));
 }
 
-fn managed_forces_non_bypass(managed: Option<&crate::config::ManagedSettingsConfig>) -> bool {
+fn managed_forces_non_bypass(managed: Option<&jfc_engine::config::ManagedSettingsConfig>) -> bool {
     managed
         .and_then(|m| m.force_permission_mode.as_deref())
         .and_then(|mode| parse_permission_mode(Some(mode)))
@@ -479,14 +479,14 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let _trace_guard = init_tracing(cli.command.is_some());
 
     // Initialize the process-global hook registry once. From here on
-    // any `crate::hooks::fire(point, ctx)` call short-circuits to the
+    // any `jfc_engine::hooks::fire(point, ctx)` call short-circuits to the
     // registered handlers (Logger only, by default — user-defined
     // hooks land via .claude/settings.json in a future pass). Idempotent.
-    crate::command_spec::register_slash_commands(crate::input::SLASH_COMMANDS);
-    crate::hooks::init_global(crate::hooks::default_registry());
+    jfc_engine::command_spec::register_slash_commands(crate::input::SLASH_COMMANDS);
+    jfc_engine::hooks::init_global(jfc_engine::hooks::default_registry());
     // TUI render-cache persistence rides on the session-save hook so the
     // engine-side session layer never links the markdown/render stack.
-    crate::session::set_post_save_hook(|| {
+    jfc_engine::session::set_post_save_hook(|| {
         let hl_cache_path = std::env::current_dir()
             .unwrap_or_default()
             .join(".jfc/highlight-heights.json");
@@ -494,7 +494,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     });
 
     // Clean up tool-result spill files older than 24h to prevent unbounded /tmp growth.
-    crate::stream::cleanup_tool_result_spills(std::time::Duration::from_secs(24 * 3600));
+    jfc_engine::stream::cleanup_tool_result_spills(std::time::Duration::from_secs(24 * 3600));
 
     // v132 file watcher: install on startup so CLAUDE.md /
     // .claude/agents/*.md / settings.toml edits emit a system-reminder
@@ -504,7 +504,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::file_watcher::install();
     crate::keybindings::load();
 
-    let managed_settings = crate::config::load_managed_settings();
+    let managed_settings = jfc_engine::config::load_managed_settings();
     let policy_inspection = matches!(cli.command.as_ref(), Some(Command::Policy { .. }));
     if !policy_inspection {
         enforce_managed_startup_policy(managed_settings.as_ref())?;
@@ -521,7 +521,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         );
     } else {
         for dir in &cli.plugin_dir {
-            crate::workflows::registry::register_extra_plugin_dir(dir.clone());
+            jfc_engine::workflows::registry::register_extra_plugin_dir(dir.clone());
         }
     }
     if managed_settings
@@ -536,7 +536,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     } else {
         for url in &cli.plugin_url {
             match plugin::ensure_plugin_url(url) {
-                Ok(path) => crate::workflows::registry::register_extra_plugin_dir(path),
+                Ok(path) => jfc_engine::workflows::registry::register_extra_plugin_dir(path),
                 Err(err) => tracing::warn!(
                 target: "jfc::plugins",
                 url,
@@ -583,7 +583,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let advisor_cli = cli.advisor.clone();
     let local_advisor = {
-        let cfg = crate::config::load_arc();
+        let cfg = jfc_engine::config::load_arc();
         let configured = advisor_cli
             .as_deref()
             .or_else(|| cfg.advisor_model.as_deref());
@@ -591,7 +591,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         let advisor = if cli.no_advisor {
             None
         } else {
-            match crate::advisor::resolve_local_advisor_model(
+            match jfc_engine::advisor::resolve_local_advisor_model(
                 &model,
                 configured,
                 force,
@@ -607,8 +607,8 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         };
         let advisor_provider = advisor.as_ref().and_then(|target| target.provider.clone());
         let advisor_model = advisor.as_ref().map(|target| target.model.clone());
-        crate::advisor::set_active_local_advisor_provider(advisor_provider.clone());
-        crate::advisor::set_active_local_advisor_model(advisor_model.clone());
+        jfc_engine::advisor::set_active_local_advisor_provider(advisor_provider.clone());
+        jfc_engine::advisor::set_active_local_advisor_model(advisor_model.clone());
         if cli.no_advisor {
             tracing::info!(target: "jfc::advisor", "local advisor disabled by --no-advisor");
         } else if let Some(target) = &advisor {
@@ -628,13 +628,13 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let server_advisor_cli = cli.server_advisor.clone();
     let advisor_model = {
-        let cfg = crate::config::load_arc();
+        let cfg = jfc_engine::config::load_arc();
         let configured = server_advisor_cli
             .as_deref()
             .or_else(|| cfg.server_advisor_model.as_deref());
         let force = server_advisor_cli.is_some();
         let resolved =
-            crate::advisor::resolve_server_advisor_model(&model, configured, force, force);
+            jfc_engine::advisor::resolve_server_advisor_model(&model, configured, force, force);
         let mut advisor = match resolved {
             Ok(model) => model,
             Err(e) if force => anyhow::bail!("--server-advisor: {e}"),
@@ -659,7 +659,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
             tracing::warn!(target: "jfc::advisor", %msg);
             advisor = None;
         }
-        crate::advisor::set_active_server_advisor_model(advisor.clone());
+        jfc_engine::advisor::set_active_server_advisor_model(advisor.clone());
         if let Some(advisor_model) = &advisor {
             tracing::info!(
                 target: "jfc::advisor",
@@ -766,7 +766,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     // "summarize this PR" --print | tee out.md`. When `--print` is
     // set without `--prompt`, read the prompt from stdin.
     if print_mode {
-        crate::tools::register_active_provider(provider.clone(), model.clone());
+        jfc_engine::tools::register_active_provider(provider.clone(), model.clone());
         let prompt = match initial_prompt {
             Some(p) => p,
             None => {
@@ -810,7 +810,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     // we fail fast on missing API key instead of after entering
     // the alt-screen.
     if let Some(remote_id) = cli.remote_session.clone() {
-        let Some(sdk_client) = crate::sdk_bridge::build_client() else {
+        let Some(sdk_client) = jfc_engine::sdk_bridge::build_client() else {
             eprintln!(
                 "--remote-session: no Anthropic API key found (set ANTHROPIC_API_KEY \
                  or configure a profile via .jfc/account.toml)"
@@ -825,7 +825,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     // validator subagent LLM calls without needing a wider
     // signature change. Safe to call multiple times — model swaps
     // overwrite the registered handle.
-    crate::tools::register_active_provider(provider.clone(), model.clone());
+    jfc_engine::tools::register_active_provider(provider.clone(), model.clone());
 
     install_terminal_panic_hook();
     enable_raw_mode()?;
@@ -853,7 +853,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
             // If no --permission-mode flag was passed, read the persisted
             // mode from config.toml [default.permission].mode so the user's
             // `/mode` choice survives across sessions.
-            let cfg = crate::config::load_arc();
+            let cfg = jfc_engine::config::load_arc();
             cfg.default
                 .permission
                 .get("mode")
@@ -904,7 +904,7 @@ async fn run_subcommand(cmd: Command) -> anyhow::Result<()> {
 }
 
 fn enforce_managed_startup_policy(
-    managed: Option<&crate::config::ManagedSettingsConfig>,
+    managed: Option<&jfc_engine::config::ManagedSettingsConfig>,
 ) -> anyhow::Result<()> {
     let Some(managed) = managed else {
         return Ok(());
@@ -961,7 +961,7 @@ fn anthropic_oauth_available() -> bool {
     {
         return true;
     }
-    let path = crate::providers::anthropic_oauth::default_store_path();
+    let path = jfc_engine::providers::anthropic_oauth::default_store_path();
     let Ok(raw) = std::fs::read_to_string(path) else {
         return false;
     };

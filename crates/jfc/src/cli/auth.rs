@@ -139,7 +139,7 @@ pub(super) async fn run_auth_subcommand(sub: AuthSubcommand) -> anyhow::Result<(
 }
 
 async fn run_openwebui_auth_subcommand(sub: OpenWebUIAuthSubcommand) -> anyhow::Result<()> {
-    use crate::providers::openwebui::{
+    use jfc_engine::providers::openwebui::{
         Account, DuoMethod, OidcLoginOptions, default_store_path, fetch_instance_config,
         get_current, list_accounts, load_store, normalize_base_url, oidc_login, parse_jwt_claims,
         remove_account, set_current, upsert_account, verify_token,
@@ -212,8 +212,8 @@ async fn run_openwebui_auth_subcommand(sub: OpenWebUIAuthSubcommand) -> anyhow::
                 let base = base.clone();
                 let token = result.token.clone();
                 tokio::spawn(async move {
-                    let tz = crate::providers::openwebui::detect_iana_timezone();
-                    crate::providers::openwebui::update_user_timezone(&base, &token, &tz).await;
+                    let tz = jfc_engine::providers::openwebui::detect_iana_timezone();
+                    jfc_engine::providers::openwebui::update_user_timezone(&base, &token, &tz).await;
                 });
             }
 
@@ -358,7 +358,7 @@ async fn run_openwebui_auth_subcommand(sub: OpenWebUIAuthSubcommand) -> anyhow::
 }
 
 async fn run_codex_auth_subcommand(sub: CodexAuthSubcommand) -> anyhow::Result<()> {
-    use crate::providers::codex_oauth::CodexOAuthProvider;
+    use jfc_engine::providers::codex_oauth::CodexOAuthProvider;
     use jfc_auth::oauth_core::TokenStore;
 
     let provider = CodexOAuthProvider::new();
@@ -427,7 +427,7 @@ async fn run_codex_auth_subcommand(sub: CodexAuthSubcommand) -> anyhow::Result<(
 }
 
 async fn run_litellm_auth_subcommand(sub: LiteLLMAuthSubcommand) -> anyhow::Result<()> {
-    use crate::providers::litellm;
+    use jfc_engine::providers::litellm;
 
     let cred_path = litellm::credentials_path();
     match sub {
@@ -492,9 +492,9 @@ async fn run_litellm_auth_subcommand(sub: LiteLLMAuthSubcommand) -> anyhow::Resu
 }
 
 async fn run_anthropic_auth_subcommand(sub: AnthropicAuthSubcommand) -> anyhow::Result<()> {
-    use crate::providers::anthropic_accounts::AccountManager;
-    use crate::providers::anthropic_oauth::default_store_path;
-    use crate::providers::anthropic_oauth_login as login;
+    use jfc_engine::providers::anthropic_accounts::AccountManager;
+    use jfc_engine::providers::anthropic_oauth::default_store_path;
+    use jfc_engine::providers::anthropic_oauth_login as login;
 
     let store_path = default_store_path();
     let mgr = AccountManager::load(store_path.clone()).await?;
@@ -538,7 +538,7 @@ async fn run_anthropic_auth_subcommand(sub: AnthropicAuthSubcommand) -> anyhow::
                 let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
                 let port = listener.local_addr()?.port();
                 let req = login::authorize_with_redirect(
-                    crate::providers::anthropic_oauth_login::RedirectTarget::Localhost(port),
+                    jfc_engine::providers::anthropic_oauth_login::RedirectTarget::Localhost(port),
                 );
                 println!();
                 println!("=== Anthropic OAuth login ===");
@@ -676,8 +676,8 @@ async fn wait_for_oauth_callback(
 }
 
 fn format_runtime_state(
-    acct: &crate::providers::anthropic_accounts::Account,
-    rt: &crate::providers::anthropic_accounts::RuntimeState,
+    acct: &jfc_engine::providers::anthropic_accounts::Account,
+    rt: &jfc_engine::providers::anthropic_accounts::RuntimeState,
 ) -> String {
     if !acct.is_disk_rate_limit_cleared() {
         return "rate-limited".into();

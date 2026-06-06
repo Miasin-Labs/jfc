@@ -87,7 +87,7 @@ pub(super) async fn run_memory_subcommand(sub: MemorySubcommand) -> anyhow::Resu
     match sub {
         MemorySubcommand::Sync { dir, json } => {
             let cwd = std::env::current_dir()?;
-            let report = crate::memory::sync_team_memory(&cwd, &dir)
+            let report = jfc_engine::memory::sync_team_memory(&cwd, &dir)
                 .map_err(|e| anyhow::anyhow!("memory sync failed: {e}"))?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -113,7 +113,7 @@ pub(super) async fn run_memory_subcommand(sub: MemorySubcommand) -> anyhow::Resu
 }
 
 async fn run_memory_store_subcommand(sub: MemoryStoreSubcommand) -> anyhow::Result<()> {
-    let Some(client) = crate::sdk_bridge::build_client() else {
+    let Some(client) = jfc_engine::sdk_bridge::build_client() else {
         anyhow::bail!(
             "memory stores require an Anthropic API key profile; configure ANTHROPIC_API_KEY or jfc auth"
         );

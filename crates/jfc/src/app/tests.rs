@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use super::shell_safety::is_readonly_bash;
 use super::*;
 use jfc_engine::app::recent_models::save_recent_models;
-use crate::types::{
+use jfc_core::{
     ChatMessage, MessagePart, ModelUsage, ReplacementMode, ToolCall, ToolInput, ToolKind,
     ToolOutput, ToolStatus,
 };
@@ -42,14 +42,14 @@ fn new_app() -> App {
 
 fn make_tool(kind: ToolKind, id: &str) -> ToolCall {
     ToolCall {
-        id: crate::ids::ToolId::from(id),
+        id: jfc_engine::ids::ToolId::from(id),
         kind,
         status: ToolStatus::Pending,
         input: ToolInput::Generic {
             summary: String::new(),
         },
         output: ToolOutput::Empty,
-        display: crate::types::ToolDisplayState::DEFAULT,
+        display: jfc_core::ToolDisplayState::DEFAULT,
         elapsed_ms: None,
         started_at: None,
         thought_signature: None,
@@ -210,7 +210,7 @@ fn permission_mode_bypass_auto_default_decisions_normal() {
 
 fn make_bash_tool(command: &str) -> ToolCall {
     ToolCall {
-        id: crate::ids::ToolId::from("b-cat"),
+        id: jfc_engine::ids::ToolId::from("b-cat"),
         kind: ToolKind::Bash,
         status: ToolStatus::Pending,
         input: ToolInput::Bash {
@@ -220,7 +220,7 @@ fn make_bash_tool(command: &str) -> ToolCall {
             run_in_background: None,
         },
         output: ToolOutput::Empty,
-        display: crate::types::ToolDisplayState::DEFAULT,
+        display: jfc_core::ToolDisplayState::DEFAULT,
         elapsed_ms: None,
         started_at: None,
         thought_signature: None,
@@ -640,7 +640,7 @@ fn switch_session_resets_state_normal() {
     app.engine.task_completion_times
         .insert(jfc_session::TaskId::from("t1"), Instant::now());
 
-    app.switch_session(Some(crate::ids::SessionId::new("ses_test_switch")));
+    app.switch_session(Some(jfc_engine::ids::SessionId::new("ses_test_switch")));
 
     assert!(!app.engine.compact_suppressed);
     assert_eq!(app.task_panel_selected, 0);
@@ -1012,7 +1012,7 @@ fn message_part_tool_carries_input_output_normal() {
             replacement: ReplacementMode::FirstOnly,
         },
         output: ToolOutput::Text("ok".into()),
-        display: crate::types::ToolDisplayState::DEFAULT,
+        display: jfc_core::ToolDisplayState::DEFAULT,
         elapsed_ms: None,
         started_at: None,
         thought_signature: None,
@@ -1092,7 +1092,7 @@ fn take_background_reminders_empty_is_empty_robust() {
 //    frontend's interpretation of the TranscriptReplaced/ScrollToBottom
 //    effects, applied via apply_engine_effects). ─────────────────────────────
 
-use crate::types::ChatMessage as CompactChatMessage;
+use jfc_core::ChatMessage as CompactChatMessage;
 
 #[tokio::test]
 async fn compaction_done_repins_scroll_to_bottom_robust() {

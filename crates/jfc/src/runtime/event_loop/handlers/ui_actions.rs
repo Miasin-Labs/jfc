@@ -20,10 +20,10 @@ pub(crate) async fn handle_submit(
     // is for the *user* to re-orient on return — it is not injected into the
     // model's context (the model already has the full transcript).
     let away = app.last_user_activity_at.elapsed();
-    if away >= crate::session_recap::AWAY_THRESHOLD && !app.idle_return_shown {
-        use crate::types::{MessagePart, Role, ToolInput};
+    if away >= jfc_engine::session_recap::AWAY_THRESHOLD && !app.idle_return_shown {
+        use jfc_core::{MessagePart, Role, ToolInput};
         let start_idx = app.interaction_message_idx.min(app.engine.messages.len());
-        let since: Vec<crate::session_recap::RecapMessage> =
+        let since: Vec<jfc_engine::session_recap::RecapMessage> =
             app.engine.messages[start_idx..]
                 .iter()
                 .map(|m| {
@@ -60,9 +60,9 @@ pub(crate) async fn handle_submit(
                         })
                         .collect();
                     let had_error = m.parts.iter().any(|p| matches!(p,
-                    MessagePart::Tool(t) if t.status == crate::types::ExecutionStatus::Failed
+                    MessagePart::Tool(t) if t.status == jfc_core::ExecutionStatus::Failed
                 ));
-                    crate::session_recap::RecapMessage {
+                    jfc_engine::session_recap::RecapMessage {
                         is_assistant: m.role == Role::Assistant,
                         tool_calls,
                         had_error,
@@ -71,7 +71,7 @@ pub(crate) async fn handle_submit(
                     }
                 })
                 .collect();
-        if let Some(recap) = crate::session_recap::generate_recap(&since) {
+        if let Some(recap) = jfc_engine::session_recap::generate_recap(&since) {
             app.away_recap = Some(format!(
                 "{recap}\n(away {}m · Esc to dismiss)",
                 away.as_secs() / 60

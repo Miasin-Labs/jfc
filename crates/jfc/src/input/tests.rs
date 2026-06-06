@@ -6,7 +6,7 @@ use super::navigation::{scan_path_refs, user_prompts};
 use super::*;
 use crate::app::App;
 use crate::runtime::{EngineEvent, ToolEvent};
-use crate::types::*;
+use jfc_core::*;
 use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
 
 struct TestProvider;
@@ -80,8 +80,8 @@ struct TemperatureGlobalGuard;
 
 impl Drop for TemperatureGlobalGuard {
     fn drop(&mut self) {
-        crate::exploration::set_temperature_global(None);
-        crate::exploration::set_exploration_level_global(None);
+        jfc_engine::exploration::set_temperature_global(None);
+        jfc_engine::exploration::set_exploration_level_global(None);
     }
 }
 
@@ -112,7 +112,7 @@ fn make_tool(id: &str, kind: ToolKind) -> ToolCall {
         status: ToolStatus::Pending,
         input,
         output: ToolOutput::Empty,
-        display: crate::types::ToolDisplayState::DEFAULT,
+        display: jfc_core::ToolDisplayState::DEFAULT,
         elapsed_ms: None,
         started_at: None,
         thought_signature: None,
@@ -131,7 +131,7 @@ fn make_bash_tool(id: &str, command: &str) -> ToolCall {
             run_in_background: None,
         },
         output: ToolOutput::Empty,
-        display: crate::types::ToolDisplayState::DEFAULT,
+        display: jfc_core::ToolDisplayState::DEFAULT,
         elapsed_ms: None,
         started_at: None,
         thought_signature: None,
@@ -326,7 +326,7 @@ fn collect_recent_paths_dedups_normal() {
             stderr: String::new(),
             exit_code: Some(0),
         },
-        display: crate::types::ToolDisplayState::DEFAULT,
+        display: jfc_core::ToolDisplayState::DEFAULT,
         elapsed_ms: None,
         started_at: None,
         thought_signature: None,
@@ -1054,7 +1054,7 @@ async fn jump_armed_e_jumps_to_error_normal() {
                     run_in_background: None,
                 },
                 output: ToolOutput::Empty,
-                display: crate::types::ToolDisplayState::DEFAULT,
+                display: jfc_core::ToolDisplayState::DEFAULT,
                 elapsed_ms: None,
                 started_at: None,
                 thought_signature: None,
@@ -1551,11 +1551,11 @@ async fn ctrl_s_toggles_info_sidebar_normal() {
 #[tokio::test]
 async fn ctrl_o_opens_diagnostic_panel_when_diagnostics_present_normal() {
     let mut app = test_app();
-    app.engine.diagnostics.push(crate::diagnostics::DiagnosticEntry {
+    app.engine.diagnostics.push(jfc_engine::diagnostics::DiagnosticEntry {
         file: "src/lib.rs".into(),
         line: 1,
         col: 1,
-        severity: crate::diagnostics::Severity::Error,
+        severity: jfc_engine::diagnostics::Severity::Error,
         message: "boom".into(),
         code: None,
         source: None,
@@ -1593,8 +1593,8 @@ async fn ctrl_o_toggles_reasoning_robust_no_diagnostics() {
     // first press seeds `true` then flips to `false` (collapse).
     let mut app = test_app();
     app.engine.messages.push(ChatMessage::assistant_parts(vec![
-        crate::types::MessagePart::Reasoning("thinking".into()),
-        crate::types::MessagePart::Text("hi".into()),
+        jfc_core::MessagePart::Reasoning("thinking".into()),
+        jfc_core::MessagePart::Text("hi".into()),
     ]));
     let (tx, _rx) = channel();
     handle_key(
@@ -1785,7 +1785,7 @@ async fn lower_o_toggles_tool_expand_normal() {
                     limit: None,
                 },
                 output: ToolOutput::Text("hi".into()),
-                display: crate::types::ToolDisplayState::DEFAULT,
+                display: jfc_core::ToolDisplayState::DEFAULT,
                 elapsed_ms: None,
                 started_at: None,
                 thought_signature: None,
@@ -2060,7 +2060,7 @@ async fn alt_d_deletes_next_word_robust() {
 #[tokio::test]
 async fn alt_period_raises_reasoning_effort_normal() {
     let mut app = test_app();
-    app.engine.effort_state.set(crate::effort::ReasoningEffort::Medium);
+    app.engine.effort_state.set(jfc_engine::effort::ReasoningEffort::Medium);
     let (tx, _rx) = channel();
     handle_key(
         &mut app,
@@ -2071,14 +2071,14 @@ async fn alt_period_raises_reasoning_effort_normal() {
     .unwrap();
     assert_eq!(
         app.engine.effort_state.current,
-        Some(crate::effort::ReasoningEffort::High)
+        Some(jfc_engine::effort::ReasoningEffort::High)
     );
 }
 
 #[tokio::test]
 async fn alt_comma_lowers_reasoning_effort_normal() {
     let mut app = test_app();
-    app.engine.effort_state.set(crate::effort::ReasoningEffort::Medium);
+    app.engine.effort_state.set(jfc_engine::effort::ReasoningEffort::Medium);
     let (tx, _rx) = channel();
     handle_key(
         &mut app,
@@ -2089,7 +2089,7 @@ async fn alt_comma_lowers_reasoning_effort_normal() {
     .unwrap();
     assert_eq!(
         app.engine.effort_state.current,
-        Some(crate::effort::ReasoningEffort::Low)
+        Some(jfc_engine::effort::ReasoningEffort::Low)
     );
 }
 
@@ -2303,7 +2303,7 @@ async fn slash_temp_sets_temperature_normal() {
     run_slash_command(&mut app, "/temp 0.7").await;
 
     assert_eq!(app.engine.temperature_state.current, Some(0.7));
-    assert_eq!(crate::exploration::active_temperature(), Some(0.7));
+    assert_eq!(jfc_engine::exploration::active_temperature(), Some(0.7));
     let last_text = app.engine
         .messages
         .last()
@@ -2323,7 +2323,7 @@ async fn slash_temp_clear_removes_temperature_normal() {
     run_slash_command(&mut app, "/temperature clear").await;
 
     assert_eq!(app.engine.temperature_state.current, None);
-    assert_eq!(crate::exploration::active_temperature(), None);
+    assert_eq!(jfc_engine::exploration::active_temperature(), None);
 }
 
 #[tokio::test]
@@ -2335,7 +2335,7 @@ async fn slash_temp_rejects_out_of_range_robust() {
     run_slash_command(&mut app, "/temp 3").await;
 
     assert_eq!(app.engine.temperature_state.current, None);
-    assert_eq!(crate::exploration::active_temperature(), None);
+    assert_eq!(jfc_engine::exploration::active_temperature(), None);
     let last_text = app.engine
         .messages
         .last()
@@ -2355,7 +2355,7 @@ async fn slash_explore_raises_sticky_level_normal() {
 
     assert_eq!(app.engine.exploration_state.sticky_delta, 1);
     assert_eq!(
-        crate::exploration::active_exploration_level(),
+        jfc_engine::exploration::active_exploration_level(),
         Some(app.engine.exploration_state.current)
     );
     let last_text = app.engine
@@ -2601,7 +2601,7 @@ async fn slash_rename_robust_no_session() {
 #[tokio::test]
 async fn slash_rename_robust_no_args_with_session() {
     let mut app = test_app();
-    app.engine.current_session_id = Some(crate::ids::SessionId::new("ses_test"));
+    app.engine.current_session_id = Some(jfc_engine::ids::SessionId::new("ses_test"));
     run_slash_command(&mut app, "/rename").await;
     assert!(!app.engine.messages.is_empty());
 }
@@ -2706,7 +2706,7 @@ async fn slash_market_renders_snapshot_normal() {
         .parts
         .iter()
         .filter_map(|p| match p {
-            crate::types::MessagePart::Text(t) => Some(t.clone()),
+            jfc_core::MessagePart::Text(t) => Some(t.clone()),
             _ => None,
         })
         .collect();
@@ -2728,7 +2728,7 @@ async fn slash_cascade_empty_state_normal() {
         .parts
         .iter()
         .filter_map(|p| match p {
-            crate::types::MessagePart::Text(t) => Some(t.clone()),
+            jfc_core::MessagePart::Text(t) => Some(t.clone()),
             _ => None,
         })
         .collect();
@@ -2783,7 +2783,7 @@ async fn slash_cascade_filters_by_metadata_normal() {
         .parts
         .iter()
         .filter_map(|p| match p {
-            crate::types::MessagePart::Text(t) => Some(t.clone()),
+            jfc_core::MessagePart::Text(t) => Some(t.clone()),
             _ => None,
         })
         .collect();
@@ -2815,7 +2815,7 @@ async fn slash_graph_history_empty_state_normal() {
         .parts
         .iter()
         .filter_map(|p| match p {
-            crate::types::MessagePart::Text(t) => Some(t.clone()),
+            jfc_core::MessagePart::Text(t) => Some(t.clone()),
             _ => None,
         })
         .collect();
@@ -2944,7 +2944,7 @@ async fn slash_registry_every_entry_dispatches_robust() {
         run_slash_command(&mut app, name).await;
         let hit_fallthrough = app.engine.messages.iter().any(|m| {
             m.parts.iter().any(|p| {
-                if let crate::types::MessagePart::Text(t) = p {
+                if let jfc_core::MessagePart::Text(t) = p {
                     t.contains("Unknown command:")
                 } else {
                     false
@@ -2959,7 +2959,7 @@ async fn slash_registry_every_entry_dispatches_robust() {
     }
     // Dispatching `/sandbox` installed the process-global sandbox config;
     // restore the baseline so later bash tests aren't forced through bwrap.
-    crate::sandbox::reset_active_bash_sandbox_for_test();
+    jfc_engine::sandbox::reset_active_bash_sandbox_for_test();
 }
 
 #[test]

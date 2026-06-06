@@ -2,7 +2,7 @@ use super::*;
 use crate::input::SLASH_COMMANDS;
 
 pub(super) fn toast_overlay(f: &mut Frame, app: &App) {
-    use crate::toast::ToastKind;
+    use jfc_engine::toast::ToastKind;
     let t = app.theme;
     let frame_area = f.area();
     if frame_area.width < 30 || frame_area.height < 4 {
@@ -147,8 +147,8 @@ pub(super) fn diagnostic_row(f: &mut Frame, app: &App, area: Rect) {
     // acknowledged via Ctrl+O don't show up in the row count. v126
     // cli.js:231036 surfaces the same delta-only count: `Found N new
     // diagnostic issue(s)` — the word "new" is load-bearing.
-    let new_entries: Vec<&crate::diagnostics::DiagnosticEntry> =
-        crate::diagnostics::unacknowledged(&app.engine.diagnostics, &app.delivered_diagnostics);
+    let new_entries: Vec<&jfc_engine::diagnostics::DiagnosticEntry> =
+        jfc_engine::diagnostics::unacknowledged(&app.engine.diagnostics, &app.delivered_diagnostics);
     let issues = new_entries.len();
     let files = {
         let mut s: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -157,12 +157,12 @@ pub(super) fn diagnostic_row(f: &mut Frame, app: &App, area: Rect) {
         }
         s.len()
     };
-    let Some(text) = crate::diagnostics::format_summary(issues, files) else {
+    let Some(text) = jfc_engine::diagnostics::format_summary(issues, files) else {
         return;
     };
     let has_errors = new_entries
         .iter()
-        .any(|e| matches!(e.severity, crate::diagnostics::Severity::Error));
+        .any(|e| matches!(e.severity, jfc_engine::diagnostics::Severity::Error));
     let icon_color = if has_errors { t.error } else { t.warning };
     let line = Line::from(vec![
         Span::styled("● ", Style::default().fg(icon_color)),
@@ -604,11 +604,11 @@ pub(super) fn diagnostic_panel(f: &mut Frame, app: &App) {
     };
     f.render_widget(Clear, rect);
     let issues = app.engine.diagnostics.len();
-    let files = crate::diagnostics::count_files(&app.engine.diagnostics);
+    let files = jfc_engine::diagnostics::count_files(&app.engine.diagnostics);
 
     // Group entries by file in first-seen order. Avoid HashMap iteration
     // for ordering stability — use a Vec of (file, Vec<&entry>).
-    let mut groups: Vec<(String, Vec<&crate::diagnostics::DiagnosticEntry>)> = Vec::new();
+    let mut groups: Vec<(String, Vec<&jfc_engine::diagnostics::DiagnosticEntry>)> = Vec::new();
     for entry in &app.engine.diagnostics {
         if let Some(g) = groups.iter_mut().find(|(f, _)| f == &entry.file) {
             g.1.push(entry);
@@ -624,13 +624,13 @@ pub(super) fn diagnostic_panel(f: &mut Frame, app: &App) {
             t.style_text_primary.add_modifier(Modifier::BOLD),
         )));
         for entry in items {
-            let body = crate::diagnostics::format_entry(entry);
+            let body = jfc_engine::diagnostics::format_entry(entry);
             // Two-cell extra indent so file headers visually anchor.
             let color = match entry.severity {
-                crate::diagnostics::Severity::Error => t.error,
-                crate::diagnostics::Severity::Warning => t.warning,
-                crate::diagnostics::Severity::Info => t.text_secondary,
-                crate::diagnostics::Severity::Hint => t.text_muted,
+                jfc_engine::diagnostics::Severity::Error => t.error,
+                jfc_engine::diagnostics::Severity::Warning => t.warning,
+                jfc_engine::diagnostics::Severity::Info => t.text_secondary,
+                jfc_engine::diagnostics::Severity::Hint => t.text_muted,
             };
             lines.push(Line::from(Span::styled(body, Style::default().fg(color))));
         }

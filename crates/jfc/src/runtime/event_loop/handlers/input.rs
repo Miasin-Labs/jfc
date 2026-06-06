@@ -6,8 +6,9 @@ use crossterm::event::{Event, KeyEventKind};
 
 use crate::app::{App, SelectKind, SelectRequest, TextSelection};
 use crate::runtime::EventSender;
-use crate::types::*;
-use crate::{attachments, input, message_view, toast};
+use jfc_core::*;
+use crate::{attachments, input, message_view};
+use jfc_engine::toast;
 
 /// Max gap between clicks to count as a multi-click (word/line select).
 const MULTI_CLICK_MS: u128 = 500;
@@ -229,7 +230,7 @@ async fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, _tx: &
             // `copy_on_select = false` disables the drag-to-select gesture
             // entirely: clicks fall straight through to the click handler and
             // the clipboard is never touched by a drag.
-            let copy_on_select = crate::config::load_arc().copy_on_select;
+            let copy_on_select = jfc_engine::config::load_arc().copy_on_select;
             let in_messages = copy_on_select
                 && app.messages_rect.borrow().as_ref().is_some_and(|r| {
                     mouse.column >= r.x
@@ -376,13 +377,13 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
                 }
             }
             if let Some(idx) = session_idx {
-                let ordered: Vec<crate::ids::SessionId> = this_project
+                let ordered: Vec<jfc_engine::ids::SessionId> = this_project
                     .into_iter()
                     .chain(other)
                     .map(|s| s.id)
                     .collect();
                 if let Some(id) = ordered.get(idx).cloned()
-                    && let Some(messages) = crate::session::load_session(&id).await
+                    && let Some(messages) = jfc_engine::session::load_session(&id).await
                 {
                     app.engine.messages = messages;
                     app.switch_session(Some(id));

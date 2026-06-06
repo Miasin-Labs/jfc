@@ -205,7 +205,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // the row a notification (transient), not a status display
     // (persistent) — what was wrong before this change.
     let unack_count =
-        crate::diagnostics::unacknowledged(&app.engine.diagnostics, &app.delivered_diagnostics).len();
+        jfc_engine::diagnostics::unacknowledged(&app.engine.diagnostics, &app.delivered_diagnostics).len();
     let diag_row_height: u16 = if unack_count == 0 { 0 } else { 1 };
 
     // In task view the agent tab strip sits at the TOP (browser-style),
@@ -466,10 +466,10 @@ fn apply_text_selection(f: &mut Frame, app: &mut App) {
             return;
         }
         crate::runtime::copy_to_clipboard(&text, "select");
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Info,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
                 format!("Copied {} chars", text.chars().count()),
             ),
         );

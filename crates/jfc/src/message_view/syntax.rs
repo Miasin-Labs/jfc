@@ -6,7 +6,7 @@ pub(super) fn produce_highlighted_with_line_numbers_lines(
     content_w: usize,
     t: Theme,
     expanded: bool,
-    diag_lines: &std::collections::HashMap<usize, crate::diagnostics::Severity>,
+    diag_lines: &std::collections::HashMap<usize, jfc_engine::diagnostics::Severity>,
 ) -> Vec<Line<'static>> {
     let (line_numbers, code) = split_line_numbers(text);
     let code_ref = code.as_deref().unwrap_or(text);
@@ -52,10 +52,10 @@ pub(super) fn produce_highlighted_with_line_numbers_lines(
                 if has_diags {
                     let lineno: usize = num_str.parse().unwrap_or(0);
                     let (glyph, color) = match diag_lines.get(&lineno) {
-                        Some(crate::diagnostics::Severity::Error) => ("✘", t.error),
-                        Some(crate::diagnostics::Severity::Warning) => ("⚠", t.warning),
-                        Some(crate::diagnostics::Severity::Info) => ("ℹ", t.accent),
-                        Some(crate::diagnostics::Severity::Hint) => ("★", t.text_secondary),
+                        Some(jfc_engine::diagnostics::Severity::Error) => ("✘", t.error),
+                        Some(jfc_engine::diagnostics::Severity::Warning) => ("⚠", t.warning),
+                        Some(jfc_engine::diagnostics::Severity::Info) => ("ℹ", t.accent),
+                        Some(jfc_engine::diagnostics::Severity::Hint) => ("★", t.text_secondary),
                         None => (" ", t.text_muted),
                     };
                     spans_init.push(Span::styled(
@@ -93,7 +93,7 @@ pub(super) fn produce_highlighted_with_line_numbers_line_count(
     content_w: usize,
     t: Theme,
     expanded: bool,
-    diag_lines: &std::collections::HashMap<usize, crate::diagnostics::Severity>,
+    diag_lines: &std::collections::HashMap<usize, jfc_engine::diagnostics::Severity>,
 ) -> usize {
     let (line_numbers, code) = split_line_numbers(text);
     let code_ref = code.as_deref().unwrap_or(text);

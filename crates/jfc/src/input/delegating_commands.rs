@@ -63,7 +63,7 @@ pub(super) async fn cmd_plan(
     _text: &str,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    handle_doc_command(app, crate::document_formats::DocKind::Plan, tx).await;
+    handle_doc_command(app, jfc_engine::document_formats::DocKind::Plan, tx).await;
 }
 
 pub(super) async fn cmd_roadmap(
@@ -72,7 +72,7 @@ pub(super) async fn cmd_roadmap(
     _text: &str,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    handle_doc_command(app, crate::document_formats::DocKind::Roadmap, tx).await;
+    handle_doc_command(app, jfc_engine::document_formats::DocKind::Roadmap, tx).await;
 }
 
 pub(super) async fn cmd_parity(
@@ -81,7 +81,7 @@ pub(super) async fn cmd_parity(
     _text: &str,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    handle_doc_command(app, crate::document_formats::DocKind::Parity, tx).await;
+    handle_doc_command(app, jfc_engine::document_formats::DocKind::Parity, tx).await;
 }
 
 pub(super) async fn cmd_philosophy(
@@ -90,7 +90,7 @@ pub(super) async fn cmd_philosophy(
     _text: &str,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    handle_doc_command(app, crate::document_formats::DocKind::Philosophy, tx).await;
+    handle_doc_command(app, jfc_engine::document_formats::DocKind::Philosophy, tx).await;
 }
 
 pub(super) async fn cmd_usage(
@@ -99,7 +99,7 @@ pub(super) async fn cmd_usage(
     _text: &str,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    handle_doc_command(app, crate::document_formats::DocKind::Usage, tx).await;
+    handle_doc_command(app, jfc_engine::document_formats::DocKind::Usage, tx).await;
 }
 
 pub(super) async fn cmd_cost(
@@ -133,12 +133,12 @@ pub(super) async fn cmd_audit(
         filter.change_id = Some((*id).to_string());
     }
     let root = std::path::PathBuf::from(&app.engine.cwd);
-    let events = crate::changeset::query_ledger_in(&root, &filter);
+    let events = jfc_engine::changeset::query_ledger_in(&root, &filter);
     let body = format!(
         "Audit ledger ({} event{}):\n{}",
         events.len(),
         if events.len() == 1 { "" } else { "s" },
-        crate::changeset::render_ledger(&events)
+        jfc_engine::changeset::render_ledger(&events)
     );
     app.engine.messages.push(ChatMessage::assistant(body));
 }
@@ -156,22 +156,22 @@ pub(super) async fn cmd_commands(
     let body = match parts.get(1) {
         Some(&"manifest") => format!(
             "Command manifest (single-source):\n{}",
-            crate::command_spec::render_manifest_all()
+            jfc_engine::command_spec::render_manifest_all()
         ),
         Some(&"completions") => {
-            let specs = crate::command_spec::all_specs();
-            let refs: Vec<&dyn crate::command_spec::CommandSpec> = specs
+            let specs = jfc_engine::command_spec::all_specs();
+            let refs: Vec<&dyn jfc_engine::command_spec::CommandSpec> = specs
                 .iter()
-                .map(|s| s as &dyn crate::command_spec::CommandSpec)
+                .map(|s| s as &dyn jfc_engine::command_spec::CommandSpec)
                 .collect();
             format!(
                 "Completion words:\n{}",
-                crate::command_spec::render_completions(&refs)
+                jfc_engine::command_spec::render_completions(&refs)
             )
         }
         _ => format!(
             "Commands across all surfaces:\n{}",
-            crate::command_spec::render_all()
+            jfc_engine::command_spec::render_all()
         ),
     };
     app.engine.messages.push(ChatMessage::assistant(body));
@@ -187,19 +187,19 @@ pub(super) async fn cmd_changes(
 ) {
     let root = std::path::PathBuf::from(&app.engine.cwd);
     let body = match (parts.get(1), parts.get(2)) {
-        (Some(&"show"), Some(id)) => crate::changeset::show_change(&root, id),
-        (Some(&"apply"), Some(id)) => crate::changeset::apply_change(&root, id).await,
-        (Some(&"revert"), Some(id)) => crate::changeset::revert_change(&root, id).await,
+        (Some(&"show"), Some(id)) => jfc_engine::changeset::show_change(&root, id),
+        (Some(&"apply"), Some(id)) => jfc_engine::changeset::apply_change(&root, id).await,
+        (Some(&"revert"), Some(id)) => jfc_engine::changeset::revert_change(&root, id).await,
         (Some(&"test"), Some(id)) => {
             // Everything after `-- ` is the test command.
             let cmd = text.split_once(" -- ").map(|(_, c)| c.trim()).unwrap_or("");
             if cmd.is_empty() {
                 "usage: /changes test <id> -- <command>".to_string()
             } else {
-                crate::changeset::test_change(&root, id, cmd).await
+                jfc_engine::changeset::test_change(&root, id, cmd).await
             }
         }
-        _ => crate::changeset::list_changes(&root),
+        _ => jfc_engine::changeset::list_changes(&root),
     };
     app.engine.messages.push(ChatMessage::assistant(body));
 }

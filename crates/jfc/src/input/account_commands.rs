@@ -32,7 +32,7 @@ pub(super) async fn cmd_workflow(
                 return;
             }
             // Resolve the name against the registry (built-in/user/project).
-            if crate::workflows::resolve(&cwd, &rest).is_none() {
+            if jfc_engine::workflows::resolve(&cwd, &rest).is_none() {
                 app.engine.messages.push(ChatMessage::assistant(format!(
                     "Workflow `{rest}` not found. List available workflows with `/workflow`."
                 )));
@@ -68,15 +68,15 @@ pub(super) async fn cmd_workflow(
             let mut parts_iter = rest.split_whitespace();
             let (scope, name) = match parts_iter.next() {
                 Some("user") => (
-                    crate::workflows::SaveScope::User,
+                    jfc_engine::workflows::SaveScope::User,
                     parts_iter.collect::<Vec<_>>().join(" "),
                 ),
                 Some("project") => (
-                    crate::workflows::SaveScope::Project,
+                    jfc_engine::workflows::SaveScope::Project,
                     parts_iter.collect::<Vec<_>>().join(" "),
                 ),
                 Some(first) => (
-                    crate::workflows::SaveScope::Project,
+                    jfc_engine::workflows::SaveScope::Project,
                     format!("{} {}", first, parts_iter.collect::<Vec<_>>().join(" "))
                         .trim()
                         .to_owned(),
@@ -94,13 +94,13 @@ pub(super) async fn cmd_workflow(
                 ));
                 return;
             }
-            match crate::workflows::resolve(&cwd, &name) {
+            match jfc_engine::workflows::resolve(&cwd, &name) {
                 None => {
                     app.engine.messages.push(ChatMessage::assistant(format!(
                         "Workflow `{name}` not found. List available workflows with `/workflow`."
                     )));
                 }
-                Some(wf) => match crate::workflows::save_workflow(&cwd, scope, &name, &wf.script) {
+                Some(wf) => match jfc_engine::workflows::save_workflow(&cwd, scope, &name, &wf.script) {
                     Ok(path) => {
                         app.engine.messages.push(ChatMessage::assistant(format!(
                             "Saved workflow `{name}` to `{}`.",
@@ -117,7 +117,7 @@ pub(super) async fn cmd_workflow(
         }
         "status" => {
             // Collect bgwf_ background tasks, optionally filtered by id.
-            use crate::types::TaskLifecycle;
+            use jfc_core::TaskLifecycle;
             let id_filter = rest.trim().to_owned();
 
             // Collect matching tasks: running + recently completed (terminal).
@@ -186,12 +186,12 @@ pub(super) async fn cmd_workflow(
                     let done = wfp
                         .agents
                         .iter()
-                        .filter(|a| a.status == crate::workflows::AgentStatus::Done)
+                        .filter(|a| a.status == jfc_engine::workflows::AgentStatus::Done)
                         .count();
                     let failed = wfp
                         .agents
                         .iter()
-                        .filter(|a| a.status == crate::workflows::AgentStatus::Failed)
+                        .filter(|a| a.status == jfc_engine::workflows::AgentStatus::Failed)
                         .count();
                     output.push_str(&format!(
                         "  Agents: {done} done · {running} running · {failed} failed\n"
@@ -261,15 +261,15 @@ fn render_workflow_listing(app: &App, cwd: &std::path::Path) -> String {
     }
 
     // ── available named workflows (registry) ────────────────────────────
-    let registry = crate::workflows::list_meta(cwd);
+    let registry = jfc_engine::workflows::list_meta(cwd);
     if !registry.is_empty() {
         body.push_str("**Available workflows** (run with `/workflow run <name>`):\n\n");
         for (name, description, source) in &registry {
             let src = match source {
-                crate::workflows::WorkflowSource::BuiltIn => "built-in",
-                crate::workflows::WorkflowSource::Plugin => "plugin",
-                crate::workflows::WorkflowSource::User => "user",
-                crate::workflows::WorkflowSource::Project => "project",
+                jfc_engine::workflows::WorkflowSource::BuiltIn => "built-in",
+                jfc_engine::workflows::WorkflowSource::Plugin => "plugin",
+                jfc_engine::workflows::WorkflowSource::User => "user",
+                jfc_engine::workflows::WorkflowSource::Project => "project",
             };
             body.push_str(&format!("- `{name}` ({src}) — {description}\n"));
         }
@@ -277,13 +277,13 @@ fn render_workflow_listing(app: &App, cwd: &std::path::Path) -> String {
     }
 
     // ── legacy TOML step templates ──────────────────────────────────────
-    let legacy = crate::workflows::list(cwd);
+    let legacy = jfc_engine::workflows::list(cwd);
     if !legacy.is_empty() {
         body.push_str("**Legacy TOML templates** (`.jfc/workflows/*.toml`):\n\n");
         for name in &legacy {
             // Attempt to load + render the summary; fall back to the bare name.
-            let line = match crate::workflows::load(cwd, name) {
-                Ok(wf) => crate::workflows::render_summary(name, &wf),
+            let line = match jfc_engine::workflows::load(cwd, name) {
+                Ok(wf) => jfc_engine::workflows::render_summary(name, &wf),
                 Err(_) => format!("- `{name}`\n"),
             };
             body.push_str(&line);
@@ -319,19 +319,19 @@ pub(super) async fn cmd_login(
         .copied()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let dispatch = crate::providers::login_dispatch::dispatch(arg);
+    let dispatch = jfc_engine::providers::login_dispatch::dispatch(arg);
     let url = match &dispatch {
-        crate::providers::login_dispatch::LoginDispatch::AnthropicApiKey(_)
-        | crate::providers::login_dispatch::LoginDispatch::ConsoleApiKey(_) => {
+        jfc_engine::providers::login_dispatch::LoginDispatch::AnthropicApiKey(_)
+        | jfc_engine::providers::login_dispatch::LoginDispatch::ConsoleApiKey(_) => {
             Some("https://console.anthropic.com/settings/keys")
         }
-        crate::providers::login_dispatch::LoginDispatch::ClaudeAiOAuth(_) => {
+        jfc_engine::providers::login_dispatch::LoginDispatch::ClaudeAiOAuth(_) => {
             Some("https://claude.ai/login")
         }
-        crate::providers::login_dispatch::LoginDispatch::CodexOAuth(_) => {
+        jfc_engine::providers::login_dispatch::LoginDispatch::CodexOAuth(_) => {
             Some("https://auth.openai.com/codex/device")
         }
-        crate::providers::login_dispatch::LoginDispatch::AntigravityOAuth(_) => {
+        jfc_engine::providers::login_dispatch::LoginDispatch::AntigravityOAuth(_) => {
             Some("https://accounts.google.com/")
         }
         _ => None,
@@ -537,7 +537,7 @@ pub(super) async fn cmd_batch(
         ));
         return;
     }
-    let Some(client) = crate::sdk_bridge::build_client() else {
+    let Some(client) = jfc_engine::sdk_bridge::build_client() else {
         app.engine.messages.push(ChatMessage::assistant(
             "No Anthropic API key configured — `/batch` needs one (set ANTHROPIC_API_KEY).".into(),
         ));

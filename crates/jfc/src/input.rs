@@ -62,7 +62,7 @@ use worktree_commands::handle_worktree_command;
 
 use crate::app::App;
 use crate::runtime::{ControlEvent, EngineEvent};
-use crate::types::*;
+use jfc_core::*;
 
 // Re-export the public functions from sub-modules
 pub use key_dispatch::handle_key;

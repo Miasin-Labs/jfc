@@ -118,8 +118,8 @@ pub(super) async fn skill_fallthrough(
 ) {
     let name = parts[0].trim_start_matches('/');
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let skills = crate::agents::load_skills(&cwd);
-    if let Some(skill) = crate::agents::find_skill_by_name(&skills, name) {
+    let skills = jfc_engine::agents::load_skills(&cwd);
+    if let Some(skill) = jfc_engine::agents::find_skill_by_name(&skills, name) {
         // Echo the user's invocation so the chat shows what they
         // typed (with optional args) — same pattern as the other
         // slash arms. The injected user message that follows carries
@@ -181,7 +181,7 @@ pub(super) async fn skill_fallthrough(
         app.engine.last_stream_event_at = Some(now);
         app.engine.streaming_last_token_at = Some(now);
         app.engine.turn_started_at = Some(now);
-        app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+        app.engine.turn_start_cost = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
         app.engine.agentic_turn_count = 0;
         app.engine.thinking_started_at = None;
         app.engine.pre_dispatched_tool_ids.clear();
@@ -204,13 +204,13 @@ pub(super) async fn skill_fallthrough(
             let msgs = app.engine.messages.clone();
             let model = app.engine.model.clone();
             tokio::spawn(async move {
-                crate::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
+                jfc_engine::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
             });
         }
         app.engine.current_session_id = Some(session_id);
 
         let provider = app.engine.provider.clone();
-        let messages = crate::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
+        let messages = jfc_engine::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
         let model = app.engine.model.clone();
         let tx_stream = tx.clone();
         let interrupt = app.engine.interrupt_flag.clone();
@@ -234,7 +234,7 @@ pub(super) async fn skill_fallthrough(
         // new stream so the old (possibly cancelled) one can't
         // racially interrupt the retry.
         tokio::spawn(async move {
-            crate::stream::stream_response(
+            jfc_engine::stream::stream_response(
                 provider, messages, model, tx_stream, interrupt, cancel, None, overrides,
             )
             .await;

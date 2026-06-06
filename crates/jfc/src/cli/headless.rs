@@ -58,7 +58,7 @@ pub(super) async fn run_print_mode(
         tokio::sync::mpsc::channel::<EngineEvent>(crate::runtime::APP_EVENT_BUFFER);
     // Plan-mode tools / economy events reach the loop via the global sender,
     // exactly as in the TUI (the old loop silently dropped them).
-    crate::tools::register_event_sender(tx.clone());
+    jfc_engine::tools::register_event_sender(tx.clone());
 
     let mut state = EngineState::new(provider, model.clone());
     // Print mode never persists sessions — the optional --session-mirror file
@@ -442,7 +442,7 @@ pub(super) async fn run_print_mode(
     }
     let _ = stdout.flush();
     if let Some(path) = config.session_mirror {
-        let wire_messages = crate::stream::build_provider_messages(&state.messages);
+        let wire_messages = jfc_engine::stream::build_provider_messages(&state.messages);
         let mirror = serde_json::json!({
             "session_id": &session_id,
             "messages": wire_messages.iter().map(provider_message_to_json).collect::<Vec<_>>(),
@@ -464,8 +464,8 @@ pub(super) async fn run_print_mode(
 /// anything else is dropped with a log.
 fn chat_messages_from_provider(
     messages: &[jfc_provider::ProviderMessage],
-) -> Vec<crate::types::ChatMessage> {
-    use crate::types::{ChatMessage, MessagePart, Role, ToolOutput, ToolStatus};
+) -> Vec<jfc_core::ChatMessage> {
+    use jfc_core::{ChatMessage, MessagePart, Role, ToolOutput, ToolStatus};
     use jfc_provider::{ProviderContent, ProviderRole};
 
     let mut out: Vec<ChatMessage> = Vec::new();
@@ -532,12 +532,12 @@ fn chat_messages_from_provider(
                         ProviderContent::ToolUse {
                             id, name, input, ..
                         } => {
-                            let kind = crate::types::ToolKind::from_name(name);
-                            match crate::types::ToolInput::from_value(name, input.clone()) {
+                            let kind = jfc_core::ToolKind::from_name(name);
+                            match jfc_core::ToolInput::from_value(name, input.clone()) {
                                 Ok(tool_input) => {
                                     parts.push(MessagePart::tool(
-                                        crate::types::ToolCall::new_pending(
-                                            crate::ids::ToolId::from(id.clone()),
+                                        jfc_core::ToolCall::new_pending(
+                                            jfc_engine::ids::ToolId::from(id.clone()),
                                             kind,
                                             tool_input,
                                         ),
@@ -581,7 +581,7 @@ fn chat_messages_from_provider(
 /// round-trip, defaulting to allow when no endpoint is configured (matching
 /// the legacy headless flow).
 async fn headless_permission_decision(
-    tool: &crate::types::ToolCall,
+    tool: &jfc_core::ToolCall,
     config: &PrintModeConfig,
     session_id: &str,
     recovered_permission_responses: &mut HashMap<String, serde_json::Value>,
@@ -1152,7 +1152,7 @@ pub(super) async fn run_remote_session(
 ) -> anyhow::Result<()> {
     use futures::StreamExt;
 
-    let session = crate::managed_session::ManagedSession::new(client, session_id.clone());
+    let session = jfc_engine::managed_session::ManagedSession::new(client, session_id.clone());
     eprintln!("--remote-session: subscribing to session {session_id}");
     let mut stream = session
         .connect()
@@ -1161,7 +1161,7 @@ pub(super) async fn run_remote_session(
     while let Some(event) = stream.next().await {
         match event {
             Ok(ev) => {
-                println!("{}", crate::managed_session::render_event_line(&ev));
+                println!("{}", jfc_engine::managed_session::render_event_line(&ev));
             }
             Err(e) => {
                 eprintln!("[stream error: {e}]");

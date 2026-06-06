@@ -83,7 +83,7 @@ pub(super) enum DaemonSubcommand {
 }
 
 pub(super) async fn run_daemon_subcommand(sub: DaemonSubcommand) -> anyhow::Result<()> {
-    use crate::daemon::{
+    use jfc_engine::daemon::{
         DaemonPaths, WorkerControlKind, WorkerControlRequest, attach_background_agent_cli,
         background_agent_logs_string, background_agents_string, fire_cron_cli, list_string,
         request_background_agent_cancel, request_worker_control, run_daemon, status_string,
@@ -102,7 +102,7 @@ pub(super) async fn run_daemon_subcommand(sub: DaemonSubcommand) -> anyhow::Resu
             // the daemon's lifetime so the spawned task isn't dropped.
             let project_root =
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let _dreamer_handle = crate::dreamer_scheduler::spawn_from_env(project_root);
+            let _dreamer_handle = jfc_engine::dreamer_scheduler::spawn_from_env(project_root);
 
             run_daemon(paths)
                 .await
@@ -214,28 +214,28 @@ pub(super) async fn run_daemon_subcommand(sub: DaemonSubcommand) -> anyhow::Resu
             println!("binary takeover queued: {id}");
             Ok(())
         }
-        DaemonSubcommand::Worker { launch } => crate::daemon::run_background_agent_worker(launch)
+        DaemonSubcommand::Worker { launch } => jfc_engine::daemon::run_background_agent_worker(launch)
             .await
             .map_err(|e| anyhow::anyhow!("worker failed: {e}")),
     }
 }
 
 pub(super) fn compact_terminal_agents_on_startup() {
-    let paths = crate::daemon::DaemonPaths::default_user();
-    let Some(mut state) = crate::daemon::load_state(&paths) else {
+    let paths = jfc_engine::daemon::DaemonPaths::default_user();
+    let Some(mut state) = jfc_engine::daemon::load_state(&paths) else {
         return;
     };
-    let dropped = crate::daemon::compact_background_agents(
+    let dropped = jfc_engine::daemon::compact_background_agents(
         &mut state,
         std::time::SystemTime::now(),
-        crate::daemon::TERMINAL_AGENT_RETENTION,
-        crate::daemon::TERMINAL_AGENTS_PER_SESSION,
-        crate::daemon::TERMINAL_AGENT_GLOBAL_CAP,
+        jfc_engine::daemon::TERMINAL_AGENT_RETENTION,
+        jfc_engine::daemon::TERMINAL_AGENTS_PER_SESSION,
+        jfc_engine::daemon::TERMINAL_AGENT_GLOBAL_CAP,
     );
     if dropped == 0 {
         return;
     }
-    if let Err(err) = crate::daemon::save_state(&paths, &state) {
+    if let Err(err) = jfc_engine::daemon::save_state(&paths, &state) {
         tracing::warn!(
             target: "jfc::daemon",
             error = %err,

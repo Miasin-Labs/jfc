@@ -73,12 +73,12 @@ impl App {
             // message — but exclude queued placeholders, since they
             // aren't actually in the prompt the model sees (see
             // `build_provider_messages`).
-            let tail: Vec<crate::types::ChatMessage> = self.engine.messages[idx + 1..]
+            let tail: Vec<jfc_core::ChatMessage> = self.engine.messages[idx + 1..]
                 .iter()
                 .filter(|m| !m.queued)
                 .cloned()
                 .collect();
-            let tail_estimate = crate::compact::estimate_tokens(&tail);
+            let tail_estimate = jfc_engine::compact::estimate_tokens(&tail);
             self.engine.tool_ctx.approx_tokens = base + tail_estimate;
         } else {
             self.engine.last_usage_input = 0;
@@ -87,13 +87,13 @@ impl App {
             // long prompt during a streaming turn would visibly bump
             // the context gauge even though that text isn't part of
             // the current prompt.
-            let unqueued: Vec<crate::types::ChatMessage> = self.engine
+            let unqueued: Vec<jfc_core::ChatMessage> = self.engine
                 .messages
                 .iter()
                 .filter(|m| !m.queued)
                 .cloned()
                 .collect();
-            self.engine.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&unqueued);
+            self.engine.tool_ctx.approx_tokens = jfc_engine::compact::estimate_tokens(&unqueued);
         }
         tracing::debug!(
             target: "jfc::app",
@@ -164,7 +164,7 @@ impl App {
 
     /// Switch sessions: engine-side reset plus the view-side resets that go
     /// with it (task panel selection, task drill-down state, token gauge).
-    pub fn switch_session(&mut self, id: Option<crate::ids::SessionId>) {
+    pub fn switch_session(&mut self, id: Option<jfc_engine::ids::SessionId>) {
         self.engine.switch_session(id);
         self.task_panel_selected = 0;
         self.task_panel_state = ratatui::widgets::TableState::default().with_selected(Some(0));

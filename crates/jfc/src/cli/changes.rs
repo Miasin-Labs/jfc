@@ -35,18 +35,18 @@ fn cwd() -> PathBuf {
 pub(super) async fn run_changes_subcommand(sub: ChangesSubcommand) -> anyhow::Result<()> {
     let root = cwd();
     let out = match sub {
-        ChangesSubcommand::List => crate::changeset::list_changes(&root),
-        ChangesSubcommand::Show { id } => crate::changeset::show_change(&root, &id),
+        ChangesSubcommand::List => jfc_engine::changeset::list_changes(&root),
+        ChangesSubcommand::Show { id } => jfc_engine::changeset::show_change(&root, &id),
         ChangesSubcommand::Test { id, command } => {
             let cmd = command.join(" ");
             if cmd.trim().is_empty() {
                 "usage: jfc changes test <id> -- <command>".to_string()
             } else {
-                crate::changeset::test_change(&root, &id, &cmd).await
+                jfc_engine::changeset::test_change(&root, &id, &cmd).await
             }
         }
-        ChangesSubcommand::Apply { id } => crate::changeset::apply_change(&root, &id).await,
-        ChangesSubcommand::Revert { id } => crate::changeset::revert_change(&root, &id).await,
+        ChangesSubcommand::Apply { id } => jfc_engine::changeset::apply_change(&root, &id).await,
+        ChangesSubcommand::Revert { id } => jfc_engine::changeset::revert_change(&root, &id).await,
     };
     println!("{out}");
     Ok(())

@@ -12,7 +12,7 @@ use ratatui::{
 use crate::app::App;
 use crate::markdown;
 use crate::theme::Theme;
-use crate::types::*;
+use jfc_core::*;
 
 use super::assistant_parts::{push_advisor_lines, push_reasoning_lines, push_task_status_lines};
 use super::tool_blocks::{render_tool_block, tool_kind_color};
@@ -50,7 +50,7 @@ pub struct PrebuiltItems<'a> {
 /// Rendering context — carries exactly what the item-builder needs from the
 /// app so the same function serves both the main chat and the task view.
 pub struct RenderCtx<'a> {
-    pub messages: &'a [crate::types::ChatMessage],
+    pub messages: &'a [jfc_core::ChatMessage],
     pub streaming_idx: Option<usize>,
     pub is_streaming: bool,
     pub reasoning_expanded: &'a HashMap<usize, bool>,
@@ -92,13 +92,13 @@ impl<'a> RenderCtx<'a> {
             render_cache: &app.render_cache,
             theme: app.theme,
             brief_mode: app.engine.brief_mode
-                || crate::feature_gates::pewter_owl_brief_enabled(app.engine.model.as_str(), false),
+                || jfc_engine::feature_gates::pewter_owl_brief_enabled(app.engine.model.as_str(), false),
         }
     }
 
     /// Task-view path: render `messages` with no streaming state, no
     /// reasoning expansion, no diagnostics.
-    pub fn from_task(messages: &'a [crate::types::ChatMessage], app: &'a App) -> Self {
+    pub fn from_task(messages: &'a [jfc_core::ChatMessage], app: &'a App) -> Self {
         static EMPTY_REASONING: std::sync::OnceLock<HashMap<usize, bool>> =
             std::sync::OnceLock::new();
         static EMPTY_GROUPS: std::sync::OnceLock<std::collections::HashSet<String>> =
@@ -565,9 +565,9 @@ impl<'a> RenderItem<'a> {
 pub(super) fn diagnostics_for_path(
     app: &App,
     input: &ToolInput,
-) -> std::collections::HashMap<usize, crate::diagnostics::Severity> {
+) -> std::collections::HashMap<usize, jfc_engine::diagnostics::Severity> {
     use std::collections::HashMap;
-    let mut out: HashMap<usize, crate::diagnostics::Severity> = HashMap::new();
+    let mut out: HashMap<usize, jfc_engine::diagnostics::Severity> = HashMap::new();
     let path = match input {
         ToolInput::Read { file_path, .. }
         | ToolInput::Edit { file_path, .. }
@@ -600,8 +600,8 @@ pub(super) fn diagnostics_for_path(
     out
 }
 
-pub(super) fn severity_rank(s: crate::diagnostics::Severity) -> u8 {
-    use crate::diagnostics::Severity;
+pub(super) fn severity_rank(s: jfc_engine::diagnostics::Severity) -> u8 {
+    use jfc_engine::diagnostics::Severity;
     match s {
         Severity::Error => 4,
         Severity::Warning => 3,
@@ -833,7 +833,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                     // sees `SendUserMessage` tool output. User-role messages
                     // (the prompts the user typed) stay visible regardless.
                     if ctx.brief_mode
-                        && msg.role == crate::types::Role::Assistant
+                        && msg.role == jfc_core::Role::Assistant
                         && !text.is_empty()
                     {
                         p += 1;

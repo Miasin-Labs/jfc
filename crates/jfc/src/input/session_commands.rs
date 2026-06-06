@@ -28,7 +28,7 @@ pub(super) async fn cmd_rename(
                     ));
         }
         (Some(id), false) => {
-            crate::session::set_session_title(id, &new_title).await;
+            jfc_engine::session::set_session_title(id, &new_title).await;
             app.engine.messages.push(ChatMessage::assistant(format!(
                 "Session `{id}` renamed to **{new_title}**.",
             )));
@@ -75,7 +75,7 @@ pub(super) async fn cmd_continue(
         jfc_session::most_recent_session_for_cwd(cwd_str.as_deref()).await
     };
     if let Some(session_id) = session_id {
-        if let Some(messages) = crate::session::load_session(&session_id).await {
+        if let Some(messages) = jfc_engine::session::load_session(&session_id).await {
             app.engine.messages = messages;
             let session_id_for_msg = session_id.clone();
             app.switch_session(Some(session_id));
@@ -149,8 +149,8 @@ pub(super) async fn cmd_resume(
             )));
         }
     } else {
-        let typed_session_id = crate::ids::SessionId::new(session_id);
-        if let Some(messages) = crate::session::load_session(&typed_session_id).await {
+        let typed_session_id = jfc_engine::ids::SessionId::new(session_id);
+        if let Some(messages) = jfc_engine::session::load_session(&typed_session_id).await {
             let msg_count = messages.len();
             // Compare the loaded session's recorded cwd against the
             // current process cwd before mutating app state. The
@@ -167,9 +167,9 @@ pub(super) async fn cmd_resume(
                 if let Some(msg) =
                     jfc_session::cwd_mismatch_message(session_cwd.as_deref(), &current_cwd)
                 {
-                    crate::toast::push_with_cap(
+                    jfc_engine::toast::push_with_cap(
                         &mut app.engine.toasts,
-                        crate::toast::Toast::new(crate::toast::ToastKind::Warning, msg),
+                        jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Warning, msg),
                     );
                 }
             }
@@ -359,7 +359,7 @@ pub(super) async fn cmd_undo(
     // file content before the tool executes. Only undoes
     // ONE step; run /undo repeatedly to walk back further.
     app.engine.messages.push(ChatMessage::user(text.to_owned()));
-    let entry = crate::tools::pop_undo_entry();
+    let entry = jfc_engine::tools::pop_undo_entry();
     let Some(entry) = entry else {
         app.engine.messages.push(ChatMessage::assistant(
             "Nothing to undo — no recent file mutation captured this session.".into(),
@@ -378,7 +378,7 @@ pub(super) async fn cmd_undo(
                 )));
             }
             Err(e) => {
-                crate::tools::restore_undo_entry(entry);
+                jfc_engine::tools::restore_undo_entry(entry);
                 app.engine.messages.push(ChatMessage::assistant(format!(
                     "Failed to write `{}`: {e} (kept the entry, run /undo again after fixing)",
                     path.display(),
@@ -394,7 +394,7 @@ pub(super) async fn cmd_undo(
                 )));
             }
             Err(e) => {
-                crate::tools::restore_undo_entry(entry);
+                jfc_engine::tools::restore_undo_entry(entry);
                 app.engine.messages.push(ChatMessage::assistant(format!(
                     "Failed to remove `{}`: {e}",
                     path.display(),
@@ -422,22 +422,22 @@ pub(super) async fn cmd_export(
     let mut body = String::from("# jfc transcript\n\n");
     for msg in &app.engine.messages {
         let role = match msg.role {
-            crate::types::Role::User => "User",
-            crate::types::Role::Assistant => "Assistant",
+            jfc_core::Role::User => "User",
+            jfc_core::Role::Assistant => "Assistant",
         };
         body.push_str(&format!("## {role}\n\n"));
         for part in &msg.parts {
             match part {
-                crate::types::MessagePart::Text(t) => {
+                jfc_core::MessagePart::Text(t) => {
                     body.push_str(t);
                     body.push_str("\n\n");
                 }
-                crate::types::MessagePart::Reasoning(t) => {
+                jfc_core::MessagePart::Reasoning(t) => {
                     body.push_str("> _thinking_\n> \n> ");
                     body.push_str(&t.replace('\n', "\n> "));
                     body.push_str("\n\n");
                 }
-                crate::types::MessagePart::Tool(tc) => {
+                jfc_core::MessagePart::Tool(tc) => {
                     body.push_str(&format!(
                         "- **Tool: {}** ({})\n",
                         tc.kind.label(),
@@ -458,17 +458,17 @@ pub(super) async fn cmd_export(
                 path.display()
             );
             app.engine.messages.push(ChatMessage::assistant(message.clone()));
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(crate::toast::ToastKind::Success, message),
+                jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Success, message),
             );
         }
         Err(e) => {
             let message = format!("Failed to write `{}`: {e}", path.display());
             app.engine.messages.push(ChatMessage::assistant(message.clone()));
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(crate::toast::ToastKind::Error, message),
+                jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Error, message),
             );
         }
     }

@@ -89,7 +89,7 @@ pub(super) fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 /// Return the user-visible session id list, in the order rendered by the
 /// sidebar (this-project first, then others). Used by Up/Down/Enter so
 /// keyboard navigation matches what the user sees.
-pub fn ordered_sidebar_sessions(app: &App) -> Vec<crate::ids::SessionId> {
+pub fn ordered_sidebar_sessions(app: &App) -> Vec<jfc_engine::ids::SessionId> {
     let cwd = app.engine.cwd.clone();
     let (this_project, other) =
         jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));

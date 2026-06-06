@@ -84,7 +84,7 @@ pub(super) fn handle_approval_key(
             deny_pending_and_queued(&mut app.engine, tx);
         }
         KeyCode::Char('b') | KeyCode::Char('B')
-            if crate::feature_gates::is_enabled(crate::feature_gates::FeatureGate::Tern) =>
+            if jfc_engine::feature_gates::is_enabled(jfc_engine::feature_gates::FeatureGate::Tern) =>
         {
             let label = approval.tool.kind.label().to_owned();
             let tool = app.engine.pending_approval.take().unwrap().tool;
@@ -103,10 +103,10 @@ pub(super) fn handle_approval_key(
             }
             app.engine.approval_queue = keep;
             if drained > 1 {
-                crate::toast::push_with_cap(
+                jfc_engine::toast::push_with_cap(
                     &mut app.engine.toasts,
-                    crate::toast::Toast::new(
-                        crate::toast::ToastKind::Info,
+                    jfc_engine::toast::Toast::new(
+                        jfc_engine::toast::ToastKind::Info,
                         format!("Batch-approved {drained} `{label}` tools"),
                     ),
                 );

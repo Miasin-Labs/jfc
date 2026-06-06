@@ -153,7 +153,7 @@ pub(super) fn tool_body_line_count(tool: &ToolCall, content_w: usize) -> usize {
         ToolOutput::Diff(diff) => diff_view_line_count(diff, expanded, content_w),
         ToolOutput::FileList(files) => produce_file_list_line_count(files),
         ToolOutput::ServerToolResult { tool_kind, content } => {
-            let rendered = crate::types::format_server_tool_result_text_public(tool_kind, content);
+            let rendered = jfc_core::format_server_tool_result_text_public(tool_kind, content);
             produce_text_block_line_count(&rendered, content_w, t.text_secondary, expanded)
         }
     }
@@ -400,7 +400,7 @@ pub(super) fn tool_body_lines_themed(
             // ToolOutput::Text — the resulting string is already
             // human-readable (titled bulleted list for web_search,
             // pretty-printed JSON for the others).
-            let rendered = crate::types::format_server_tool_result_text_public(tool_kind, content);
+            let rendered = jfc_core::format_server_tool_result_text_public(tool_kind, content);
             produce_text_block_lines(
                 &rendered,
                 content_w,

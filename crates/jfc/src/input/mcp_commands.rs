@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::types::ChatMessage;
+use jfc_core::ChatMessage;
 
 /// Dispatch `/mcp ...` subcommands.
 ///
@@ -20,7 +20,7 @@ pub(super) async fn handle_mcp_command(app: &mut App, args: &str) {
         format!("/mcp {args}")
     };
 
-    let Some(registry) = crate::tools::snapshot_mcp_registry() else {
+    let Some(registry) = jfc_engine::tools::snapshot_mcp_registry() else {
         app.engine.messages.push(ChatMessage::user(raw));
         app.engine.messages.push(ChatMessage::assistant(
             "MCP registry not initialized. Add `[mcp.<name>]` blocks to \
@@ -62,7 +62,7 @@ pub(super) async fn handle_mcp_command(app: &mut App, args: &str) {
                 return;
             }
             app.engine.messages.push(ChatMessage::user(raw));
-            let body = match crate::mcp::restart_server(&registry, arg).await {
+            let body = match jfc_engine::mcp::restart_server(&registry, arg).await {
                 Some(true) => format!("MCP server `{arg}` restarted and reconnected."),
                 Some(false) => format!(
                     "MCP server `{arg}` was restarted but failed to reconnect. \

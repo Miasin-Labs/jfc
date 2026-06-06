@@ -66,7 +66,7 @@ pub(crate) fn model_fqn(raw: &str) -> String {
 /// meaningful order the user sees in the fan, deterministically, instead
 /// of HashMap-iteration order (arbitrary, and not failures-first).
 pub(crate) fn fleet_ordered_task_ids(app: &App) -> Vec<String> {
-    use crate::types::TaskLifecycle;
+    use jfc_core::TaskLifecycle;
     let mut ids: Vec<(&str, u8)> = app.engine
         .background_tasks
         .values()
@@ -84,8 +84,8 @@ pub(crate) fn fleet_ordered_task_ids(app: &App) -> Vec<String> {
 /// Sort rank for the fleet ordering. Failures float to the very top
 /// (impossible to miss), then live work, then idle, then the
 /// recently-completed fade-out tail. Lower = higher on screen.
-fn fleet_rank(status: crate::types::TaskLifecycle, is_active: bool) -> u8 {
-    use crate::types::TaskLifecycle;
+fn fleet_rank(status: jfc_core::TaskLifecycle, is_active: bool) -> u8 {
+    use jfc_core::TaskLifecycle;
     match status {
         TaskLifecycle::Failed => 0,
         _ if is_active => 1, // the agent whose stream is live right now
@@ -98,7 +98,7 @@ fn fleet_rank(status: crate::types::TaskLifecycle, is_active: bool) -> u8 {
 }
 
 pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
-    use crate::types::TaskLifecycle;
+    use jfc_core::TaskLifecycle;
     if area.height == 0 || area.width < 20 {
         return;
     }
@@ -389,7 +389,7 @@ pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
 ///    └─ tester: Running tests… · 5 tool uses
 /// ```
 pub(crate) fn render_teammate_tree(f: &mut Frame, app: &App, area: Rect) {
-    use crate::swarm;
+    use jfc_engine::swarm;
     use crate::theme::teammate_color;
 
     if area.height == 0 || area.width < 20 {
@@ -442,15 +442,15 @@ pub(crate) fn render_teammate_tree(f: &mut Frame, app: &App, area: Rect) {
         let bt_status = bt.map(|bt| bt.status);
         let activity = bt.and_then(|bt| bt.last_tool.clone());
 
-        let status_text = if matches!(bt_status, Some(crate::types::TaskLifecycle::Idle)) {
+        let status_text = if matches!(bt_status, Some(jfc_core::TaskLifecycle::Idle)) {
             // Source-of-truth: the runner has emitted TeammateEvent::Idle.
             // Don't fall back to elapsed-since-spawn timing — that
             // misreported "Idle for 30s" while the agent was actively
             // streaming for 30s.
             ": Idle".to_owned()
-        } else if matches!(bt_status, Some(crate::types::TaskLifecycle::Completed)) {
+        } else if matches!(bt_status, Some(jfc_core::TaskLifecycle::Completed)) {
             ": Done".to_owned()
-        } else if matches!(bt_status, Some(crate::types::TaskLifecycle::Failed)) {
+        } else if matches!(bt_status, Some(jfc_core::TaskLifecycle::Failed)) {
             ": Failed".to_owned()
         } else {
             match &activity {

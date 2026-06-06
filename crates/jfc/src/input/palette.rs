@@ -1,4 +1,5 @@
-use crate::{app::App, types::ChatMessage};
+use crate::app::App;
+use jfc_core::ChatMessage;
 
 use super::theme_picker::{apply_theme, open_theme_picker};
 
@@ -168,7 +169,7 @@ pub fn collect_all_models(app: &App) -> Vec<jfc_provider::ModelInfo> {
                     })
             })
             .collect();
-        crate::providers::anthropic_models::apply_seat_tier_filter(merged, app.engine.seat_tier.as_deref())
+        jfc_engine::providers::anthropic_models::apply_seat_tier_filter(merged, app.engine.seat_tier.as_deref())
     });
 
     if !app.engine.recent_models.is_empty() {

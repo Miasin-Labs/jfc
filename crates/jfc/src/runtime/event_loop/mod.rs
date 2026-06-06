@@ -11,8 +11,13 @@ use crate::runtime::{
     StreamRequestOverrides, TeamEvent, draw_synchronized, restore_persistent_background_agents,
     set_terminal_title,
 };
-use crate::types::*;
-use crate::{config, diagnostics_producer, lsp_client, session, slate, stream};
+use jfc_core::*;
+use jfc_engine::config;
+use jfc_engine::diagnostics_producer;
+use jfc_engine::lsp_client;
+use jfc_engine::session;
+use jfc_engine::slate;
+use jfc_engine::stream;
 use jfc_provider::{ModelId, Provider, ProviderId};
 
 use crossterm::event::Event as TermEvent;
@@ -68,7 +73,7 @@ pub(crate) async fn run(
     providers: Vec<Arc<dyn Provider>>,
     provider: Arc<dyn Provider>,
     model: ModelId,
-    oauth_handle: Option<Arc<crate::providers::AnthropicOAuthProvider>>,
+    oauth_handle: Option<Arc<jfc_engine::providers::AnthropicOAuthProvider>>,
     startup_session: crate::StartupSession,
     initial_prompt: Option<String>,
     initial_permission_mode: Option<crate::app::PermissionMode>,
@@ -83,7 +88,7 @@ pub(crate) async fn run(
     // solver/validator agents, future cron-triggered work) so they
     // emit the same TaskStarted/AgentChunk/TaskCompleted events the
     // fan UI + ctrl+X panel render. Mirrors register_active_provider.
-    crate::tools::register_event_sender(tx.clone());
+    jfc_engine::tools::register_event_sender(tx.clone());
     tracing::info!(target: "jfc::ui::events", "registered AppEvent sender for non-Task agent paths");
     let mut app = App::new(provider, model);
     app.engine.providers = providers.clone();
@@ -128,7 +133,7 @@ pub(crate) async fn run(
             .as_ref()
             .map(|rc| rc.port)
             .unwrap_or(jfc_remote::protocol::DEFAULT_PORT);
-        match crate::remote_host::RemoteHost::start(rc_port, tx.clone()).await {
+        match jfc_engine::remote_host::RemoteHost::start(rc_port, tx.clone()).await {
             Ok(host) => {
                 tracing::info!(
                     target: "jfc::remote",
@@ -148,7 +153,7 @@ pub(crate) async fn run(
         }
     }
 
-    crate::claude_status::spawn_status_poll(tx.clone());
+    jfc_engine::claude_status::spawn_status_poll(tx.clone());
     // v141 parity: when the caller passed `--permission-mode`, apply
     // it before any user prompt so the first turn already runs under
     // the requested mode. Without this the user would have to
@@ -191,14 +196,14 @@ pub(crate) async fn run(
         crate::markdown::clear_highlight_cache();
     }
     if let Some(name) = startup_config.output_style.as_deref() {
-        let parsed = crate::output_style::OutputStyle::from_str_loose(name);
+        let parsed = jfc_engine::output_style::OutputStyle::from_str_loose(name);
         tracing::info!(
             target: "jfc::ui::output_style",
             style = %parsed.name(),
             "applied persisted output style"
         );
         app.engine.output_style = parsed;
-        crate::output_style::set_active(parsed);
+        jfc_engine::output_style::set_active(parsed);
     }
 
     // v132 Finch onboarding — first-run UI for users with no prior
@@ -207,7 +212,7 @@ pub(crate) async fn run(
     // when the Finch feature gate is off (default for established
     // users). The gate flips itself off after the first successful
     // turn so the overlay doesn't repeat.
-    if crate::feature_gates::is_enabled(crate::feature_gates::FeatureGate::Finch) {
+    if jfc_engine::feature_gates::is_enabled(jfc_engine::feature_gates::FeatureGate::Finch) {
         let session_dir_empty = std::fs::read_dir(jfc_session::sessions_dir())
             .map(|mut it| it.next().is_none())
             .unwrap_or(true);
@@ -223,13 +228,13 @@ pub(crate) async fn run(
     // AutoDefaultNudge: show a one-time notice that auto is the default
     // permission mode. Only fires when the gate is enabled AND the
     // marker file `~/.config/jfc/auto_nudge_seen` does not exist.
-    if crate::feature_gates::is_enabled(crate::feature_gates::FeatureGate::AutoDefaultNudge) {
+    if jfc_engine::feature_gates::is_enabled(jfc_engine::feature_gates::FeatureGate::AutoDefaultNudge) {
         let marker = dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("jfc")
             .join("auto_nudge_seen");
         if !marker.exists() {
-            app.engine.messages.push(crate::types::ChatMessage::assistant(
+            app.engine.messages.push(jfc_core::ChatMessage::assistant(
                 "\u{2139}\u{fe0f} Auto mode is now the default permission mode. Use /permissions to change.".to_string(),
             ));
             // Create the marker file so the nudge doesn't repeat.
@@ -322,7 +327,7 @@ pub(crate) async fn run(
                 // Rebuild any active stop-condition from the goal
                 // sidecar — without this, /continue forgets the
                 // user's goal and the next EndTurn settles silently.
-                if let Some(goal) = crate::goal::load_sidecar(session_id.as_str()) {
+                if let Some(goal) = jfc_engine::goal::load_sidecar(session_id.as_str()) {
                     tracing::info!(
                         target: "jfc::goal",
                         session_id = %session_id,
@@ -358,10 +363,10 @@ pub(crate) async fn run(
                         cwd = ?cwd_str,
                         "no session for this cwd — continued the globally-most-recent session from another project"
                     );
-                    crate::toast::push_with_cap(
+                    jfc_engine::toast::push_with_cap(
                         &mut app.engine.toasts,
-                        crate::toast::Toast::new(
-                            crate::toast::ToastKind::Warning,
+                        jfc_engine::toast::Toast::new(
+                            jfc_engine::toast::ToastKind::Warning,
                             "No session for this directory — continued the most recent session from \
                              another project. Use `--resume <id>` or start fresh if that's not what you wanted."
                                 .to_string(),
@@ -382,7 +387,7 @@ pub(crate) async fn run(
             }
         }
         crate::StartupSession::Resume(session_id) => {
-            let session_id = crate::ids::SessionId::new(session_id);
+            let session_id = jfc_engine::ids::SessionId::new(session_id);
             if let Some((messages, saved_model)) =
                 session::load_session_with_model(&session_id).await
             {
@@ -419,7 +424,7 @@ pub(crate) async fn run(
                     app.engine.task_store = jfc_session::TaskStore::open(session_id.as_str());
                 }
                 // Rebuild any active stop-condition from the goal sidecar.
-                if let Some(goal) = crate::goal::load_sidecar(session_id.as_str()) {
+                if let Some(goal) = jfc_engine::goal::load_sidecar(session_id.as_str()) {
                     tracing::info!(
                         target: "jfc::goal",
                         session_id = %session_id,
@@ -466,11 +471,11 @@ pub(crate) async fn run(
         }
         crate::StartupSession::Fork(source_id) => {
             // Fork: load messages from the source session, but mint a new session ID.
-            let source_session_id = crate::ids::SessionId::new(source_id.clone());
+            let source_session_id = jfc_engine::ids::SessionId::new(source_id.clone());
             if let Some((messages, _saved_model)) =
                 session::load_session_with_model(&source_session_id).await
             {
-                let new_id = crate::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
+                let new_id = jfc_engine::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
                 tracing::info!(
                     target: "jfc::session",
                     source = %source_session_id,
@@ -489,7 +494,7 @@ pub(crate) async fn run(
                     if let Ok(content) = std::fs::read_to_string(&export_path)
                         && let Ok(export) = serde_json::from_str::<serde_json::Value>(&content)
                     {
-                        let new_id = crate::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
+                        let new_id = jfc_engine::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
                         // Load messages from the export
                         if let Some(msgs) = export.get("messages").and_then(|m| m.as_array()) {
                             for msg in msgs {
@@ -498,9 +503,9 @@ pub(crate) async fn run(
                                 let content =
                                     msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
                                 let chat_msg = if role == "assistant" {
-                                    crate::types::ChatMessage::assistant(content.to_owned())
+                                    jfc_core::ChatMessage::assistant(content.to_owned())
                                 } else {
-                                    crate::types::ChatMessage::user(content.to_owned())
+                                    jfc_core::ChatMessage::user(content.to_owned())
                                 };
                                 app.engine.messages.push(chat_msg);
                             }
@@ -521,18 +526,18 @@ pub(crate) async fn run(
     restore_persistent_background_agents(&mut app.engine);
 
     // Check for pending historian transcripts from previous sessions.
-    crate::learn_lifecycle::on_session_start(&app.engine.cwd);
+    jfc_engine::learn_lifecycle::on_session_start(&app.engine.cwd);
 
     // Apply persisted reasoning_effort from config.toml. MUST run AFTER
     // the --continue/--resume block above (which may switch `app.engine.model` to
     // the session's saved model) so the effort resolves for the ACTUAL
     // model in use, not the initial CLI-provided one.
     {
-        let cfg = crate::config::load_arc();
+        let cfg = jfc_engine::config::load_arc();
         let effort_str = resolve_effort_for_model(&cfg, &app.engine.model);
         if let Some(level) = effort_str
             .as_deref()
-            .and_then(crate::effort::ReasoningEffort::from_str_loose)
+            .and_then(jfc_engine::effort::ReasoningEffort::from_str_loose)
         {
             tracing::info!(
                 target: "jfc::ui::effort",
@@ -542,8 +547,8 @@ pub(crate) async fn run(
             );
             app.engine.effort_state.set(level);
         }
-        if let Some(temperature) = crate::exploration::temperature_from_env()
-            .or_else(|| crate::exploration::resolve_temperature_for_model(&cfg, &app.engine.model))
+        if let Some(temperature) = jfc_engine::exploration::temperature_from_env()
+            .or_else(|| jfc_engine::exploration::resolve_temperature_for_model(&cfg, &app.engine.model))
         {
             tracing::info!(
                 target: "jfc::exploration",
@@ -554,7 +559,7 @@ pub(crate) async fn run(
             let _ = app.engine.temperature_state.set(temperature);
         }
         app.engine.exploration_state
-            .configure(crate::exploration::ExplorationSettings::from_config(&cfg));
+            .configure(jfc_engine::exploration::ExplorationSettings::from_config(&cfg));
     }
 
     // Handle --prompt flag: queue an initial prompt to submit after startup
@@ -678,12 +683,12 @@ pub(crate) async fn run(
     // `tools::all_tool_defs_with_mcp()` so the model sees servers as
     // soon as they finish handshaking. Gated by `JFC_DISABLE_MCP=1`.
     {
-        let registry = crate::mcp::McpRegistry::new();
-        crate::tools::register_mcp_registry(registry.clone());
-        let mcp_configs = crate::config::load_arc().mcp.clone();
+        let registry = jfc_engine::mcp::McpRegistry::new();
+        jfc_engine::tools::register_mcp_registry(registry.clone());
+        let mcp_configs = jfc_engine::config::load_arc().mcp.clone();
         let tx_mcp = tx.clone();
         tokio::spawn(async move {
-            crate::mcp::register_servers_from_config(&registry, &mcp_configs).await;
+            jfc_engine::mcp::register_servers_from_config(&registry, &mcp_configs).await;
             // Notify UI so the sidebar shows server status.
             let servers = registry
                 .list()
@@ -692,9 +697,9 @@ pub(crate) async fn run(
                 .map(|s| McpServerInfo {
                     name: s.name.clone(),
                     status: match s.status {
-                        crate::mcp::McpServerStatus::Connected => McpStatus::Connected,
-                        crate::mcp::McpServerStatus::Failed => McpStatus::Error,
-                        crate::mcp::McpServerStatus::Disabled => McpStatus::Disabled,
+                        jfc_engine::mcp::McpServerStatus::Connected => McpStatus::Connected,
+                        jfc_engine::mcp::McpServerStatus::Failed => McpStatus::Error,
+                        jfc_engine::mcp::McpServerStatus::Disabled => McpStatus::Disabled,
                     },
                 })
                 .collect();
@@ -724,7 +729,7 @@ pub(crate) async fn run(
         app.engine.last_stream_event_at = Some(now);
         app.engine.streaming_last_token_at = Some(now);
         app.engine.turn_started_at = Some(now);
-        app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+        app.engine.turn_start_cost = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
         app.engine.last_usage_output = 0;
         app.engine.usage_apply_baseline = (0, 0, 0, 0);
 
@@ -752,7 +757,7 @@ pub(crate) async fn run(
         } else {
             app.engine.model.clone()
         };
-        let cfg = crate::config::load_arc();
+        let cfg = jfc_engine::config::load_arc();
         app.engine.exploration_state.begin_turn(&prompt, &cfg);
         let tx_clone = tx.clone();
         let interrupt = app.engine.interrupt_flag.clone();
@@ -764,7 +769,7 @@ pub(crate) async fn run(
         let prev_msg_id = app.engine.last_response_id.take();
         // Refresh CLAUDE.md frontmatter disallowed tools before each turn.
         if let Ok(cwd_path) = std::env::current_dir() {
-            let hierarchy = crate::context::ClaudeMdHierarchy::load(&cwd_path);
+            let hierarchy = jfc_engine::context::ClaudeMdHierarchy::load(&cwd_path);
             app.engine.claudemd_disallowed_tools = hierarchy.collect_disallowed_tools();
         }
         let overrides = StreamRequestOverrides {
@@ -908,7 +913,7 @@ pub(crate) async fn run(
             // events (keys, ticks) are never mirrored.
             if let AppEvent::Engine(ref engine_ev) = ev
                 && let Some(ref rc) = app.remote_host
-                && let Some(envelope) = crate::remote_host::mirror_event(engine_ev)
+                && let Some(envelope) = jfc_engine::remote_host::mirror_event(engine_ev)
             {
                 rc.mirror(envelope);
             }
@@ -975,7 +980,7 @@ pub(crate) async fn run(
 
             // Pending approval → PermissionRequest with diff preview.
             if let Some(ref approval) = app.engine.pending_approval {
-                let diff = crate::remote_host::tool_diff_preview(&approval.tool);
+                let diff = jfc_engine::remote_host::tool_diff_preview(&approval.tool);
                 rc.mirror_pending_approval(
                     approval.tool.id.as_ref(),
                     approval.tool.kind.label(),
@@ -1042,7 +1047,7 @@ pub(crate) async fn run(
     // transcript. Runs synchronously (blocking on exit is acceptable — it's a
     // single LLM call, ~2-5s) so the user's learning is captured before the
     // process exits. Best-effort: failures are logged, never surfaced.
-    crate::learn_lifecycle::on_session_end(&app.engine.messages, &app.engine.cwd);
+    jfc_engine::learn_lifecycle::on_session_end(&app.engine.messages, &app.engine.cwd);
 
     Ok(())
 }
@@ -1060,7 +1065,7 @@ pub(crate) async fn run(
 ///
 /// Returns `None` when none of those layers define an effort, so we leave
 /// the runtime at "server default" instead of forcing medium.
-fn resolve_effort_for_model(cfg: &crate::config::Config, model: &str) -> Option<String> {
+fn resolve_effort_for_model(cfg: &jfc_engine::config::Config, model: &str) -> Option<String> {
     let bare = model.rsplit('/').next().unwrap_or(model);
     // 0: ultracode override — first explicit boolean wins (narrow → wide).
     // `Some(true)` forces xhigh; `Some(false)` opts out for that layer and
@@ -1190,7 +1195,7 @@ mod event_priority_tests {
 #[cfg(test)]
 mod effort_resolve_tests {
     use super::*;
-    use crate::config::{AgentConfig, Config};
+    use jfc_engine::config::{AgentConfig, Config};
 
     fn cfg_with(default_effort: Option<&str>, agents: &[(&str, &str)]) -> Config {
         let mut cfg = Config::default();

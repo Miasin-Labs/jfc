@@ -112,8 +112,8 @@ pub(super) fn step_reasoning_effort(app: &mut App, raise: bool) {
         None if raise => format!("Reasoning effort is already at max ({current})"),
         None => format!("Reasoning effort is already at min ({current})"),
     };
-    crate::toast::push_with_cap(
+    jfc_engine::toast::push_with_cap(
         &mut app.engine.toasts,
-        crate::toast::Toast::new(crate::toast::ToastKind::Info, message),
+        jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Info, message),
     );
 }

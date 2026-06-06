@@ -76,10 +76,10 @@ pub(super) async fn cmd_vim(
     } else {
         None
     };
-    crate::toast::push_with_cap(
+    jfc_engine::toast::push_with_cap(
         &mut app.engine.toasts,
-        crate::toast::Toast::new(
-            crate::toast::ToastKind::Info,
+        jfc_engine::toast::Toast::new(
+            jfc_engine::toast::ToastKind::Info,
             if now_on {
                 "vim mode on — Normal mode (i to insert, Esc to return)".to_string()
             } else {
@@ -176,7 +176,7 @@ pub(super) async fn cmd_timeline(
     let last_assistant = app.engine
         .messages
         .iter()
-        .rposition(|m| matches!(m.role, crate::types::Role::Assistant));
+        .rposition(|m| matches!(m.role, jfc_core::Role::Assistant));
     let Some(idx) = last_assistant else {
         app.engine.messages.push(ChatMessage::assistant(
             "No assistant turn yet — nothing to timeline.".into(),
@@ -186,7 +186,7 @@ pub(super) async fn cmd_timeline(
     let msg = &app.engine.messages[idx];
     let mut rows: Vec<String> = Vec::new();
     for part in &msg.parts {
-        if let crate::types::MessagePart::Tool(tc) = part {
+        if let jfc_core::MessagePart::Tool(tc) = part {
             let elapsed = tc
                 .elapsed_ms
                 .map(|ms| {
@@ -238,7 +238,7 @@ pub(super) async fn cmd_doctor(
 
     // ── 1. Config file ────────────────────────────────────────────────
     {
-        let cfg_path = crate::config::config_path();
+        let cfg_path = jfc_engine::config::config_path();
         let cfg_display = cfg_path.display().to_string();
         // Tilde-shorten for readability
         let cfg_display = if let Some(home) = dirs::home_dir() {
@@ -250,7 +250,7 @@ pub(super) async fn cmd_doctor(
             // Try a parse round-trip to catch TOML errors
             std::fs::read_to_string(&cfg_path)
                 .ok()
-                .and_then(|s| toml::from_str::<crate::config::Config>(&s).ok())
+                .and_then(|s| toml::from_str::<jfc_engine::config::Config>(&s).ok())
                 .is_some()
         };
         report.push_str(&format!(
@@ -330,7 +330,7 @@ pub(super) async fn cmd_doctor(
 
     // ── 5. MCP servers ────────────────────────────────────────────────
     {
-        let cfg = crate::config::load_arc();
+        let cfg = jfc_engine::config::load_arc();
         if cfg.mcp.is_empty() {
             report.push_str("  MCP: no servers configured\n");
         } else {
@@ -406,10 +406,10 @@ pub(super) async fn cmd_doctor(
     report.push_str(&format!("  Permission mode: {:?}\n", app.engine.permission_mode));
 
     // ── 9. Session cost so far ────────────────────────────────────────
-    let total = crate::cost::total_cost(&app.engine.usage_by_model);
+    let total = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
     report.push_str(&format!(
         "  Session cost: {}\n",
-        crate::cost::fmt_cost(total)
+        jfc_engine::cost::fmt_cost(total)
     ));
 
     app.engine.messages.push(ChatMessage::assistant(report));
@@ -434,7 +434,7 @@ pub(super) async fn cmd_help(
     // it stays in lock-step with `/commands`. Aliases collapse onto their
     // canonical row's help text.
     let mut body = String::from("**Available commands:**\n");
-    body.push_str(&crate::command_spec::slash_help_lines());
+    body.push_str(&jfc_engine::command_spec::slash_help_lines());
     body.push_str(
         "\n\
          **Keys:**\n\
@@ -615,7 +615,7 @@ pub(super) async fn cmd_skills(
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
     let skills =
-        crate::agents::load_skills(&std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        jfc_engine::agents::load_skills(&std::env::current_dir().unwrap_or_else(|_| ".".into()));
     let body = if skills.is_empty() {
         "No skills defined. Add .claude/skills/<name>.md files.".to_owned()
     } else {
@@ -654,7 +654,7 @@ pub(super) async fn cmd_agents(
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
     let agents =
-        crate::agents::load_agents(&std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        jfc_engine::agents::load_agents(&std::env::current_dir().unwrap_or_else(|_| ".".into()));
     let body = if agents.is_empty() {
         "No agent definitions found. Create `.claude/agents/<name>.md` files \
                  with YAML frontmatter (`name:` required, plus optional `model`, \
@@ -692,7 +692,7 @@ pub(super) async fn cmd_market(
     // Surface the agent-economy snapshot — same data the
     // `market_status` tool returns, but framed for the user
     // rather than the model. No bounty_id filter for now.
-    let report_str = match crate::tools::market_report_string().await {
+    let report_str = match jfc_engine::tools::market_report_string().await {
         Ok(s) => s,
         Err(e) => format!("Market unavailable: {e}"),
     };
@@ -770,7 +770,7 @@ pub(super) async fn cmd_graph_history(
     _text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    let records = crate::tools::graph_history_snapshot();
+    let records = jfc_engine::tools::graph_history_snapshot();
     let body = if records.is_empty() {
         "No graph queries recorded yet. Run `graph_query` (via the model) or \
                  ask the model to query the code graph, then re-invoke `/graph-history` \

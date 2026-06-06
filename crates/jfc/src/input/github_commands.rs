@@ -1,15 +1,16 @@
 use tokio::sync::mpsc;
 
-use crate::{app::App, runtime::EngineEvent, types::ChatMessage};
+use crate::{app::App, runtime::EngineEvent};
+use jfc_core::ChatMessage;
 
 fn push_gh_unavailable(app: &mut App, cmd: &str) {
     let msg = "GitHub CLI not found on PATH. Install via <https://cli.github.com> \
                or set `JFC_GH_BIN_OVERRIDE` to a `gh` binary path."
         .to_owned();
-    crate::toast::push_with_cap(
+    jfc_engine::toast::push_with_cap(
         &mut app.engine.toasts,
-        crate::toast::Toast::new(
-            crate::toast::ToastKind::Error,
+        jfc_engine::toast::Toast::new(
+            jfc_engine::toast::ToastKind::Error,
             "GitHub CLI (gh) not installed",
         ),
     );
@@ -214,7 +215,7 @@ pub(super) async fn handle_pr_autofix(
     app.engine.last_stream_event_at = Some(now);
     app.engine.streaming_last_token_at = Some(now);
     app.engine.turn_started_at = Some(now);
-    app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+    app.engine.turn_start_cost = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
     app.engine.thinking_started_at = None;
     app.engine.thinking_ended_at = None;
     app.engine.last_usage_output = 0;
@@ -230,13 +231,13 @@ pub(super) async fn handle_pr_autofix(
         let messages = app.engine.messages.clone();
         let model = app.engine.model.clone();
         tokio::spawn(async move {
-            crate::session::save_session(&session_id, &messages, None, Some(model.as_str())).await;
+            jfc_engine::session::save_session(&session_id, &messages, None, Some(model.as_str())).await;
         });
     }
     app.engine.current_session_id = Some(session_id);
 
     let provider = app.engine.provider.clone();
-    let messages = crate::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
+    let messages = jfc_engine::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
     let model = app.engine.model.clone();
     let tx_stream = tx.clone();
     let interrupt = app.engine.interrupt_flag.clone();
@@ -257,7 +258,7 @@ pub(super) async fn handle_pr_autofix(
         ..Default::default()
     };
     tokio::spawn(async move {
-        crate::stream::stream_response(
+        jfc_engine::stream::stream_response(
             provider, messages, model, tx_stream, interrupt, cancel, None, overrides,
         )
         .await;

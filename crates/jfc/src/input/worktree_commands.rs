@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::types::ChatMessage;
+use jfc_core::ChatMessage;
 
 /// Dispatch the `/worktree ...` subcommands. Argument string is the slice after
 /// `/worktree `: empty / `"list"` lists, `"create <name>"` creates,
@@ -19,7 +19,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
     }
 
     async fn list_body(cwd: &str) -> String {
-        match crate::worktrees::list_worktrees_async(&std::path::PathBuf::from(cwd)).await {
+        match jfc_engine::worktrees::list_worktrees_async(&std::path::PathBuf::from(cwd)).await {
             Ok(rows) if rows.is_empty() => "No worktrees registered.".to_owned(),
             Ok(rows) => {
                 let mut s = format!("**{} worktree(s):**\n\n", rows.len());
@@ -51,7 +51,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
                 );
                 return;
             }
-            if let Err(e) = crate::worktrees::validate_name(arg) {
+            if let Err(e) = jfc_engine::worktrees::validate_name(arg) {
                 echo(
                     app,
                     format!("/worktree create {arg}"),
@@ -59,7 +59,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
                 );
                 return;
             }
-            let body = match crate::worktrees::create_worktree_async(&repo_root, arg).await {
+            let body = match jfc_engine::worktrees::create_worktree_async(&repo_root, arg).await {
                 Ok(w) => format!(
                     "Created worktree `{}` on branch `{}`.\n\n\
                      Switch into it with:\n```\ncd {}\n```\nthen re-run `jfc`.",
@@ -79,7 +79,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
                 );
                 return;
             }
-            if let Err(e) = crate::worktrees::validate_name(arg) {
+            if let Err(e) = jfc_engine::worktrees::validate_name(arg) {
                 echo(
                     app,
                     format!("/worktree remove {arg}"),
@@ -87,7 +87,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
                 );
                 return;
             }
-            let body = match crate::worktrees::remove_worktree_async(&repo_root, arg).await {
+            let body = match jfc_engine::worktrees::remove_worktree_async(&repo_root, arg).await {
                 Ok(()) => format!(
                     "Removed worktree `.jfc-worktrees/{arg}`. The branch `jfc/{arg}` is preserved \
                      — recover with `git switch jfc/{arg}` from any checkout."
@@ -105,7 +105,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
                 );
                 return;
             }
-            if let Err(e) = crate::worktrees::validate_name(arg) {
+            if let Err(e) = jfc_engine::worktrees::validate_name(arg) {
                 echo(
                     app,
                     format!("/worktree switch {arg}"),

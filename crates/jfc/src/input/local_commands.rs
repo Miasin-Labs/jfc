@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use super::theme_picker::{apply_theme, open_theme_picker};
 use crate::app::App;
 use crate::runtime::{ControlEvent, EngineEvent};
-use crate::types::ChatMessage;
+use jfc_core::ChatMessage;
 
 /// `/dump-context` prints everything jfc would inject into the system prompt
 /// into the transcript.
@@ -21,7 +21,7 @@ pub(super) async fn handle_dump_context_command(app: &mut App) {
     }
     report.push('\n');
 
-    let hierarchy = crate::context::ClaudeMdHierarchy::load(&cwd);
+    let hierarchy = jfc_engine::context::ClaudeMdHierarchy::load(&cwd);
     if let Some(rendered) = hierarchy.render() {
         report.push_str("### CLAUDE.md hierarchy\n\n```\n");
         report.push_str(&rendered);
@@ -32,7 +32,7 @@ pub(super) async fn handle_dump_context_command(app: &mut App) {
         );
     }
 
-    let skills = crate::agents::load_skills(&cwd);
+    let skills = jfc_engine::agents::load_skills(&cwd);
     report.push_str(&format!("### Skills ({})\n\n", skills.len()));
     for skill in &skills {
         report.push_str(&format!("- `{}`\n", skill.name));
@@ -42,7 +42,7 @@ pub(super) async fn handle_dump_context_command(app: &mut App) {
     }
     report.push('\n');
 
-    let memories = crate::memory::load_all_memories(&cwd);
+    let memories = jfc_engine::memory::load_all_memories(&cwd);
     report.push_str(&format!("### Memories ({})\n\n", memories.len()));
     for mem in &memories {
         let name = mem
@@ -60,7 +60,7 @@ pub(super) async fn handle_dump_context_command(app: &mut App) {
     }
     report.push('\n');
 
-    let tools = crate::tools::all_tool_defs();
+    let tools = jfc_engine::tools::all_tool_defs();
     report.push_str(&format!(
         "### Tool definitions sent to API ({})\n\n",
         tools.len()
@@ -70,7 +70,7 @@ pub(super) async fn handle_dump_context_command(app: &mut App) {
     }
     report.push('\n');
 
-    let agents = crate::agents::load_agents(&cwd);
+    let agents = jfc_engine::agents::load_agents(&cwd);
     report.push_str(&format!("### Agents ({})\n\n", agents.len()));
     for a in &agents {
         report.push_str(&format!(
@@ -86,9 +86,9 @@ pub(super) async fn handle_dump_context_command(app: &mut App) {
     report.push('\n');
 
     app.engine.messages
-        .push(crate::types::ChatMessage::user("/dump-context".to_string()));
+        .push(jfc_core::ChatMessage::user("/dump-context".to_string()));
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(report));
+        .push(jfc_core::ChatMessage::assistant(report));
 }
 
 /// `/theme [name]` switches the live UI theme or opens the picker.
@@ -101,10 +101,10 @@ pub(super) fn handle_theme_command(app: &mut App, args: &str) {
     match crate::theme::Theme::choice_by_name(name) {
         Some(choice) => apply_theme(app, choice.name),
         None => {
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Warning,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Warning,
                     format!(
                         "unknown theme '{name}' — try one of: {}",
                         crate::theme::Theme::available_names().join(", ")
@@ -148,9 +148,9 @@ pub(super) fn handle_fleet_command(app: &mut App) {
         }
     }
     app.engine.messages
-        .push(crate::types::ChatMessage::user("/fleet".into()));
+        .push(jfc_core::ChatMessage::user("/fleet".into()));
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(lines.join("\n")));
+        .push(jfc_core::ChatMessage::assistant(lines.join("\n")));
     tracing::info!(
         target: "jfc::ui::fleet",
         teammates = app.engine.team_context.teammates.len(),
@@ -166,7 +166,7 @@ pub(super) async fn handle_teleport_command(app: &mut App, target: &str) {
     let repo_root: &Path = cwd.as_path();
 
     if target.is_empty() {
-        let targets = crate::swarm::teleport::list_teleport_targets(repo_root);
+        let targets = jfc_engine::swarm::teleport::list_teleport_targets(repo_root);
         let body = if targets.is_empty() {
             "No jfc-managed branches in this repo (looking for `jfc/<session>` branches).\n\
              Spawn a teammate via Task to create one, or check out a branch with `git checkout`."
@@ -184,9 +184,9 @@ pub(super) async fn handle_teleport_command(app: &mut App, target: &str) {
             s
         };
         app.engine.messages
-            .push(crate::types::ChatMessage::user("/teleport".into()));
+            .push(jfc_core::ChatMessage::user("/teleport".into()));
         app.engine.messages
-            .push(crate::types::ChatMessage::assistant(body));
+            .push(jfc_core::ChatMessage::assistant(body));
         return;
     }
 
@@ -195,12 +195,12 @@ pub(super) async fn handle_teleport_command(app: &mut App, target: &str) {
     } else {
         format!("jfc/{target}")
     };
-    let result = crate::swarm::teleport::teleport_to_session(repo_root, &target_branch, None);
-    app.engine.messages.push(crate::types::ChatMessage::user(format!(
+    let result = jfc_engine::swarm::teleport::teleport_to_session(repo_root, &target_branch, None);
+    app.engine.messages.push(jfc_core::ChatMessage::user(format!(
         "/teleport {target}"
     )));
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(result.message.clone()));
+        .push(jfc_core::ChatMessage::assistant(result.message.clone()));
     tracing::info!(
         target: "jfc::ui::teleport",
         target = %target_branch,
@@ -211,7 +211,7 @@ pub(super) async fn handle_teleport_command(app: &mut App, target: &str) {
 
 /// `/output-style [name]` switches assistant reply style.
 pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
-    use crate::output_style::OutputStyle;
+    use jfc_engine::output_style::OutputStyle;
     let arg = args.trim();
     if arg.is_empty() {
         let mut lines = vec!["Available output styles:".to_string(), "".to_string()];
@@ -230,17 +230,17 @@ pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
         lines.push("".into());
         lines.push("Use `/output-style <name>` to switch.".into());
         app.engine.messages
-            .push(crate::types::ChatMessage::user("/output-style".into()));
+            .push(jfc_core::ChatMessage::user("/output-style".into()));
         app.engine.messages
-            .push(crate::types::ChatMessage::assistant(lines.join("\n")));
+            .push(jfc_core::ChatMessage::assistant(lines.join("\n")));
         return;
     }
     let parsed = OutputStyle::from_str_loose(arg);
     if parsed == OutputStyle::Default && !arg.eq_ignore_ascii_case("default") {
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Warning,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Warning,
                 format!(
                     "Unknown output style '{arg}' — try one of: {}",
                     OutputStyle::all()
@@ -254,7 +254,7 @@ pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
         return;
     }
     app.engine.output_style = parsed;
-    crate::output_style::set_active(parsed);
+    jfc_engine::output_style::set_active(parsed);
     let persist_msg = match save_output_style(parsed.name()) {
         Ok(_) => format!("output style: {}", parsed.name()),
         Err(e) => {
@@ -262,20 +262,20 @@ pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
             format!("output style: {} (not persisted: {e})", parsed.name())
         }
     };
-    crate::toast::push_with_cap(
+    jfc_engine::toast::push_with_cap(
         &mut app.engine.toasts,
-        crate::toast::Toast::new(crate::toast::ToastKind::Success, persist_msg),
+        jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Success, persist_msg),
     );
 }
 
 fn save_output_style(name: &str) -> Result<std::path::PathBuf, String> {
-    let path = crate::config::config_path();
+    let path = jfc_engine::config::config_path();
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
         return Err(format!("cannot create {}: {e}", parent.display()));
     }
-    let mut cfg: crate::config::Config = match std::fs::read_to_string(&path) {
+    let mut cfg: jfc_engine::config::Config = match std::fs::read_to_string(&path) {
         Ok(s) if !s.trim().is_empty() => match toml::from_str(&s) {
             Ok(c) => c,
             Err(e) => {
@@ -285,7 +285,7 @@ fn save_output_style(name: &str) -> Result<std::path::PathBuf, String> {
                 ));
             }
         },
-        _ => crate::config::Config::default(),
+        _ => jfc_engine::config::Config::default(),
     };
     cfg.output_style = Some(name.to_string());
     let serialized = toml::to_string_pretty(&cfg).map_err(|e| format!("serialize failed: {e}"))?;
@@ -298,11 +298,11 @@ fn save_output_style(name: &str) -> Result<std::path::PathBuf, String> {
 /// model turn that asks JFC to create or update the matching project document.
 pub(super) async fn handle_doc_command(
     app: &mut App,
-    kind: crate::document_formats::DocKind,
+    kind: jfc_engine::document_formats::DocKind,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
     let cwd = std::path::PathBuf::from(&app.engine.cwd);
-    let target = crate::document_formats::doc_target(&cwd, kind);
+    let target = jfc_engine::document_formats::doc_target(&cwd, kind);
     let exists = target.is_file();
     let echo = format!("/{}", kind.verb());
     let body = kind.prompt_body(&target, exists);
@@ -349,7 +349,7 @@ pub(super) async fn handle_init_command(app: &mut App) {
     let target = cwd.join("CLAUDE.md");
 
     app.engine.messages
-        .push(crate::types::ChatMessage::user("/init".into()));
+        .push(jfc_core::ChatMessage::user("/init".into()));
 
     let overwrite_note = if target.exists() {
         format!(
@@ -525,7 +525,7 @@ pub(super) async fn handle_init_command(app: &mut App) {
     };
 
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(body));
+        .push(jfc_core::ChatMessage::assistant(body));
 }
 
 /// `/cost` reports running session cost.
@@ -536,7 +536,7 @@ pub(super) fn handle_cost_command(app: &mut App) {
         lines.push("  (no model usage yet — try a prompt first)".into());
     } else {
         for (model, usage) in &app.engine.usage_by_model {
-            let cost = crate::cost::cost_for(model.as_str(), usage);
+            let cost = jfc_engine::cost::cost_for(model.as_str(), usage);
             total += cost;
             lines.push(format!(
                 "  {} · {} in / {} out / {} cache-read / {} cache-write → {}",
@@ -545,16 +545,16 @@ pub(super) fn handle_cost_command(app: &mut App) {
                 usage.output_tokens,
                 usage.cache_read_tokens,
                 usage.cache_write_tokens,
-                crate::cost::fmt_cost(cost),
+                jfc_engine::cost::fmt_cost(cost),
             ));
         }
     }
     lines.push("".into());
-    lines.push(format!("**Total: {}**", crate::cost::fmt_cost(total)));
+    lines.push(format!("**Total: {}**", jfc_engine::cost::fmt_cost(total)));
     app.engine.messages
-        .push(crate::types::ChatMessage::user("/cost".into()));
+        .push(jfc_core::ChatMessage::user("/cost".into()));
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(lines.join("\n")));
+        .push(jfc_core::ChatMessage::assistant(lines.join("\n")));
 }
 
 /// `/status` reports rich session status.
@@ -573,7 +573,7 @@ pub(super) fn handle_status_command(app: &mut App) {
     let total_cost: f64 = app.engine
         .usage_by_model
         .iter()
-        .map(|(m, u)| crate::cost::cost_for(m.as_str(), u))
+        .map(|(m, u)| jfc_engine::cost::cost_for(m.as_str(), u))
         .sum();
 
     let model_str = app.engine.model.as_str();
@@ -581,7 +581,7 @@ pub(super) fn handle_status_command(app: &mut App) {
     let turn_count = app.engine
         .messages
         .iter()
-        .filter(|m| m.role == crate::types::Role::User)
+        .filter(|m| m.role == jfc_core::Role::User)
         .count();
     let mcp_count = app.engine.mcp_servers.len();
     let effort_label = app.engine.effort_state.status();
@@ -597,7 +597,7 @@ pub(super) fn handle_status_command(app: &mut App) {
             "**Tokens:** {} in / {} out / {} cache-read / {} cache-write",
             total_in, total_out, total_cr, total_cw
         ),
-        format!("**Cost:** {}", crate::cost::fmt_cost(total_cost)),
+        format!("**Cost:** {}", jfc_engine::cost::fmt_cost(total_cost)),
         format!("**MCP servers:** {mcp_count} active"),
         format!(
             "**Fast mode:** {}",
@@ -608,9 +608,9 @@ pub(super) fn handle_status_command(app: &mut App) {
         format!("**Exploration:** {exploration_label}"),
     ];
     app.engine.messages
-        .push(crate::types::ChatMessage::user("/status".into()));
+        .push(jfc_core::ChatMessage::user("/status".into()));
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(lines.join("\n")));
+        .push(jfc_core::ChatMessage::assistant(lines.join("\n")));
 }
 
 /// `/bug` opens a pre-filled GitHub issue with environment + session
@@ -663,11 +663,11 @@ pub(super) fn handle_bug_command(app: &mut App, description: String) {
     // let _ = std::process::Command::new("cmd")
     //     .args(["/C", "start", &url])
     //     .spawn();
-    app.engine.messages.push(crate::types::ChatMessage::user(
+    app.engine.messages.push(jfc_core::ChatMessage::user(
         format!("/bug {description}").trim_end().into(),
     ));
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(format!(
+        .push(jfc_core::ChatMessage::assistant(format!(
             "Opened a pre-filled bug report at {}/issues/new in your browser.\n\
              If nothing opened, copy the URL above. Context already attached:\n\
              - **Session ID**: `{session_id}`\n\
@@ -683,7 +683,7 @@ pub(super) fn handle_bug_command(app: &mut App, description: String) {
 /// `/rewind [N]` drops the last N user/assistant turn pairs from the transcript.
 pub(super) fn handle_rewind_command(app: &mut App, n_str: &str) {
     let n: usize = n_str.parse().unwrap_or(1).max(1);
-    use crate::types::Role;
+    use jfc_core::Role;
     let mut dropped_pairs = 0usize;
     while dropped_pairs < n {
         let last_user_idx = app.engine.messages.iter().rposition(|m| m.role == Role::User);
@@ -714,10 +714,10 @@ pub(super) fn handle_rewind_command(app: &mut App, n_str: &str) {
             if app.engine.messages.len() == 1 { "" } else { "s" },
         )
     };
-    crate::toast::push_with_cap(
+    jfc_engine::toast::push_with_cap(
         &mut app.engine.toasts,
-        crate::toast::Toast::new(crate::toast::ToastKind::Info, body.clone()),
+        jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Info, body.clone()),
     );
     app.engine.messages
-        .push(crate::types::ChatMessage::assistant(body));
+        .push(jfc_core::ChatMessage::assistant(body));
 }

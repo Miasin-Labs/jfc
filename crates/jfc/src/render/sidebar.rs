@@ -1,6 +1,6 @@
 use super::*;
 pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
-    use crate::types::LspStatus;
+    use jfc_core::LspStatus;
 
     let t = app.theme;
 
@@ -164,7 +164,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     if !app.engine.usage_by_model.is_empty() {
         lines.push(section("Usage by model"));
 
-        let mut model_entries: Vec<(&String, &crate::types::ModelUsage)> =
+        let mut model_entries: Vec<(&String, &jfc_core::ModelUsage)> =
             app.engine.usage_by_model.iter().collect();
         model_entries.sort_by_key(|(k, _)| k.as_str());
 
@@ -217,14 +217,14 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
-        let total = crate::cost::total_cost(&app.engine.usage_by_model);
+        let total = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
         // Hide the cost line on free / unauthenticated runs (matches
         // the status bar's gate at >$0.001). Showing `Total cost:
         // $0.00` on every fresh session was visual noise — the line
         // only earns its row once there's a cost to talk about.
         if total > 0.001 {
             lines.push(Line::from(vec![Span::styled(
-                format!("Total cost: {}", crate::cost::fmt_cost(total)),
+                format!("Total cost: {}", jfc_engine::cost::fmt_cost(total)),
                 Style::default().fg(t.text_muted),
             )]));
         }
@@ -311,7 +311,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         // teammate-tree below) so the team panel and the spinner-row
         // tree read the same way.
         for info in app.engine.team_context.teammates.values() {
-            if info.name == crate::swarm::TEAM_LEAD_NAME {
+            if info.name == jfc_engine::swarm::TEAM_LEAD_NAME {
                 continue;
             }
             let dot_color = crate::theme::teammate_color(info.color.as_deref());

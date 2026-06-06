@@ -8,7 +8,7 @@ pub(crate) use ratatui::{
 
 pub(crate) use crate::app::App;
 pub(crate) use crate::theme::Theme;
-pub(crate) use crate::types::*;
+pub(crate) use jfc_core::*;
 
 mod agents;
 mod approval;

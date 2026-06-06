@@ -42,9 +42,9 @@ pub(super) async fn handle_submit(
                 ),
                 Err(e) => format!("memory save failed: {e}"),
             };
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(crate::toast::ToastKind::Info, toast_msg),
+                jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Info, toast_msg),
             );
             // Clear the prompt; this was a note, not a turn.
             app.textarea.select_all();
@@ -136,7 +136,7 @@ pub(super) async fn handle_submit(
             let tx_diag = tx.clone();
             let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
             tokio::spawn(async move {
-                crate::diagnostics_producer::run_once(cwd, tx_diag).await;
+                jfc_engine::diagnostics_producer::run_once(cwd, tx_diag).await;
             });
         }
         handle_slash_command(app, &text, Some(tx)).await;

@@ -240,12 +240,12 @@ fn away_recap_band(f: &mut Frame, t: crate::theme::Theme, inner: Rect, recap: &s
 
 /// Build a `Line` for one agent row inside the workflow detail panel.
 fn workflow_agent_line(
-    agent: &crate::workflows::task::AgentProgress,
+    agent: &jfc_engine::workflows::task::AgentProgress,
     in_current_phase: bool,
     frame: usize,
     t: Theme,
 ) -> Line<'static> {
-    use crate::workflows::task::AgentStatus;
+    use jfc_engine::workflows::task::AgentStatus;
     let bullet = if in_current_phase { "●" } else { "○" };
     let (status_glyph, status_color) = match agent.status {
         AgentStatus::Running => {
@@ -402,7 +402,7 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
                     std::sync::OnceLock::new();
                 let empty = EMPTY.get_or_init(std::collections::HashSet::new);
                 let expanded = app.viewing_task_expanded.get(task_id).unwrap_or(empty);
-                let task_done = matches!(bt.status, crate::types::TaskLifecycle::Completed);
+                let task_done = matches!(bt.status, jfc_core::TaskLifecycle::Completed);
                 let lines =
                     task_view_body_lines(&bt.messages, expanded, &t, inner_width, task_done);
                 (title, lines, false)
@@ -420,8 +420,8 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
     f.render_widget(block, area);
 
     let task_status = app.engine.background_tasks.get(task_id).map(|bt| bt.status);
-    let task_is_running = matches!(task_status, Some(crate::types::TaskLifecycle::Running));
-    let task_is_idle = matches!(task_status, Some(crate::types::TaskLifecycle::Idle));
+    let task_is_running = matches!(task_status, Some(jfc_core::TaskLifecycle::Running));
+    let task_is_idle = matches!(task_status, Some(jfc_core::TaskLifecycle::Idle));
 
     // While the task is still running, append a spinner+"Receiving…"
     // row so the user can tell at a glance that more output is on
@@ -698,12 +698,12 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
             };
             let title = truncate_cells(desc, 22);
             let (glyph, color) = match bt.map(|b| b.status) {
-                Some(crate::types::TaskLifecycle::Running) => {
+                Some(jfc_core::TaskLifecycle::Running) => {
                     let frame = (app.launched_at.elapsed().as_millis() / 240) as usize;
                     (["✶", "✷", "✸", "✹"][frame % 4], t.warning)
                 }
-                Some(crate::types::TaskLifecycle::Completed) => ("●", t.success),
-                Some(crate::types::TaskLifecycle::Failed) => ("✗", t.error),
+                Some(jfc_core::TaskLifecycle::Completed) => ("●", t.success),
+                Some(jfc_core::TaskLifecycle::Failed) => ("✗", t.error),
                 _ => ("○", t.text_muted),
             };
             Tab {

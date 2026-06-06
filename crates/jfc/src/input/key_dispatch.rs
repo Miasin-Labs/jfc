@@ -191,7 +191,7 @@ fn message_has_reasoning(app: &App, idx: usize) -> bool {
     app.engine.messages.get(idx).is_some_and(|m| {
         m.parts
             .iter()
-            .any(|p| matches!(p, crate::types::MessagePart::Reasoning(_)))
+            .any(|p| matches!(p, jfc_core::MessagePart::Reasoning(_)))
     })
 }
 
@@ -299,10 +299,10 @@ async fn handle_command_keys(
             // forgotten chord doesn't intercept user typing.
             app.jump_armed = true;
             app.jump_armed_at = Some(std::time::Instant::now());
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Info,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Info,
                     "jump: e=last error · t=last tool · m=last user · a=last assistant".to_string(),
                 ),
             );
@@ -456,7 +456,7 @@ async fn handle_command_keys(
                 // refreshes don't re-pop the row for the same entry.
                 for entry in &app.engine.diagnostics {
                     app.delivered_diagnostics
-                        .insert(crate::diagnostics::entry_key(entry));
+                        .insert(jfc_engine::diagnostics::entry_key(entry));
                 }
             }
             Some(Ok(false))
@@ -607,11 +607,11 @@ async fn handle_command_keys(
             // Shift+Tab cycles permission modes
             app.engine.permission_mode = app.engine.permission_mode.next();
             // Persist the mode change to config.toml so it survives sessions.
-            crate::config::save_permission_mode(&app.engine.permission_mode);
-            crate::toast::push_with_cap(
+            jfc_engine::config::save_permission_mode(&app.engine.permission_mode);
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Info,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Info,
                     format!(
                         "{} Mode: {}",
                         app.engine.permission_mode.symbol(),
@@ -703,10 +703,10 @@ async fn handle_command_keys(
 /// Ctrl+E — edit the most recent user message in place.
 fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
     if app.engine.is_streaming || !app.engine.pending_tool_calls.is_empty() || app.engine.pending_approval.is_some() {
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Warning,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Warning,
                 "edit: still in flight, finish or interrupt first".to_string(),
             ),
         );
@@ -730,18 +730,18 @@ fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
         app.textarea.cut();
         app.textarea.insert_str(&text);
         app.editing_message_idx = Some(idx);
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Info,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
                 "editing previous message — Esc cancels, Enter resubmits".to_string(),
             ),
         );
     } else {
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Info,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
                 "no previous user message to edit".to_string(),
             ),
         );
@@ -754,10 +754,10 @@ fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
 fn cmd_yank_path_ref(app: &mut App) -> Option<anyhow::Result<bool>> {
     let paths = collect_recent_paths(&app.engine.messages);
     if paths.is_empty() {
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Info,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
                 "no path:line refs found in recent output".to_string(),
             ),
         );
@@ -766,10 +766,10 @@ fn cmd_yank_path_ref(app: &mut App) -> Option<anyhow::Result<bool>> {
     let idx = app.path_yank_cursor % paths.len();
     let target = paths[idx].clone();
     crate::runtime::copy_to_clipboard(&target, "path-yank");
-    crate::toast::push_with_cap(
+    jfc_engine::toast::push_with_cap(
         &mut app.engine.toasts,
-        crate::toast::Toast::new(
-            crate::toast::ToastKind::Success,
+        jfc_engine::toast::Toast::new(
+            jfc_engine::toast::ToastKind::Success,
             format!("{} ({}/{})", target, idx + 1, paths.len()),
         ),
     );
@@ -794,10 +794,10 @@ fn cmd_open_prompt_search(app: &mut App) -> Option<anyhow::Result<bool>> {
         }
     }
     if all.is_empty() {
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Info,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
                 "no prompt history to search".to_string(),
             ),
         );
@@ -816,10 +816,10 @@ fn cmd_open_prompt_search(app: &mut App) -> Option<anyhow::Result<bool>> {
 fn cmd_paste_clipboard_image(app: &mut App) -> Option<anyhow::Result<bool>> {
     match crate::attachments::read_clipboard_image() {
         Ok(Some((att, w, h))) => {
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Info,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Info,
                     format!("Image attached ({}x{}, {} bytes)", w, h, att.bytes.len()),
                 ),
             );
@@ -883,8 +883,8 @@ fn cmd_toggle_expand_recent(app: &mut App) -> Option<anyhow::Result<bool>> {
                 if let MessagePart::Tool(tc) = part {
                     match &tc.output {
                         ToolOutput::LargeText(lt)
-                            if lt.line_count > crate::types::LargeText::COLLAPSE_LINES
-                                || lt.content.len() > crate::types::LargeText::COLLAPSE_BYTES =>
+                            if lt.line_count > jfc_core::LargeText::COLLAPSE_LINES
+                                || lt.content.len() > jfc_core::LargeText::COLLAPSE_BYTES =>
                         {
                             tc.display.toggle_collapsed();
                             break 'toggle;
@@ -938,9 +938,9 @@ fn cmd_handle_escape(
         app.editing_message_idx = None;
         app.textarea.select_all();
         app.textarea.cut();
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(crate::toast::ToastKind::Info, "edit cancelled".to_string()),
+            jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Info, "edit cancelled".to_string()),
         );
         return Some(Ok(false));
     }
@@ -966,10 +966,10 @@ fn cmd_handle_escape(
             request_user_interrupt(app, tx);
         } else {
             app.last_esc_at = Some(now);
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Info,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Info,
                     "Press ESC again to interrupt".to_owned(),
                 ),
             );
@@ -1015,7 +1015,7 @@ pub(crate) fn can_interrupt_on_submit(app: &App, compacting: bool) -> bool {
         && app.engine
             .pending_tool_calls
             .iter()
-            .all(|t| crate::scheduler::is_concurrency_safe(&t.kind))
+            .all(|t| jfc_engine::scheduler::is_concurrency_safe(&t.kind))
 }
 
 /// `Enter` (without Shift) submission flow: trim textarea, route to the
@@ -1450,15 +1450,15 @@ fn handle_leader_key_keys(
                     && let Some(bt) = app.engine.background_tasks.get_mut(&id)
                     && matches!(
                         bt.status,
-                        crate::types::TaskLifecycle::Running | crate::types::TaskLifecycle::Idle
+                        jfc_core::TaskLifecycle::Running | jfc_core::TaskLifecycle::Idle
                     )
                 {
-                    bt.status = crate::types::TaskLifecycle::Failed;
+                    bt.status = jfc_core::TaskLifecycle::Failed;
                     bt.error = Some("cancelled by user".into());
-                    crate::toast::push_with_cap(
+                    jfc_engine::toast::push_with_cap(
                         &mut app.engine.toasts,
-                        crate::toast::Toast::new(
-                            crate::toast::ToastKind::Warning,
+                        jfc_engine::toast::Toast::new(
+                            jfc_engine::toast::ToastKind::Warning,
                             format!("Cancelled task {id}"),
                         ),
                     );
@@ -1479,10 +1479,10 @@ fn handle_leader_key_keys(
                             ))
                             .await;
                     });
-                    crate::toast::push_with_cap(
+                    jfc_engine::toast::push_with_cap(
                         &mut app.engine.toasts,
-                        crate::toast::Toast::new(
-                            crate::toast::ToastKind::Info,
+                        jfc_engine::toast::Toast::new(
+                            jfc_engine::toast::ToastKind::Info,
                             format!("Retrying task {id}"),
                         ),
                     );
@@ -1601,10 +1601,10 @@ fn handle_yank_key(app: &mut App, key: event::KeyEvent) -> Option<anyhow::Result
             crate::runtime::copy_to_clipboard(&text, "yank");
             let preview: String = text.chars().take(40).collect();
             let suffix = if text.chars().count() > 40 { "…" } else { "" };
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Success,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Success,
                     format!("Copied: {preview}{suffix}"),
                 ),
             );

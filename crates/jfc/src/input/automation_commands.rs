@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::runtime::EngineEvent;
-use crate::types::ChatMessage;
+use jfc_core::ChatMessage;
 
 // /dream — memory consolidation
 // ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ Use the MemoryCreate tool for new memories and MemoryDelete for stale ones.{cron
     app.engine.last_stream_event_at = Some(now);
     app.engine.streaming_last_token_at = Some(now);
     app.engine.turn_started_at = Some(now);
-    app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+    app.engine.turn_start_cost = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
     app.engine.thinking_started_at = None;
     app.engine.thinking_ended_at = None;
     app.engine.last_usage_output = 0;
@@ -85,13 +85,13 @@ Use the MemoryCreate tool for new memories and MemoryDelete for stale ones.{cron
         let msgs = app.engine.messages.clone();
         let model = app.engine.model.clone();
         tokio::spawn(async move {
-            crate::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
+            jfc_engine::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
         });
     }
     app.engine.current_session_id = Some(session_id);
 
     let provider = app.engine.provider.clone();
-    let messages = crate::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
+    let messages = jfc_engine::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
     let model = app.engine.model.clone();
     let tx_stream = tx.clone();
     let interrupt = app.engine.interrupt_flag.clone();
@@ -112,7 +112,7 @@ Use the MemoryCreate tool for new memories and MemoryDelete for stale ones.{cron
         ..Default::default()
     };
     tokio::spawn(async move {
-        crate::stream::stream_response(
+        jfc_engine::stream::stream_response(
             provider, messages, model, tx_stream, interrupt, cancel, None, overrides,
         )
         .await;
@@ -237,7 +237,7 @@ Then immediately execute the prompt now (do not wait for the first cron fire)."
     app.engine.last_stream_event_at = Some(now);
     app.engine.streaming_last_token_at = Some(now);
     app.engine.turn_started_at = Some(now);
-    app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+    app.engine.turn_start_cost = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
     app.engine.thinking_started_at = None;
     app.engine.thinking_ended_at = None;
     app.engine.last_usage_output = 0;
@@ -253,13 +253,13 @@ Then immediately execute the prompt now (do not wait for the first cron fire)."
         let msgs = app.engine.messages.clone();
         let model = app.engine.model.clone();
         tokio::spawn(async move {
-            crate::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
+            jfc_engine::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
         });
     }
     app.engine.current_session_id = Some(session_id);
 
     let provider = app.engine.provider.clone();
-    let messages = crate::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
+    let messages = jfc_engine::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
     let model = app.engine.model.clone();
     let tx_stream = tx.clone();
     let interrupt = app.engine.interrupt_flag.clone();
@@ -280,7 +280,7 @@ Then immediately execute the prompt now (do not wait for the first cron fire)."
         ..Default::default()
     };
     tokio::spawn(async move {
-        crate::stream::stream_response(
+        jfc_engine::stream::stream_response(
             provider, messages, model, tx_stream, interrupt, cancel, None, overrides,
         )
         .await;
@@ -363,7 +363,7 @@ and display the results in a readable table with columns: id, schedule, command,
     app.engine.last_stream_event_at = Some(now);
     app.engine.streaming_last_token_at = Some(now);
     app.engine.turn_started_at = Some(now);
-    app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+    app.engine.turn_start_cost = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
     app.engine.thinking_started_at = None;
     app.engine.thinking_ended_at = None;
     app.engine.last_usage_output = 0;
@@ -379,13 +379,13 @@ and display the results in a readable table with columns: id, schedule, command,
         let msgs = app.engine.messages.clone();
         let model = app.engine.model.clone();
         tokio::spawn(async move {
-            crate::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
+            jfc_engine::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
         });
     }
     app.engine.current_session_id = Some(session_id);
 
     let provider = app.engine.provider.clone();
-    let messages = crate::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
+    let messages = jfc_engine::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
     let model = app.engine.model.clone();
     let tx_stream = tx.clone();
     let interrupt = app.engine.interrupt_flag.clone();
@@ -406,7 +406,7 @@ and display the results in a readable table with columns: id, schedule, command,
         ..Default::default()
     };
     tokio::spawn(async move {
-        crate::stream::stream_response(
+        jfc_engine::stream::stream_response(
             provider, messages, model, tx_stream, interrupt, cancel, None, overrides,
         )
         .await;

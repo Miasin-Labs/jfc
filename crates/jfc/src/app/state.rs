@@ -420,7 +420,7 @@ pub struct App {
     /// Remote-control host. `Some` when `/remote-control` is active or RC was
     /// started at launch. Events are mirrored to connected clients; client
     /// input is injected into the main event bus. See `crate::remote_host`.
-    pub remote_host: Option<std::sync::Arc<crate::remote_host::RemoteHost>>,
+    pub remote_host: Option<std::sync::Arc<jfc_engine::remote_host::RemoteHost>>,
     /// Shared flag: true when the UI needs high-frequency ticks (animations,
     /// kinetic scroll, boot sweep). The tick task reads this to choose
     /// `ANIM_TICK_MS` vs `IDLE_TICK_MS`.

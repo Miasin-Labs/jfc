@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::{App, ApprovalChoice, PendingApproval};
 use crate::theme::Theme;
-use crate::types::{ToolCall, ToolInput};
+use jfc_core::{ToolCall, ToolInput};
 
 pub(super) fn approval(f: &mut Frame, app: &App) {
     let Some(ref pending) = app.engine.pending_approval else {
@@ -262,13 +262,13 @@ fn render_choice_list(f: &mut Frame, pending: &PendingApproval, area: Rect, t: &
 /// Check whether a tool call represents a destructive bash command AND the
 /// `DestructiveWarn` feature gate is enabled.
 fn is_tool_destructive(tool: &ToolCall) -> bool {
-    if !crate::feature_gates::is_enabled(crate::feature_gates::FeatureGate::DestructiveWarn) {
+    if !jfc_engine::feature_gates::is_enabled(jfc_engine::feature_gates::FeatureGate::DestructiveWarn) {
         return false;
     }
     let ToolInput::Bash { command, .. } = &tool.input else {
         return false;
     };
-    crate::auto_classifier::is_destructive_bash(command)
+    jfc_engine::auto_classifier::is_destructive_bash(command)
 }
 
 /// Render the `[⚠ DESTRUCTIVE]` warning line with explanation.

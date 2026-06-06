@@ -20,7 +20,7 @@ pub(crate) fn filtered_theme_choices(app: &App) -> Vec<&'static crate::theme::Th
 pub(super) fn open_theme_picker(app: &mut App) {
     app.theme_preview_original = Some(app.theme);
     app.theme_picker_input.clear();
-    let current = crate::config::load_arc().theme.clone();
+    let current = jfc_engine::config::load_arc().theme.clone();
     app.theme_picker_selected = current
         .as_deref()
         .and_then(Theme::choice_by_name)
@@ -57,19 +57,19 @@ pub(super) fn apply_theme(app: &mut App, name: &str) {
         app.theme = theme;
         app.render_cache.borrow_mut().clear();
         crate::markdown::clear_highlight_cache();
-        if let Err(err) = crate::config::save_theme(choice.name) {
-            crate::toast::push_with_cap(
+        if let Err(err) = jfc_engine::config::save_theme(choice.name) {
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Warning,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Warning,
                     format!("Theme: {} (not persisted: {err})", choice.label),
                 ),
             );
         } else {
-            crate::toast::push_with_cap(
+            jfc_engine::toast::push_with_cap(
                 &mut app.engine.toasts,
-                crate::toast::Toast::new(
-                    crate::toast::ToastKind::Success,
+                jfc_engine::toast::Toast::new(
+                    jfc_engine::toast::ToastKind::Success,
                     format!("Theme: {}", choice.label),
                 ),
             );

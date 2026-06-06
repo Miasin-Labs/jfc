@@ -30,7 +30,7 @@ pub(super) enum PluginSubcommand {
 }
 
 pub(super) async fn run_plugin_subcommand(sub: PluginSubcommand) -> anyhow::Result<()> {
-    let managed = crate::config::load_managed_settings();
+    let managed = jfc_engine::config::load_managed_settings();
     match sub {
         PluginSubcommand::List => {
             print!("{}", list_plugins()?);

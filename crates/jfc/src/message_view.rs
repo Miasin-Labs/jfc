@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::App;
 use crate::markdown;
 use crate::theme::Theme;
-use crate::types::*;
+use jfc_core::*;
 
 mod assistant_parts;
 mod bash;

@@ -41,7 +41,7 @@ pub(super) async fn cmd_compact(
     // with the live gauge and could show "0%" for a session the
     // sidebar reports as 90%-full.
     let est = app.engine.tool_ctx.approx_tokens;
-    let level = crate::compact::compact_level(est, app.engine.max_context_tokens);
+    let level = jfc_engine::compact::compact_level(est, app.engine.max_context_tokens);
     let pct = (est * 100)
         .checked_div(app.engine.max_context_tokens)
         .map_or(0, |p| p.min(999));
@@ -113,9 +113,9 @@ pub(super) async fn cmd_advisor(
             raw_model.to_ascii_lowercase().as_str(),
             "off" | "disable" | "disabled"
         ) {
-            match crate::config::save_server_advisor_model(None) {
+            match jfc_engine::config::save_server_advisor_model(None) {
                 Ok(_) => {
-                    crate::advisor::set_active_server_advisor_model(None);
+                    jfc_engine::advisor::set_active_server_advisor_model(None);
                     app.engine.server_advisor_model = None;
                     app.engine.messages
                         .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
@@ -152,12 +152,12 @@ pub(super) async fn cmd_advisor(
                 )]));
             return;
         }
-        match crate::advisor::resolve_server_advisor_model(&app.engine.model, Some(raw_model), true, true)
+        match jfc_engine::advisor::resolve_server_advisor_model(&app.engine.model, Some(raw_model), true, true)
         {
-            Ok(Some(model)) => match crate::config::save_server_advisor_model(Some(model.as_str()))
+            Ok(Some(model)) => match jfc_engine::config::save_server_advisor_model(Some(model.as_str()))
             {
                 Ok(_) => {
-                    crate::advisor::set_active_server_advisor_model(Some(model.clone()));
+                    jfc_engine::advisor::set_active_server_advisor_model(Some(model.clone()));
                     app.engine.server_advisor_model = Some(model.clone());
                     app.engine.messages
                         .push(ChatMessage::assistant_parts(vec![MessagePart::Advisor(
@@ -191,9 +191,9 @@ pub(super) async fn cmd_advisor(
         first.to_ascii_lowercase().as_str(),
         "off" | "disable" | "disabled"
     ) {
-        match crate::config::save_advisor_model(None) {
+        match jfc_engine::config::save_advisor_model(None) {
             Ok(_) => {
-                crate::advisor::set_active_local_advisor_model(None);
+                jfc_engine::advisor::set_active_local_advisor_model(None);
                 app.engine.local_advisor_model = None;
                 app.engine.advisor_enabled = false;
                 app.engine.advisor_session = None;
@@ -224,14 +224,14 @@ pub(super) async fn cmd_advisor(
                 )]));
             return;
         }
-        match crate::advisor::resolve_local_advisor_model(
+        match jfc_engine::advisor::resolve_local_advisor_model(
             &app.engine.model,
             Some(raw_model),
             true,
             Some(true),
         ) {
             Ok(Some(model)) => {
-                let provider = crate::advisor::resolve_local_advisor_provider(
+                let provider = jfc_engine::advisor::resolve_local_advisor_provider(
                     &app.engine.providers,
                     std::sync::Arc::clone(&app.engine.provider),
                     model.provider.as_ref(),
@@ -239,19 +239,19 @@ pub(super) async fn cmd_advisor(
                 );
                 match provider {
                     Ok(provider) => {
-                        match crate::config::save_advisor_model(Some(&model.config_value())) {
+                        match jfc_engine::config::save_advisor_model(Some(&model.config_value())) {
                             Ok(_) => {
-                                crate::advisor::set_active_local_advisor_provider(
+                                jfc_engine::advisor::set_active_local_advisor_provider(
                                     model.provider.clone(),
                                 );
-                                crate::advisor::set_active_local_advisor_model(Some(
+                                jfc_engine::advisor::set_active_local_advisor_model(Some(
                                     model.model.clone(),
                                 ));
                                 app.engine.local_advisor_provider = model.provider.clone();
                                 app.engine.local_advisor_model = Some(model.model.clone());
                                 app.engine.advisor_enabled = true;
                                 app.engine.advisor_session =
-                                    Some(crate::advisor::AdvisorSession::new(model.model.clone()));
+                                    Some(jfc_engine::advisor::AdvisorSession::new(model.model.clone()));
                                 app.engine.messages.push(ChatMessage::assistant_parts(vec![
                                     MessagePart::Advisor(format!(
                                         "Local advisor set to `{}` via `{}`.",
@@ -305,7 +305,7 @@ pub(super) async fn cmd_advisor(
         // tracks the *active* model at first invocation; switching
         // models mid-session keeps the original advisor model.
         let session = app.engine.advisor_session.get_or_insert_with(|| {
-            crate::advisor::AdvisorSession::new(
+            jfc_engine::advisor::AdvisorSession::new(
                 app.engine.local_advisor_model
                     .clone()
                     .unwrap_or_else(|| app.engine.model.clone()),
@@ -317,7 +317,7 @@ pub(super) async fn cmd_advisor(
         // immutably while we're holding `&mut app.engine.advisor_session`
         // mutably — borrow-check fails.
         let snapshot = app.engine.messages.clone();
-        let provider = match crate::advisor::resolve_local_advisor_provider(
+        let provider = match jfc_engine::advisor::resolve_local_advisor_provider(
             &app.engine.providers,
             std::sync::Arc::clone(&app.engine.provider),
             app.engine.local_advisor_provider.as_ref(),
@@ -332,7 +332,7 @@ pub(super) async fn cmd_advisor(
                 return;
             }
         };
-        match crate::advisor::ask_advisor(provider.as_ref(), session, query.clone(), &snapshot)
+        match jfc_engine::advisor::ask_advisor(provider.as_ref(), session, query.clone(), &snapshot)
             .await
         {
             Ok(reply) => {
@@ -375,13 +375,13 @@ pub(super) async fn cmd_config(
     let arg = parts.get(1).copied().unwrap_or("").trim();
     app.engine.messages.push(ChatMessage::user(text.to_owned()));
     if arg == "path" {
-        let p = crate::config::config_path();
+        let p = jfc_engine::config::config_path();
         app.engine.messages.push(ChatMessage::assistant(format!(
             "**Config path:** `{}`",
             p.display()
         )));
     } else {
-        let cfg = crate::config::load_arc();
+        let cfg = jfc_engine::config::load_arc();
         let body = match toml::to_string_pretty(&cfg) {
             Ok(s) if s.trim().is_empty() => "(empty config — no overrides)".to_owned(),
             Ok(s) => format!("```toml\n{s}```"),
@@ -484,7 +484,7 @@ pub(super) async fn cmd_fast(
     // v2.1.139's `/fast` command (Alt+O keybind).
     app.engine.messages.push(ChatMessage::user(text.to_owned()));
     app.engine.fast_mode = !app.engine.fast_mode;
-    crate::effort::set_fast_mode_global(app.engine.fast_mode);
+    jfc_engine::effort::set_fast_mode_global(app.engine.fast_mode);
     app.engine.messages.push(ChatMessage::assistant(format!(
         "Fast mode: **{}** — {}",
         if app.engine.fast_mode { "ON" } else { "OFF" },
@@ -607,7 +607,7 @@ pub(super) async fn cmd_effort(
     } else if arg == "clear" || arg == "off" {
         let msg = app.engine.effort_state.clear();
         app.engine.messages.push(ChatMessage::assistant(msg));
-    } else if let Some(level) = crate::effort::ReasoningEffort::from_str_loose(arg) {
+    } else if let Some(level) = jfc_engine::effort::ReasoningEffort::from_str_loose(arg) {
         let msg = app.engine.effort_state.set(level);
         app.engine.messages.push(ChatMessage::assistant(msg));
     } else {
@@ -632,7 +632,7 @@ pub(super) async fn cmd_temp(
         let msg = app.engine.temperature_state.clear();
         app.engine.messages.push(ChatMessage::assistant(msg));
     } else {
-        match crate::exploration::parse_temperature(arg) {
+        match jfc_engine::exploration::parse_temperature(arg) {
             Ok(value) => {
                 let mut msg = app.engine.temperature_state.set(value);
                 // The pin is silently dropped for request shapes that lock
@@ -677,7 +677,7 @@ pub(super) async fn cmd_explore(
         "clear" | "default" | "auto" => app.engine.exploration_state.clear_adjustments(),
         "max" | "ultra" => {
             app.engine.exploration_state
-                .force_next(crate::exploration::ExplorationLevel::MAX);
+                .force_next(jfc_engine::exploration::ExplorationLevel::MAX);
             "Next turn exploration forced to level 4.".to_owned()
         }
         other => format!(
@@ -718,11 +718,11 @@ pub(super) async fn cmd_feature(
     let rest = parts.get(1).copied().unwrap_or("").trim();
     if rest.is_empty() {
         let mut body = String::from("**Feature gates:**\n\n");
-        for &gate in crate::feature_gates::FeatureGate::ALL {
+        for &gate in jfc_engine::feature_gates::FeatureGate::ALL {
             body.push_str(&format!(
                 "- `{}` — **{}** ({})\n",
                 gate.codename(),
-                if crate::feature_gates::is_enabled(gate) {
+                if jfc_engine::feature_gates::is_enabled(gate) {
                     "ON"
                 } else {
                     "OFF"
@@ -736,7 +736,7 @@ pub(super) async fn cmd_feature(
         let mut sub = rest.split_whitespace();
         let name = sub.next().unwrap_or("");
         let toggle = sub.next().unwrap_or("").to_ascii_lowercase();
-        let Some(gate) = crate::feature_gates::FeatureGate::from_codename(name) else {
+        let Some(gate) = jfc_engine::feature_gates::FeatureGate::from_codename(name) else {
             app.engine.messages.push(ChatMessage::assistant(format!(
                 "Unknown feature gate `{name}`. List with `/feature`."
             )));
@@ -749,7 +749,7 @@ pub(super) async fn cmd_feature(
                 app.engine.messages.push(ChatMessage::assistant(format!(
                     "`{}` is currently **{}**. Toggle with `/feature {} on|off`.",
                     gate.codename(),
-                    if crate::feature_gates::is_enabled(gate) {
+                    if jfc_engine::feature_gates::is_enabled(gate) {
                         "ON"
                     } else {
                         "OFF"
@@ -765,7 +765,7 @@ pub(super) async fn cmd_feature(
                 return;
             }
         };
-        crate::feature_gates::set(gate, enabled);
+        jfc_engine::feature_gates::set(gate, enabled);
         app.engine.messages.push(ChatMessage::assistant(format!(
             "`{}` set to **{}** ({}).",
             gate.codename(),
@@ -775,7 +775,7 @@ pub(super) async fn cmd_feature(
         // v132 system-reminder so the model sees the gate flip
         // on the next turn (rather than guessing from changed
         // behavior).
-        crate::system_reminder::append_to_last_user(
+        jfc_engine::system_reminder::append_to_last_user(
             &mut app.engine.messages,
             &format!(
                 "Feature gate `{}` flipped to **{}** ({}). Adjust your \
@@ -796,7 +796,7 @@ pub(super) async fn cmd_goal(
 ) {
     // v137 session-scoped goal. `/goal <condition>` sets a stop
     // condition — the agent keeps working until the evaluator
-    // says it's met (see `crate::goal::evaluate`). `/goal
+    // says it's met (see `jfc_engine::goal::evaluate`). `/goal
     // clear` (or stop/off/reset/none/cancel) removes it.
     // `/goal` alone shows the current state.
     app.engine.messages.push(ChatMessage::user(text.to_owned()));
@@ -811,13 +811,13 @@ pub(super) async fn cmd_goal(
             None => "No goal set. Usage: `/goal <condition>`".to_string(),
         };
         app.engine.messages.push(ChatMessage::assistant(msg));
-    } else if crate::goal::is_clear_arg(arg) {
+    } else if jfc_engine::goal::is_clear_arg(arg) {
         let prev = app.engine.goal.take();
         app.engine.goal_evaluator_in_flight = false;
         // Drop the sidecar so a future /continue doesn't
         // revive a goal the user just cancelled.
         if let Some(sid) = app.engine.current_session_id.as_ref() {
-            crate::goal::save_sidecar(sid.as_str(), None);
+            jfc_engine::goal::save_sidecar(sid.as_str(), None);
         }
         let msg = match prev {
             Some(g) => format!(
@@ -827,31 +827,31 @@ pub(super) async fn cmd_goal(
             None => "No goal was set.".to_string(),
         };
         app.engine.messages.push(ChatMessage::assistant(msg));
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(crate::toast::ToastKind::Success, "Goal cleared".to_string()),
+            jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Success, "Goal cleared".to_string()),
         );
     } else {
-        match crate::goal::validate_condition(arg) {
+        match jfc_engine::goal::validate_condition(arg) {
             Ok(condition) => {
-                let goal = crate::goal::ActiveGoal::new(condition.clone());
+                let goal = jfc_engine::goal::ActiveGoal::new(condition.clone());
                 app.engine.goal = Some(goal);
                 // Persist the new goal so /continue picks it
                 // up if the user exits before the next turn.
                 if let Some(sid) = app.engine.current_session_id.as_ref() {
-                    crate::goal::save_sidecar(sid.as_str(), app.engine.goal.as_ref());
+                    jfc_engine::goal::save_sidecar(sid.as_str(), app.engine.goal.as_ref());
                 }
                 app.engine.messages.push(ChatMessage::assistant(format!(
                     "Goal set: {condition}\n\nThe agent will keep \
                              working until this condition is met (auto-\
                              evaluated after each turn, max {} iterations). \
                              Use `/goal clear` to cancel.",
-                    crate::goal::MAX_ITERATIONS
+                    jfc_engine::goal::MAX_ITERATIONS
                 )));
-                crate::toast::push_with_cap(
+                jfc_engine::toast::push_with_cap(
                     &mut app.engine.toasts,
-                    crate::toast::Toast::new(
-                        crate::toast::ToastKind::Success,
+                    jfc_engine::toast::Toast::new(
+                        jfc_engine::toast::ToastKind::Success,
                         format!("Goal: {condition}"),
                     ),
                 );
@@ -876,7 +876,7 @@ pub(super) async fn cmd_goal(
                                  condition holds (auto-evaluated after each \
                                  turn, max {} iterations). It auto-clears \
                                  once the condition is met.",
-                        crate::goal::MAX_ITERATIONS
+                        jfc_engine::goal::MAX_ITERATIONS
                     );
                     let _ = tx.send(EngineEvent::Control(ControlEvent::SubmitPrompt(kickoff))).await;
                     tracing::info!(
@@ -915,19 +915,19 @@ pub(super) async fn cmd_memory(
             .unwrap_or("status");
         match sub {
             "on" | "enable" => {
-                crate::memory_recall::set_runtime_override(Some(true));
+                jfc_engine::memory_recall::set_runtime_override(Some(true));
                 app.engine.messages.push(ChatMessage::assistant(
                     "Two-phase memory recall: **on** (runtime override).".into(),
                 ));
             }
             "off" | "disable" => {
-                crate::memory_recall::set_runtime_override(Some(false));
+                jfc_engine::memory_recall::set_runtime_override(Some(false));
                 app.engine.messages.push(ChatMessage::assistant(
                     "Two-phase memory recall: **off** (runtime override).".into(),
                 ));
             }
             "default" | "reset" => {
-                crate::memory_recall::set_runtime_override(None);
+                jfc_engine::memory_recall::set_runtime_override(None);
                 app.engine.messages.push(ChatMessage::assistant(
                     "Two-phase memory recall: cleared runtime override; \
                              falling back to `~/.config/jfc/config.toml` value."
@@ -935,8 +935,8 @@ pub(super) async fn cmd_memory(
                 ));
             }
             "status" | "" => {
-                let persisted = crate::config::load_arc().memory_recall_enabled;
-                let effective = crate::memory_recall::is_enabled(persisted);
+                let persisted = jfc_engine::config::load_arc().memory_recall_enabled;
+                let effective = jfc_engine::memory_recall::is_enabled(persisted);
                 app.engine.messages.push(ChatMessage::assistant(format!(
                     "**Memory recall**\n\
                              - Effective: **{}**\n\
@@ -956,14 +956,14 @@ pub(super) async fn cmd_memory(
         }
     } else {
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let mems = crate::memory::load_all_memories(&cwd);
+        let mems = jfc_engine::memory::load_all_memories(&cwd);
         let body = if mems.is_empty() {
             "No memory files found. Create `.jfc/memory/*.md` (project) or \
                      `~/.config/jfc/memory/*.md` (user) with YAML frontmatter \
                      (`type:` and `scope:`) and a markdown body."
                 .to_owned()
         } else {
-            let listing = crate::memory::format_existing_memories(&mems);
+            let listing = jfc_engine::memory::format_existing_memories(&mems);
             format!(
                 "**{} memor{} loaded:**\n\n{listing}\n\nUse `/memory recall status` to see whether two-phase recall is active.",
                 mems.len(),
@@ -980,7 +980,7 @@ pub(super) async fn cmd_claude_md(
     _text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    let h = crate::context::ClaudeMdHierarchy::load(
+    let h = jfc_engine::context::ClaudeMdHierarchy::load(
         &std::env::current_dir().unwrap_or_else(|_| ".".into()),
     );
     let body = if !h.any() {
@@ -1046,7 +1046,7 @@ pub(super) async fn cmd_mode(
     if let Some(mode) = new_mode {
         app.engine.permission_mode = mode;
         // Persist so the mode survives session restart / --continue.
-        crate::config::save_permission_mode(&app.engine.permission_mode);
+        jfc_engine::config::save_permission_mode(&app.engine.permission_mode);
         // Sync auto_mode.enabled with permission mode for backward compat
         app.engine.auto_mode.enabled = mode == crate::app::PermissionMode::Auto;
         app.engine.messages.push(ChatMessage::assistant(format!(
@@ -1140,11 +1140,11 @@ pub(super) async fn cmd_swarm_approve(
                 "No active team — nothing to approve.".into(),
             ));
         } else {
-            let resolution = crate::swarm::types::PermissionResolution {
+            let resolution = jfc_engine::swarm::types::PermissionResolution {
                 decision: if approve {
-                    crate::swarm::types::PermissionDecision::Approved
+                    jfc_engine::swarm::types::PermissionDecision::Approved
                 } else {
-                    crate::swarm::types::PermissionDecision::Rejected
+                    jfc_engine::swarm::types::PermissionDecision::Rejected
                 },
                 resolved_by: "user".to_owned(),
                 feedback,
@@ -1153,7 +1153,7 @@ pub(super) async fn cmd_swarm_approve(
             };
             let req_id = id.clone();
             tokio::spawn(async move {
-                let _ = crate::swarm::permission_sync::resolve_permission(
+                let _ = jfc_engine::swarm::permission_sync::resolve_permission(
                     &req_id,
                     &resolution,
                     &team_name,
@@ -1191,7 +1191,7 @@ pub(super) async fn cmd_autoloop(
     _text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    use crate::autonomous_loop::{AutonomousLoopState, LoopPacing, read_loop_file};
+    use jfc_engine::autonomous_loop::{AutonomousLoopState, LoopPacing, read_loop_file};
 
     // `/loop stop` kills an active loop.
     if parts.get(1).copied() == Some("stop") {
@@ -1211,7 +1211,7 @@ pub(super) async fn cmd_autoloop(
         ));
         return;
     }
-    let git_root = crate::context::discover_git_root();
+    let git_root = jfc_engine::context::discover_git_root();
     let project_root = git_root
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -1242,8 +1242,8 @@ pub(super) async fn cmd_sandbox(
     app.engine.bash_sandbox.enabled = !app.engine.bash_sandbox.enabled;
     // Mirror the toggle into the global static so the bash dispatch path
     // (which doesn't have access to `&mut App`) sees the new config.
-    crate::sandbox::install_bash_sandbox_config(app.engine.bash_sandbox.clone());
-    let avail = crate::sandbox::is_bwrap_available();
+    jfc_engine::sandbox::install_bash_sandbox_config(app.engine.bash_sandbox.clone());
+    let avail = jfc_engine::sandbox::is_bwrap_available();
     let msg = if app.engine.bash_sandbox.enabled {
         if avail {
             "Bash sandbox enabled — commands will be wrapped in bwrap with network isolation."
@@ -1376,10 +1376,10 @@ pub(super) async fn cmd_stuck(
         .iter()
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
-            crate::types::MessagePart::Tool(tc) => Some(tc),
+            jfc_core::MessagePart::Tool(tc) => Some(tc),
             _ => None,
         })
-        .filter(|tc| tc.status == crate::types::ToolStatus::Running)
+        .filter(|tc| tc.status == jfc_core::ToolStatus::Running)
         .count();
     report.push_str(&format!("• Pending tool calls: {pending_tools}\n"));
 
@@ -1466,7 +1466,7 @@ pub(super) async fn cmd_team_onboarding(
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let guide = crate::team_onboarding::generate_onboarding_guide(&root);
+    let guide = jfc_engine::team_onboarding::generate_onboarding_guide(&root);
     app.engine.messages.push(ChatMessage::assistant(guide));
 }
 
@@ -1491,7 +1491,7 @@ pub(super) async fn cmd_coach(
     };
     for m in &app.engine.messages {
         for p in &m.parts {
-            if let crate::types::MessagePart::Tool(t) = p {
+            if let jfc_core::MessagePart::Tool(t) = p {
                 stats.total_tool_calls += 1;
                 match t.kind.label() {
                     "Read" => stats.read_calls += 1,
@@ -1500,7 +1500,7 @@ pub(super) async fn cmd_coach(
                     "Grep" | "Glob" | "GraphSearch" | "GraphContext" => stats.search_calls += 1,
                     _ => {}
                 }
-                if t.status == crate::types::ExecutionStatus::Failed {
+                if t.status == jfc_core::ExecutionStatus::Failed {
                     stats.error_count += 1;
                 }
             }
@@ -1535,7 +1535,7 @@ pub(super) async fn cmd_remote(
         }
     };
     let client = reqwest::Client::new();
-    match crate::ccr::spawn_remote_session(
+    match jfc_engine::ccr::spawn_remote_session(
         &client,
         &api_key,
         "https://api.anthropic.com",
@@ -1603,7 +1603,7 @@ pub(super) async fn cmd_remote_control(
     }
 
     // Check config-level disable.
-    if crate::config::load_arc()
+    if jfc_engine::config::load_arc()
         .remote_control
         .as_ref()
         .is_some_and(|rc| rc.disabled)
@@ -1632,7 +1632,7 @@ pub(super) async fn cmd_remote_control(
     };
 
     let port = jfc_remote::protocol::DEFAULT_PORT;
-    match crate::remote_host::RemoteHost::start(port, tx.clone()).await {
+    match jfc_engine::remote_host::RemoteHost::start(port, tx.clone()).await {
         Ok(host) => {
             let addr = host.addr();
             let token = host.token.clone();
@@ -1726,7 +1726,7 @@ pub(super) async fn cmd_oauth_login(
     _text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    let cfg = crate::auth::device_flow::DeviceFlowConfig {
+    let cfg = jfc_engine::auth::device_flow::DeviceFlowConfig {
         client_id: std::env::var("JFC_OAUTH_CLIENT_ID").unwrap_or_else(|_| "jfc-cli".into()),
         device_auth_url: std::env::var("JFC_OAUTH_DEVICE_URL")
             .unwrap_or_else(|_| "https://auth.anthropic.com/oauth/device/code".into()),
@@ -1735,7 +1735,7 @@ pub(super) async fn cmd_oauth_login(
         scopes: vec!["openid".into(), "offline_access".into()],
     };
     let client = reqwest::Client::new();
-    let device_resp = match crate::auth::device_flow::request_device_code(&client, &cfg).await {
+    let device_resp = match jfc_engine::auth::device_flow::request_device_code(&client, &cfg).await {
         Ok(r) => r,
         Err(e) => {
             app.engine.messages.push(ChatMessage::assistant(format!(
@@ -1748,7 +1748,7 @@ pub(super) async fn cmd_oauth_login(
         "Go to: **{}**\nEnter code: **{}**\n\nPolling for completion (expires in {}s)...",
         device_resp.verification_uri, device_resp.user_code, device_resp.expires_in,
     )));
-    match crate::auth::device_flow::poll_for_token(
+    match jfc_engine::auth::device_flow::poll_for_token(
         &client,
         &cfg,
         &device_resp.device_code,
@@ -1758,7 +1758,7 @@ pub(super) async fn cmd_oauth_login(
     .await
     {
         Ok(token) => {
-            let _ = crate::auth::device_flow::store_token(&token);
+            let _ = jfc_engine::auth::device_flow::store_token(&token);
             app.engine.messages.push(ChatMessage::assistant(
                 "Login successful — token stored in `.jfc/credentials.json`.".into(),
             ));
@@ -1906,7 +1906,7 @@ pub(super) async fn cmd_babysit_prs(
     if arg.eq_ignore_ascii_case("stop") {
         match app.engine.babysit_prs_cron_id.take() {
             Some(id) => {
-                use crate::daemon::{Daemon, DaemonPaths};
+                use jfc_engine::daemon::{Daemon, DaemonPaths};
                 let paths = DaemonPaths::default_user();
                 let removed = match Daemon::new(&paths.base_dir) {
                     Ok(mut d) => d.remove_cron_job(&id),
@@ -1967,7 +1967,7 @@ pub(super) async fn cmd_babysit_prs(
             format!("@every {arg}")
         };
 
-        use crate::daemon::{Daemon, DaemonPaths, parse_schedule};
+        use jfc_engine::daemon::{Daemon, DaemonPaths, parse_schedule};
         match parse_schedule(&normalized) {
             Ok(sched) => {
                 let paths = DaemonPaths::default_user();

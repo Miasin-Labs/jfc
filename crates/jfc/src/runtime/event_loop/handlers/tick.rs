@@ -9,12 +9,12 @@
 use std::sync::Arc;
 
 use crate::app::App;
-use crate::providers::AnthropicOAuthProvider;
+use jfc_engine::providers::AnthropicOAuthProvider;
 use crate::runtime::{
     ControlEvent, EngineEvent, EventSender, ProviderEvent, TeamEvent, maybe_continue_task_factory,
     read_git_branch_from_root, sync_detached_background_tasks_from_daemon,
 };
-use crate::toast;
+use jfc_engine::toast;
 
 use jfc_engine::runtime::event_loop::guards::{CONFIG_RELOAD_REMINDER, MCP_REFRESH_REMINDER};
 
@@ -163,10 +163,10 @@ pub(crate) async fn handle_tick(
     {
         app.idle_return_shown = true;
         let tokens_est = app.engine.tool_ctx.approx_tokens;
-        crate::toast::push_with_cap(
+        jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            crate::toast::Toast::new(
-                crate::toast::ToastKind::Info,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
                 format!(
                     "Welcome back! Context: ~{tokens_est} tokens. \
                      Consider `/clear` to save on re-caching or `/compact` to trim."
@@ -215,8 +215,8 @@ pub(crate) async fn handle_tick(
         && !app.engine.force_compact_pending
     {
         let est = app.engine.tool_ctx.approx_tokens;
-        let level = crate::compact::compact_level(est, app.engine.max_context_tokens);
-        if matches!(level, crate::compact::CompactLevel::Precompute) {
+        let level = jfc_engine::compact::compact_level(est, app.engine.max_context_tokens);
+        if matches!(level, jfc_engine::compact::CompactLevel::Precompute) {
             tracing::info!(
                 target: "jfc::compact",
                 est,
@@ -305,9 +305,9 @@ pub(crate) async fn handle_tick(
             .as_ref()
             .map(|s| s.as_str().to_owned())
             .unwrap_or_else(|| "<no-session>".to_owned());
-        crate::hooks::fire_async(
-            crate::hooks::HookPoint::OnHeartbeat,
-            &crate::hooks::HookContext::for_session(&session_id),
+        jfc_engine::hooks::fire_async(
+            jfc_engine::hooks::HookPoint::OnHeartbeat,
+            &jfc_engine::hooks::HookContext::for_session(&session_id),
         );
     }
 
@@ -318,7 +318,7 @@ pub(crate) async fn handle_tick(
     // reminder so the user knows the tool catalog
     // mutated and the model picks up the change next
     // turn.
-    let cur_refresh = crate::mcp::registry::refresh_counter();
+    let cur_refresh = jfc_engine::mcp::registry::refresh_counter();
     if cur_refresh > app.engine.last_mcp_refresh_seen {
         app.engine.last_mcp_refresh_seen = cur_refresh;
         toast::push_with_cap(
@@ -331,19 +331,19 @@ pub(crate) async fn handle_tick(
         app.engine.queue_background_reminder(MCP_REFRESH_REMINDER);
         needs_draw = true;
         // Re-sync sidebar MCP status after catalog change.
-        if let Some(registry) = crate::tools::snapshot_mcp_registry() {
+        if let Some(registry) = jfc_engine::tools::snapshot_mcp_registry() {
             let servers = registry
                 .list()
                 .await
                 .iter()
-                .map(|s| crate::types::McpServerInfo {
+                .map(|s| jfc_core::McpServerInfo {
                     name: s.name.clone(),
                     status: match s.status {
-                        crate::mcp::McpServerStatus::Connected => {
-                            crate::types::McpStatus::Connected
+                        jfc_engine::mcp::McpServerStatus::Connected => {
+                            jfc_core::McpStatus::Connected
                         }
-                        crate::mcp::McpServerStatus::Failed => crate::types::McpStatus::Error,
-                        crate::mcp::McpServerStatus::Disabled => crate::types::McpStatus::Disabled,
+                        jfc_engine::mcp::McpServerStatus::Failed => jfc_core::McpStatus::Error,
+                        jfc_engine::mcp::McpServerStatus::Disabled => jfc_core::McpStatus::Disabled,
                     },
                 })
                 .collect();
@@ -415,7 +415,7 @@ pub(crate) async fn handle_tick(
         tokio::spawn(async move {
             let count = match tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                crate::worktrees::list_worktrees_async(&cwd),
+                jfc_engine::worktrees::list_worktrees_async(&cwd),
             )
             .await
             {
@@ -470,11 +470,11 @@ pub(crate) async fn handle_tick(
         let mode = app.engine.permission_mode;
         let tx_swarm = tx.clone();
         tokio::spawn(async move {
-            let pending = crate::swarm::permission_sync::read_pending_permissions(&team_name).await;
+            let pending = jfc_engine::swarm::permission_sync::read_pending_permissions(&team_name).await;
             for req in pending {
                 if !matches!(
                     req.status,
-                    crate::swarm::types::PermissionRequestStatus::Pending
+                    jfc_engine::swarm::types::PermissionRequestStatus::Pending
                 ) {
                     continue;
                 }
@@ -510,11 +510,11 @@ pub(crate) async fn handle_tick(
                 };
                 match auto {
                     Some(approve) => {
-                        let resolution = crate::swarm::types::PermissionResolution {
+                        let resolution = jfc_engine::swarm::types::PermissionResolution {
                             decision: if approve {
-                                crate::swarm::types::PermissionDecision::Approved
+                                jfc_engine::swarm::types::PermissionDecision::Approved
                             } else {
-                                crate::swarm::types::PermissionDecision::Rejected
+                                jfc_engine::swarm::types::PermissionDecision::Rejected
                             },
                             resolved_by: "leader".to_owned(),
                             feedback: if approve {
@@ -525,7 +525,7 @@ pub(crate) async fn handle_tick(
                             updated_input: None,
                             permission_updates: Vec::new(),
                         };
-                        if let Err(e) = crate::swarm::permission_sync::resolve_permission(
+                        if let Err(e) = jfc_engine::swarm::permission_sync::resolve_permission(
                             &req.id,
                             &resolution,
                             &team_name,
@@ -552,7 +552,7 @@ pub(crate) async fn handle_tick(
                         );
                         let _ = tx_swarm
                             .send(EngineEvent::Control(ControlEvent::Notice {
-                                kind: crate::toast::ToastKind::Warning,
+                                kind: jfc_engine::toast::ToastKind::Warning,
                                 text: toast_text,
                             }))
                             .await;
@@ -571,7 +571,7 @@ pub(crate) async fn handle_tick(
         let team_name = team_name.clone();
         let tx_inbox = tx.clone();
         tokio::spawn(async move {
-            let messages = crate::swarm::runner::poll_leader_inbox(&team_name).await;
+            let messages = jfc_engine::swarm::runner::poll_leader_inbox(&team_name).await;
             for msg in messages {
                 // Hand off to the main thread which has
                 // mutable access to `app.engine.messages` —

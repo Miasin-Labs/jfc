@@ -89,7 +89,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
 
     // Identity: model first, then cost in gold (the number you watch).
     push1!(app.engine.model.to_string(), sec, 100);
-    let cost_total = crate::cost::total_cost(&app.engine.usage_by_model);
+    let cost_total = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
     if cost_total > 0.001 {
         let cost_str = if cost_total < 0.01 {
             format!("${:.4}", cost_total)
@@ -105,7 +105,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     let mcp_down: Vec<&str> = app.engine
         .mcp_servers
         .iter()
-        .filter(|s| matches!(s.status, crate::types::McpStatus::Error))
+        .filter(|s| matches!(s.status, jfc_core::McpStatus::Error))
         .map(|s| s.name.as_str())
         .collect();
     if !mcp_down.is_empty() {

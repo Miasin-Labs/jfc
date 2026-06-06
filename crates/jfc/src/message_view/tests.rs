@@ -782,12 +782,12 @@ mod helper_tests {
 
     fn dummy_tool(input: ToolInput, output: ToolOutput, kind: ToolKind) -> ToolCall {
         ToolCall {
-            id: crate::ids::ToolId::from("t-1"),
+            id: jfc_engine::ids::ToolId::from("t-1"),
             kind,
             status: ToolStatus::Completed,
             input,
             output,
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
@@ -1026,9 +1026,9 @@ mod helper_tests {
             ToolKind::Bash,
         );
         t.display = if expanded {
-            crate::types::ToolDisplayState::Expanded { pinned: false }
+            jfc_core::ToolDisplayState::Expanded { pinned: false }
         } else {
-            crate::types::ToolDisplayState::DEFAULT
+            jfc_core::ToolDisplayState::DEFAULT
         };
         tool_content_height_with_tool(&t, content_w)
     }
@@ -1192,7 +1192,7 @@ mod helper_tests {
             ToolOutput::Text("foo\nbar\nbaz".into()),
             ToolKind::Bash,
         );
-        t.display = crate::types::ToolDisplayState::Collapsed;
+        t.display = jfc_core::ToolDisplayState::Collapsed;
         assert_eq!(tool_block_height(&t, 80), 1);
         // Public wrapper should match.
         assert_eq!(tool_block_height_pub(&t, 80), 1);
@@ -1514,7 +1514,7 @@ mod helper_tests {
                 run_in_background: None,
             },
             output: ToolOutput::Empty,
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
@@ -1541,7 +1541,7 @@ mod helper_tests {
                 run_in_background: None,
             },
             output: ToolOutput::Empty,
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
@@ -1566,7 +1566,7 @@ mod helper_tests {
                 run_in_background: None,
             },
             output: ToolOutput::Empty,
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
@@ -1832,7 +1832,7 @@ mod helper_tests {
             ToolOutput::Empty,
             ToolKind::Bash,
         );
-        tool.display = crate::types::ToolDisplayState::Expanded { pinned: true };
+        tool.display = jfc_core::ToolDisplayState::Expanded { pinned: true };
         let spans = build_title_spans(&tool, &t, "●", Style::default(), 80);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(combined.contains("◆"), "expected pin glyph: {combined:?}");
@@ -1890,7 +1890,7 @@ mod helper_tests {
 
     #[test]
     fn severity_rank_orders_correctly_normal() {
-        use crate::diagnostics::Severity;
+        use jfc_engine::diagnostics::Severity;
         assert!(severity_rank(Severity::Error) > severity_rank(Severity::Warning));
         assert!(severity_rank(Severity::Warning) > severity_rank(Severity::Info));
         assert!(severity_rank(Severity::Info) > severity_rank(Severity::Hint));
@@ -1898,7 +1898,7 @@ mod helper_tests {
 
     #[test]
     fn severity_rank_distinct_values_robust() {
-        use crate::diagnostics::Severity;
+        use jfc_engine::diagnostics::Severity;
         let mut v = vec![
             severity_rank(Severity::Error),
             severity_rank(Severity::Warning),
@@ -2117,9 +2117,9 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
             ToolKind::Bash,
         );
         tool.display = if expanded {
-            crate::types::ToolDisplayState::Expanded { pinned: false }
+            jfc_core::ToolDisplayState::Expanded { pinned: false }
         } else {
-            crate::types::ToolDisplayState::DEFAULT
+            jfc_core::ToolDisplayState::DEFAULT
         };
         tool_body_lines_themed(&tool, 100, Theme::dark(), None)
     }
@@ -2140,9 +2140,9 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
             ToolKind::Bash,
         );
         tool.display = if expanded {
-            crate::types::ToolDisplayState::Expanded { pinned: false }
+            jfc_core::ToolDisplayState::Expanded { pinned: false }
         } else {
-            crate::types::ToolDisplayState::DEFAULT
+            jfc_core::ToolDisplayState::DEFAULT
         };
         tool_body_lines_themed(&tool, 120, Theme::dark(), None)
     }
@@ -2628,7 +2628,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
                 stderr: String::new(),
                 exit_code: Some(0),
             },
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: Some(120),
             started_at: None,
             thought_signature: None,
@@ -2651,7 +2651,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
         let app = stub_app();
         let mut hunk_lines = Vec::new();
         for n in 0..120 {
-            hunk_lines.push(crate::types::DiffLine {
+            hunk_lines.push(jfc_core::DiffLine {
                 kind: if n % 3 == 0 {
                     DiffLineKind::Added
                 } else if n % 3 == 1 {
@@ -2668,7 +2668,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
             file_path: "src/foo.rs".into(),
             additions: 40,
             deletions: 40,
-            hunks: vec![crate::types::DiffHunk {
+            hunks: vec![jfc_core::DiffHunk {
                 old_start: 1,
                 new_start: 1,
                 header: "@@ -1,120 +1,120 @@".into(),
@@ -2686,7 +2686,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
                 replacement: ReplacementMode::FirstOnly,
             },
             output: ToolOutput::Diff(diff),
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
@@ -2726,9 +2726,9 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
                 language: "rs".into(),
             },
             display: if expanded {
-                crate::types::ToolDisplayState::Expanded { pinned: false }
+                jfc_core::ToolDisplayState::Expanded { pinned: false }
             } else {
-                crate::types::ToolDisplayState::DEFAULT
+                jfc_core::ToolDisplayState::DEFAULT
             },
             elapsed_ms: None,
             started_at: None,
@@ -2765,7 +2765,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
                 content: body,
                 language: "rs".into(),
             },
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,

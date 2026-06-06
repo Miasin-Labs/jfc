@@ -883,7 +883,7 @@ mod pure_helper_tests {
     #[test]
     fn effort_status_badge_shows_pinned_level_normal() {
         let mut app = fake_app();
-        app.engine.effort_state.set(crate::effort::ReasoningEffort::XHigh);
+        app.engine.effort_state.set(jfc_engine::effort::ReasoningEffort::XHigh);
         assert_eq!(effort_status_badge(&app), "effort xhigh".to_string());
     }
 
@@ -1037,7 +1037,7 @@ mod pure_helper_tests {
                 replacement: ReplacementMode::FirstOnly,
             },
             output: ToolOutput::Diff(diff),
-            display: crate::types::ToolDisplayState::DEFAULT,
+            display: jfc_core::ToolDisplayState::DEFAULT,
             elapsed_ms: None,
             started_at: None,
             thought_signature: None,
@@ -1069,7 +1069,7 @@ mod pure_helper_tests {
         let mut app = fake_app();
         for (i, (a, d)) in [(5, 1), (10, 3)].into_iter().enumerate() {
             let tool = ToolCall {
-                id: crate::ids::ToolId::from(format!("t{i}")),
+                id: jfc_engine::ids::ToolId::from(format!("t{i}")),
                 kind: ToolKind::Edit,
                 status: ToolStatus::Completed,
                 input: ToolInput::Edit {
@@ -1084,7 +1084,7 @@ mod pure_helper_tests {
                     additions: a,
                     deletions: d,
                 }),
-                display: crate::types::ToolDisplayState::DEFAULT,
+                display: jfc_core::ToolDisplayState::DEFAULT,
                 elapsed_ms: None,
                 started_at: None,
                 thought_signature: None,
@@ -1118,7 +1118,7 @@ mod pure_helper_tests {
             .enumerate()
         {
             let tool = ToolCall {
-                id: crate::ids::ToolId::from(format!("t{i}")),
+                id: jfc_engine::ids::ToolId::from(format!("t{i}")),
                 kind: ToolKind::Edit,
                 status: ToolStatus::Completed,
                 input: ToolInput::Edit {
@@ -1133,7 +1133,7 @@ mod pure_helper_tests {
                     additions: a,
                     deletions: d,
                 }),
-                display: crate::types::ToolDisplayState::DEFAULT,
+                display: jfc_core::ToolDisplayState::DEFAULT,
                 elapsed_ms: None,
                 started_at: None,
                 thought_signature: None,
@@ -1215,7 +1215,7 @@ mod pure_helper_tests {
 mod subagent_counter_tests {
     use super::*;
     use crate::app::BackgroundTask;
-    use crate::types::TaskLifecycle;
+    use jfc_core::TaskLifecycle;
 
     fn task_with(tools: u32, in_tok: u64, out_tok: u64) -> BackgroundTask {
         BackgroundTask {
