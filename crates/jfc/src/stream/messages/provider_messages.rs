@@ -53,7 +53,7 @@ fn build_assistant_and_tool_result_messages(msgs: &[ChatMessage]) -> Vec<Provide
 
     for (msg_idx, m) in msgs.iter().enumerate() {
         // Skip queued-prompt placeholders. They're real ChatMessages in
-        // `app.messages` (so the user can see them rendered with the
+        // `app.engine.messages` (so the user can see them rendered with the
         // pending/running glyph) but they MUST NOT be sent to the provider
         // until `drain_queued_prompts` promotes them.
         if m.queued {

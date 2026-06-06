@@ -37,7 +37,7 @@ pub(crate) async fn handle_term_event(
             let attached_image = match attachments::read_clipboard_image() {
                 Ok(Some((att, w, h))) => {
                     toast::push_with_cap(
-                        &mut app.toasts,
+                        &mut app.engine.toasts,
                         toast::Toast::new(
                             toast::ToastKind::Info,
                             format!("Image attached ({}x{}, {} bytes)", w, h, att.bytes.len()),
@@ -92,7 +92,7 @@ pub(crate) async fn handle_term_event(
                 }
                 if attached_any {
                     toast::push_with_cap(
-                        &mut app.toasts,
+                        &mut app.engine.toasts,
                         toast::Toast::new(
                             toast::ToastKind::Info,
                             format!("{} image(s) attached from path", image_paths.len()),
@@ -309,7 +309,7 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
         .map(str::to_owned);
     // Toast click → dismiss. Toasts render newest-
     // first; row 0 corresponds to the last entry
-    // in `app.toasts`, row 1 to the second-to-last,
+    // in `app.engine.toasts`, row 1 to the second-to-last,
     // etc. (See `iter().rev().take(h)` in
     // `toast_overlay`.) Pop the matched toast.
     let toast_hit = app
@@ -324,9 +324,9 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
         })
         .map(|r| mouse.row.saturating_sub(r.y) as usize);
     if let Some(local_row) = toast_hit {
-        if local_row < app.toasts.len() {
-            let drop_idx = app.toasts.len() - 1 - local_row;
-            app.toasts.remove(drop_idx);
+        if local_row < app.engine.toasts.len() {
+            let drop_idx = app.engine.toasts.len() - 1 - local_row;
+            app.engine.toasts.remove(drop_idx);
         }
         return;
     }
@@ -351,7 +351,7 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
         let local_row = mouse.row.saturating_sub(rect.y + 1);
         // Skip the empty/no-sessions placeholder row.
         if !app.session_meta.is_empty() {
-            let cwd = app.cwd.clone();
+            let cwd = app.engine.cwd.clone();
             let (this_project, other) =
                 jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
             // Walk rows: header rows are 1 each; rest are sessions.
@@ -384,12 +384,12 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
                 if let Some(id) = ordered.get(idx).cloned()
                     && let Some(messages) = crate::session::load_session(&id).await
                 {
-                    app.messages = messages;
+                    app.engine.messages = messages;
                     app.switch_session(Some(id));
-                    app.streaming_text = String::new();
-                    app.streaming_reasoning = String::new();
-                    app.streaming_response_bytes = 0;
-                    app.streaming_assistant_idx = None;
+                    app.engine.streaming_text = String::new();
+                    app.engine.streaming_reasoning = String::new();
+                    app.engine.streaming_response_bytes = 0;
+                    app.engine.streaming_assistant_idx = None;
                     app.session_selected = idx;
                     app.session_list_state.select(Some(idx));
                     app.scroll_to_bottom();
@@ -422,7 +422,7 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
                 if prev_id == &tool_id
                     && now.duration_since(*prev_at).as_millis() < DOUBLE_CLICK_MS
         );
-        for msg in &mut app.messages {
+        for msg in &mut app.engine.messages {
             for part in &mut msg.parts {
                 if let MessagePart::Tool(tc) = part
                     && tc.id == tool_id

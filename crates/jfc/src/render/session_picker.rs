@@ -129,7 +129,7 @@ pub(super) fn session_picker(f: &mut Frame, app: &mut App) {
     .bottom_margin(0);
 
     let now = chrono::Utc::now();
-    let current_id = app.current_session_id.clone();
+    let current_id = app.engine.current_session_id.clone();
     let rows: Vec<Row> = visible
         .iter()
         .map(|m| {

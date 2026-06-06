@@ -21,14 +21,14 @@ pub(crate) struct LocalAdvisorDispatchContext {
 
 impl LocalAdvisorDispatchContext {
     pub(crate) fn from_app(app: &crate::app::App) -> Option<Self> {
-        if !app.advisor_enabled {
+        if !app.engine.advisor_enabled {
             return None;
         }
-        let advisor_model = app.local_advisor_model.clone()?;
+        let advisor_model = app.engine.local_advisor_model.clone()?;
         let provider = match crate::advisor::resolve_local_advisor_provider(
-            &app.providers,
-            Arc::clone(&app.provider),
-            app.local_advisor_provider.as_ref(),
+            &app.engine.providers,
+            Arc::clone(&app.engine.provider),
+            app.engine.local_advisor_provider.as_ref(),
             &advisor_model,
         ) {
             Ok(provider) => provider,
@@ -44,7 +44,7 @@ impl LocalAdvisorDispatchContext {
         Some(Self {
             provider,
             advisor_model,
-            transcript: app.messages.clone(),
+            transcript: app.engine.messages.clone(),
         })
     }
 }
@@ -452,7 +452,7 @@ pub(crate) fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBa
                     max_input_tokens,
                     // In-process subagent (foreground Task tool, no
                     // `run_in_background`). Skip daemon registration; the
-                    // BackgroundTask row in `app.background_tasks` is the
+                    // BackgroundTask row in `app.engine.background_tasks` is the
                     // authoritative UI state.
                     is_detached: false,
                     parent_task_id: task_input.parent_task_id.clone(),
@@ -474,7 +474,7 @@ pub(crate) fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBa
                 .as_ref()
                 .map(|(info, _, _)| std::path::PathBuf::from(&info.path));
             // No daemon registration for in-process subagents — they're
-            // tracked via `app.background_tasks` and the assistant
+            // tracked via `app.engine.background_tasks` and the assistant
             // message's TaskStatus parts. Previously this call planted
             // them in the daemon roster too, where the reconciler would
             // later mark them stale at UI exit, confusing the next

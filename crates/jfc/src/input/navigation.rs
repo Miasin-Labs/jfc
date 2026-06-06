@@ -109,7 +109,7 @@ pub(super) fn refresh_search_matches(app: &mut App, query: &str) {
     let q = query.to_lowercase();
     let mut matches: Vec<usize> = Vec::new();
     if !q.is_empty() {
-        for (idx, msg) in app.messages.iter().enumerate() {
+        for (idx, msg) in app.engine.messages.iter().enumerate() {
             let body_hit = msg.parts.iter().any(|part| match part {
                 crate::types::MessagePart::Text(text) => text.to_lowercase().contains(&q),
                 crate::types::MessagePart::Reasoning(text) => text.to_lowercase().contains(&q),
@@ -145,13 +145,13 @@ pub(super) fn refresh_search_matches(app: &mut App, query: &str) {
 }
 
 pub(super) fn scroll_to_message(app: &mut App, target_idx: usize) {
-    if target_idx >= app.messages.len() {
+    if target_idx >= app.engine.messages.len() {
         return;
     }
 
     let approx_width: usize = 80;
     let mut offset = 0usize;
-    for (idx, msg) in app.messages.iter().enumerate() {
+    for (idx, msg) in app.engine.messages.iter().enumerate() {
         if idx >= target_idx {
             break;
         }
@@ -169,13 +169,13 @@ pub(super) fn scroll_to_message(app: &mut App, target_idx: usize) {
     app.scroll_offset = offset;
     app.follow_bottom = false;
     crate::toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         crate::toast::Toast::new(
             crate::toast::ToastKind::Info,
             format!(
                 "jumped to message {}/{}",
                 target_idx + 1,
-                app.messages.len()
+                app.engine.messages.len()
             ),
         ),
     );
@@ -184,7 +184,7 @@ pub(super) fn scroll_to_message(app: &mut App, target_idx: usize) {
 pub(super) fn jump_to_last_error(app: &mut App) {
     use crate::types::ToolStatus;
 
-    let target = app.messages.iter().enumerate().rev().find(|(_, message)| {
+    let target = app.engine.messages.iter().enumerate().rev().find(|(_, message)| {
         message.parts.iter().any(|part| {
             matches!(
                 part,
@@ -195,7 +195,7 @@ pub(super) fn jump_to_last_error(app: &mut App) {
     match target {
         Some((idx, _)) => scroll_to_message(app, idx),
         None => crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Warning,
                 "no failed tools in this session".to_string(),
@@ -205,7 +205,7 @@ pub(super) fn jump_to_last_error(app: &mut App) {
 }
 
 pub(super) fn jump_to_last_tool(app: &mut App) {
-    let target = app.messages.iter().enumerate().rev().find(|(_, message)| {
+    let target = app.engine.messages.iter().enumerate().rev().find(|(_, message)| {
         message
             .parts
             .iter()
@@ -214,7 +214,7 @@ pub(super) fn jump_to_last_tool(app: &mut App) {
     match target {
         Some((idx, _)) => scroll_to_message(app, idx),
         None => crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Warning,
                 "no tool calls in this session".to_string(),
@@ -224,7 +224,7 @@ pub(super) fn jump_to_last_tool(app: &mut App) {
 }
 
 pub(super) fn jump_to_last_user(app: &mut App) {
-    let target = app
+    let target = app.engine
         .messages
         .iter()
         .enumerate()
@@ -233,7 +233,7 @@ pub(super) fn jump_to_last_user(app: &mut App) {
     match target {
         Some((idx, _)) => scroll_to_message(app, idx),
         None => crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Warning,
                 "no user messages yet".to_string(),
@@ -243,7 +243,7 @@ pub(super) fn jump_to_last_user(app: &mut App) {
 }
 
 pub(super) fn jump_to_last_assistant(app: &mut App) {
-    let target = app
+    let target = app.engine
         .messages
         .iter()
         .enumerate()
@@ -252,7 +252,7 @@ pub(super) fn jump_to_last_assistant(app: &mut App) {
     match target {
         Some((idx, _)) => scroll_to_message(app, idx),
         None => crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Warning,
                 "no assistant messages yet".to_string(),
@@ -262,7 +262,7 @@ pub(super) fn jump_to_last_assistant(app: &mut App) {
 }
 
 pub(super) fn user_prompts(app: &App) -> Vec<String> {
-    app.messages
+    app.engine.messages
         .iter()
         .filter(|message| message.role == Role::User)
         .filter_map(|message| {

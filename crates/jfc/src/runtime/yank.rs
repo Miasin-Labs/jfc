@@ -19,7 +19,7 @@ use crate::{
 /// Pull the rendered text of the last assistant message. Pure helper —
 /// no side effects, exposed at crate-vis for the `/copy last` path.
 pub(crate) fn last_assistant_text(app: &App) -> Option<String> {
-    app.messages
+    app.engine.messages
         .iter()
         .rev()
         .find(|m| m.role == Role::Assistant)
@@ -29,7 +29,7 @@ pub(crate) fn last_assistant_text(app: &App) -> Option<String> {
 /// Flatten an entire transcript to a plaintext blob. Used by `/copy all`.
 pub(crate) fn full_transcript_text(app: &App) -> String {
     let mut out = String::new();
-    for msg in &app.messages {
+    for msg in &app.engine.messages {
         let role_label = match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
@@ -47,7 +47,7 @@ pub(crate) fn full_transcript_text(app: &App) -> String {
 pub(crate) fn tail_transcript_text(app: &App, n: usize) -> String {
     let mut taken = 0;
     let mut chunks: Vec<String> = Vec::new();
-    for msg in app.messages.iter().rev() {
+    for msg in app.engine.messages.iter().rev() {
         if taken >= n {
             break;
         }

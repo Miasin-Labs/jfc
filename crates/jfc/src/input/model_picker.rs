@@ -27,27 +27,27 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: crossterm::event::KeyE
             if let Some(model) = filtered.get(app.model_picker_selected) {
                 let chosen_id = model.id.clone();
                 let chosen_provider_name = model.provider.clone();
-                let old_model = app.model.clone();
-                let old_max_ctx = app.max_context_tokens;
+                let old_model = app.engine.model.clone();
+                let old_max_ctx = app.engine.max_context_tokens;
                 tracing::info!(
                     target: "jfc::input",
                     old_model = %old_model,
                     new_model = %chosen_id,
-                    old_provider = %app.provider.name(),
+                    old_provider = %app.engine.provider.name(),
                     new_provider = %chosen_provider_name,
                     old_max_context_tokens = old_max_ctx,
                     "model switch initiated from picker"
                 );
-                if let Some(p) = app
+                if let Some(p) = app.engine
                     .providers
                     .iter()
                     .find(|p| chosen_provider_name == p.name())
                 {
-                    app.provider = Arc::clone(p);
+                    app.engine.provider = Arc::clone(p);
                 }
-                app.model = chosen_id.clone();
-                let recent_model = crate::qualified_model_id(app.provider.as_ref(), &chosen_id);
-                crate::app::push_recent_model(&mut app.recent_models, &recent_model);
+                app.engine.model = chosen_id.clone();
+                let recent_model = crate::qualified_model_id(app.engine.provider.as_ref(), &chosen_id);
+                crate::app::push_recent_model(&mut app.engine.recent_models, &recent_model);
                 app.sync_selected_context_window();
                 close_model_picker(app);
             }

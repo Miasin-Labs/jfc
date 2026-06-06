@@ -31,8 +31,8 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
 
     // ── Row 0: divider-as-context-gauge ──────────────────────────────────
     {
-        let used = app.tool_ctx.approx_tokens;
-        let max = app.max_context_tokens.max(1);
+        let used = app.engine.tool_ctx.approx_tokens;
+        let max = app.engine.max_context_tokens.max(1);
         let ratio = (used as f64 / max as f64).clamp(0.0, 1.0);
         let pct = (ratio * 100.0).round() as u32;
         let gauge_color = if pct < 60 {
@@ -62,13 +62,13 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
 
     // Just the project directory name — the full path was noise on a line
     // that's already tight; the branch + model carry the working context.
-    let cwd_display = std::path::Path::new(&app.cwd)
+    let cwd_display = std::path::Path::new(&app.engine.cwd)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| app.cwd.clone());
+        .unwrap_or_else(|| app.engine.cwd.clone());
 
     // ── Build prioritised, colour-coded segments (see `StatusSeg`) ──
-    let provider_badge = pretty_provider_label(app.provider.name());
+    let provider_badge = pretty_provider_label(app.engine.provider.name());
     let muted = Style::default().fg(t.text_muted);
     let sec = Style::default().fg(t.text_secondary);
     // Semantic split (was all `warning` gold): `cost` rides the money hue,
@@ -88,8 +88,8 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Identity: model first, then cost in gold (the number you watch).
-    push1!(app.model.to_string(), sec, 100);
-    let cost_total = crate::cost::total_cost(&app.usage_by_model);
+    push1!(app.engine.model.to_string(), sec, 100);
+    let cost_total = crate::cost::total_cost(&app.engine.usage_by_model);
     if cost_total > 0.001 {
         let cost_str = if cost_total < 0.01 {
             format!("${:.4}", cost_total)
@@ -102,7 +102,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Problems / actionable state — high priority, coloured to draw the eye.
-    let mcp_down: Vec<&str> = app
+    let mcp_down: Vec<&str> = app.engine
         .mcp_servers
         .iter()
         .filter(|s| matches!(s.status, crate::types::McpStatus::Error))
@@ -115,11 +115,11 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
             93,
         );
     }
-    if let Some(status) = app.claude_status.as_ref() {
+    if let Some(status) = app.engine.claude_status.as_ref() {
         if status.is_degraded() {
             push1!(status.short_badge(), alert, 92);
         }
-    } else if app.claude_status_error.is_some() {
+    } else if app.engine.claude_status_error.is_some() {
         push1!(
             "status unreachable".to_owned(),
             Style::default().fg(t.error),
@@ -127,7 +127,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         );
     }
     let approval_count =
-        app.approval_queue.len() + if app.pending_approval.is_some() { 1 } else { 0 };
+        app.engine.approval_queue.len() + if app.engine.pending_approval.is_some() { 1 } else { 0 };
     if approval_count > 0 {
         push1!(
             format!("{approval_count} pending"),
@@ -140,16 +140,16 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.viewing_task_id.is_some() {
         push1!("[task view]".to_owned(), Style::default().fg(t.accent), 88);
     }
-    if !app.queued_prompts.is_empty() {
-        push1!(format!("⏳ {} queued", app.queued_prompts.len()), muted, 80);
+    if !app.engine.queued_prompts.is_empty() {
+        push1!(format!("⏳ {} queued", app.engine.queued_prompts.len()), muted, 80);
     }
-    let alive_n = app
+    let alive_n = app.engine
         .background_tasks
         .values()
         .filter(|bt| bt.status.is_alive())
         .count();
     if alive_n > 0 {
-        let tools: u32 = app
+        let tools: u32 = app.engine
             .background_tasks
             .values()
             .filter(|bt| bt.status.is_alive())
@@ -164,16 +164,16 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Mode flags.
-    if let crate::app::PermissionMode::Default = app.permission_mode {
+    if let crate::app::PermissionMode::Default = app.engine.permission_mode {
     } else {
         // Plain label — the mode word (Bypass / Auto / Plan) reads on its own;
         // the leading symbol was emoji-zoo noise.
-        push1!(app.permission_mode.label().to_owned(), activity, 85);
+        push1!(app.engine.permission_mode.label().to_owned(), activity, 85);
     }
-    if app.fast_mode {
+    if app.engine.fast_mode {
         push1!("fast".to_owned(), activity, 60);
     }
-    if app.effort_state.current.is_some() {
+    if app.engine.effort_state.current.is_some() {
         push1!(effort_status_badge(app), muted, 50);
     }
     if let Some(ref rc) = app.remote_host {
@@ -189,7 +189,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     // Repo zone: branch · diff (green/red) · cwd. `⎇` stays — it's the
     // conventional, compact branch marker (the user's own shell prompt uses
     // it); the `Δ` diff prefix is dropped since the +/− colors say "diff".
-    if let Some(branch) = app.git_branch.as_deref().filter(|b| !b.is_empty()) {
+    if let Some(branch) = app.engine.git_branch.as_deref().filter(|b| !b.is_empty()) {
         push1!(format!("⎇ {}", super::truncate_str(branch, 24)), muted, 70);
     }
     let diff = super::collect_diff_stats(app);
@@ -208,10 +208,10 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
     push1!(cwd_display, muted, 45);
 
-    if let Some(badge) = plan_badge(app.subscription_type.as_deref(), app.seat_tier.as_deref()) {
+    if let Some(badge) = plan_badge(app.engine.subscription_type.as_deref(), app.engine.seat_tier.as_deref()) {
         push1!(badge, muted, 40);
     }
-    if app
+    if app.engine
         .last_session_save_at
         .is_some_and(|t| t.elapsed().as_millis() < 2000)
     {
@@ -227,7 +227,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     // Static provider dot — the network EKG (which used to drive a pulse
     // here) is gone; a steady provider-coloured dot just identifies the
     // backend without faking "liveness".
-    let dot_color = provider_accent(app.provider.name());
+    let dot_color = provider_accent(app.engine.provider.name());
 
     let prefix_w = 3 + super::cell_width(&provider_badge); // " ● <provider>"
     const SEP_W: usize = 3; // " · "
@@ -260,7 +260,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(
             provider_badge,
             Style::default()
-                .fg(provider_accent(app.provider.name()))
+                .fg(provider_accent(app.engine.provider.name()))
                 .add_modifier(Modifier::BOLD),
         ),
     ];
@@ -283,7 +283,7 @@ pub(super) fn context_gauge_label(used: usize, max: usize, pct: u32) -> String {
 }
 
 pub(super) fn effort_status_badge(app: &App) -> String {
-    match app.effort_state.current {
+    match app.engine.effort_state.current {
         Some(effort) => format!("effort {effort}"),
         None => "effort default".to_string(),
     }

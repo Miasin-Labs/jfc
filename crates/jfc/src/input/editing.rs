@@ -101,19 +101,19 @@ pub(super) fn input_has_text(app: &App) -> bool {
 }
 
 pub(super) fn step_reasoning_effort(app: &mut App, raise: bool) {
-    let current = app.effort_state.current.unwrap_or_default();
+    let current = app.engine.effort_state.current.unwrap_or_default();
     let next = if raise {
         current.next()
     } else {
         current.previous()
     };
     let message = match next {
-        Some(level) => app.effort_state.set(level),
+        Some(level) => app.engine.effort_state.set(level),
         None if raise => format!("Reasoning effort is already at max ({current})"),
         None => format!("Reasoning effort is already at min ({current})"),
     };
     crate::toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         crate::toast::Toast::new(crate::toast::ToastKind::Info, message),
     );
 }

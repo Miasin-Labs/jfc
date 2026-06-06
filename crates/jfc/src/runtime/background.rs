@@ -16,13 +16,13 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
     paths: &DaemonPaths,
 ) -> bool {
     let Some((state, mtime)) =
-        crate::daemon::load_state_if_changed(paths, app.last_detached_state_mtime)
+        crate::daemon::load_state_if_changed(paths, app.engine.last_detached_state_mtime)
     else {
         return false;
     };
 
-    app.last_detached_state_mtime = Some(mtime);
-    let session_id = app.current_session_id.as_ref().map(|id| id.to_string());
+    app.engine.last_detached_state_mtime = Some(mtime);
+    let session_id = app.engine.current_session_id.as_ref().map(|id| id.to_string());
     let mut changed = false;
     for (id, agent) in &state.background_agents {
         if agent.launch_path.is_none() {
@@ -39,7 +39,7 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
         let new_status = lifecycle_from_daemon_status(agent.status);
         let completed_at = background_agent_completed_at(agent, new_status);
         let messages = crate::daemon::read_last_lines(&agent.log_path, 200);
-        let entry = app
+        let entry = app.engine
             .background_tasks
             .entry(id.clone())
             .or_insert_with(|| BackgroundTask {
@@ -75,12 +75,12 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
             let was_terminal = entry.status.is_terminal();
             entry.status = new_status;
             if !was_terminal && new_status.is_terminal() {
-                app.background_tasks_completed_since_last_turn += 1;
+                app.engine.background_tasks_completed_since_last_turn += 1;
                 // Real terminal transition observed this process — unblocks
                 // the Case-2 auto-wake. (Restored prior-session agents arrive
                 // already-terminal and skip this branch, so `--continue` won't
                 // fire an unsolicited summary turn at startup.)
-                app.observed_bg_terminal_transition_this_process = true;
+                app.engine.observed_bg_terminal_transition_this_process = true;
             }
             changed = true;
         }
@@ -164,7 +164,7 @@ fn update_task_status_parts_for_background_agent(
 ) -> bool {
     let task_id = TaskId::from(id.to_owned());
     let mut changed = false;
-    for msg in &mut app.messages {
+    for msg in &mut app.engine.messages {
         for part in &mut msg.parts {
             if let MessagePart::TaskStatus(status_part) = part
                 && status_part.task_id == task_id
@@ -198,13 +198,13 @@ fn instant_from_system_time(t: std::time::SystemTime) -> std::time::Instant {
 
 pub(crate) fn restore_persistent_background_agents(app: &mut App) {
     let paths = DaemonPaths::default_user();
-    let session_id = app.current_session_id.as_ref().map(|id| id.as_str());
+    let session_id = app.engine.current_session_id.as_ref().map(|id| id.as_str());
     for agent in crate::daemon::background_agents_for_restore(&paths, session_id, 20) {
         let status = lifecycle_from_daemon_status(agent.status);
         let completed_at = background_agent_completed_at(&agent, status);
         let messages = crate::daemon::read_last_lines(&agent.log_path, 200);
         let chat_messages = parse_agent_log_to_chat_messages(&messages);
-        app.background_tasks.insert(
+        app.engine.background_tasks.insert(
             agent.id.clone(),
             BackgroundTask {
                 task_id: TaskId::from(agent.id),
@@ -288,7 +288,7 @@ mod tests {
 
     fn app_for_session(session_id: &str) -> App {
         let mut app = App::new(Arc::new(StubProvider), "test-model");
-        app.current_session_id = Some(crate::ids::SessionId::new(session_id));
+        app.engine.current_session_id = Some(crate::ids::SessionId::new(session_id));
         app
     }
 
@@ -352,7 +352,7 @@ mod tests {
         assert!(sync_detached_background_tasks_from_daemon_with_paths(
             &mut app, &paths
         ));
-        let bt = app.background_tasks.get(task_id).expect("background task");
+        let bt = app.engine.background_tasks.get(task_id).expect("background task");
         assert_eq!(bt.status, TaskLifecycle::Running);
         assert!(bt.completed_at.is_none());
         assert!(bt.chat_messages.iter().any(|msg| {
@@ -361,7 +361,7 @@ mod tests {
         }));
 
         let now = SystemTime::now();
-        let mut completed = app
+        let mut completed = app.engine
             .background_tasks
             .get(task_id)
             .unwrap()
@@ -376,11 +376,11 @@ mod tests {
         std::fs::write(&log_path, "initial output\n[Completed] done\n").expect("write log");
         save_state(&paths, &state).expect("save completed state");
 
-        app.last_detached_state_mtime = None;
+        app.engine.last_detached_state_mtime = None;
         assert!(sync_detached_background_tasks_from_daemon_with_paths(
             &mut app, &paths
         ));
-        let bt = app.background_tasks.get(task_id).expect("background task");
+        let bt = app.engine.background_tasks.get(task_id).expect("background task");
         assert_eq!(bt.status, TaskLifecycle::Completed);
         assert!(
             bt.completed_at.is_some(),

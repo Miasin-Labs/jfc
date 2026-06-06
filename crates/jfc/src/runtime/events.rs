@@ -125,7 +125,7 @@ pub struct StreamRequestOverrides {
     /// System reminders queued by background events (file watcher,
     /// MCP refresh, …) and drained into `prepare_stream_request` so
     /// they land in the next outbound request's system prompt exactly
-    /// once, without mutating `app.messages` per FS event.
+    /// once, without mutating `app.engine.messages` per FS event.
     pub background_reminders: Vec<String>,
     /// Combined disallowed tools from CLI `--disallowed-tools` and
     /// CLAUDE.md frontmatter. These tools are removed from the
@@ -252,7 +252,7 @@ pub enum StreamEvent {
     Error(String),
     /// The provider switched from the requested model to a fallback
     /// (e.g. 529 overload caused an Opus→Sonnet swap). The UI shows a
-    /// toast and optionally updates `app.model`.
+    /// toast and optionally updates `app.engine.model`.
     FallbackTriggered {
         original_model: String,
         fallback_model: String,
@@ -450,7 +450,7 @@ pub enum ProviderEvent {
         servers: Vec<crate::types::LspServerInfo>,
     },
     /// LSP push: full set of currently-active diagnostics. Replaces
-    /// `app.diagnostics` wholesale (the LSP client should send a fresh
+    /// `app.engine.diagnostics` wholesale (the LSP client should send a fresh
     /// snapshot, not deltas, so the consumer doesn't have to dedup).
     /// Mirrors v126 cli.js:338038 — the `Found N issues in M files` row
     /// is rendered from this state.
@@ -473,8 +473,8 @@ pub enum TeamEvent {
         summary: Option<String>,
     },
     /// A teammate has been spawned (Task tool with name+team_name set). Carries
-    /// the data the leader needs to populate `app.team_context.team_name` and
-    /// `app.team_context.teammates`. Without this event, both fields stayed
+    /// the data the leader needs to populate `app.engine.team_context.team_name` and
+    /// `app.engine.team_context.teammates`. Without this event, both fields stayed
     /// empty regardless of how many teammates were spawned, so the team-mode
     /// teammate tree never activated and `team_context.is_active()` lied
     /// about whether a team was in flight.
@@ -487,7 +487,7 @@ pub enum TeamEvent {
         cwd: String,
         /// Abort handle returned by `swarm::runner::start_teammate`. The
         /// event handler must move this into
-        /// `app.team_context.teammates[agent_id].abort_tx` so the channel
+        /// `app.engine.team_context.teammates[agent_id].abort_tx` so the channel
         /// stays open for the teammate's lifetime. Dropping it closes the
         /// channel and the runner's abort_rx.changed() resolves Err on the
         /// next poll — which the runner treats as Cancelled, lighting up
@@ -498,7 +498,7 @@ pub enum TeamEvent {
 
 pub enum GoalEvent {
     /// Verdict from the `/goal` stop-condition evaluator. Emitted by a
-    /// background task spawned at EndTurn when `app.goal.is_some()`.
+    /// background task spawned at EndTurn when `app.engine.goal.is_some()`.
     /// The event_loop handler decides whether to inject a continuation
     /// reminder (`ok=false`) or stamp a success banner (`ok=true`).
     Verdict { ok: bool, reason: String },

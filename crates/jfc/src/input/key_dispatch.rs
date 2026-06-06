@@ -188,7 +188,7 @@ pub async fn handle_key(
 /// Whether message `idx` carries a `Reasoning` part — i.e. there's a
 /// `∴ Thinking` block Ctrl+O can collapse/expand.
 fn message_has_reasoning(app: &App, idx: usize) -> bool {
-    app.messages.get(idx).is_some_and(|m| {
+    app.engine.messages.get(idx).is_some_and(|m| {
         m.parts
             .iter()
             .any(|p| matches!(p, crate::types::MessagePart::Reasoning(_)))
@@ -198,34 +198,34 @@ fn message_has_reasoning(app: &App, idx: usize) -> bool {
 /// Index of the most recent message that has a reasoning block, if any.
 /// Ctrl+O targets this when nothing is actively streaming.
 fn last_reasoning_message_idx(app: &App) -> Option<usize> {
-    (0..app.messages.len())
+    (0..app.engine.messages.len())
         .rev()
         .find(|&i| message_has_reasoning(app, i))
 }
 
 pub(crate) fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::runtime::EngineEvent>) {
-    let already_requested = app.cancel_token.is_cancelled()
-        || app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst);
+    let already_requested = app.engine.cancel_token.is_cancelled()
+        || app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst);
 
-    let old_cancel = app.cancel_token.clone();
-    app.interrupt_flag
+    let old_cancel = app.engine.cancel_token.clone();
+    app.engine.interrupt_flag
         .store(true, std::sync::atomic::Ordering::SeqCst);
     old_cancel.cancel();
-    app.cancel_token = tokio_util::sync::CancellationToken::new();
+    app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
     app.last_esc_at = None;
 
-    if let Some(handle) = app.active_stream_handle.take() {
+    if let Some(handle) = app.engine.active_stream_handle.take() {
         handle.abort();
     }
 
     let denied_approvals = approval::deny_pending_and_queued(app, tx);
 
-    if app.goal_evaluator_in_flight {
+    if app.engine.goal_evaluator_in_flight {
         tracing::info!(
             target: "jfc::input::abort",
             "marking in-flight goal evaluator cancelled"
         );
-        app.goal_evaluator_in_flight = false;
+        app.engine.goal_evaluator_in_flight = false;
     }
 
     // Zero the in-flight auto-mode classifier counter. Each classifier task
@@ -236,13 +236,13 @@ pub(crate) fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::run
     // (the "queue a message after cancelling and it never fires" bug). The
     // aborted stream's StreamEvent::Error resets the rest of the pipeline; this
     // counter has no such self-clearing event.
-    if app.pending_classifications > 0 {
+    if app.engine.pending_classifications > 0 {
         tracing::info!(
             target: "jfc::input::abort",
-            pending = app.pending_classifications,
+            pending = app.engine.pending_classifications,
             "zeroing in-flight classifier counter on interrupt"
         );
-        app.pending_classifications = 0;
+        app.engine.pending_classifications = 0;
     }
 
     let killed = crate::bash_processes::terminate_all();
@@ -255,7 +255,7 @@ pub(crate) fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::run
     }
 
     if !app.has_interruptible_work() {
-        app.interrupt_flag
+        app.engine.interrupt_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -269,7 +269,7 @@ pub(crate) fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::run
     }
 
     crate::toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         crate::toast::Toast::new(
             crate::toast::ToastKind::Warning,
             if killed > 0 {
@@ -375,7 +375,7 @@ async fn handle_command_keys(
             app.jump_armed = true;
             app.jump_armed_at = Some(std::time::Instant::now());
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Info,
                     "jump: e=last error · t=last tool · m=last user · a=last assistant".to_string(),
@@ -451,8 +451,8 @@ async fn handle_command_keys(
         // Mirrors Claude Code's `app:toggleTodos` keybinding behavior.
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             use crate::app::ExpandedView;
-            let has_teammates = app.team_context.is_active()
-                || app.background_tasks.values().any(|bt| bt.status.is_alive());
+            let has_teammates = app.engine.team_context.is_active()
+                || app.engine.background_tasks.values().any(|bt| bt.status.is_alive());
             app.expanded_view = match app.expanded_view {
                 ExpandedView::None => ExpandedView::Tasks,
                 ExpandedView::Tasks if has_teammates => ExpandedView::Teammates,
@@ -509,7 +509,7 @@ async fn handle_command_keys(
             // before flipping — otherwise the first press seeded `false` and
             // flipped back to `true`, a visible no-op (the block stayed open
             // while the hint said "collapse").
-            let target = app
+            let target = app.engine
                 .streaming_assistant_idx
                 .filter(|&i| message_has_reasoning(app, i))
                 .or_else(|| last_reasoning_message_idx(app));
@@ -518,7 +518,7 @@ async fn handle_command_keys(
             } else if let Some(idx) = target {
                 let entry = app.reasoning_expanded.entry(idx).or_insert(true);
                 *entry = !*entry;
-            } else if !app.diagnostics.is_empty() {
+            } else if !app.engine.diagnostics.is_empty() {
                 app.show_diagnostic_panel = true;
                 // Reset scroll on open so the user always lands at the
                 // top of the list — the panel is more useful when
@@ -529,7 +529,7 @@ async fn handle_command_keys(
                 // them. v126 cli.js:231025-231036 does the same — once a
                 // diagnostic has been shown to the user, subsequent
                 // refreshes don't re-pop the row for the same entry.
-                for entry in &app.diagnostics {
+                for entry in &app.engine.diagnostics {
                     app.delivered_diagnostics
                         .insert(crate::diagnostics::entry_key(entry));
                 }
@@ -680,17 +680,17 @@ async fn handle_command_keys(
         (KeyModifiers::NONE, KeyCode::Esc) => cmd_handle_escape(app, key, tx),
         (KeyModifiers::SHIFT, KeyCode::BackTab) | (KeyModifiers::NONE, KeyCode::BackTab) => {
             // Shift+Tab cycles permission modes
-            app.permission_mode = app.permission_mode.next();
+            app.engine.permission_mode = app.engine.permission_mode.next();
             // Persist the mode change to config.toml so it survives sessions.
-            crate::config::save_permission_mode(&app.permission_mode);
+            crate::config::save_permission_mode(&app.engine.permission_mode);
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Info,
                     format!(
                         "{} Mode: {}",
-                        app.permission_mode.symbol(),
-                        app.permission_mode.label()
+                        app.engine.permission_mode.symbol(),
+                        app.engine.permission_mode.label()
                     ),
                 ),
             );
@@ -777,9 +777,9 @@ async fn handle_command_keys(
 
 /// Ctrl+E — edit the most recent user message in place.
 fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
-    if app.is_streaming || !app.pending_tool_calls.is_empty() || app.pending_approval.is_some() {
+    if app.engine.is_streaming || !app.engine.pending_tool_calls.is_empty() || app.engine.pending_approval.is_some() {
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Warning,
                 "edit: still in flight, finish or interrupt first".to_string(),
@@ -788,7 +788,7 @@ fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
         return Some(Ok(false));
     }
     let last_user: Option<(usize, String)> =
-        app.messages.iter().enumerate().rev().find_map(|(i, m)| {
+        app.engine.messages.iter().enumerate().rev().find_map(|(i, m)| {
             if m.role_is_user() && !m.is_compact_boundary() {
                 m.parts.iter().find_map(|p| match p {
                     MessagePart::Text(s) if !s.is_empty() && !s.starts_with('/') => {
@@ -806,7 +806,7 @@ fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
         app.textarea.insert_str(&text);
         app.editing_message_idx = Some(idx);
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Info,
                 "editing previous message — Esc cancels, Enter resubmits".to_string(),
@@ -814,7 +814,7 @@ fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
         );
     } else {
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Info,
                 "no previous user message to edit".to_string(),
@@ -827,10 +827,10 @@ fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
 /// Ctrl+L — yank a `path:line(:col)?` reference from recent tool output,
 /// cycling through matches on repeated presses.
 fn cmd_yank_path_ref(app: &mut App) -> Option<anyhow::Result<bool>> {
-    let paths = collect_recent_paths(&app.messages);
+    let paths = collect_recent_paths(&app.engine.messages);
     if paths.is_empty() {
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Info,
                 "no path:line refs found in recent output".to_string(),
@@ -842,7 +842,7 @@ fn cmd_yank_path_ref(app: &mut App) -> Option<anyhow::Result<bool>> {
     let target = paths[idx].clone();
     crate::runtime::copy_to_clipboard(&target, "path-yank");
     crate::toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         crate::toast::Toast::new(
             crate::toast::ToastKind::Success,
             format!("{} ({}/{})", target, idx + 1, paths.len()),
@@ -856,7 +856,7 @@ fn cmd_yank_path_ref(app: &mut App) -> Option<anyhow::Result<bool>> {
 fn cmd_open_prompt_search(app: &mut App) -> Option<anyhow::Result<bool>> {
     let mut all: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for m in app.messages.iter().rev() {
+    for m in app.engine.messages.iter().rev() {
         if !m.role_is_user() || m.is_compact_boundary() {
             continue;
         }
@@ -870,7 +870,7 @@ fn cmd_open_prompt_search(app: &mut App) -> Option<anyhow::Result<bool>> {
     }
     if all.is_empty() {
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Info,
                 "no prompt history to search".to_string(),
@@ -892,7 +892,7 @@ fn cmd_paste_clipboard_image(app: &mut App) -> Option<anyhow::Result<bool>> {
     match crate::attachments::read_clipboard_image() {
         Ok(Some((att, w, h))) => {
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Info,
                     format!("Image attached ({}x{}, {} bytes)", w, h, att.bytes.len()),
@@ -929,7 +929,7 @@ fn cmd_paste_clipboard_image(app: &mut App) -> Option<anyhow::Result<bool>> {
 /// `LargeText`/tool block in the main transcript.
 fn cmd_toggle_expand_recent(app: &mut App) -> Option<anyhow::Result<bool>> {
     if let Some(ref task_id) = app.viewing_task_id.clone() {
-        if let Some(bt) = app.background_tasks.get(task_id) {
+        if let Some(bt) = app.engine.background_tasks.get(task_id) {
             let threshold_lines = crate::render::TASK_VIEW_COLLAPSE_LINES;
             let threshold_bytes = crate::render::TASK_VIEW_COLLAPSE_BYTES;
             let last_collapsible = bt
@@ -952,7 +952,7 @@ fn cmd_toggle_expand_recent(app: &mut App) -> Option<anyhow::Result<bool>> {
         return Some(Ok(false));
     }
     'toggle: {
-        let messages = &mut app.messages;
+        let messages = &mut app.engine.messages;
         for msg in messages.iter_mut().rev() {
             for part in msg.parts.iter_mut().rev() {
                 if let MessagePart::Tool(tc) = part {
@@ -1014,7 +1014,7 @@ fn cmd_handle_escape(
         app.textarea.select_all();
         app.textarea.cut();
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(crate::toast::ToastKind::Info, "edit cancelled".to_string()),
         );
         return Some(Ok(false));
@@ -1042,7 +1042,7 @@ fn cmd_handle_escape(
         } else {
             app.last_esc_at = Some(now);
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Info,
                     "Press ESC again to interrupt".to_owned(),
@@ -1075,19 +1075,19 @@ fn cmd_handle_escape(
 /// connection opened and the model started responding — the only state where
 /// interrupting is the right call.
 pub(crate) fn can_interrupt_on_submit(app: &App, compacting: bool) -> bool {
-    app.is_streaming
+    app.engine.is_streaming
         && !compacting
         // Connection opened and the model has begun producing output. Before
         // the first byte there's nothing to steer — queue instead so the
         // first turn isn't silently dropped mid-connect.
-        && app.streaming_response_bytes > 0
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_classifications == 0
-        && app.in_flight_eager_dispatches == 0
-        && app.in_flight_tool_batches == 0
-        && app.in_progress_tool_use_ids.is_empty()
-        && app
+        && app.engine.streaming_response_bytes > 0
+        && app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_classifications == 0
+        && app.engine.in_flight_eager_dispatches == 0
+        && app.engine.in_flight_tool_batches == 0
+        && app.engine.in_progress_tool_use_ids.is_empty()
+        && app.engine
             .pending_tool_calls
             .iter()
             .all(|t| crate::scheduler::is_concurrency_safe(&t.kind))
@@ -1116,11 +1116,11 @@ async fn handle_enter_submit(
                 target: "jfc::input::submit",
                 submitted_chars = text.chars().count(),
                 line_count = app.textarea.lines().len(),
-                is_streaming = app.is_streaming,
-                streaming_response_bytes = app.streaming_response_bytes,
+                is_streaming = app.engine.is_streaming,
+                streaming_response_bytes = app.engine.streaming_response_bytes,
                 editing_idx = ?app.editing_message_idx,
                 history_cursor = ?app.history_cursor,
-                queued_depth = app.queued_prompts.len(),
+                queued_depth = app.engine.queued_prompts.len(),
                 preview = %text.chars().take(48).collect::<String>(),
                 "enter_submit: textarea content captured"
             );
@@ -1138,8 +1138,8 @@ async fn handle_enter_submit(
             // knows it landed, and drains via `drain_queued_prompts` in
             // main.rs once the approval pipeline empties.
             let pipeline_busy = app.pipeline_busy_for_submit();
-            let compacting = app.compacting_started_at.is_some();
-            if app.is_streaming || pipeline_busy || compacting {
+            let compacting = app.engine.compacting_started_at.is_some();
+            if app.engine.is_streaming || pipeline_busy || compacting {
                 // Check if we can interrupt: if streaming with only
                 // safe/interruptible tools, abort and inject instead
                 // of queuing. This gives real-time steering.
@@ -1150,16 +1150,16 @@ async fn handle_enter_submit(
                         "interrupt-on-submit: aborting interruptible stream"
                     );
                     // Cancel the current stream
-                    app.cancel_token.cancel();
-                    if let Some(handle) = app.active_stream_handle.take() {
+                    app.engine.cancel_token.cancel();
+                    if let Some(handle) = app.engine.active_stream_handle.take() {
                         handle.abort();
                     }
-                    app.cancel_token = tokio_util::sync::CancellationToken::new();
-                    app.interrupt_flag
+                    app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+                    app.engine.interrupt_flag
                         .store(false, std::sync::atomic::Ordering::SeqCst);
-                    app.is_streaming = false;
-                    app.streaming_started_at = None;
-                    app.last_stream_event_at = None;
+                    app.engine.is_streaming = false;
+                    app.engine.streaming_started_at = None;
+                    app.engine.last_stream_event_at = None;
                     // Don't queue: submit the new turn immediately now that
                     // the interruptible stream has been cancelled.
                     if let Err(e) = handle_submit(app, text, tx).await {
@@ -1212,7 +1212,7 @@ pub(super) fn queue_prompt_for_later(app: &mut App, text: String) {
     let glyph = if is_meta { "⚙" } else { "⏳" };
     tracing::info!(
         target: "jfc::ui::queue",
-        depth = app.queued_prompts.len() + 1,
+        depth = app.engine.queued_prompts.len() + 1,
         is_meta,
         "queued_prompt"
     );
@@ -1236,13 +1236,13 @@ pub(super) fn queue_prompt_for_later(app: &mut App, text: String) {
         app.pasted_images = remaining;
         matched
     };
-    app.queued_prompts.push(crate::app::QueuedPrompt {
+    app.engine.queued_prompts.push(crate::app::QueuedPrompt {
         text: text.clone(),
         is_meta,
         priority: crate::app::QueuePriority::Later,
         attachments,
     });
-    app.messages
+    app.engine.messages
         .push(ChatMessage::user_queued(format!("{glyph} {text}")));
     app.scroll_to_bottom();
 }
@@ -1440,12 +1440,12 @@ fn handle_arrow_history_keys(app: &mut App, key: event::KeyEvent) -> Option<anyh
             // results list.
             if !input_has_text(app)
                 && app.viewing_task_id.is_none()
-                && app.background_tasks.values().any(|bt| bt.status.is_alive())
+                && app.engine.background_tasks.values().any(|bt| bt.status.is_alive())
             {
                 // Pick the most-recent alive agent (matches the
                 // existing `↓ jump to latest` semantics inside the
                 // task view).
-                let mut alive_ids: Vec<String> = app
+                let mut alive_ids: Vec<String> = app.engine
                     .background_tasks
                     .iter()
                     .filter(|(_, bt)| bt.status.is_alive())
@@ -1522,7 +1522,7 @@ fn handle_leader_key_keys(
             // stops the visual bleed and lets the user move on.
             KeyCode::Char('x') => {
                 if let Some(id) = app.viewing_task_id.clone()
-                    && let Some(bt) = app.background_tasks.get_mut(&id)
+                    && let Some(bt) = app.engine.background_tasks.get_mut(&id)
                     && matches!(
                         bt.status,
                         crate::types::TaskLifecycle::Running | crate::types::TaskLifecycle::Idle
@@ -1531,7 +1531,7 @@ fn handle_leader_key_keys(
                     bt.status = crate::types::TaskLifecycle::Failed;
                     bt.error = Some("cancelled by user".into());
                     crate::toast::push_with_cap(
-                        &mut app.toasts,
+                        &mut app.engine.toasts,
                         crate::toast::Toast::new(
                             crate::toast::ToastKind::Warning,
                             format!("Cancelled task {id}"),
@@ -1543,7 +1543,7 @@ fn handle_leader_key_keys(
             // fresh user prompt so the leader dispatches a new agent.
             KeyCode::Char('r') => {
                 if let Some(id) = app.viewing_task_id.clone()
-                    && let Some(bt) = app.background_tasks.get(&id)
+                    && let Some(bt) = app.engine.background_tasks.get(&id)
                 {
                     let prompt = bt.description.clone();
                     let tx_clone = tx.clone();
@@ -1555,7 +1555,7 @@ fn handle_leader_key_keys(
                             .await;
                     });
                     crate::toast::push_with_cap(
-                        &mut app.toasts,
+                        &mut app.engine.toasts,
                         crate::toast::Toast::new(
                             crate::toast::ToastKind::Info,
                             format!("Retrying task {id}"),
@@ -1574,23 +1574,23 @@ fn handle_leader_key_keys(
 fn handle_up_recall_keys(app: &mut App, key: event::KeyEvent) -> Option<anyhow::Result<bool>> {
     if key.code == KeyCode::Up
         && key.modifiers == KeyModifiers::NONE
-        && !app.queued_prompts.is_empty()
+        && !app.engine.queued_prompts.is_empty()
         && app.textarea.lines().iter().all(|l| l.is_empty())
-        && let Some(qp) = app.queued_prompts.pop_back()
+        && let Some(qp) = app.engine.queued_prompts.pop_back()
     {
         let glyph = if qp.is_meta { "⚙" } else { "⏳" };
         let placeholder = format!("{glyph} {}", qp.text);
         // Remove the matching placeholder user message (last occurrence).
-        for i in (0..app.messages.len()).rev() {
-            if app.messages[i].role == Role::User
-                && app.messages[i]
+        for i in (0..app.engine.messages.len()).rev() {
+            if app.engine.messages[i].role == Role::User
+                && app.engine.messages[i]
                     .parts
                     .iter()
                     .any(|p| matches!(p, MessagePart::Text(t) if t == &placeholder))
             {
-                let streaming_before = app.streaming_assistant_idx;
+                let streaming_before = app.engine.streaming_assistant_idx;
                 let editing_before = app.editing_message_idx;
-                app.messages.remove(i);
+                app.engine.messages.remove(i);
                 // Removing a message shifts every subsequent index down
                 // by one. `streaming_assistant_idx` would otherwise point
                 // one slot past the live assistant if a fresh sub-stream
@@ -1600,10 +1600,10 @@ fn handle_up_recall_keys(app: &mut App, key: event::KeyEvent) -> Option<anyhow::
                 // `Role::User` message → API 400 on the next request:
                 // "tool_use blocks can only appear in assistant messages".
                 // Reproduced as session ses_20260516_071052 msg[20]/msg[21].
-                if let Some(streaming_idx) = app.streaming_assistant_idx
+                if let Some(streaming_idx) = app.engine.streaming_assistant_idx
                     && i < streaming_idx
                 {
-                    app.streaming_assistant_idx = Some(streaming_idx - 1);
+                    app.engine.streaming_assistant_idx = Some(streaming_idx - 1);
                 }
                 if let Some(edit_idx) = app.editing_message_idx {
                     if i == edit_idx {
@@ -1615,12 +1615,12 @@ fn handle_up_recall_keys(app: &mut App, key: event::KeyEvent) -> Option<anyhow::
                 tracing::info!(
                     target: "jfc::ui::queue::recall",
                     removed_at = i,
-                    message_count = app.messages.len(),
+                    message_count = app.engine.messages.len(),
                     streaming_before = ?streaming_before,
-                    streaming_after = ?app.streaming_assistant_idx,
+                    streaming_after = ?app.engine.streaming_assistant_idx,
                     editing_before = ?editing_before,
                     editing_after = ?app.editing_message_idx,
-                    is_streaming = app.is_streaming,
+                    is_streaming = app.engine.is_streaming,
                     "up_recall: removed queued placeholder, adjusted indices"
                 );
                 break;
@@ -1650,7 +1650,7 @@ fn handle_up_recall_keys(app: &mut App, key: event::KeyEvent) -> Option<anyhow::
             before_chars,
             recalled_chars = qp.text.chars().count(),
             after_chars,
-            queued_remaining = app.queued_prompts.len(),
+            queued_remaining = app.engine.queued_prompts.len(),
             is_meta = qp.is_meta,
             "recall queued prompt into textarea (cleared before insert)"
         );
@@ -1677,7 +1677,7 @@ fn handle_yank_key(app: &mut App, key: event::KeyEvent) -> Option<anyhow::Result
             let preview: String = text.chars().take(40).collect();
             let suffix = if text.chars().count() > 40 { "…" } else { "" };
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Success,
                     format!("Copied: {preview}{suffix}"),

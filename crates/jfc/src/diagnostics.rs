@@ -2,7 +2,7 @@
 //! (ctrl+o to expand)`. Mirrors v126 cli.js:338030-338040.
 //!
 //! Pure formatters live here so they're testable without standing up the
-//! full LSP pipeline. The renderer reads `app.diagnostics` (when wired)
+//! full LSP pipeline. The renderer reads `app.engine.diagnostics` (when wired)
 //! and calls these to build the visible line.
 //!
 //! v126's expanded form (cli.js:338043-338053) groups by URI:

@@ -26,9 +26,9 @@ pub(super) const MCP_REFRESH_REMINDER: &str = "An MCP server announced `tools/li
 /// shape (the API then rejects the next request with "tool_use blocks can
 /// only appear in assistant messages").
 pub(super) fn streaming_assistant_mut(app: &mut App) -> Option<&mut ChatMessage> {
-    let idx = app.streaming_assistant_idx?;
-    let len = app.messages.len();
-    let msg = app.messages.get_mut(idx)?;
+    let idx = app.engine.streaming_assistant_idx?;
+    let len = app.engine.messages.len();
+    let msg = app.engine.messages.get_mut(idx)?;
     if msg.role != Role::Assistant {
         tracing::warn!(
             target: "jfc::stream::guard",

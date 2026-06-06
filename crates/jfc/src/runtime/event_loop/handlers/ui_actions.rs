@@ -10,7 +10,7 @@ pub(crate) fn handle_enter_plan_mode(app: &mut App, reason: String) {
     // Model-callable plan mode entry — the EnterPlanMode tool
     // emits this. Flip the leader's permission mode and toast
     // the reason so the user knows what triggered it.
-    app.permission_mode = crate::app::PermissionMode::Plan;
+    app.engine.permission_mode = crate::app::PermissionMode::Plan;
     let preview: String = reason.chars().take(120).collect();
     let body = if preview.is_empty() {
         "Entered plan mode (model request)".to_owned()
@@ -18,7 +18,7 @@ pub(crate) fn handle_enter_plan_mode(app: &mut App, reason: String) {
         format!("Plan mode: {preview}")
     };
     toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         toast::Toast::new(toast::ToastKind::Info, body),
     );
     // v132 mid-stream system-reminder so the next turn
@@ -26,7 +26,7 @@ pub(crate) fn handle_enter_plan_mode(app: &mut App, reason: String) {
     // model only learns about the new permissions when
     // a tool call gets denied — too late.
     crate::system_reminder::append_to_last_user(
-        &mut app.messages,
+        &mut app.engine.messages,
         "Permission mode is now `Plan` (read-only). Use ExitPlanMode \
          with a finalized plan to proceed with edits.",
     );
@@ -49,9 +49,9 @@ pub(crate) async fn handle_submit(
     let away = app.last_user_activity_at.elapsed();
     if away >= crate::session_recap::AWAY_THRESHOLD && !app.idle_return_shown {
         use crate::types::{MessagePart, Role, ToolInput};
-        let start_idx = app.interaction_message_idx.min(app.messages.len());
+        let start_idx = app.interaction_message_idx.min(app.engine.messages.len());
         let since: Vec<crate::session_recap::RecapMessage> =
-            app.messages[start_idx..]
+            app.engine.messages[start_idx..]
                 .iter()
                 .map(|m| {
                     let text_preview = m
@@ -108,7 +108,7 @@ pub(crate) async fn handle_submit(
     }
     // Update interaction tracking for next away-detection.
     app.last_user_activity_at = std::time::Instant::now();
-    app.interaction_message_idx = app.messages.len();
+    app.interaction_message_idx = app.engine.messages.len();
     app.idle_return_shown = false;
     // Re-fire after pre-submit compaction. Reuses the same
     // dispatch path as a typed prompt so message persistence,
@@ -124,7 +124,7 @@ pub(crate) async fn handle_submit(
 
 /// Handle `StreamEvent::SystemPromptLen(len)`.
 pub(crate) fn handle_system_prompt_len(app: &mut App, len: usize) {
-    app.last_system_prompt_len = Some(len);
+    app.engine.last_system_prompt_len = Some(len);
 }
 
 /// Handle `StreamEvent::RequestMetadata(meta)`.
@@ -137,7 +137,7 @@ pub(crate) fn handle_request_metadata(app: &mut App, meta: crate::runtime::Strea
         tool_choice = ?meta.tool_choice,
         "stream request metadata"
     );
-    app.current_stream_request = Some(meta);
+    app.engine.current_stream_request = Some(meta);
 }
 
 /// Handle `StreamEvent::Lifecycle(status)`.
@@ -152,7 +152,7 @@ pub(crate) fn handle_stream_lifecycle(
         detail = ?status.detail,
         "stream lifecycle status"
     );
-    app.stream_lifecycle = Some(status);
+    app.engine.stream_lifecycle = Some(status);
 }
 
 /// Handle `ControlEvent::Notice { kind, text }`.
@@ -160,7 +160,7 @@ pub(crate) fn handle_toast(app: &mut App, kind: toast::ToastKind, text: impl Int
     // Push onto the auto-expiring strip with the kind's
     // default TTL. Capped at `MAX_TOASTS` to bound memory
     // when a long-running compaction or classifier spams.
-    toast::push_with_cap(&mut app.toasts, toast::Toast::new(kind, text));
+    toast::push_with_cap(&mut app.engine.toasts, toast::Toast::new(kind, text));
 }
 
 /// Handle `ControlEvent::LoadSession(session_id)`.
@@ -177,16 +177,16 @@ pub(crate) async fn handle_load_session(app: &mut App, session_id: crate::ids::S
     );
     match crate::session::load_session(&session_id).await {
         Some(messages) => {
-            app.messages = messages;
+            app.engine.messages = messages;
             let id_for_toast = session_id.clone();
             app.switch_session(Some(session_id));
-            app.streaming_text.clear();
-            app.streaming_reasoning.clear();
-            app.streaming_response_bytes = 0;
-            app.streaming_assistant_idx = None;
+            app.engine.streaming_text.clear();
+            app.engine.streaming_reasoning.clear();
+            app.engine.streaming_response_bytes = 0;
+            app.engine.streaming_assistant_idx = None;
             app.scroll_to_bottom();
             toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 toast::Toast::new(
                     toast::ToastKind::Success,
                     format!("Loaded session {id_for_toast}"),
@@ -195,7 +195,7 @@ pub(crate) async fn handle_load_session(app: &mut App, session_id: crate::ids::S
         }
         None => {
             toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 toast::Toast::new(
                     toast::ToastKind::Error,
                     format!("Failed to load session {session_id}"),
@@ -216,7 +216,7 @@ pub(crate) fn handle_exit_plan_mode(app: &mut App, plan: String) {
     tracing::info!(
         target: "jfc::ui::plan_mode",
         plan_bytes = plan.len(),
-        from_mode = ?app.permission_mode,
+        from_mode = ?app.engine.permission_mode,
         "ExitPlanMode: surfacing plan + transitioning out of Plan"
     );
     let body = format!("\n\n**Plan presented (Plan Mode → Accept Edits)**\n\n---\n\n{plan}");
@@ -227,39 +227,39 @@ pub(crate) fn handle_exit_plan_mode(app: &mut App, plan: String) {
     // rposition scan. Prevents a stale index (Up-recall
     // shifted the slot left onto a user placeholder) from
     // gluing the plan body onto a User message.
-    let streaming_assistant = app.streaming_assistant_idx.filter(|&idx| {
+    let streaming_assistant = app.engine.streaming_assistant_idx.filter(|&idx| {
         matches!(
-            app.messages.get(idx).map(|m| m.role),
+            app.engine.messages.get(idx).map(|m| m.role),
             Some(crate::types::Role::Assistant),
         )
     });
     let target_idx = streaming_assistant.or_else(|| {
-        app.messages
+        app.engine.messages
             .iter()
             .rposition(|m| m.role == crate::types::Role::Assistant)
     });
     if let Some(idx) = target_idx {
         // Append as a new Text part to the existing assistant msg.
-        app.messages[idx]
+        app.engine.messages[idx]
             .parts
             .push(crate::types::MessagePart::Text(body));
     } else {
         // Fallback: no assistant message found (shouldn't happen
         // but defensive). Push as a new message.
-        app.messages
+        app.engine.messages
             .push(crate::types::ChatMessage::assistant(body));
     }
-    if matches!(app.permission_mode, app::PermissionMode::Plan) {
-        app.permission_mode = app::PermissionMode::AcceptEdits;
+    if matches!(app.engine.permission_mode, app::PermissionMode::Plan) {
+        app.engine.permission_mode = app::PermissionMode::AcceptEdits;
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Success,
                 "Plan approved — mode: Accept Edits",
             ),
         );
         crate::system_reminder::append_to_last_user(
-            &mut app.messages,
+            &mut app.engine.messages,
             "Permission mode flipped from `Plan` to `AcceptEdits`. \
              Edit/Write/Bash now auto-approve. Continue executing the plan.",
         );

@@ -18,11 +18,11 @@ pub(super) fn handle_started(app: &mut App) {
     // weren't (handles the edge case of manual /compact which
     // may not go through the AllToolsComplete path).
     tracing::debug!(target: "jfc::compact", "CompactionStarted event received — showing spinner");
-    if app.compacting_started_at.is_none() {
-        app.compacting_started_at = Some(std::time::Instant::now());
-        app.compacting_output_chars = 0;
-        app.compacting_attempt_baseline = 0;
-        app.compacting_last_progress = 0;
+    if app.engine.compacting_started_at.is_none() {
+        app.engine.compacting_started_at = Some(std::time::Instant::now());
+        app.engine.compacting_output_chars = 0;
+        app.engine.compacting_attempt_baseline = 0;
+        app.engine.compacting_last_progress = 0;
     }
 }
 
@@ -39,11 +39,11 @@ pub(super) fn handle_progress(app: &mut App, output_chars: u64) {
     // spinner shows a monotonically-increasing total — the
     // user sees the true work-done across attempts instead
     // of a flickering counter that jumps `↓3k → ↓92 → ↓1k`.
-    if output_chars < app.compacting_last_progress {
-        app.compacting_attempt_baseline += app.compacting_last_progress;
+    if output_chars < app.engine.compacting_last_progress {
+        app.engine.compacting_attempt_baseline += app.engine.compacting_last_progress;
     }
-    app.compacting_last_progress = output_chars;
-    app.compacting_output_chars = app.compacting_attempt_baseline + output_chars;
+    app.engine.compacting_last_progress = output_chars;
+    app.engine.compacting_output_chars = app.engine.compacting_attempt_baseline + output_chars;
 }
 
 pub(super) async fn handle_done(
@@ -55,13 +55,13 @@ pub(super) async fn handle_done(
     post_tokens: usize,
 ) {
     // Reset post-compact read tracker so we can detect re-reads.
-    app.post_compact_reads.clear();
+    app.engine.post_compact_reads.clear();
     let saved = pre_tokens.saturating_sub(post_tokens);
     // Stash the savings so the next outbound request forwards it as the
     // context-hint (context-hint-2026-04-09). Drained after one send. Only
     // worth hinting when non-trivial; the body builder enforces the 20k floor.
     if saved > 0 {
-        app.pending_context_hint_tokens_saved = Some(saved as u64);
+        app.engine.pending_context_hint_tokens_saved = Some(saved as u64);
     }
     tracing::info!(
         target: "jfc::compact",
@@ -69,7 +69,7 @@ pub(super) async fn handle_done(
         new_message_count = messages.len(),
         "applying compaction result to app state"
     );
-    let was_streaming = app.is_streaming;
+    let was_streaming = app.engine.is_streaming;
     if was_streaming {
         // Defensive: should be unreachable with the synchronous
         // compacting_started_at guard, but if a stream somehow
@@ -80,7 +80,7 @@ pub(super) async fn handle_done(
              discarding compaction result to avoid data corruption"
         );
     } else {
-        app.messages = messages;
+        app.engine.messages = messages;
         // Migrate cleanup flags (rapid_refill_count,
         // last_compact_turn, etc.) from the compact
         // worker's local tool_ctx, but preserve the
@@ -99,29 +99,29 @@ pub(super) async fn handle_done(
         // reflects what's actually about to be sent on
         // the next turn — both compaction and the
         // pre-submit gate now use the same source.
-        let preserved = app.tool_ctx.approx_tokens;
-        app.tool_ctx = tool_ctx;
+        let preserved = app.engine.tool_ctx.approx_tokens;
+        app.engine.tool_ctx = tool_ctx;
         // Use the smaller of (preserved calibrated value)
         // and post_tokens — preserved is wire-truth from
         // before compact, post_tokens is a local
         // estimate. After compaction the real prompt is
         // ≤ pre-compact; clamping to min protects against
         // showing the user a count larger than reality.
-        app.tool_ctx.approx_tokens = preserved.min(post_tokens);
+        app.engine.tool_ctx.approx_tokens = preserved.min(post_tokens);
         // Add a fixed overhead estimate for system prompt, tool defs,
         // memories, etc. that the local message estimate doesn't include.
         // Without this, the gauge shows "safe" immediately post-compact
         // while the next request actually sends system+messages which can
         // be 50-100k+ of overhead.
-        let overhead = app.last_system_prompt_len.unwrap_or(30_000);
-        app.tool_ctx.approx_tokens = app.tool_ctx.approx_tokens.saturating_add(overhead);
-        app.last_usage_input = 0;
+        let overhead = app.engine.last_system_prompt_len.unwrap_or(30_000);
+        app.engine.tool_ctx.approx_tokens = app.engine.tool_ctx.approx_tokens.saturating_add(overhead);
+        app.engine.last_usage_input = 0;
         // Reset the per-turn baseline so the next
         // `StreamUsage` cumulative delta builds from 0,
         // not from pre-compact totals — without this,
         // `apply_cumulative` would treat the post-compact
         // input as a negative delta and stall.
-        app.usage_apply_baseline = (0, 0, 0, 0);
+        app.engine.usage_apply_baseline = (0, 0, 0, 0);
         // Repin to the bottom of the freshly-compacted transcript. The whole
         // message vec was just replaced, so any prior `scroll_offset` indexes
         // into a buffer that no longer exists; leaving `follow_bottom` false
@@ -132,16 +132,16 @@ pub(super) async fn handle_done(
         // self-invalidates by text hash, so no explicit clear is needed.
         app.scroll_to_bottom();
     }
-    app.compacting_started_at = None;
-    app.compacting_output_chars = 0;
-    app.compacting_attempt_baseline = 0;
-    app.compacting_last_progress = 0;
-    app.compact_suppressed = false;
+    app.engine.compacting_started_at = None;
+    app.engine.compacting_output_chars = 0;
+    app.engine.compacting_attempt_baseline = 0;
+    app.engine.compacting_last_progress = 0;
+    app.engine.compact_suppressed = false;
     // Surface the compaction outcome to the user via a toast
     // — they don't have to scroll to see the boundary marker.
     let saved_k = saved / 1000;
     toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         toast::Toast::new(
             toast::ToastKind::Success,
             format!("Compacted — saved ~{saved_k}k tokens"),
@@ -159,12 +159,12 @@ pub(super) async fn handle_done(
     // tool_results (should_continue_loop=true) and
     // there's no other reason to pause.
     if !was_streaming
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty()
-        && !app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
-        && !app.cancel_token.is_cancelled()
-        && stream::should_continue_loop(&app.messages)
+        && app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_tool_calls.is_empty()
+        && !app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
+        && !app.engine.cancel_token.is_cancelled()
+        && stream::should_continue_loop(&app.engine.messages)
     {
         // Same mixed-mode gate as in AllToolsComplete:
         // if the original Done event flagged
@@ -174,8 +174,8 @@ pub(super) async fn handle_done(
         // Single-shot semantics: clear the flag here so
         // a subsequent non-pause turn doesn't inherit
         // the routing.
-        if app.pending_pause_turn_resume {
-            app.pending_pause_turn_resume = false;
+        if app.engine.pending_pause_turn_resume {
+            app.engine.pending_pause_turn_resume = false;
             tracing::info!(
                 target: "jfc::stream",
                 "agentic loop resuming after CompactionDone — pause_turn mixed mode, routing through continue_after_pause_turn"
@@ -189,14 +189,14 @@ pub(super) async fn handle_done(
             stream::continue_agentic_loop(app, tx).await;
         }
     } else if !was_streaming
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty()
+        && app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_tool_calls.is_empty()
     {
         // Compaction landed at end of turn (no pending
         // tool results). Drain queued prompts so they
         // start now that the context is clean.
-        app.turn_started_at = None;
+        app.engine.turn_started_at = None;
         drain_queued_prompts(app, tx).await;
         maybe_continue_task_factory(app, tx).await;
     }
@@ -217,12 +217,12 @@ pub(super) async fn handle_failed(
         "compaction failed — surfacing toast to user"
     );
     if let Some(real_count) = calibrated_tokens {
-        app.tool_ctx.approx_tokens = real_count;
+        app.engine.tool_ctx.approx_tokens = real_count;
     }
-    app.compacting_started_at = None;
-    app.compacting_output_chars = 0;
-    app.compacting_attempt_baseline = 0;
-    app.compacting_last_progress = 0;
+    app.engine.compacting_started_at = None;
+    app.engine.compacting_output_chars = 0;
+    app.engine.compacting_attempt_baseline = 0;
+    app.engine.compacting_last_progress = 0;
     // Permanent failures (provider unsupported, exhausted retries,
     // breaker tripped) latch suppression so we stop spamming
     // compact attempts on every AllToolsComplete; the user clears
@@ -231,7 +231,7 @@ pub(super) async fn handle_failed(
     // suppressing them would silently disable auto-compact for
     // the rest of the session.
     if !transient {
-        app.compact_suppressed = true;
+        app.engine.compact_suppressed = true;
         crate::notifications::notify_compact_failed(&reason);
     }
     let toast_kind = if transient {
@@ -244,17 +244,17 @@ pub(super) async fn handle_failed(
     } else {
         format!("Compaction failed: {reason}")
     };
-    toast::push_with_cap(&mut app.toasts, toast::Toast::new(toast_kind, toast_msg));
+    toast::push_with_cap(&mut app.engine.toasts, toast::Toast::new(toast_kind, toast_msg));
 
     // Re-check agentic loop continuation after failed compaction —
     // without this, tool results that triggered the compaction attempt
     // sit unreplied-to and the loop stalls permanently.
-    if app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty()
-        && !app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
-        && !app.cancel_token.is_cancelled()
-        && stream::should_continue_loop(&app.messages)
+    if app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_tool_calls.is_empty()
+        && !app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
+        && !app.engine.cancel_token.is_cancelled()
+        && stream::should_continue_loop(&app.engine.messages)
     {
         tracing::info!(
             target: "jfc::compact",
@@ -315,7 +315,7 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new(Arc::new(TestProvider), "test-model");
-        app.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
         app
     }
 
@@ -331,7 +331,7 @@ mod tests {
         app.viewport_height = 20;
         app.scroll_offset = 5;
         app.follow_bottom = false;
-        app.is_streaming = false;
+        app.engine.is_streaming = false;
 
         let compacted = vec![
             ChatMessage::compact_boundary("summary of the session so far", 120_000),
@@ -366,10 +366,10 @@ mod tests {
     #[tokio::test]
     async fn compaction_done_while_streaming_does_not_repin_edge() {
         let mut app = test_app();
-        app.is_streaming = true;
+        app.engine.is_streaming = true;
         app.follow_bottom = false;
         app.scroll_offset = 5;
-        let before = app.messages.len();
+        let before = app.engine.messages.len();
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
         handle_done(
@@ -382,7 +382,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(app.messages.len(), before, "result must be discarded");
+        assert_eq!(app.engine.messages.len(), before, "result must be discarded");
         assert!(!app.follow_bottom, "discard path must not repin");
         assert_eq!(app.scroll_offset, 5);
     }

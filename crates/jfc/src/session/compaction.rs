@@ -37,7 +37,7 @@ pub(super) fn extract_first_prompt(messages: &[ChatMessage]) -> Option<String> {
 ///     ConsecutiveAssistant in the log;
 ///   * confuses LLM-based summarizers that key off speaker alternation.
 ///
-/// This helper does NOT touch the in-memory `app.messages` (sub-stream
+/// This helper does NOT touch the in-memory `app.engine.messages` (sub-stream
 /// boundaries are still needed at runtime for streaming-slot tracking
 /// and the "this sub-stream completed at T" timestamps); it only runs
 /// on the path **into** the session JSON.

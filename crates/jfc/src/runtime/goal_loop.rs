@@ -3,19 +3,19 @@ use crate::runtime::{EngineEvent, EventSender, GoalEvent};
 use crate::{app, stream, types};
 
 pub(crate) fn dispatch_goal_evaluator_if_active(app: &mut app::App, tx: &EventSender) -> bool {
-    let Some(goal) = app.goal.as_ref() else {
+    let Some(goal) = app.engine.goal.as_ref() else {
         return false;
     };
-    if app.goal_evaluator_in_flight {
+    if app.engine.goal_evaluator_in_flight {
         tracing::debug!(target: "jfc::goal", "evaluator already in flight, skipping");
         return true;
     }
     if goal.is_exhausted() {
         let banner = crate::goal::format_exhaustion_banner(goal);
-        app.messages.push(types::ChatMessage::assistant(banner));
-        app.goal = None;
+        app.engine.messages.push(types::ChatMessage::assistant(banner));
+        app.engine.goal = None;
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Error,
                 "Goal abandoned — iteration cap reached".to_owned(),
@@ -24,12 +24,12 @@ pub(crate) fn dispatch_goal_evaluator_if_active(app: &mut app::App, tx: &EventSe
         return false;
     }
 
-    app.goal_evaluator_in_flight = true;
+    app.engine.goal_evaluator_in_flight = true;
     let condition = goal.condition.clone();
-    let history = app.messages.clone();
-    let provider = std::sync::Arc::clone(&app.provider);
-    let model = app.model.clone();
-    let cancel = app.cancel_token.clone();
+    let history = app.engine.messages.clone();
+    let provider = std::sync::Arc::clone(&app.engine.provider);
+    let model = app.engine.model.clone();
+    let cancel = app.engine.cancel_token.clone();
     let tx_eval = tx.clone();
     tokio::spawn(async move {
         let verdict = tokio::select! {
@@ -68,8 +68,8 @@ pub(crate) async fn handle_goal_verdict(
     ok: bool,
     reason: String,
 ) {
-    app.goal_evaluator_in_flight = false;
-    let Some(mut goal) = app.goal.take() else {
+    app.engine.goal_evaluator_in_flight = false;
+    let Some(mut goal) = app.engine.goal.take() else {
         persist_goal_for_session(app);
         drain_queued_prompts(app, tx).await;
         maybe_continue_task_factory(app, tx).await;
@@ -78,9 +78,9 @@ pub(crate) async fn handle_goal_verdict(
 
     if ok {
         let banner = crate::goal::format_success_banner(&goal, &reason);
-        append_to_last_assistant_or_push(&mut app.messages, &banner);
+        append_to_last_assistant_or_push(&mut app.engine.messages, &banner);
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(crate::toast::ToastKind::Success, "Goal achieved".to_owned()),
         );
         persist_goal_for_session(app);
@@ -93,9 +93,9 @@ pub(crate) async fn handle_goal_verdict(
     goal.last_unmet_reason = Some(reason.clone());
     if goal.is_exhausted() {
         let banner = crate::goal::format_exhaustion_banner(&goal);
-        append_to_last_assistant_or_push(&mut app.messages, &banner);
+        append_to_last_assistant_or_push(&mut app.engine.messages, &banner);
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Error,
                 "Goal abandoned — iteration cap reached".to_owned(),
@@ -109,11 +109,11 @@ pub(crate) async fn handle_goal_verdict(
 
     let iteration = goal.iterations;
     let condition = goal.condition.clone();
-    app.goal = Some(goal);
+    app.engine.goal = Some(goal);
     persist_goal_for_session(app);
     let reminder = crate::goal::format_unmet_reminder(&condition, &reason, iteration);
     let body = crate::system_reminder::format(&reminder);
-    app.messages.push(types::ChatMessage::user(body));
+    app.engine.messages.push(types::ChatMessage::user(body));
     tracing::info!(
         target: "jfc::goal",
         iteration,
@@ -137,8 +137,8 @@ fn append_to_last_assistant_or_push(messages: &mut Vec<types::ChatMessage>, body
 }
 
 fn persist_goal_for_session(app: &app::App) {
-    let Some(session_id) = app.current_session_id.as_ref() else {
+    let Some(session_id) = app.engine.current_session_id.as_ref() else {
         return;
     };
-    crate::goal::save_sidecar(session_id.as_str(), app.goal.as_ref());
+    crate::goal::save_sidecar(session_id.as_str(), app.engine.goal.as_ref());
 }

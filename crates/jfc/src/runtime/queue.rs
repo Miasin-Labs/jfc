@@ -8,7 +8,7 @@ use crate::{
 use jfc_core::QueuedPrompt;
 
 pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
-    let drained: Vec<QueuedPrompt> = app.queued_prompts.drain_all();
+    let drained: Vec<QueuedPrompt> = app.engine.queued_prompts.drain_all();
     if drained.is_empty() {
         return;
     }
@@ -34,7 +34,7 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
         } = queued;
         let glyph = if is_meta { "⚙" } else { "⏳" };
         let placeholder = format!("{glyph} {text}");
-        for msg in app.messages.iter_mut() {
+        for msg in app.engine.messages.iter_mut() {
             if msg.role == Role::User {
                 let mut replaced = false;
                 for part in msg.parts.iter_mut() {
@@ -83,16 +83,16 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
     // stream into the same conversation buffer, clobbering
     // `streaming_assistant_idx` so the live stream's chunks can't attach.
     if non_meta_texts.is_empty() {
-        if !app.queued_prompts.is_empty() {
+        if !app.engine.queued_prompts.is_empty() {
             Box::pin(drain_queued_prompts(app, tx)).await;
         }
         return;
     }
 
-    let assistant_idx = app.messages.len();
+    let assistant_idx = app.engine.messages.len();
     #[cfg(debug_assertions)]
     if let Err(error) = crate::types::validate_turn_invariants_inner(
-        &app.messages,
+        &app.engine.messages,
         /* allow_streaming_tail = */ true,
     ) {
         tracing::warn!(
@@ -102,15 +102,15 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
             "drain_queued_prompts: turn-invariant violation before staging assistant slot"
         );
     }
-    app.tool_ctx.total_user_turns += 1;
+    app.engine.tool_ctx.total_user_turns += 1;
 
     #[cfg(feature = "intent-gate")]
     if let Some(intent_text) = first_non_meta_text.as_deref() {
         let intent_for_inject = crate::intent::classify(intent_text).intent;
         if crate::intent::is_graph_intent(intent_for_inject) {
-            let cwd = std::path::PathBuf::from(&app.cwd);
+            let cwd = std::path::PathBuf::from(&app.engine.cwd);
             let injected = crate::intent::auto_inject_graph_context(
-                &mut app.messages,
+                &mut app.engine.messages,
                 intent_for_inject,
                 intent_text,
                 &cwd,
@@ -127,66 +127,66 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
     #[cfg(not(feature = "intent-gate"))]
     let _ = first_non_meta_text;
 
-    app.messages.push(ChatMessage::assistant(String::new()));
-    app.streaming_text = String::new();
-    app.streaming_reasoning = String::new();
-    app.streaming_response_bytes = 0;
-    app.turn_output_tokens = 0;
-    app.refusal_fallback_attempted = false;
-    app.network_recovery_status = None;
-    app.network_recovery_attempts = 0;
-    app.stream_lifecycle = None;
-    app.streaming_assistant_idx = Some(assistant_idx);
-    app.is_streaming = true;
+    app.engine.messages.push(ChatMessage::assistant(String::new()));
+    app.engine.streaming_text = String::new();
+    app.engine.streaming_reasoning = String::new();
+    app.engine.streaming_response_bytes = 0;
+    app.engine.turn_output_tokens = 0;
+    app.engine.refusal_fallback_attempted = false;
+    app.engine.network_recovery_status = None;
+    app.engine.network_recovery_attempts = 0;
+    app.engine.stream_lifecycle = None;
+    app.engine.streaming_assistant_idx = Some(assistant_idx);
+    app.engine.is_streaming = true;
     let now = std::time::Instant::now();
-    app.streaming_started_at = Some(now);
-    app.last_stream_event_at = Some(now);
-    app.streaming_last_token_at = Some(now);
-    app.turn_started_at = Some(now);
-    app.turn_start_cost = crate::cost::total_cost(&app.usage_by_model);
-    app.pending_classifications = 0;
-    app.agentic_turn_count = 0;
+    app.engine.streaming_started_at = Some(now);
+    app.engine.last_stream_event_at = Some(now);
+    app.engine.streaming_last_token_at = Some(now);
+    app.engine.turn_started_at = Some(now);
+    app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+    app.engine.pending_classifications = 0;
+    app.engine.agentic_turn_count = 0;
     // Reset cancel token + interrupt flag for the drained turn. Same
     // rationale as handle_submit — a stale cancel from the previous
     // turn would otherwise fire immediately on this freshly-drained
     // submission and emit "Interrupted by user".
-    app.cancel_token = tokio_util::sync::CancellationToken::new();
-    app.interrupt_flag
+    app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+    app.engine.interrupt_flag
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    app.last_usage_output = 0;
-    app.usage_apply_baseline = (0, 0, 0, 0);
+    app.engine.last_usage_output = 0;
+    app.engine.usage_apply_baseline = (0, 0, 0, 0);
     app.scroll_to_bottom();
 
-    let provider = app.provider.clone();
-    let messages = stream::build_provider_messages(&app.messages[..assistant_idx]);
+    let provider = app.engine.provider.clone();
+    let messages = stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
     let route_text = non_meta_texts.first().cloned().unwrap_or_default();
-    let model = if let Some(ref router) = app.slate {
-        router.route(&route_text, app.model.clone())
+    let model = if let Some(ref router) = app.engine.slate {
+        router.route(&route_text, app.engine.model.clone())
     } else {
-        app.model.clone()
+        app.engine.model.clone()
     };
     let tx_spawn = tx.clone();
-    let interrupt = app.interrupt_flag.clone();
-    app.cancel_token = tokio_util::sync::CancellationToken::new();
-    let cancel = app.cancel_token.clone();
+    let interrupt = app.engine.interrupt_flag.clone();
+    app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel = app.engine.cancel_token.clone();
     let tx_guard = tx.clone();
     // Refresh CLAUDE.md frontmatter disallowed tools before each turn.
     if let Ok(cwd_path) = std::env::current_dir() {
         let hierarchy = crate::context::ClaudeMdHierarchy::load(&cwd_path);
-        app.claudemd_disallowed_tools = hierarchy.collect_disallowed_tools();
+        app.engine.claudemd_disallowed_tools = hierarchy.collect_disallowed_tools();
     }
     let overrides = StreamRequestOverrides {
-        background_reminders: app.take_background_reminders(),
-        disallowed_tools: app.effective_disallowed_tools(),
-        allowed_tools: app.allowed_tools.clone(),
-        custom_betas: app.custom_betas.clone(),
-        fine_grained_tool_streaming: app.fine_grained_tool_streaming,
-        strict_tool_schemas: app.strict_tool_schemas,
-        task_budget: app.cli_task_budget,
-        max_thinking_tokens: app.cli_max_thinking_tokens,
-        thinking_display: app.cli_thinking_display.clone(),
-        brief_mode: app.brief_mode,
-        context_hint_tokens_saved: app.take_context_hint_tokens_saved(),
+        background_reminders: app.engine.take_background_reminders(),
+        disallowed_tools: app.engine.effective_disallowed_tools(),
+        allowed_tools: app.engine.allowed_tools.clone(),
+        custom_betas: app.engine.custom_betas.clone(),
+        fine_grained_tool_streaming: app.engine.fine_grained_tool_streaming,
+        strict_tool_schemas: app.engine.strict_tool_schemas,
+        task_budget: app.engine.cli_task_budget,
+        max_thinking_tokens: app.engine.cli_max_thinking_tokens,
+        thinking_display: app.engine.cli_thinking_display.clone(),
+        brief_mode: app.engine.brief_mode,
+        context_hint_tokens_saved: app.engine.take_context_hint_tokens_saved(),
         ..Default::default()
     };
     // Park the *inner* task's abort handle on App so the watchdog can
@@ -200,7 +200,7 @@ pub(crate) async fn drain_queued_prompts(app: &mut App, tx: &EventSender) {
         )
         .await;
     });
-    app.active_stream_handle = Some(inner.abort_handle());
+    app.engine.active_stream_handle = Some(inner.abort_handle());
     tokio::spawn(async move {
         if let Err(join_err) = inner.await {
             let msg = if join_err.is_panic() {

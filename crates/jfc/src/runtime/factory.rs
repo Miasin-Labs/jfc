@@ -24,13 +24,13 @@ pub(crate) fn factory_mode_enabled() -> bool {
 /// in this function, so setting it here makes any same-burst re-entry a no-op.
 /// It is cleared on the next genuine `stream_done`/failure like any other turn.
 async fn commit_factory_turn(app: &mut App, tx: &EventSender, prompt: String) {
-    app.turn_started_at = Some(std::time::Instant::now());
+    app.engine.turn_started_at = Some(std::time::Instant::now());
     let _ = tx.send(EngineEvent::Control(ControlEvent::SubmitPrompt(prompt))).await;
 }
 
 pub(crate) async fn maybe_continue_task_factory(app: &mut App, tx: &EventSender) {
     if !factory_mode_enabled()
-        || app.is_streaming
+        || app.engine.is_streaming
         // A live user/agentic turn keeps `turn_started_at` set until it
         // genuinely concludes (stream_done clears it only on EndTurn with
         // nothing pending). The factory must not inject a new task prompt
@@ -40,12 +40,12 @@ pub(crate) async fn maybe_continue_task_factory(app: &mut App, tx: &EventSender)
         // Firing here would race a second concurrent turn into the same
         // conversation buffer (the "random task queue / partially committed"
         // symptom). Only inject when the leader is fully idle.
-        || app.turn_started_at.is_some()
-        || app.pending_approval.is_some()
-        || !app.approval_queue.is_empty()
-        || !app.pending_tool_calls.is_empty()
-        || !app.queued_prompts.is_empty()
-        || app
+        || app.engine.turn_started_at.is_some()
+        || app.engine.pending_approval.is_some()
+        || !app.engine.approval_queue.is_empty()
+        || !app.engine.pending_tool_calls.is_empty()
+        || !app.engine.queued_prompts.is_empty()
+        || app.engine
             .background_tasks
             .values()
             .any(|task| task.status.is_alive())
@@ -61,7 +61,7 @@ pub(crate) async fn maybe_continue_task_factory(app: &mut App, tx: &EventSender)
     // them back up, instead of stalling forever and forcing a manual "continue"
     // nudge. Only factory-owned claims are touched — live subagent work uses a
     // different owner string and is never disturbed.
-    let requeued = app.task_store.requeue_stuck("jfc-factory");
+    let requeued = app.engine.task_store.requeue_stuck("jfc-factory");
     if !requeued.is_empty() {
         tracing::info!(
             target: "jfc::tasks::factory",
@@ -70,19 +70,19 @@ pub(crate) async fn maybe_continue_task_factory(app: &mut App, tx: &EventSender)
         );
     }
 
-    let counts = app.task_store.counts();
+    let counts = app.engine.task_store.counts();
     // Plan-verify gate: for a non-trivial batch (≥3 pending) ask the leader to
     // sanity-check the DAG once before execution. Smaller batches (1-2 tasks)
     // fall straight through to `claim_next_available` below and auto-continue
     // without the verification round-trip.
-    if counts.pending >= 3 && counts.in_progress == 0 && !app.plan_verified_this_batch {
-        app.plan_verified_this_batch = true;
+    if counts.pending >= 3 && counts.in_progress == 0 && !app.engine.plan_verified_this_batch {
+        app.engine.plan_verified_this_batch = true;
         // Run the task-graph validator and surface its *computed* findings —
         // dependency cycles (Tarjan), upstream-failed propagation, the ready
         // frontier, and parallelization opportunities — instead of asking the
         // leader to eyeball them.
-        let validation = app.task_store.validate();
-        let tasks = app.task_store.list_all();
+        let validation = app.engine.task_store.validate();
+        let tasks = app.engine.task_store.list_all();
         let pending: Vec<_> = tasks
             .iter()
             .filter(|task| task.status == TaskStatus::Pending)
@@ -154,7 +154,7 @@ pub(crate) async fn maybe_continue_task_factory(app: &mut App, tx: &EventSender)
         // context, then cache this batch's decomposition under its signature.
         let subjects: Vec<String> = pending.iter().map(|t| t.subject.clone()).collect();
         let signature = jfc_core::normalize_signature(&subjects.join(" "));
-        let prior_note = app
+        let prior_note = app.engine
             .plan_cache
             .get_similar(&signature, 0.6)
             .map(|p| {
@@ -166,7 +166,7 @@ pub(crate) async fn maybe_continue_task_factory(app: &mut App, tx: &EventSender)
                 )
             })
             .unwrap_or_default();
-        app.plan_cache.insert(&subjects.join(" "), subjects.clone());
+        app.engine.plan_cache.insert(&subjects.join(" "), subjects.clone());
 
         let prompt = format!(
             "Before executing the task queue, verify this plan is sound:\n\n{task_list}\n{findings}{prior_note}\n\
@@ -180,12 +180,12 @@ pub(crate) async fn maybe_continue_task_factory(app: &mut App, tx: &EventSender)
         return;
     }
 
-    let Some(task) = app.task_store.claim_next_available("jfc-factory") else {
+    let Some(task) = app.engine.task_store.claim_next_available("jfc-factory") else {
         return;
     };
 
     if matches!(task.risk, Some(TaskRisk::High)) {
-        let _ = app.task_store.update(
+        let _ = app.engine.task_store.update(
             task.id.as_str(),
             TaskPatch {
                 status: Some(TaskStatus::Pending),
@@ -289,7 +289,7 @@ mod tests {
             std::env::set_var("JFC_FACTORY_MODE", "1");
         }
         let mut app = App::new(Arc::new(TestProvider), "test-model");
-        app.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
         app
     }
 
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn single_pending_task_auto_continues_and_commits_turn() {
         let mut app = factory_app();
-        app.task_store
+        app.engine.task_store
             .create(
                 "only task".into(),
                 "do it".into(),
@@ -321,21 +321,21 @@ mod tests {
         maybe_continue_task_factory(&mut app, &tx).await;
 
         assert!(
-            app.turn_started_at.is_some(),
+            app.engine.turn_started_at.is_some(),
             "factory must mark the turn committed so same-burst re-entry no-ops"
         );
         assert_eq!(submit_count(&mut rx), 1, "exactly one Submit enqueued");
-        let claimed = app.task_store.get("t1").unwrap();
+        let claimed = app.engine.task_store.get("t1").unwrap();
         assert_eq!(claimed.status, jfc_session::TaskStatus::InProgress);
     }
 
     #[tokio::test]
     async fn same_burst_reentry_is_noop_no_double_submit() {
         let mut app = factory_app();
-        app.task_store
+        app.engine.task_store
             .create("a".into(), "x".into(), None, Vec::<String>::new())
             .unwrap();
-        app.task_store
+        app.engine.task_store
             .create("b".into(), "y".into(), None, Vec::<String>::new())
             .unwrap();
         let (tx, mut rx) = mpsc::channel::<EngineEvent>(16);
@@ -351,7 +351,7 @@ mod tests {
             1,
             "second same-burst call must not enqueue a second Submit"
         );
-        let counts = app.task_store.counts();
+        let counts = app.engine.task_store.counts();
         assert_eq!(counts.in_progress, 1, "only one task claimed");
         assert_eq!(counts.pending, 1, "the other stays pending");
     }
@@ -359,13 +359,13 @@ mod tests {
     #[tokio::test]
     async fn reaper_requeues_stuck_then_reclaims_when_idle() {
         let mut app = factory_app();
-        app.task_store
+        app.engine.task_store
             .create("stuck".into(), "x".into(), None, Vec::<String>::new())
             .unwrap();
         // Simulate a prior factory turn that claimed t1 but ended without
         // completing it: in_progress + owned by jfc-factory, yet the leader is
         // now idle (turn_started_at None, no live agents).
-        app.task_store
+        app.engine.task_store
             .update(
                 "t1",
                 jfc_session::TaskPatch {
@@ -382,8 +382,8 @@ mod tests {
         // The reaper resets the stuck task, then the claim re-picks it and
         // commits a fresh turn — instead of stalling forever.
         assert_eq!(submit_count(&mut rx), 1, "stuck task re-continued");
-        assert!(app.turn_started_at.is_some());
-        let t1 = app.task_store.get("t1").unwrap();
+        assert!(app.engine.turn_started_at.is_some());
+        let t1 = app.engine.task_store.get("t1").unwrap();
         assert_eq!(t1.status, jfc_session::TaskStatus::InProgress);
         assert_eq!(t1.owner.as_deref(), Some("jfc-factory"));
     }

@@ -11,7 +11,7 @@ use crate::theme::Theme;
 use crate::types::{ToolCall, ToolInput};
 
 pub(super) fn approval(f: &mut Frame, app: &App) {
-    let Some(ref pending) = app.pending_approval else {
+    let Some(ref pending) = app.engine.pending_approval else {
         return;
     };
     let t = app.theme;
@@ -46,7 +46,7 @@ pub(super) fn approval(f: &mut Frame, app: &App) {
 
     // Count the queue depth so the user knows there's more behind the current
     // approval. Without this, multi-tool turns silently waited on each modal.
-    let queue_len = app.approval_queue.len();
+    let queue_len = app.engine.approval_queue.len();
     let title = if queue_len > 0 {
         format!(" Allow tool use? · 1 of {} ", queue_len + 1)
     } else {

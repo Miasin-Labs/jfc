@@ -20,7 +20,7 @@ static SANDBOX_TOAST_SHOWN: AtomicBool = AtomicBool::new(false);
 fn maybe_show_sandbox_toast(app: &mut App) {
     if crate::is_sandbox_active() && !SANDBOX_TOAST_SHOWN.swap(true, Ordering::Relaxed) {
         toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             toast::Toast::new(ToastKind::Info, "Tools auto-approved (sandboxed)"),
         );
     }
@@ -57,31 +57,31 @@ fn dispatch_tool_batch(app: &mut App, tx: &EventSender, calls: Vec<ToolCall>, ea
         return;
     }
     if eager {
-        app.in_flight_eager_dispatches += 1;
+        app.engine.in_flight_eager_dispatches += 1;
         for tool in &calls {
-            app.pre_dispatched_tool_ids
+            app.engine.pre_dispatched_tool_ids
                 .insert(tool.id.as_str().to_owned());
         }
     }
-    app.in_flight_tool_batches += 1;
+    app.engine.in_flight_tool_batches += 1;
     emit_in_progress(tx, "add", tool_ids(&calls));
     crate::runtime::update_task_activities(app, &calls);
     crate::stream::dispatch_tools_batched(
         calls,
         crate::stream::ToolBatchDispatch {
             tx: tx.clone(),
-            dedup: Arc::clone(&app.dedup_cache),
-            task_store: Some(Arc::clone(&app.task_store)),
-            active_team_name: app.team_context.team_name.clone(),
-            current_session_id: app
+            dedup: Arc::clone(&app.engine.dedup_cache),
+            task_store: Some(Arc::clone(&app.engine.task_store)),
+            active_team_name: app.engine.team_context.team_name.clone(),
+            current_session_id: app.engine
                 .current_session_id
                 .as_ref()
                 .map(|id| id.as_str().to_owned()),
-            provider: Arc::clone(&app.provider),
-            model: app.model.clone(),
-            teammate_event_tx: app.teammate_event_tx.clone(),
+            provider: Arc::clone(&app.engine.provider),
+            model: app.engine.model.clone(),
+            teammate_event_tx: app.engine.teammate_event_tx.clone(),
             local_advisor: crate::stream::LocalAdvisorDispatchContext::from_app(app),
-            cancel: app.cancel_token.clone(),
+            cancel: app.engine.cancel_token.clone(),
         },
     );
 }
@@ -94,14 +94,14 @@ pub(crate) fn dispatch_eager_safe_prefix(app: &mut App, tx: &EventSender) -> Vec
     if !crate::feature_gates::is_enabled(crate::feature_gates::FeatureGate::StreamingToolExec) {
         return Vec::new();
     }
-    if app.in_flight_tool_batches > 0
-        || app.pending_approval.is_some()
-        || !app.approval_queue.is_empty()
-        || app.pending_classifications > 0
+    if app.engine.in_flight_tool_batches > 0
+        || app.engine.pending_approval.is_some()
+        || !app.engine.approval_queue.is_empty()
+        || app.engine.pending_classifications > 0
     {
         return Vec::new();
     }
-    let prefix_len = app
+    let prefix_len = app.engine
         .pending_tool_calls
         .iter()
         .take_while(|tool| crate::scheduler::is_concurrency_safe(&tool.kind))
@@ -110,7 +110,7 @@ pub(crate) fn dispatch_eager_safe_prefix(app: &mut App, tx: &EventSender) -> Vec
         return Vec::new();
     }
 
-    let calls: Vec<_> = app.pending_tool_calls.drain(..prefix_len).collect();
+    let calls: Vec<_> = app.engine.pending_tool_calls.drain(..prefix_len).collect();
     let ids = tool_ids(&calls);
     tracing::info!(
         target: "jfc::ui::tool",
@@ -127,17 +127,17 @@ pub(crate) fn dispatch_eager_safe_prefix(app: &mut App, tx: &EventSender) -> Vec
 /// AllComplete handler will call this after the prefix settles, preserving
 /// model order between eager read-only tools and later side-effecting tools.
 pub(crate) fn dispatch_pending_after_stream(app: &mut App, tx: &EventSender) -> bool {
-    if app.pending_tool_calls.is_empty()
-        || app.in_flight_tool_batches > 0
-        || app.in_flight_eager_dispatches > 0
+    if app.engine.pending_tool_calls.is_empty()
+        || app.engine.in_flight_tool_batches > 0
+        || app.engine.in_flight_eager_dispatches > 0
     {
         return false;
     }
 
-    let all_calls = std::mem::take(&mut app.pending_tool_calls);
+    let all_calls = std::mem::take(&mut app.engine.pending_tool_calls);
     let calls: Vec<_> = all_calls
         .into_iter()
-        .filter(|tool| !app.pre_dispatched_tool_ids.contains(tool.id.as_str()))
+        .filter(|tool| !app.engine.pre_dispatched_tool_ids.contains(tool.id.as_str()))
         .collect();
     if calls.is_empty() {
         crate::runtime::send_critical(tx, EngineEvent::Tool(ToolEvent::AllComplete));
@@ -157,7 +157,7 @@ pub(crate) fn dispatch_pending_after_stream(app: &mut App, tx: &EventSender) -> 
 /// Handle a new tool announced by the stream layer.
 pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Box<ToolCall>) {
     app.record_stream_activity();
-    app.stream_lifecycle = None;
+    app.engine.stream_lifecycle = None;
     // Trace every StreamTool entry so next-run diagnostics show
     // exactly which routing path each tool took. Without this,
     // tools that take the auto-mode or no-approval branches are
@@ -167,12 +167,12 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
         target: "jfc::ui::tool",
         tool_kind = tool.kind.label(),
         tool_id = %tool.id,
-        auto_mode = app.auto_mode.enabled,
+        auto_mode = app.engine.auto_mode.enabled,
         needs_approval = app.tool_needs_approval(&tool),
-        streaming_idx = ?app.streaming_assistant_idx,
+        streaming_idx = ?app.engine.streaming_assistant_idx,
         "StreamTool received"
     );
-    app.exploration_state.record_tool_call(&tool);
+    app.engine.exploration_state.record_tool_call(&tool);
     // Guard 1: a tool that arrived already terminal (the stream
     // layer builds `ToolCall::new_failed` for malformed provider
     // input — bad JSON or schema mismatch) must NOT be dispatched.
@@ -218,7 +218,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
         // turn-ending tool — so a second concurrent one, or a malformed
         // `options` array, is recorded as a failed tool_result so the tool_use
         // stays paired and the loop can continue.
-        if app.pending_question.is_some() {
+        if app.engine.pending_question.is_some() {
             let mut tool = tool;
             tool.status = ToolStatus::Failed;
             tool.output = ToolOutput::Text(
@@ -241,7 +241,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
                 questions = pending.items.len(),
                 "route=ask_user_question (modal opened)"
             );
-            app.pending_question = Some(pending);
+            app.engine.pending_question = Some(pending);
         } else {
             let mut tool = tool;
             tool.status = ToolStatus::Failed;
@@ -273,7 +273,7 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
         if let Some(msg) = streaming_assistant_mut(app) {
             msg.parts.push(MessagePart::tool_boxed(tool));
         }
-    } else if app.auto_mode.enabled {
+    } else if app.engine.auto_mode.enabled {
         // v126 auto-mode: when enabled, every tool call is sent to a
         // classifier LLM that returns block/allow with a reason. The
         // user is never prompted. Disabled (default) → original flow.
@@ -288,18 +288,18 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
         // matching decrement is in handle_classifier_decision; the verdict is
         // dropped (no decrement) only on cancellation, which the turn-start
         // reset cleans up.
-        app.pending_classifications += 1;
-        let provider = Arc::clone(&app.provider);
-        let model = app.model.clone();
-        let cfg = app.auto_mode.clone();
-        let history = app.messages.clone();
+        app.engine.pending_classifications += 1;
+        let provider = Arc::clone(&app.engine.provider);
+        let model = app.engine.model.clone();
+        let cfg = app.engine.auto_mode.clone();
+        let history = app.engine.messages.clone();
         let tx_cls = tx.clone();
         let tool_for_task = tool.clone();
         // wg-async: classifier issues a provider call
         // (often 2-5s). Race against cancellation so an
         // ESC×2 unblocks the user-visible tool decision
         // instead of letting it land in a cancelled turn.
-        let cancel_cls = app.cancel_token.clone();
+        let cancel_cls = app.engine.cancel_token.clone();
         tokio::spawn(async move {
             let decision = tokio::select! {
                 biased;
@@ -339,14 +339,14 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
         // verdict so the modal cycles through them in order.
         let kind_label = tool.kind.label();
         let tool_id = tool.id.clone();
-        if app.pending_approval.is_none() {
+        if app.engine.pending_approval.is_none() {
             tracing::info!(
                 target: "jfc::ui::approval",
                 tool_kind = kind_label,
                 tool_id = %tool_id,
                 "modal_opened"
             );
-            app.pending_approval = Some(PendingApproval {
+            app.engine.pending_approval = Some(PendingApproval {
                 tool: *tool,
                 selected: 0,
             });
@@ -355,10 +355,10 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
                 target: "jfc::ui::approval",
                 tool_kind = kind_label,
                 tool_id = %tool_id,
-                queue_depth = app.approval_queue.len() + 1,
+                queue_depth = app.engine.approval_queue.len() + 1,
                 "queued_behind_modal"
             );
-            app.approval_queue.push_back(*tool);
+            app.engine.approval_queue.push_back(*tool);
         }
     } else {
         // Sandbox auto-approval toast (first time only per session).
@@ -379,11 +379,11 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
                 target: "jfc::ui::tool",
                 tool_kind = tool.kind.label(),
                 tool_id = %tool.id,
-                pending_total = app.pending_tool_calls.len() + 1,
+                pending_total = app.engine.pending_tool_calls.len() + 1,
                 safe_for_eager = current_tool_is_safe,
                 "route=eager_queue (streaming-tool-exec ON, no approval needed)"
             );
-            app.pending_tool_calls.push((*tool).clone());
+            app.engine.pending_tool_calls.push((*tool).clone());
             let dispatched_ids = dispatch_eager_safe_prefix(app, tx);
             if !dispatched_ids.iter().any(|id| id == &current_tool_id) {
                 let reason = if current_tool_is_safe {
@@ -398,11 +398,11 @@ pub(crate) async fn handle_stream_tool(app: &mut App, tx: &EventSender, tool: Bo
                 target: "jfc::ui::tool",
                 tool_kind = tool.kind.label(),
                 tool_id = %tool.id,
-                pending_total = app.pending_tool_calls.len() + 1,
+                pending_total = app.engine.pending_tool_calls.len() + 1,
                 "route=deferred_dispatch (streaming-tool-exec OFF, no approval needed)"
             );
             emit_deferred_tool_use(tx, &tool, "queued_for_stream_done");
-            app.pending_tool_calls.push(*tool);
+            app.engine.pending_tool_calls.push(*tool);
         }
     }
 }
@@ -415,7 +415,7 @@ pub(crate) async fn handle_classifier_decision(
     blocked: bool,
     reason: String,
 ) {
-    app.pending_classifications = app.pending_classifications.saturating_sub(1);
+    app.engine.pending_classifications = app.engine.pending_classifications.saturating_sub(1);
     if blocked {
         emit_in_progress(tx, "remove", vec![tool.id.as_str().to_owned()]);
         tool.status = ToolStatus::Failed;
@@ -431,7 +431,7 @@ pub(crate) async fn handle_classifier_decision(
                 .push(MessagePart::tool_boxed(Box::new((*tool).clone())));
         }
         emit_deferred_tool_use(tx, &tool, "queued_for_stream_done");
-        app.pending_tool_calls.push(*tool);
+        app.engine.pending_tool_calls.push(*tool);
     }
 
     // If the stream already finished while verdicts were outstanding (so
@@ -440,17 +440,17 @@ pub(crate) async fn handle_classifier_decision(
     // tools sit in pending_tool_calls forever and the loop stalls. While the
     // stream is still active (`is_streaming`), defer: stream_done will
     // dispatch normally once it ends with the counter back at 0.
-    let resolved_while_idle = !app.is_streaming
-        && app.pending_classifications == 0
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty();
+    let resolved_while_idle = !app.engine.is_streaming
+        && app.engine.pending_classifications == 0
+        && app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty();
     if !resolved_while_idle {
         return;
     }
-    if !app.pending_tool_calls.is_empty() {
-        let calls = std::mem::take(&mut app.pending_tool_calls);
+    if !app.engine.pending_tool_calls.is_empty() {
+        let calls = std::mem::take(&mut app.engine.pending_tool_calls);
         crate::runtime::update_task_activities(app, &calls);
-        app.in_flight_tool_batches += 1;
+        app.engine.in_flight_tool_batches += 1;
         emit_in_progress(
             tx,
             "add",
@@ -463,18 +463,18 @@ pub(crate) async fn handle_classifier_decision(
             calls,
             crate::stream::ToolBatchDispatch {
                 tx: tx.clone(),
-                dedup: Arc::clone(&app.dedup_cache),
-                task_store: Some(Arc::clone(&app.task_store)),
-                active_team_name: app.team_context.team_name.clone(),
-                current_session_id: app
+                dedup: Arc::clone(&app.engine.dedup_cache),
+                task_store: Some(Arc::clone(&app.engine.task_store)),
+                active_team_name: app.engine.team_context.team_name.clone(),
+                current_session_id: app.engine
                     .current_session_id
                     .as_ref()
                     .map(|id| id.as_str().to_owned()),
-                provider: Arc::clone(&app.provider),
-                model: app.model.clone(),
-                teammate_event_tx: app.teammate_event_tx.clone(),
+                provider: Arc::clone(&app.engine.provider),
+                model: app.engine.model.clone(),
+                teammate_event_tx: app.engine.teammate_event_tx.clone(),
                 local_advisor: crate::stream::LocalAdvisorDispatchContext::from_app(app),
-                cancel: app.cancel_token.clone(),
+                cancel: app.engine.cancel_token.clone(),
             },
         );
     } else {
@@ -512,8 +512,8 @@ pub(crate) fn handle_server_tool_result(
         );
     }
     let mut applied = false;
-    if let Some(idx) = app.streaming_assistant_idx
-        && let Some(msg) = app.messages.get_mut(idx)
+    if let Some(idx) = app.engine.streaming_assistant_idx
+        && let Some(msg) = app.engine.messages.get_mut(idx)
     {
         for part in msg.parts.iter_mut() {
             if let MessagePart::Tool(tc) = part
@@ -557,7 +557,7 @@ pub(crate) fn handle_server_tool_result(
             target: "jfc::stream",
             tool_use_id = %tool_use_id,
             wire_type = tool_kind.wire_type(),
-            streaming_idx = ?app.streaming_assistant_idx,
+            streaming_idx = ?app.engine.streaming_assistant_idx,
             "server_tool_result arrived with no matching server_tool_use ToolCall on streaming message"
         );
     }
@@ -611,7 +611,7 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new(Arc::new(TestProvider), "test-model");
-        app.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
         app
     }
 
@@ -644,15 +644,15 @@ mod tests {
     async fn eager_prefix_does_not_dispatch_unsafe_front_regression() {
         let _guard = StreamingToolExecGuard::enable();
         let mut app = test_app();
-        app.pending_tool_calls = vec![bash_tool("b1"), glob_tool("g1")];
+        app.engine.pending_tool_calls = vec![bash_tool("b1"), glob_tool("g1")];
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
         let dispatched = dispatch_eager_safe_prefix(&mut app, &tx);
 
         assert!(dispatched.is_empty());
-        assert_eq!(app.pending_tool_calls.len(), 2);
-        assert_eq!(app.in_flight_eager_dispatches, 0);
-        assert_eq!(app.in_flight_tool_batches, 0);
+        assert_eq!(app.engine.pending_tool_calls.len(), 2);
+        assert_eq!(app.engine.in_flight_eager_dispatches, 0);
+        assert_eq!(app.engine.in_flight_tool_batches, 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -660,18 +660,18 @@ mod tests {
     async fn eager_prefix_drains_only_safe_prefix_before_unsafe_regression() {
         let _guard = StreamingToolExecGuard::enable();
         let mut app = test_app();
-        app.pending_tool_calls = vec![glob_tool("g1"), glob_tool("g2"), bash_tool("b1")];
+        app.engine.pending_tool_calls = vec![glob_tool("g1"), glob_tool("g2"), bash_tool("b1")];
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
         let dispatched = dispatch_eager_safe_prefix(&mut app, &tx);
 
         assert_eq!(dispatched, vec!["g1".to_owned(), "g2".to_owned()]);
-        assert_eq!(app.pending_tool_calls.len(), 1);
-        assert_eq!(app.pending_tool_calls[0].id.as_str(), "b1");
-        assert_eq!(app.in_flight_eager_dispatches, 1);
-        assert_eq!(app.in_flight_tool_batches, 1);
-        assert!(app.pre_dispatched_tool_ids.contains("g1"));
-        assert!(app.pre_dispatched_tool_ids.contains("g2"));
+        assert_eq!(app.engine.pending_tool_calls.len(), 1);
+        assert_eq!(app.engine.pending_tool_calls[0].id.as_str(), "b1");
+        assert_eq!(app.engine.in_flight_eager_dispatches, 1);
+        assert_eq!(app.engine.in_flight_tool_batches, 1);
+        assert!(app.engine.pre_dispatched_tool_ids.contains("g1"));
+        assert!(app.engine.pre_dispatched_tool_ids.contains("g2"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -679,18 +679,18 @@ mod tests {
     async fn eager_prefix_waits_for_auto_mode_classifier_regression() {
         let _guard = StreamingToolExecGuard::enable();
         let mut app = test_app();
-        app.pending_classifications = 1;
-        app.pending_tool_calls = vec![glob_tool("g1")];
+        app.engine.pending_classifications = 1;
+        app.engine.pending_tool_calls = vec![glob_tool("g1")];
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
         let dispatched = dispatch_eager_safe_prefix(&mut app, &tx);
 
         assert!(dispatched.is_empty());
-        assert_eq!(app.pending_tool_calls.len(), 1);
-        assert_eq!(app.pending_tool_calls[0].id.as_str(), "g1");
-        assert_eq!(app.in_flight_eager_dispatches, 0);
-        assert_eq!(app.in_flight_tool_batches, 0);
-        assert!(app.pre_dispatched_tool_ids.is_empty());
+        assert_eq!(app.engine.pending_tool_calls.len(), 1);
+        assert_eq!(app.engine.pending_tool_calls[0].id.as_str(), "g1");
+        assert_eq!(app.engine.in_flight_eager_dispatches, 0);
+        assert_eq!(app.engine.in_flight_tool_batches, 0);
+        assert!(app.engine.pre_dispatched_tool_ids.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -698,11 +698,11 @@ mod tests {
     async fn classifier_decision_with_streaming_tool_exec_queues_while_streaming_regression() {
         let _guard = StreamingToolExecGuard::enable();
         let mut app = test_app();
-        app.auto_mode.enabled = true;
-        app.is_streaming = true;
-        app.pending_classifications = 1;
-        app.messages.push(ChatMessage::assistant_parts(Vec::new()));
-        app.streaming_assistant_idx = Some(0);
+        app.engine.auto_mode.enabled = true;
+        app.engine.is_streaming = true;
+        app.engine.pending_classifications = 1;
+        app.engine.messages.push(ChatMessage::assistant_parts(Vec::new()));
+        app.engine.streaming_assistant_idx = Some(0);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
         handle_classifier_decision(
@@ -714,12 +714,12 @@ mod tests {
         )
         .await;
 
-        assert_eq!(app.pending_classifications, 0);
-        assert_eq!(app.pending_tool_calls.len(), 1);
-        assert_eq!(app.pending_tool_calls[0].id.as_str(), "g1");
-        assert_eq!(app.in_flight_eager_dispatches, 0);
-        assert_eq!(app.in_flight_tool_batches, 0);
-        assert!(app.pre_dispatched_tool_ids.is_empty());
+        assert_eq!(app.engine.pending_classifications, 0);
+        assert_eq!(app.engine.pending_tool_calls.len(), 1);
+        assert_eq!(app.engine.pending_tool_calls[0].id.as_str(), "g1");
+        assert_eq!(app.engine.in_flight_eager_dispatches, 0);
+        assert_eq!(app.engine.in_flight_tool_batches, 0);
+        assert!(app.engine.pre_dispatched_tool_ids.is_empty());
 
         let event = rx
             .try_recv()
@@ -737,9 +737,9 @@ mod tests {
     async fn classifier_decision_after_stream_dispatches_ordered_batch_not_eager_regression() {
         let _guard = StreamingToolExecGuard::enable();
         let mut app = test_app();
-        app.auto_mode.enabled = true;
-        app.is_streaming = false;
-        app.pending_classifications = 1;
+        app.engine.auto_mode.enabled = true;
+        app.engine.is_streaming = false;
+        app.engine.pending_classifications = 1;
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
         handle_classifier_decision(
@@ -751,10 +751,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(app.pending_classifications, 0);
-        assert!(app.pending_tool_calls.is_empty());
-        assert_eq!(app.in_flight_eager_dispatches, 0);
-        assert_eq!(app.in_flight_tool_batches, 1);
-        assert!(app.pre_dispatched_tool_ids.is_empty());
+        assert_eq!(app.engine.pending_classifications, 0);
+        assert!(app.engine.pending_tool_calls.is_empty());
+        assert_eq!(app.engine.in_flight_eager_dispatches, 0);
+        assert_eq!(app.engine.in_flight_tool_batches, 1);
+        assert!(app.engine.pre_dispatched_tool_ids.is_empty());
     }
 }

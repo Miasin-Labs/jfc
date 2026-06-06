@@ -45,7 +45,7 @@ pub(crate) fn handle_workflow_progress(app: &mut App, ev: WorkflowProgressEvent)
 }
 
 fn apply_phase(app: &mut App, task_id: &str, title: String) {
-    let Some(bt) = app.background_tasks.get_mut(task_id) else {
+    let Some(bt) = app.engine.background_tasks.get_mut(task_id) else {
         return;
     };
     let wfp = ensure_progress(bt, task_id);
@@ -60,7 +60,7 @@ fn apply_agent_started(
     label: String,
     phase: Option<String>,
 ) {
-    let Some(bt) = app.background_tasks.get_mut(task_id) else {
+    let Some(bt) = app.engine.background_tasks.get_mut(task_id) else {
         return;
     };
     let wfp = ensure_progress(bt, task_id);
@@ -81,7 +81,7 @@ fn apply_agent_cache_hit(
     label: String,
     phase: Option<String>,
 ) {
-    let Some(bt) = app.background_tasks.get_mut(task_id) else {
+    let Some(bt) = app.engine.background_tasks.get_mut(task_id) else {
         return;
     };
     let wfp = ensure_progress(bt, task_id);
@@ -97,7 +97,7 @@ fn apply_agent_cache_hit(
 }
 
 fn apply_agent_done(app: &mut App, task_id: &str, index: u32) {
-    let Some(bt) = app.background_tasks.get_mut(task_id) else {
+    let Some(bt) = app.engine.background_tasks.get_mut(task_id) else {
         return;
     };
     if let Some(ref mut wfp) = bt.workflow_progress
@@ -108,7 +108,7 @@ fn apply_agent_done(app: &mut App, task_id: &str, index: u32) {
 }
 
 fn apply_agent_failed(app: &mut App, task_id: &str, index: u32, error: String) {
-    let Some(bt) = app.background_tasks.get_mut(task_id) else {
+    let Some(bt) = app.engine.background_tasks.get_mut(task_id) else {
         return;
     };
     if let Some(ref mut wfp) = bt.workflow_progress {
@@ -120,7 +120,7 @@ fn apply_agent_failed(app: &mut App, task_id: &str, index: u32, error: String) {
 }
 
 fn apply_log(app: &mut App, task_id: &str, message: String) {
-    let Some(bt) = app.background_tasks.get_mut(task_id) else {
+    let Some(bt) = app.engine.background_tasks.get_mut(task_id) else {
         return;
     };
     let wfp = ensure_progress(bt, task_id);

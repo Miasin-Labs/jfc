@@ -1,5 +1,5 @@
 //! Renders the `AskUserQuestion` modal — the interactive multiple-choice
-//! dialog driven by `app.pending_question` (see `input/question.rs`).
+//! dialog driven by `app.engine.pending_question` (see `input/question.rs`).
 //!
 //! Structurally a sibling of `render/approval.rs`: a centered, cleared dialog
 //! with (for multi-question prompts) a header-chip nav bar, a keyboard-navigable
@@ -19,7 +19,7 @@ use crate::app::{App, PendingQuestion, QuestionItem};
 use crate::theme::Theme;
 
 pub(super) fn question(f: &mut Frame, app: &App) {
-    let Some(pending) = app.pending_question.as_ref() else {
+    let Some(pending) = app.engine.pending_question.as_ref() else {
         return;
     };
     let t = app.theme;

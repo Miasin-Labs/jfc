@@ -35,22 +35,22 @@ pub(crate) fn set_terminal_title(app: &App) {
 
     static LAST: OnceLock<Mutex<String>> = OnceLock::new();
     let last = LAST.get_or_init(|| Mutex::new(String::new()));
-    let cwd_label = std::path::Path::new(app.cwd.as_str())
+    let cwd_label = std::path::Path::new(app.engine.cwd.as_str())
         .file_name()
         .and_then(|name| name.to_str())
         .map(str::to_owned)
-        .unwrap_or_else(|| app.cwd.clone());
+        .unwrap_or_else(|| app.engine.cwd.clone());
     let lines_below = app
         .total_lines
         .saturating_sub(app.scroll_offset + app.viewport_height);
     let prefix = if !app.follow_bottom && lines_below > 0 {
         format!("({lines_below} new) ")
-    } else if app.is_streaming {
+    } else if app.engine.is_streaming {
         "● ".to_owned()
     } else {
         String::new()
     };
-    let title = format!("{}jfc · {} · {}", prefix, app.model, cwd_label);
+    let title = format!("{}jfc · {} · {}", prefix, app.engine.model, cwd_label);
     let mut guard = match last.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),

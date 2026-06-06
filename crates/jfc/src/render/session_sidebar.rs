@@ -11,7 +11,7 @@ use crate::theme::Theme;
 
 /// Sessions sidebar — toggled with Ctrl+B. Renders the saved-session metadata
 /// from `~/.config/jfc/sessions/` (cached on `App::session_meta` so render()
-/// does no disk I/O). Sessions whose `cwd` matches `app.cwd` are shown first
+/// does no disk I/O). Sessions whose `cwd` matches `app.engine.cwd` are shown first
 /// under a `── This project ──` separator; everything else (including
 /// legacy `cwd: None` entries) lands below `── Other projects ──`.
 /// Each row is two lines: title (from `display_title()`) on top, a muted
@@ -39,7 +39,7 @@ pub(super) fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         )))]
     } else {
         let now = chrono::Utc::now();
-        let cwd = app.cwd.clone();
+        let cwd = app.engine.cwd.clone();
         let (this_project, other) =
             jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
 
@@ -90,7 +90,7 @@ pub(super) fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 /// sidebar (this-project first, then others). Used by Up/Down/Enter so
 /// keyboard navigation matches what the user sees.
 pub fn ordered_sidebar_sessions(app: &App) -> Vec<crate::ids::SessionId> {
-    let cwd = app.cwd.clone();
+    let cwd = app.engine.cwd.clone();
     let (this_project, other) =
         jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
     this_project
@@ -107,7 +107,7 @@ fn visible_selected_row(app: &App) -> Option<usize> {
     if app.session_meta.is_empty() {
         return None;
     }
-    let cwd = app.cwd.clone();
+    let cwd = app.engine.cwd.clone();
     let (this_project, other) =
         jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
     let sel = app.session_selected;
@@ -140,7 +140,7 @@ fn session_row(
     now: &chrono::DateTime<chrono::Utc>,
     t: Theme,
 ) -> ListItem<'static> {
-    let is_active = app.current_session_id.as_ref() == Some(&s.id);
+    let is_active = app.engine.current_session_id.as_ref() == Some(&s.id);
     let bullet = if is_active { "▣ " } else { "  " };
     let title = s.display_title();
     let cwd_label = jfc_session::shorten_cwd(s.cwd.as_deref());

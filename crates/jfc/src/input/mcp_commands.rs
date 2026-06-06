@@ -21,8 +21,8 @@ pub(super) async fn handle_mcp_command(app: &mut App, args: &str) {
     };
 
     let Some(registry) = crate::tools::snapshot_mcp_registry() else {
-        app.messages.push(ChatMessage::user(raw));
-        app.messages.push(ChatMessage::assistant(
+        app.engine.messages.push(ChatMessage::user(raw));
+        app.engine.messages.push(ChatMessage::assistant(
             "MCP registry not initialized. Add `[mcp.<name>]` blocks to \
              `~/.config/jfc/config.toml` and restart jfc."
                 .to_owned(),
@@ -50,18 +50,18 @@ pub(super) async fn handle_mcp_command(app: &mut App, args: &str) {
                 }
                 s
             };
-            app.messages.push(ChatMessage::user(raw));
-            app.messages.push(ChatMessage::assistant(body));
+            app.engine.messages.push(ChatMessage::user(raw));
+            app.engine.messages.push(ChatMessage::assistant(body));
         }
         "restart" => {
             if arg.is_empty() {
-                app.messages.push(ChatMessage::user(raw));
-                app.messages.push(ChatMessage::assistant(
+                app.engine.messages.push(ChatMessage::user(raw));
+                app.engine.messages.push(ChatMessage::assistant(
                     "Usage: `/mcp restart <name>`.".to_owned(),
                 ));
                 return;
             }
-            app.messages.push(ChatMessage::user(raw));
+            app.engine.messages.push(ChatMessage::user(raw));
             let body = match crate::mcp::restart_server(&registry, arg).await {
                 Some(true) => format!("MCP server `{arg}` restarted and reconnected."),
                 Some(false) => format!(
@@ -70,12 +70,12 @@ pub(super) async fn handle_mcp_command(app: &mut App, args: &str) {
                 ),
                 None => format!("MCP server `{arg}` is not configured."),
             };
-            app.messages.push(ChatMessage::assistant(body));
+            app.engine.messages.push(ChatMessage::assistant(body));
         }
         "logs" => {
             if arg.is_empty() {
-                app.messages.push(ChatMessage::user(raw));
-                app.messages.push(ChatMessage::assistant(
+                app.engine.messages.push(ChatMessage::user(raw));
+                app.engine.messages.push(ChatMessage::assistant(
                     "Usage: `/mcp logs <name>`.".to_owned(),
                 ));
                 return;
@@ -108,12 +108,12 @@ pub(super) async fn handle_mcp_command(app: &mut App, args: &str) {
                     }
                 },
             };
-            app.messages.push(ChatMessage::user(raw));
-            app.messages.push(ChatMessage::assistant(body));
+            app.engine.messages.push(ChatMessage::user(raw));
+            app.engine.messages.push(ChatMessage::assistant(body));
         }
         other => {
-            app.messages.push(ChatMessage::user(raw));
-            app.messages.push(ChatMessage::assistant(format!(
+            app.engine.messages.push(ChatMessage::user(raw));
+            app.engine.messages.push(ChatMessage::assistant(format!(
                 "Unknown subcommand `{other}`. Try `/mcp list`, `/mcp restart <name>`, or `/mcp logs <name>`."
             )));
         }

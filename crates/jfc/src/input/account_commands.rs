@@ -12,7 +12,7 @@ pub(super) async fn cmd_workflow(
     // workflow tasks. `/workflow run <name>` injects a `Workflow({name})`
     // request so the model invokes the real Workflow tool (deterministic JS
     // orchestration). Legacy TOML step-templates are also surfaced.
-    app.messages.push(ChatMessage::user(text.to_owned()));
+    app.engine.messages.push(ChatMessage::user(text.to_owned()));
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let arg = parts.get(1).copied().unwrap_or("").trim();
     let mut sub = arg.split_whitespace();
@@ -20,12 +20,12 @@ pub(super) async fn cmd_workflow(
     let rest: String = sub.collect::<Vec<_>>().join(" ");
     match verb {
         "" | "list" => {
-            app.messages
+            app.engine.messages
                 .push(ChatMessage::assistant(render_workflow_listing(app, &cwd)));
         }
         "run" => {
             if rest.is_empty() {
-                app.messages.push(ChatMessage::assistant(
+                app.engine.messages.push(ChatMessage::assistant(
                     "Usage: `/workflow run <name>`. List available workflows with `/workflow`."
                         .into(),
                 ));
@@ -33,13 +33,13 @@ pub(super) async fn cmd_workflow(
             }
             // Resolve the name against the registry (built-in/user/project).
             if crate::workflows::resolve(&cwd, &rest).is_none() {
-                app.messages.push(ChatMessage::assistant(format!(
+                app.engine.messages.push(ChatMessage::assistant(format!(
                     "Workflow `{rest}` not found. List available workflows with `/workflow`."
                 )));
                 return;
             }
             let Some(tx) = tx else {
-                app.messages.push(ChatMessage::assistant(
+                app.engine.messages.push(ChatMessage::assistant(
                     "Workflow runner needs the event channel; called from a context without one."
                         .into(),
                 ));
@@ -58,7 +58,7 @@ pub(super) async fn cmd_workflow(
                     crate::runtime::ControlEvent::SubmitPrompt(prompt),
                 ))
                 .await;
-            app.messages.push(ChatMessage::assistant(format!(
+            app.engine.messages.push(ChatMessage::assistant(format!(
                 "Dispatching workflow `{rest}` via the Workflow tool…"
             )));
         }
@@ -82,33 +82,33 @@ pub(super) async fn cmd_workflow(
                         .to_owned(),
                 ),
                 None => {
-                    app.messages.push(ChatMessage::assistant(
+                    app.engine.messages.push(ChatMessage::assistant(
                         "Usage: `/workflow save [user|project] <name>`".into(),
                     ));
                     return;
                 }
             };
             if name.is_empty() {
-                app.messages.push(ChatMessage::assistant(
+                app.engine.messages.push(ChatMessage::assistant(
                     "Usage: `/workflow save [user|project] <name>`".into(),
                 ));
                 return;
             }
             match crate::workflows::resolve(&cwd, &name) {
                 None => {
-                    app.messages.push(ChatMessage::assistant(format!(
+                    app.engine.messages.push(ChatMessage::assistant(format!(
                         "Workflow `{name}` not found. List available workflows with `/workflow`."
                     )));
                 }
                 Some(wf) => match crate::workflows::save_workflow(&cwd, scope, &name, &wf.script) {
                     Ok(path) => {
-                        app.messages.push(ChatMessage::assistant(format!(
+                        app.engine.messages.push(ChatMessage::assistant(format!(
                             "Saved workflow `{name}` to `{}`.",
                             path.display()
                         )));
                     }
                     Err(e) => {
-                        app.messages.push(ChatMessage::assistant(format!(
+                        app.engine.messages.push(ChatMessage::assistant(format!(
                             "Failed to save workflow `{name}`: {e}"
                         )));
                     }
@@ -121,7 +121,7 @@ pub(super) async fn cmd_workflow(
             let id_filter = rest.trim().to_owned();
 
             // Collect matching tasks: running + recently completed (terminal).
-            let tasks: Vec<&crate::app::BackgroundTask> = app
+            let tasks: Vec<&crate::app::BackgroundTask> = app.engine
                 .background_tasks
                 .values()
                 .filter(|bt| {
@@ -150,7 +150,7 @@ pub(super) async fn cmd_workflow(
                 .collect();
 
             if tasks.is_empty() {
-                app.messages
+                app.engine.messages
                     .push(ChatMessage::assistant("No active workflow tasks.".into()));
                 return;
             }
@@ -221,10 +221,10 @@ pub(super) async fn cmd_workflow(
                 }
             }
 
-            app.messages.push(ChatMessage::assistant(output));
+            app.engine.messages.push(ChatMessage::assistant(output));
         }
         other => {
-            app.messages.push(ChatMessage::assistant(format!(
+            app.engine.messages.push(ChatMessage::assistant(format!(
                 "Unknown subcommand `{other}`. Use `/workflow list`, `/workflow run <name>`, `/workflow save [user|project] <name>`, or `/workflow status [id]`."
             )));
         }
@@ -238,7 +238,7 @@ fn render_workflow_listing(app: &App, cwd: &std::path::Path) -> String {
     let mut body = String::new();
 
     // ── running workflow background tasks ───────────────────────────────
-    let running: Vec<&crate::app::BackgroundTask> = app
+    let running: Vec<&crate::app::BackgroundTask> = app.engine
         .background_tasks
         .values()
         .filter(|bt| {
@@ -313,7 +313,7 @@ pub(super) async fn cmd_login(
     // out to xdg-open / open / start to launch the browser
     // (cheap, async-safe; failures are silent on systems
     // without one of those binaries).
-    app.messages.push(ChatMessage::user(text.to_owned()));
+    app.engine.messages.push(ChatMessage::user(text.to_owned()));
     let arg = parts
         .get(1)
         .copied()
@@ -350,7 +350,7 @@ pub(super) async fn cmd_login(
         //     .spawn();
         // tracing::info!(target: "jfc::login", %url, "opened browser for /login");
     }
-    app.messages.push(ChatMessage::assistant(format!(
+    app.engine.messages.push(ChatMessage::assistant(format!(
         "{dispatch}{}",
         if url.is_some() {
             "\n\n_(opened the browser for you)_"
@@ -366,7 +366,7 @@ pub(super) async fn cmd_logout(
     text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    app.messages.push(ChatMessage::user(text.to_owned()));
+    app.engine.messages.push(ChatMessage::user(text.to_owned()));
     let arg = parts
         .get(1)
         .copied()
@@ -403,7 +403,7 @@ pub(super) async fn cmd_logout(
                 .join("\n")
         )
     };
-    app.messages.push(ChatMessage::assistant(summary));
+    app.engine.messages.push(ChatMessage::assistant(summary));
 }
 
 pub(super) async fn cmd_release_notes(
@@ -412,7 +412,7 @@ pub(super) async fn cmd_release_notes(
     text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    app.messages.push(ChatMessage::user(text.to_owned()));
+    app.engine.messages.push(ChatMessage::user(text.to_owned()));
     // Try to read the workspace CHANGELOG; fall back to a stub
     // pointer when the binary was installed somewhere without it.
     let candidates = ["CHANGELOG.md", "../CHANGELOG.md", "../../CHANGELOG.md"];
@@ -434,7 +434,7 @@ pub(super) async fn cmd_release_notes(
                 super::support::releases_url()
             )
         });
-    app.messages.push(ChatMessage::assistant(notes));
+    app.engine.messages.push(ChatMessage::assistant(notes));
 }
 
 pub(super) async fn cmd_feedback(
@@ -443,8 +443,8 @@ pub(super) async fn cmd_feedback(
     text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    app.messages.push(ChatMessage::user(text.to_owned()));
-    let session_id = app
+    app.engine.messages.push(ChatMessage::user(text.to_owned()));
+    let session_id = app.engine
         .current_session_id
         .as_ref()
         .map(|s| s.as_str())
@@ -458,8 +458,8 @@ pub(super) async fn cmd_feedback(
          - OS: `{}`\n\
          - Session ID: `{session_id}`\n",
         env!("CARGO_PKG_VERSION"),
-        app.provider.name(),
-        app.model.as_str(),
+        app.engine.provider.name(),
+        app.engine.model.as_str(),
         std::env::consts::OS,
     );
     let _url = super::support::bug_report_url("", &body);
@@ -472,7 +472,7 @@ pub(super) async fn cmd_feedback(
     // let _ = std::process::Command::new("cmd")
     //     .args(["/C", "start", &url])
     //     .spawn();
-    app.messages.push(ChatMessage::assistant(format!(
+    app.engine.messages.push(ChatMessage::assistant(format!(
         "Opened a pre-filled bug report at {}/issues/new in your browser \
          (version, model, OS, and session id `{session_id}` are already attached).",
         super::support::repo_url(),
@@ -485,8 +485,8 @@ pub(super) async fn cmd_upgrade(
     text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    app.messages.push(ChatMessage::user(text.to_owned()));
-    app.messages.push(ChatMessage::assistant(format!(
+    app.engine.messages.push(ChatMessage::user(text.to_owned()));
+    app.engine.messages.push(ChatMessage::assistant(format!(
         "To upgrade jfc, run one of:\n\
          * `cargo install --git {}` (HEAD)\n\
          * `cargo install jfc` (latest crates.io release)\n\
@@ -507,10 +507,10 @@ pub(super) async fn cmd_batch(
     // 50% discount. The batch ID is returned synchronously;
     // results stream back via the Sessions API in a follow-up
     // turn (poll `/batch status <id>`).
-    app.messages.push(ChatMessage::user(text.to_owned()));
+    app.engine.messages.push(ChatMessage::user(text.to_owned()));
     let arg = parts.get(1).copied().unwrap_or("").trim();
     if arg.is_empty() {
-        app.messages.push(ChatMessage::assistant(
+        app.engine.messages.push(ChatMessage::assistant(
             "Usage: `/batch <prompt-file>`. The file should contain one prompt per line.".into(),
         ));
         return;
@@ -519,7 +519,7 @@ pub(super) async fn cmd_batch(
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            app.messages.push(ChatMessage::assistant(format!(
+            app.engine.messages.push(ChatMessage::assistant(format!(
                 "Failed to read `{}`: {e}",
                 path.display(),
             )));
@@ -532,18 +532,18 @@ pub(super) async fn cmd_batch(
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
     if prompts.is_empty() {
-        app.messages.push(ChatMessage::assistant(
+        app.engine.messages.push(ChatMessage::assistant(
             "No prompts found (each non-empty, non-`#`-comment line counts as one).".into(),
         ));
         return;
     }
     let Some(client) = crate::sdk_bridge::build_client() else {
-        app.messages.push(ChatMessage::assistant(
+        app.engine.messages.push(ChatMessage::assistant(
             "No Anthropic API key configured — `/batch` needs one (set ANTHROPIC_API_KEY).".into(),
         ));
         return;
     };
-    let model = app.model.as_str().to_owned();
+    let model = app.engine.model.as_str().to_owned();
     let prompt_count = prompts.len();
     let path_for_msg = path.display().to_string();
     tokio::spawn(async move {
@@ -594,7 +594,7 @@ pub(super) async fn cmd_batch(
             }
         }
     });
-    app.messages.push(ChatMessage::assistant(format!(
+    app.engine.messages.push(ChatMessage::assistant(format!(
         "Queued {prompt_count} prompts from `{}` for batch processing. \
                  Watch stderr / `/doctor` for the batch ID.",
         path.display()

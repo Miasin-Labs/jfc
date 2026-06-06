@@ -86,26 +86,26 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // for the *whole* turn (set at submit, cleared at the
     // turn-complete event). Background tasks count too so a fan of
     // subagents keeps the spinner alive even if the leader finished.
-    let any_alive_subagent = app.background_tasks.values().any(|bt| bt.status.is_alive());
-    let show_spinner = app.is_streaming
-        || app.compacting_started_at.is_some()
-        || !app.pending_tool_calls.is_empty()
-        || app.turn_started_at.is_some()
+    let any_alive_subagent = app.engine.background_tasks.values().any(|bt| bt.status.is_alive());
+    let show_spinner = app.engine.is_streaming
+        || app.engine.compacting_started_at.is_some()
+        || !app.engine.pending_tool_calls.is_empty()
+        || app.engine.turn_started_at.is_some()
         || any_alive_subagent;
     // When a team is active, the spinner area expands to show the teammate tree:
     // 2 base rows (spinner + next-task hint) + 1 leader row + N teammate rows.
     // For non-team parallel subagents (the "fire 5 Explore agents" case),
     // expand for the same reason — the user sees one row per agent.
-    let teammate_count = if app.team_context.is_active() {
-        app.team_context.teammates.len().saturating_sub(1) // exclude leader
+    let teammate_count = if app.engine.team_context.is_active() {
+        app.engine.team_context.teammates.len().saturating_sub(1) // exclude leader
     } else {
         0
     };
-    let active_subagent_count = if !app.team_context.is_active() {
+    let active_subagent_count = if !app.engine.team_context.is_active() {
         // Count both Running and Idle teammates: Idle ones still belong
         // on the fan (the user can SendMessage to wake them) so the
         // tree row needs to be reserved for them.
-        app.background_tasks
+        app.engine.background_tasks
             .values()
             .filter(|bt| bt.status.is_alive())
             .count()
@@ -123,7 +123,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // ("Tasks (k/n done)") + up to task_pin_visible rows + an optional
     // "+N more" footer. Height collapses to 0 when no tasks exist so
     // first-run UI stays clean.
-    let tp_all = app.task_store.list(jfc_session::DeletedFilter::Exclude);
+    let tp_all = app.engine.task_store.list(jfc_session::DeletedFilter::Exclude);
     let tp_open: usize = tp_all
         .iter()
         .filter(|t| {
@@ -138,7 +138,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         .iter()
         .filter(|t| matches!(t.status, jfc_session::TaskStatus::Completed))
         .filter(|t| {
-            app.task_completion_times
+            app.engine.task_completion_times
                 .get(&t.id)
                 .is_some_and(|ts| now_tp.duration_since(*ts).as_secs() < 30)
         })
@@ -205,7 +205,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // the row a notification (transient), not a status display
     // (persistent) — what was wrong before this change.
     let unack_count =
-        crate::diagnostics::unacknowledged(&app.diagnostics, &app.delivered_diagnostics).len();
+        crate::diagnostics::unacknowledged(&app.engine.diagnostics, &app.delivered_diagnostics).len();
     let diag_row_height: u16 = if unack_count == 0 { 0 } else { 1 };
 
     // In task view the agent tab strip sits at the TOP (browser-style),
@@ -343,7 +343,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         teammates_panel(f, app);
     }
 
-    if !app.toasts.is_empty() {
+    if !app.engine.toasts.is_empty() {
         toast_overlay(f, app);
     }
 
@@ -351,7 +351,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         mention_popup(f, app, chunks[5]);
     }
 
-    if app.show_diagnostic_panel && !app.diagnostics.is_empty() {
+    if app.show_diagnostic_panel && !app.engine.diagnostics.is_empty() {
         diagnostic_panel(f, app);
     }
 
@@ -373,14 +373,14 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         slash_popup(f, app, &prefix);
     }
 
-    if app.pending_approval.is_some() {
+    if app.engine.pending_approval.is_some() {
         approval(f, app);
     }
 
     // The AskUserQuestion modal. Mutually exclusive with approval in practice
     // (approval gates a dispatch; a question is a separate turn-ending tool),
     // but rendered last so it wins if both were somehow set.
-    if app.pending_question.is_some() {
+    if app.engine.pending_question.is_some() {
         question(f, app);
     }
 }
@@ -467,7 +467,7 @@ fn apply_text_selection(f: &mut Frame, app: &mut App) {
         }
         crate::runtime::copy_to_clipboard(&text, "select");
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Info,
                 format!("Copied {} chars", text.chars().count()),

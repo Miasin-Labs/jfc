@@ -38,12 +38,12 @@ pub(crate) fn record_network_recovery(
 ) {
     let status_code = parse_retry_status_code(message);
     let reason = classify_network_recovery(status_code, message);
-    app.network_recovery_attempts = app.network_recovery_attempts.saturating_add(1);
-    app.network_recovery_status = Some(NetworkRecoveryStatus {
+    app.engine.network_recovery_attempts = app.engine.network_recovery_attempts.saturating_add(1);
+    app.engine.network_recovery_status = Some(NetworkRecoveryStatus {
         provider,
         reason,
         status_code,
-        attempts: app.network_recovery_attempts,
+        attempts: app.engine.network_recovery_attempts,
         updated_at: std::time::Instant::now(),
     });
 }

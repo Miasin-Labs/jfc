@@ -37,7 +37,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the user-readable title first (custom `/rename` → first prompt →
     // formatted-id-timestamp fallback). Stash the raw session id in a
     // muted second row so the user can still see / copy it.
-    let (title, id_str) = match app.current_session_id.as_ref() {
+    let (title, id_str) = match app.engine.current_session_id.as_ref() {
         Some(id) => {
             let id_str = id.as_str().to_owned();
             let title = app
@@ -78,7 +78,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // bottom-bar gauge were already computing the same thing two
     // different ways, leaving a maintenance footgun where one could
     // drift from the other.
-    let total_tokens = app.tool_ctx.approx_tokens as u64;
+    let total_tokens = app.engine.tool_ctx.approx_tokens as u64;
     let ctx_max = app.selected_context_window_tokens().max(1) as u64;
     let pct = (total_tokens as f64 / ctx_max as f64 * 100.0).min(100.0);
 
@@ -142,12 +142,12 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
 
-    let total_cache_read: u64 = app
+    let total_cache_read: u64 = app.engine
         .usage_by_model
         .values()
         .map(|u| u.cache_read_tokens)
         .sum();
-    let total_input: u64 = app.usage_by_model.values().map(|u| u.input_tokens).sum();
+    let total_input: u64 = app.engine.usage_by_model.values().map(|u| u.input_tokens).sum();
     if total_cache_read > 0 && total_input > 0 {
         let global_hit_pct = (total_cache_read as f64 / total_input as f64 * 100.0).min(100.0);
         lines.push(Line::from(vec![
@@ -161,11 +161,11 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     lines.push(Line::from(""));
 
-    if !app.usage_by_model.is_empty() {
+    if !app.engine.usage_by_model.is_empty() {
         lines.push(section("Usage by model"));
 
         let mut model_entries: Vec<(&String, &crate::types::ModelUsage)> =
-            app.usage_by_model.iter().collect();
+            app.engine.usage_by_model.iter().collect();
         model_entries.sort_by_key(|(k, _)| k.as_str());
 
         for (model_name, usage) in &model_entries {
@@ -217,7 +217,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
-        let total = crate::cost::total_cost(&app.usage_by_model);
+        let total = crate::cost::total_cost(&app.engine.usage_by_model);
         // Hide the cost line on free / unauthenticated runs (matches
         // the status bar's gate at >$0.001). Showing `Total cost:
         // $0.00` on every fresh session was visual noise — the line
@@ -234,7 +234,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     lines.push(section("LSP"));
 
-    if app.lsp_servers.is_empty() {
+    if app.engine.lsp_servers.is_empty() {
         // Wrap the placeholder line manually based on the inner
         // sidebar width — the parent Paragraph doesn't wrap, so a
         // verbose hint like "LSPs will activate as files are read"
@@ -248,7 +248,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             )]));
         }
     } else {
-        for srv in &app.lsp_servers {
+        for srv in &app.engine.lsp_servers {
             let (dot_color, label) = match srv.status {
                 LspStatus::Active => (t.success, "Active"),
                 LspStatus::Inactive => (t.text_muted, "Inactive"),
@@ -272,7 +272,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // formatted as `<dot> <name>`, blank separator below.
     lines.push(section("MCP"));
 
-    if app.mcp_servers.is_empty() {
+    if app.engine.mcp_servers.is_empty() {
         for row in wrap_text_to_width("No MCP servers configured", inner.width as usize) {
             lines.push(Line::from(vec![Span::styled(
                 row,
@@ -280,7 +280,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             )]));
         }
     } else {
-        for srv in &app.mcp_servers {
+        for srv in &app.engine.mcp_servers {
             lines.push(Line::from(vec![
                 Span::styled("● ", Style::default().fg(mcp_status_color(srv.status, t))),
                 Span::styled(
@@ -296,10 +296,10 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Team section - show active teammates. Single-blank separator
     // is enough; the section() helper's gutter glyph already gives
     // the eye an anchor, no need for a double-row break.
-    if app.team_context.is_active() {
+    if app.engine.team_context.is_active() {
         lines.push(section("Team"));
 
-        if let Some(ref team_name) = app.team_context.team_name {
+        if let Some(ref team_name) = app.engine.team_context.team_name {
             lines.push(Line::from(vec![Span::styled(
                 format!("  {team_name}"),
                 Style::default().fg(t.text_secondary),
@@ -310,7 +310,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         // dot with the teammate's assigned palette color (mirrors the
         // teammate-tree below) so the team panel and the spinner-row
         // tree read the same way.
-        for info in app.team_context.teammates.values() {
+        for info in app.engine.team_context.teammates.values() {
             if info.name == crate::swarm::TEAM_LEAD_NAME {
                 continue;
             }
@@ -321,7 +321,7 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             ]));
         }
 
-        if app.team_context.teammates.len() <= 1 {
+        if app.engine.team_context.teammates.len() <= 1 {
             lines.push(Line::from(vec![Span::styled(
                 "  (no teammates)",
                 Style::default().fg(t.text_secondary),

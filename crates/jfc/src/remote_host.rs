@@ -347,7 +347,7 @@ pub fn mirror_event(ev: &EngineEvent) -> Option<RemoteEnvelope> {
             preceding_tool_use_ids: preceding_tool_use_ids.clone(),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
         }),
-        // Done/Idle transitions are derived post-burst from `app.is_streaming`
+        // Done/Idle transitions are derived post-burst from `app.engine.is_streaming`
         // in the event loop (see `mirror_status`). Errors carry a message, so
         // they're mirrored directly here.
         EngineEvent::Stream(StreamEvent::Error(e)) => Some(RemoteEnvelope::SessionStatus {

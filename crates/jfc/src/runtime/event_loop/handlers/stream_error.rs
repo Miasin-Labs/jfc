@@ -15,20 +15,20 @@ use crate::{toast, types};
 /// Handle `StreamEvent::Error(e)`.
 pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: String) {
     app.record_stream_activity();
-    app.stream_lifecycle = None;
+    app.engine.stream_lifecycle = None;
     tracing::error!(
         target: "jfc::stream",
         error = %e,
-        is_streaming = app.is_streaming,
-        cancelled = app.cancel_token.is_cancelled(),
-        interrupt_flag = app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
-        streaming_response_bytes = app.streaming_response_bytes,
-        streaming_assistant_idx = ?app.streaming_assistant_idx,
+        is_streaming = app.engine.is_streaming,
+        cancelled = app.engine.cancel_token.is_cancelled(),
+        interrupt_flag = app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
+        streaming_response_bytes = app.engine.streaming_response_bytes,
+        streaming_assistant_idx = ?app.engine.streaming_assistant_idx,
         "StreamEvent::Error — resetting stream state"
     );
     if e == "Interrupted by user"
-        && !app.cancel_token.is_cancelled()
-        && !app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
+        && !app.engine.cancel_token.is_cancelled()
+        && !app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
     {
         tracing::info!(
             target: "jfc::stream",
@@ -63,9 +63,9 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
         || e.starts_with("Stream open timed out")
         || e.starts_with("stream task cancelled");
     if is_superseded_stream_lifecycle_error
-        && app.is_streaming
-        && !app.cancel_token.is_cancelled()
-        && !app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
+        && app.engine.is_streaming
+        && !app.engine.cancel_token.is_cancelled()
+        && !app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
     {
         tracing::info!(
             target: "jfc::stream",
@@ -77,8 +77,8 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
 
     let interrupted_by_user = e.contains("Interrupted by user")
         || (e.starts_with("stream task cancelled")
-            && (app.cancel_token.is_cancelled()
-                || app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)));
+            && (app.engine.cancel_token.is_cancelled()
+                || app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)));
 
     // ─── Synthetic tool_result injection on interrupt ────────
     // When a stream is interrupted with pending/running tool_use
@@ -88,8 +88,8 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     // API requires every tool_use to have a matching tool_result.
     // Mirrors claude-code 2.1.141's createSyntheticErrorMessage.
     if interrupted_by_user
-        && let Some(assistant_idx) = app.streaming_assistant_idx
-        && let Some(msg) = app.messages.get(assistant_idx)
+        && let Some(assistant_idx) = app.engine.streaming_assistant_idx
+        && let Some(msg) = app.engine.messages.get(assistant_idx)
     {
         let dangling_tool_ids: Vec<crate::ids::ToolId> = msg
             .parts
@@ -113,7 +113,7 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
                 "injecting synthetic tool_result for interrupted tool_use(s)"
             );
             // Mark each tool as Failed in the assistant message.
-            if let Some(msg) = app.messages.get_mut(assistant_idx) {
+            if let Some(msg) = app.engine.messages.get_mut(assistant_idx) {
                 for part in &mut msg.parts {
                     if let types::MessagePart::Tool(tc) = part
                         && dangling_tool_ids.contains(&tc.id)
@@ -165,8 +165,8 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
             e.trim_start_matches(crate::providers::anthropic_oauth::AUTO_RETRY_SENTINEL),
         );
     } else {
-        app.network_recovery_status = None;
-        app.network_recovery_attempts = 0;
+        app.engine.network_recovery_status = None;
+        app.engine.network_recovery_attempts = 0;
     }
     // v132 mid-stream auto-compact: stream.rs prefixes
     // its `auto-compact:` sentinel when the API rejected
@@ -177,9 +177,9 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     // time the estimator drifts.
     let auto_compact_signal = e.starts_with("auto-compact:");
     if auto_compact_signal {
-        app.force_compact_pending = true;
+        app.engine.force_compact_pending = true;
         toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             toast::Toast::new(
                 toast::ToastKind::Warning,
                 "Auto-compacting (prompt exceeded model window)…",
@@ -197,10 +197,10 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
         // structured multi-text user message isn't silently truncated to its
         // opening block. Binary attachments can't ride along
         // `ControlEvent::SubmitPrompt(String)`, but they are not lost from context: the
-        // original user message (with its attachments) stays in `app.messages`
+        // original user message (with its attachments) stays in `app.engine.messages`
         // and survives into the preserved tail of the compacted transcript —
         // the re-queue only re-drives the turn, it does not re-upload.
-        let last_user = app
+        let last_user = app.engine
             .messages
             .iter()
             .rfind(|m| matches!(m.role, types::Role::User) && !m.is_compact_boundary());
@@ -221,8 +221,8 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
             });
         }
     }
-    let retry_assistant_idx = app.streaming_assistant_idx;
-    let retry_turn_started_at = app.turn_started_at;
+    let retry_assistant_idx = app.engine.streaming_assistant_idx;
+    let retry_turn_started_at = app.engine.turn_started_at;
 
     // BUG FIX (2026-06-01): When a stream fails AFTER emitting content
     // (committed_output=true), append a truncation warning to the message
@@ -230,7 +230,7 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     // confusing case where output_tokens=0 with actual content, and the
     // message looks fine but is actually truncated mid-sentence.
     if let Some(idx) = retry_assistant_idx
-        && let Some(msg) = app.messages.get_mut(idx)
+        && let Some(msg) = app.engine.messages.get_mut(idx)
         && (msg.usage.as_ref().map(|u| u.output_tokens).unwrap_or(0) > 0
             || msg
                 .parts
@@ -248,20 +248,20 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
         }
     }
 
-    app.is_streaming = false;
-    app.last_stream_event_at = None;
-    app.streaming_started_at = None;
-    app.streaming_last_token_at = None;
-    app.thinking_started_at = None;
-    app.thinking_ended_at = None;
-    app.streaming_text = String::new();
-    app.streaming_reasoning = String::new();
+    app.engine.is_streaming = false;
+    app.engine.last_stream_event_at = None;
+    app.engine.streaming_started_at = None;
+    app.engine.streaming_last_token_at = None;
+    app.engine.thinking_started_at = None;
+    app.engine.thinking_ended_at = None;
+    app.engine.streaming_text = String::new();
+    app.engine.streaming_reasoning = String::new();
     app.render_cache.borrow_mut().clear_streaming();
-    app.streaming_response_bytes = 0;
-    app.streaming_assistant_idx = None;
-    app.active_stream_handle = None;
-    app.current_stream_request = None;
-    app.stream_lifecycle = None;
+    app.engine.streaming_response_bytes = 0;
+    app.engine.streaming_assistant_idx = None;
+    app.engine.active_stream_handle = None;
+    app.engine.current_stream_request = None;
+    app.engine.stream_lifecycle = None;
     // Clear the turn clock and any pending tool calls so the
     // spinner row stops rendering. Without this, the
     // `show_spinner` condition stays true (it checks
@@ -269,30 +269,30 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     // and the spinner/counter keeps animating after an
     // interrupt or network error.
     if !auto_retry_signal {
-        app.turn_started_at = None;
+        app.engine.turn_started_at = None;
     }
-    app.pending_tool_calls.clear();
+    app.engine.pending_tool_calls.clear();
     // A question modal only exists as a turn's terminal act; if the turn died
     // (error/cancel) the answer can no longer feed anywhere, so close the modal
     // rather than leave it capturing all key input. The dangling AskUserQuestion
     // tool_use is marked Failed by the synthetic-tool-result injection above.
-    app.pending_question = None;
-    app.pre_dispatched_tool_ids.clear();
-    app.deferred_tool_uses.clear();
-    app.in_progress_tool_use_ids.clear();
-    app.in_flight_eager_dispatches = 0;
-    app.in_flight_tool_batches = 0;
+    app.engine.pending_question = None;
+    app.engine.pre_dispatched_tool_ids.clear();
+    app.engine.deferred_tool_uses.clear();
+    app.engine.in_progress_tool_use_ids.clear();
+    app.engine.in_flight_eager_dispatches = 0;
+    app.engine.in_flight_tool_batches = 0;
     // Reset the interrupt flag so background tasks or the
     // next auto-retry don't see a stale `true`. Also mint
     // a fresh cancel token — the previous one may already
     // be cancelled, and we don't want to poison the next
     // spawn.
-    app.interrupt_flag
+    app.engine.interrupt_flag
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    app.cancel_token = tokio_util::sync::CancellationToken::new();
+    app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
     let mut auto_retry_restarted = false;
     if auto_retry_signal {
-        app.exploration_state
+        app.engine.exploration_state
             .bump_for_signal(crate::exploration::ExplorationSignal::StreamRetry);
         if let Some(idx) = retry_assistant_idx {
             restart_stream_in_place(app, tx, idx, retry_turn_started_at);
@@ -303,10 +303,10 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
                 error = %visible_error,
                 "auto-retry stream error had no assistant slot; surfacing as hard error"
             );
-            app.network_recovery_status = None;
-            app.network_recovery_attempts = 0;
-            app.turn_started_at = None;
-            app.messages.push(ChatMessage::assistant(format!(
+            app.engine.network_recovery_status = None;
+            app.engine.network_recovery_attempts = 0;
+            app.engine.turn_started_at = None;
+            app.engine.messages.push(ChatMessage::assistant(format!(
                 "**Error:** {visible_error}\n\n_Press Ctrl+R to retry the last prompt._"
             )));
             let mut preview_cap = visible_error.len().min(120);
@@ -315,12 +315,12 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
             }
             let preview = &visible_error[..preview_cap];
             toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 toast::Toast::new(toast::ToastKind::Error, format!("Stream error: {preview}")),
             );
         }
     } else if !auto_compact_signal && !interrupted_by_user {
-        app.messages.push(ChatMessage::assistant(format!(
+        app.engine.messages.push(ChatMessage::assistant(format!(
             "**Error:** {e}\n\n_Press Ctrl+R to retry the last prompt._"
         )));
         // Surface as a toast too so the user sees the failure
@@ -333,7 +333,7 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
         }
         let preview = &e[..preview_cap];
         toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             toast::Toast::new(toast::ToastKind::Error, format!("Stream error: {preview}")),
         );
     }
@@ -345,10 +345,10 @@ pub(crate) async fn handle_stream_error(app: &mut App, tx: &EventSender, e: Stri
     // submitted again. Drain here so queued prompts run on
     // the next opportunity. Skipped on auto-compact since
     // that path already re-queues the last user prompt.
-    if !auto_compact_signal && !auto_retry_restarted && !app.queued_prompts.is_empty() {
+    if !auto_compact_signal && !auto_retry_restarted && !app.engine.queued_prompts.is_empty() {
         tracing::info!(
             target: "jfc::ui::queue",
-            count = app.queued_prompts.len(),
+            count = app.engine.queued_prompts.len(),
             "draining queued prompts after StreamError"
         );
         drain_queued_prompts(app, tx).await;
@@ -378,7 +378,7 @@ pub(crate) fn handle_fallback_triggered(
         _ => format!("Model fallback: using {fallback_model} (from {original_model})"),
     };
     toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         toast::Toast::new(toast::ToastKind::Warning, message),
     );
 }
@@ -439,24 +439,24 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new(Arc::new(TestProvider), "test-model");
-        app.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
         app
     }
 
     #[tokio::test]
     async fn stale_interrupt_from_superseded_stream_is_ignored() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::user("new prompt".into()));
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.is_streaming = true;
-        app.streaming_assistant_idx = Some(1);
+        app.engine.messages.push(ChatMessage::user("new prompt".into()));
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.is_streaming = true;
+        app.engine.streaming_assistant_idx = Some(1);
         let (tx, _rx) = mpsc::channel(8);
 
         handle_stream_error(&mut app, &tx, "Interrupted by user".to_owned()).await;
 
-        assert!(app.is_streaming);
-        assert_eq!(app.streaming_assistant_idx, Some(1));
-        assert_eq!(app.messages.len(), 2);
+        assert!(app.engine.is_streaming);
+        assert_eq!(app.engine.streaming_assistant_idx, Some(1));
+        assert_eq!(app.engine.messages.len(), 2);
     }
 
     // Normal — REGRESSION (the "Stream cancelled before connection opened"
@@ -470,13 +470,13 @@ mod tests {
     #[tokio::test]
     async fn superseded_pre_open_cancel_is_dropped_normal() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::user("new prompt".into()));
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.is_streaming = true;
-        app.streaming_assistant_idx = Some(1);
+        app.engine.messages.push(ChatMessage::user("new prompt".into()));
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.is_streaming = true;
+        app.engine.streaming_assistant_idx = Some(1);
         // Fresh turn's token is healthy; interrupt flag clear (submit, not ESC).
-        app.cancel_token = tokio_util::sync::CancellationToken::new();
-        app.interrupt_flag
+        app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+        app.engine.interrupt_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let (tx, _rx) = mpsc::channel(8);
 
@@ -489,9 +489,9 @@ mod tests {
 
         // The new turn must be untouched: still streaming, same slot, no
         // **Error:** message appended.
-        assert!(app.is_streaming, "fresh turn must keep streaming");
-        assert_eq!(app.streaming_assistant_idx, Some(1));
-        assert_eq!(app.messages.len(), 2, "no error message appended");
+        assert!(app.engine.is_streaming, "fresh turn must keep streaming");
+        assert_eq!(app.engine.streaming_assistant_idx, Some(1));
+        assert_eq!(app.engine.messages.len(), 2, "no error message appended");
     }
 
     // Robust: the open-timeout sibling string ("Stream open timed out…")
@@ -500,10 +500,10 @@ mod tests {
     #[tokio::test]
     async fn superseded_open_timeout_is_dropped_robust() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::user("new prompt".into()));
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.is_streaming = true;
-        app.streaming_assistant_idx = Some(1);
+        app.engine.messages.push(ChatMessage::user("new prompt".into()));
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.is_streaming = true;
+        app.engine.streaming_assistant_idx = Some(1);
         let (tx, _rx) = mpsc::channel(8);
 
         handle_stream_error(
@@ -513,19 +513,19 @@ mod tests {
         )
         .await;
 
-        assert!(app.is_streaming);
-        assert_eq!(app.messages.len(), 2);
+        assert!(app.engine.is_streaming);
+        assert_eq!(app.engine.messages.len(), 2);
     }
 
     #[tokio::test]
     async fn superseded_aborted_stream_join_error_is_dropped_robust() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::user("new prompt".into()));
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.is_streaming = true;
-        app.streaming_assistant_idx = Some(1);
-        app.cancel_token = tokio_util::sync::CancellationToken::new();
-        app.interrupt_flag
+        app.engine.messages.push(ChatMessage::user("new prompt".into()));
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.is_streaming = true;
+        app.engine.streaming_assistant_idx = Some(1);
+        app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+        app.engine.interrupt_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let (tx, _rx) = mpsc::channel(8);
 
@@ -536,20 +536,20 @@ mod tests {
         )
         .await;
 
-        assert!(app.is_streaming);
-        assert_eq!(app.streaming_assistant_idx, Some(1));
-        assert_eq!(app.messages.len(), 2, "no stale join error appended");
+        assert!(app.engine.is_streaming);
+        assert_eq!(app.engine.streaming_assistant_idx, Some(1));
+        assert_eq!(app.engine.messages.len(), 2, "no stale join error appended");
     }
 
     #[tokio::test]
     async fn aborted_stream_join_error_after_user_interrupt_is_clean_robust() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::user("only prompt".into()));
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.is_streaming = true;
-        app.streaming_assistant_idx = Some(1);
-        app.cancel_token.cancel();
-        app.interrupt_flag
+        app.engine.messages.push(ChatMessage::user("only prompt".into()));
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.is_streaming = true;
+        app.engine.streaming_assistant_idx = Some(1);
+        app.engine.cancel_token.cancel();
+        app.engine.interrupt_flag
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let (tx, _rx) = mpsc::channel(8);
 
@@ -560,18 +560,18 @@ mod tests {
         )
         .await;
 
-        assert!(!app.is_streaming);
+        assert!(!app.engine.is_streaming);
         assert_eq!(
-            app.messages.len(),
+            app.engine.messages.len(),
             2,
             "user interrupt should not add hard error"
         );
         assert!(
-            !app.cancel_token.is_cancelled(),
+            !app.engine.cancel_token.is_cancelled(),
             "next turn gets a fresh token"
         );
         assert!(
-            !app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
+            !app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst),
             "interrupt flag should be cleared after cleanup"
         );
     }
@@ -579,19 +579,19 @@ mod tests {
     #[tokio::test]
     async fn stream_error_clears_active_stream_handle_robust() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::user("only prompt".into()));
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.is_streaming = true;
-        app.streaming_assistant_idx = Some(1);
+        app.engine.messages.push(ChatMessage::user("only prompt".into()));
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.is_streaming = true;
+        app.engine.streaming_assistant_idx = Some(1);
         let handle = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
-        app.active_stream_handle = Some(handle.abort_handle());
+        app.engine.active_stream_handle = Some(handle.abort_handle());
         let (tx, _rx) = mpsc::channel(8);
 
         handle_stream_error(&mut app, &tx, "provider failed".to_owned()).await;
 
-        assert!(app.active_stream_handle.is_none());
+        assert!(app.engine.active_stream_handle.is_none());
         assert!(!app.has_interruptible_work());
         handle.abort();
     }
@@ -603,11 +603,11 @@ mod tests {
     #[tokio::test]
     async fn genuine_pre_open_cancel_surfaces_robust() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::user("only prompt".into()));
-        app.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.messages.push(ChatMessage::user("only prompt".into()));
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
         // No fresh turn: is_streaming was already cleared by the lifecycle.
-        app.is_streaming = false;
-        app.streaming_assistant_idx = Some(1);
+        app.engine.is_streaming = false;
+        app.engine.streaming_assistant_idx = Some(1);
         let (tx, _rx) = mpsc::channel(8);
 
         handle_stream_error(
@@ -618,8 +618,8 @@ mod tests {
         .await;
 
         // Hard-error path ran: an **Error:** assistant message was appended.
-        assert_eq!(app.messages.len(), 3, "error message must be appended");
-        let last = app.messages.last().expect("appended message");
+        assert_eq!(app.engine.messages.len(), 3, "error message must be appended");
+        let last = app.engine.messages.last().expect("appended message");
         let text: String = last
             .parts
             .iter()

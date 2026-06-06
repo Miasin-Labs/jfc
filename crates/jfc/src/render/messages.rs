@@ -107,12 +107,12 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
     // *after* the if/else with an explicit `drop(items)`.
     let totals_to_commit = (
         total_lines,
-        (app.messages.len(), app.streaming_text.len(), inner_width),
+        (app.engine.messages.len(), app.engine.streaming_text.len(), inner_width),
         visible,
         new_scroll_offset,
     );
 
-    if app.messages.is_empty() && app.streaming_text.is_empty() {
+    if app.engine.messages.is_empty() && app.engine.streaming_text.is_empty() {
         // Static placeholder — no boot animation. The empty session is a
         // calm muted prompt that settles immediately; a star cascade
         // rippling across the headline on every launch was decoration the
@@ -382,7 +382,7 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
     // its own L/R padding), so the height estimate is full width − 3.
     let inner_width = area.width.saturating_sub(3) as usize;
 
-    let (title_str, body_lines, use_message_view) = match app.background_tasks.get(task_id) {
+    let (title_str, body_lines, use_message_view) = match app.engine.background_tasks.get(task_id) {
         None => (format!("task {task_id} (not found)"), Vec::new(), false),
         Some(bt) => {
             let title = format!(
@@ -419,7 +419,7 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let task_status = app.background_tasks.get(task_id).map(|bt| bt.status);
+    let task_status = app.engine.background_tasks.get(task_id).map(|bt| bt.status);
     let task_is_running = matches!(task_status, Some(crate::types::TaskLifecycle::Running));
     let task_is_idle = matches!(task_status, Some(crate::types::TaskLifecycle::Idle));
 
@@ -436,13 +436,13 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
     let visible = inner.height as usize;
 
     // Workflow tasks get a dedicated progress panel.
-    let has_workflow = app
+    let has_workflow = app.engine
         .background_tasks
         .get(task_id)
         .map(|bt| bt.workflow_progress.is_some())
         .unwrap_or(false);
     if has_workflow {
-        if let Some(bt) = app.background_tasks.get(task_id) {
+        if let Some(bt) = app.engine.background_tasks.get(task_id) {
             let scroll = app.scroll_offset;
             render_workflow_detail(f, inner, bt, t, scroll, visible);
         }
@@ -454,7 +454,7 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
         use crate::message_view::{MessageView, PrebuiltItems, RenderCtx, build_render_items_ctx};
         use ratatui::widgets::Widget;
 
-        let chat_msgs = app
+        let chat_msgs = app.engine
             .background_tasks
             .get(task_id)
             .map(|bt| bt.chat_messages.as_slice())
@@ -462,7 +462,7 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
 
         // Compute scroll BEFORE borrowing app through items, then assign after.
         let total_lines_est = {
-            let msgs = app
+            let msgs = app.engine
                 .background_tasks
                 .get(task_id)
                 .map(|bt| bt.chat_messages.as_slice())
@@ -670,7 +670,7 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
     let descs: Vec<&str> = task_ids
         .iter()
         .map(|id| {
-            app.background_tasks
+            app.engine.background_tasks
                 .get(id)
                 .map(|b| b.description.as_str())
                 .unwrap_or(id.as_str())
@@ -688,7 +688,7 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
     let tabs: Vec<Tab> = task_ids
         .iter()
         .map(|id| {
-            let bt = app.background_tasks.get(id);
+            let bt = app.engine.background_tasks.get(id);
             let desc = bt.map(|b| b.description.as_str()).unwrap_or(id.as_str());
             let desc = desc.strip_prefix(common).unwrap_or(desc).trim_start();
             let desc = if desc.is_empty() {
@@ -814,7 +814,7 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
 /// spinner instead of leaving a blank second line.
 fn next_open_task_subject(app: &App) -> Option<String> {
     use jfc_session::DeletedFilter;
-    let tasks = app.task_store.list(DeletedFilter::Exclude);
+    let tasks = app.engine.task_store.list(DeletedFilter::Exclude);
     pick_next_open_task(&tasks).map(|t| t.subject.clone())
 }
 
@@ -862,21 +862,21 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
     // True once the wire has gone quiet long enough that the row should
     // read as stalled — the glyph + label render muted instead of accent.
     let mut dim = false;
-    if let Some(started) = app.compacting_started_at {
+    if let Some(started) = app.engine.compacting_started_at {
         let elapsed = now.duration_since(started);
         // Pass the pre-compact token count so the spinner shows
         // *what's being compacted*. `tool_ctx.approx_tokens` still
         // reflects the pre-compact estimate during the compact (it's
         // only updated to the post-compact value when CompactionDone
         // fires), so it's the right source.
-        let pre = app.tool_ctx.approx_tokens as u64;
+        let pre = app.engine.tool_ctx.approx_tokens as u64;
         compact_body = Some(crate::spinner::format_compact_status(
             app.spinner_frame,
             elapsed,
             pre,
-            app.compacting_output_chars,
+            app.engine.compacting_output_chars,
         ));
-    } else if let Some(recovery) = app.network_recovery_status.as_ref() {
+    } else if let Some(recovery) = app.engine.network_recovery_status.as_ref() {
         head_glyph = crate::glyphs::RECOVERY;
         let label = match recovery.status_code {
             Some(code) => format!("{code} {}", recovery.reason.label()),
@@ -893,7 +893,7 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
             recovery.attempts,
             last_seen
         );
-        if let Some(status) = app.claude_status.as_ref()
+        if let Some(status) = app.engine.claude_status.as_ref()
             && let Some(outage) = status.outage_context()
         {
             tail_body.push_str(" · status ");
@@ -904,14 +904,14 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         // cumulative time, not just the current sub-stream's age. Fall back
         // to `streaming_started_at` for the brief first frame after submit
         // before the agentic gate updates the turn clock.
-        let elapsed = app
+        let elapsed = app.engine
             .turn_started_at
-            .or(app.streaming_started_at)
+            .or(app.engine.streaming_started_at)
             .map(|t| now.duration_since(t))
             .unwrap_or_default();
-        let stream_is_live = app.is_streaming;
+        let stream_is_live = app.engine.is_streaming;
         let stall = if stream_is_live {
-            app.streaming_last_token_at
+            app.engine.streaming_last_token_at
                 .map(|t| now.duration_since(t))
                 .unwrap_or_default()
         } else {
@@ -930,7 +930,7 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         // chars/4 estimate. Holds steady between `message_delta` usage events,
         // then steps by the real increment.
         let live_tokens = if stream_is_live {
-            app.turn_output_tokens
+            app.engine.turn_output_tokens
         } else {
             0
         };
@@ -941,7 +941,7 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         let thinking = match app.spinner_state.phase {
             crate::spinner::SpinnerPhase::Thinking => Some(crate::spinner::ThinkingStatus::Live),
             crate::spinner::SpinnerPhase::Responding => {
-                match (app.thinking_started_at, app.thinking_ended_at) {
+                match (app.engine.thinking_started_at, app.engine.thinking_ended_at) {
                     (Some(start), Some(end)) => Some(crate::spinner::ThinkingStatus::Done(
                         end.duration_since(start),
                     )),
@@ -968,16 +968,16 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
             token_rate,
             stall,
             thinking,
-            app.streaming_thinking_tokens,
+            app.engine.streaming_thinking_tokens,
         );
         head_glyph = segs.glyph;
         dim = segs.dim;
         // Honest phase label, unless an in-progress task names the actual
         // work — its `activeForm` is more specific *and* still honest, so
         // it wins. No random decorative verb, no shimmer sweep.
-        let lifecycle = app.stream_lifecycle.as_ref();
+        let lifecycle = app.engine.stream_lifecycle.as_ref();
         let label: std::borrow::Cow<'_, str> = {
-            let tasks = app.task_store.list(jfc_session::DeletedFilter::Exclude);
+            let tasks = app.engine.task_store.list(jfc_session::DeletedFilter::Exclude);
             tasks
                 .iter()
                 .find(|t| t.status == jfc_session::TaskStatus::InProgress)
@@ -1101,7 +1101,7 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let t = app.theme;
-    let all = app.task_store.list(jfc_session::DeletedFilter::Exclude);
+    let all = app.engine.task_store.list(jfc_session::DeletedFilter::Exclude);
     if all.is_empty() {
         return;
     }
@@ -1121,7 +1121,7 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|t| matches!(t.status, jfc_session::TaskStatus::Completed))
         .any(|t| {
-            app.task_completion_times
+            app.engine.task_completion_times
                 .get(&t.id)
                 .is_some_and(|ts| now.duration_since(*ts).as_secs() < 30)
         });
@@ -1166,7 +1166,7 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
     let active_todo_id: Option<String> = app
         .last_active_agent_task
         .as_deref()
-        .and_then(|aid| app.background_tasks.get(aid))
+        .and_then(|aid| app.engine.background_tasks.get(aid))
         .and_then(|bt| bt.parent_task_id.clone());
 
     // Header: a glanceable progress bar instead of "(99 done, 12 in
@@ -1206,7 +1206,7 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
     let recent_done = completed
         .iter()
         .filter(|task| {
-            app.task_completion_times
+            app.engine.task_completion_times
                 .get(&task.id)
                 .is_some_and(|t| now_sort.duration_since(*t).as_secs() < 30)
         })
@@ -1256,8 +1256,8 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
     // tick, so the braille advances smoothly. With no live work the frame
     // wouldn't redraw on its own, so a "spinning" glyph would freeze until
     // the next keypress (the jank we're fixing); show a static `◐` then.
-    let any_alive_agent = app.background_tasks.values().any(|bt| bt.status.is_alive());
-    let animate = !crate::spinner::reduced_motion() && (app.is_streaming || any_alive_agent);
+    let any_alive_agent = app.engine.background_tasks.values().any(|bt| bt.status.is_alive());
+    let animate = !crate::spinner::reduced_motion() && (app.engine.is_streaming || any_alive_agent);
     let spin_frame = (app.launched_at.elapsed().as_millis() / 100) as usize;
     let spinner = crate::app::SPINNER[spin_frame % crate::app::SPINNER.len()];
     let mut focal_used = false;
@@ -1381,7 +1381,7 @@ pub(super) fn agent_fan_below_input(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let t = app.theme;
-    let is_team = app.team_context.is_active();
+    let is_team = app.engine.team_context.is_active();
     // Flat dock: a single TOP divider. The subagent path draws its own
     // `agents  ●N ○N ✓N ✗N` summary line, so no box title there; the
     // team path keeps a `team` label since its tree has no summary row.

@@ -2484,7 +2484,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
         msg.parts.clear();
         let wide = "x".repeat(150);
         msg.parts.push(MessagePart::Reasoning(wide));
-        app.messages.push(msg);
+        app.engine.messages.push(msg);
         // Force expanded so the body rows actually render.
         app.reasoning_expanded.insert(0, true);
         let w = 40usize;
@@ -2507,7 +2507,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
              so word-wrap must split it into multiple visual rows."
                 .to_owned(),
         ));
-        app.messages.push(msg);
+        app.engine.messages.push(msg);
         let w = 30usize;
         assert_eq!(
             message_view_total_lines(&app, w),
@@ -2536,7 +2536,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
             elapsed_ms: Some(1234),
             model: None,
         }));
-        app.messages.push(msg);
+        app.engine.messages.push(msg);
         let w = 60usize;
         assert_eq!(
             message_view_total_lines(&app, w),
@@ -2553,7 +2553,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
         msg.parts.clear();
         msg.parts
             .push(MessagePart::CompactBoundary { pre_tokens: 12345 });
-        app.messages.push(msg);
+        app.engine.messages.push(msg);
         let w = 16usize;
         assert_eq!(
             message_view_total_lines(&app, w),

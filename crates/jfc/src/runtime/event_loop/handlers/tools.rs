@@ -16,7 +16,7 @@ pub(crate) fn handle_output_chunk(app: &mut App, tool_id: crate::ids::ToolId, ch
     // Append streaming output to the tool's live preview.
     // This fires line-by-line for bash commands, giving
     // real-time visibility into long-running processes.
-    for msg in &mut app.messages {
+    for msg in &mut app.engine.messages {
         for part in &mut msg.parts {
             if let MessagePart::Tool(tc) = part
                 && tc.id == tool_id
@@ -66,7 +66,7 @@ pub(crate) fn handle_tool_result(
         output_len = result.output.len(),
         "tool_result received"
     );
-    app.exploration_state.record_tool_result(result.is_error());
+    app.engine.exploration_state.record_tool_result(result.is_error());
     let _ = tx.try_send(EngineEvent::Tool(
         crate::runtime::ToolEvent::SetInProgressToolUseIds {
             action: "remove".to_owned(),
@@ -74,7 +74,7 @@ pub(crate) fn handle_tool_result(
         },
     ));
     let mut found = false;
-    for msg in &mut app.messages {
+    for msg in &mut app.engine.messages {
         for part in &mut msg.parts {
             if let MessagePart::Tool(tc) = part
                 && tc.id == tool_id
@@ -143,7 +143,7 @@ pub(crate) fn handle_tool_result(
                     match &tc.input {
                         crate::types::ToolInput::Edit { file_path, .. }
                         | crate::types::ToolInput::Write { file_path, .. } => {
-                            app.turn_edited_files.insert(file_path.clone());
+                            app.engine.turn_edited_files.insert(file_path.clone());
                         }
                         _ => {}
                     }
@@ -153,7 +153,7 @@ pub(crate) fn handle_tool_result(
                 if matches!(tc.kind, ToolKind::TaskCreate)
                     && matches!(new_status, ToolStatus::Completed)
                 {
-                    app.plan_verified_this_batch = false;
+                    app.engine.plan_verified_this_batch = false;
                 }
                 found = true;
                 break;
@@ -167,7 +167,7 @@ pub(crate) fn handle_tool_result(
             // in the next provider request via per-message
             // ownership — no global queue needed.
             if !result.attachments.is_empty() {
-                for msg in &mut app.messages {
+                for msg in &mut app.engine.messages {
                     if matches!(msg.role, types::Role::Assistant)
                         && msg
                             .parts
@@ -244,7 +244,7 @@ pub(crate) fn handle_tool_use_summary(
 }
 
 fn last_assistant_has_unresolved_tool(app: &App) -> bool {
-    app.messages
+    app.engine.messages
         .iter()
         .rev()
         .find(|msg| msg.role == Role::Assistant)
@@ -256,7 +256,7 @@ fn last_assistant_has_unresolved_tool(app: &App) -> bool {
 }
 
 fn completed_tool_batch_summary(app: &App) -> Option<(String, Vec<String>)> {
-    let last_assistant = app
+    let last_assistant = app.engine
         .messages
         .iter()
         .rev()
@@ -322,34 +322,34 @@ fn truncate_summary(text: &str, max_chars: usize) -> String {
 }
 
 pub(crate) fn should_recheck_completion_after_tool_result(app: &App) -> bool {
-    !app.is_streaming
-        && app.pending_classifications == 0
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty()
-        && app.in_flight_eager_dispatches == 0
-        && app.in_flight_tool_batches == 0
-        && app.compacting_started_at.is_none()
-        && stream::should_continue_loop(&app.messages)
+    !app.engine.is_streaming
+        && app.engine.pending_classifications == 0
+        && app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_tool_calls.is_empty()
+        && app.engine.in_flight_eager_dispatches == 0
+        && app.engine.in_flight_tool_batches == 0
+        && app.engine.compacting_started_at.is_none()
+        && stream::should_continue_loop(&app.engine.messages)
 }
 
 /// Handle `ToolEvent::AllComplete` — all tools in the current batch finished.
 pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
     // Decrement the dispatch counters if there are outstanding ones.
-    app.in_flight_eager_dispatches = app.in_flight_eager_dispatches.saturating_sub(1);
-    app.in_flight_tool_batches = app.in_flight_tool_batches.saturating_sub(1);
+    app.engine.in_flight_eager_dispatches = app.engine.in_flight_eager_dispatches.saturating_sub(1);
+    app.engine.in_flight_tool_batches = app.engine.in_flight_tool_batches.saturating_sub(1);
     tracing::info!(
         target: "jfc::stream",
-        message_count = app.messages.len(),
-        model = %app.model,
-        pending_approvals = app.approval_queue.len() + usize::from(app.pending_approval.is_some()),
-        pending_tool_calls = app.pending_tool_calls.len(),
-        pending_classifications = app.pending_classifications,
-        in_flight_eager = app.in_flight_eager_dispatches,
-        in_flight_batches = app.in_flight_tool_batches,
+        message_count = app.engine.messages.len(),
+        model = %app.engine.model,
+        pending_approvals = app.engine.approval_queue.len() + usize::from(app.engine.pending_approval.is_some()),
+        pending_tool_calls = app.engine.pending_tool_calls.len(),
+        pending_classifications = app.engine.pending_classifications,
+        in_flight_eager = app.engine.in_flight_eager_dispatches,
+        in_flight_batches = app.engine.in_flight_tool_batches,
         "ToolEvent::AllComplete"
     );
-    if app.is_streaming {
+    if app.engine.is_streaming {
         // A late AllComplete after cancellation may still find queued safe
         // tools. Dispatching is OK: the shared cancellation token makes the
         // scheduler report them as cancelled instead of running side effects.
@@ -385,12 +385,12 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
     // half the model's tool batch is still queued) and
     // re-stream provider requests against an incomplete
     // transcript.
-    let turn_truly_complete = app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty()
-        && app.pending_classifications == 0
-        && app.in_flight_eager_dispatches == 0
-        && app.in_flight_tool_batches == 0;
+    let turn_truly_complete = app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_tool_calls.is_empty()
+        && app.engine.pending_classifications == 0
+        && app.engine.in_flight_eager_dispatches == 0
+        && app.engine.in_flight_tool_batches == 0;
     if !turn_truly_complete {
         tracing::debug!(
             target: "jfc::stream",
@@ -412,15 +412,15 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         }));
     }
     // Save session once per completed tool batch (not per tool).
-    if let Some(ref session_id) = app.current_session_id {
+    if let Some(ref session_id) = app.engine.current_session_id {
         let sid = session_id.clone();
-        let msgs = app.messages.clone();
-        let cwd = app.cwd.clone();
-        let model = app.model.clone();
+        let msgs = app.engine.messages.clone();
+        let cwd = app.engine.cwd.clone();
+        let model = app.engine.model.clone();
         tokio::spawn(async move {
             session::save_session(&sid, &msgs, Some(cwd.as_str()), Some(model.as_str())).await;
         });
-        app.last_session_save_at = Some(std::time::Instant::now());
+        app.engine.last_session_save_at = Some(std::time::Instant::now());
     }
 
     // Slop Guard aggregation: scan the last assistant
@@ -430,7 +430,7 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
     {
         let marker = crate::tools::SLOP_GUARD_MARKER;
         let mut aggregate_findings: Vec<String> = Vec::new();
-        if let Some(last_assistant) = app
+        if let Some(last_assistant) = app.engine
             .messages
             .iter()
             .rev()
@@ -459,7 +459,7 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
                 finding_count = aggregate_findings.len(),
                 "injecting slop_guard system-reminder"
             );
-            crate::system_reminder::append_to_last_user(&mut app.messages, &reminder_body);
+            crate::system_reminder::append_to_last_user(&mut app.engine.messages, &reminder_body);
         }
     }
 
@@ -480,41 +480,41 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         let _ = std::io::stderr().write_all(b"\x07");
         let _ = std::io::stderr().flush();
     }
-    let manual = std::mem::take(&mut app.force_compact_pending);
+    let manual = std::mem::take(&mut app.engine.force_compact_pending);
     // Guard: don't spawn another compact if one is already in flight.
     // Without this, every AllToolsComplete while context > threshold
     // spawns a NEW compact task — if the provider doesn't support
     // compaction (returns Unsupported), the tasks pile up at ~12/sec
     // and spam 79K+ WARN lines per session. Only `manual` (/compact)
     // bypasses the guard to let the user force a retry.
-    if app.compacting_started_at.is_some() && !manual {
+    if app.engine.compacting_started_at.is_some() && !manual {
         tracing::debug!(
             target: "jfc::compact",
             "skipping post-response compact — one already in flight"
         );
-    } else if app.compact_suppressed && !manual {
+    } else if app.engine.compact_suppressed && !manual {
         tracing::debug!(
             target: "jfc::compact",
             "skipping post-response compact — suppressed after permanent failure"
         );
     } else if manual
-        || crate::compact::should_compact(app.tool_ctx.approx_tokens, app.max_context_tokens)
+        || crate::compact::should_compact(app.engine.tool_ctx.approx_tokens, app.engine.max_context_tokens)
     {
         if manual {
             // /compact is the user's explicit override — clear
             // BOTH the suppression flag AND the rapid-refill
             // counter. Otherwise a previously tripped breaker
             // would still fast-fail this manual attempt.
-            app.compact_suppressed = false;
-            app.tool_ctx.rapid_refill_count = 0;
+            app.engine.compact_suppressed = false;
+            app.engine.tool_ctx.rapid_refill_count = 0;
         }
         tracing::info!(
             target: "jfc::compact",
             manual,
-            model = %app.model,
-            max_context_tokens = app.max_context_tokens,
-            message_count = app.messages.len(),
-            rapid_refill_count = app.tool_ctx.rapid_refill_count,
+            model = %app.engine.model,
+            max_context_tokens = app.engine.max_context_tokens,
+            message_count = app.engine.messages.len(),
+            rapid_refill_count = app.engine.tool_ctx.rapid_refill_count,
             "post-response compaction triggered"
         );
         // Set the compaction guard synchronously so the agentic
@@ -523,18 +523,18 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         // spinner, but the guard must be synchronous to prevent
         // the race where continue_agentic_loop fires before the
         // async event is processed.
-        app.compacting_started_at = Some(std::time::Instant::now());
-        app.compacting_output_chars = 0;
-        app.compacting_attempt_baseline = 0;
-        app.compacting_last_progress = 0;
+        app.engine.compacting_started_at = Some(std::time::Instant::now());
+        app.engine.compacting_output_chars = 0;
+        app.engine.compacting_attempt_baseline = 0;
+        app.engine.compacting_last_progress = 0;
         let _ = tx
             .send(EngineEvent::Compaction(CompactionEvent::Started))
             .await;
-        let messages = app.messages.clone();
-        let provider = Arc::clone(&app.provider);
-        let model = app.model.clone();
-        let mut tool_ctx = app.tool_ctx.clone();
-        let window = app.max_context_tokens;
+        let messages = app.engine.messages.clone();
+        let provider = Arc::clone(&app.engine.provider);
+        let model = app.engine.model.clone();
+        let mut tool_ctx = app.engine.tool_ctx.clone();
+        let window = app.engine.max_context_tokens;
         let tx_compact = tx.clone();
         let progress_tx = tx_compact.clone();
         let on_progress: crate::compact::CompactProgressCb = Box::new(move |chars| {
@@ -548,7 +548,7 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         // provider call against `cancelled()` so ESC×2
         // mid-compact doesn't leave it running for ~30s
         // sending CompactionDone into a stale state.
-        let cancel_compact = app.cancel_token.clone();
+        let cancel_compact = app.engine.cancel_token.clone();
         tokio::spawn(async move {
             // Use compaction_model from config if set; otherwise
             // fall back to the session's current model.
@@ -686,8 +686,8 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
     // visibly stalls. From the v126 log: 5 bash tools synthesized
     // then conversation died after first approval. Holding the
     // continuation here lets the user finish all approvals first.
-    if app.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
-        || app.cancel_token.is_cancelled()
+    if app.engine.interrupt_flag.load(std::sync::atomic::Ordering::SeqCst)
+        || app.engine.cancel_token.is_cancelled()
     {
         tracing::info!(
             target: "jfc::stream",
@@ -696,32 +696,32 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         // Clear so the next user submission starts fresh —
         // both the legacy flag and the (possibly cancelled)
         // token need refreshing for the next spawn cycle.
-        app.interrupt_flag
+        app.engine.interrupt_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        app.cancel_token = tokio_util::sync::CancellationToken::new();
-        app.is_streaming = false;
-        app.streaming_started_at = None;
-        app.last_stream_event_at = None;
-        app.streaming_last_token_at = None;
+        app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+        app.engine.is_streaming = false;
+        app.engine.streaming_started_at = None;
+        app.engine.last_stream_event_at = None;
+        app.engine.streaming_last_token_at = None;
         app.token_rate_samples.clear();
-        app.thinking_started_at = None;
-        app.thinking_ended_at = None;
-        app.streaming_text.clear();
-        app.streaming_reasoning.clear();
-        app.streaming_response_bytes = 0;
-        app.streaming_assistant_idx = None;
-        app.current_stream_request = None;
-        app.stream_lifecycle = None;
-        app.turn_started_at = None;
-    } else if app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.compacting_started_at.is_none()
-        && stream::should_continue_loop(&app.messages)
+        app.engine.thinking_started_at = None;
+        app.engine.thinking_ended_at = None;
+        app.engine.streaming_text.clear();
+        app.engine.streaming_reasoning.clear();
+        app.engine.streaming_response_bytes = 0;
+        app.engine.streaming_assistant_idx = None;
+        app.engine.current_stream_request = None;
+        app.engine.stream_lifecycle = None;
+        app.engine.turn_started_at = None;
+    } else if app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.compacting_started_at.is_none()
+        && stream::should_continue_loop(&app.engine.messages)
     {
         // Fan-out consolidation: if multiple parallel agent
         // tasks completed in this batch, inject a summary
         // so the model sees a coherent digest before responding.
-        if let Some(last_assistant) = app
+        if let Some(last_assistant) = app.engine
             .messages
             .iter()
             .rev()
@@ -755,7 +755,7 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
                         .join("\n")
                 );
                 crate::system_reminder::append_to_last_user(
-                    &mut app.messages,
+                    &mut app.engine.messages,
                     &format!(
                         "Consolidation of {task_count} parallel agent results:\n\n{consolidated}\n\nSynthesize these results into a coherent response. Deduplicate overlapping findings. Note any contradictions between agents."
                     ),
@@ -770,7 +770,7 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         // they're complete, route through the pause-turn-
         // resume builder so we don't inject the forbidden
         // "Continue from where you left off." filler. See
-        // app.pending_pause_turn_resume docs and cli.js
+        // app.engine.pending_pause_turn_resume docs and cli.js
         // v142:622686 for the protocol.
         //
         // Single-shot: clear the flag before dispatching
@@ -778,14 +778,14 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         // returns to the normal continue_agentic_loop
         // path. If the resumed turn ALSO pause_turns,
         // its own Done handler re-latches the flag.
-        if app.pending_pause_turn_resume {
-            app.pending_pause_turn_resume = false;
+        if app.engine.pending_pause_turn_resume {
+            app.engine.pending_pause_turn_resume = false;
             tracing::info!(
                 target: "jfc::stream",
                 "mixed-mode pause_turn: local tools complete, resuming server-side sampling loop"
             );
             stream::continue_after_pause_turn(app, tx).await;
-        } else if !app.queued_prompts.is_empty() {
+        } else if !app.engine.queued_prompts.is_empty() {
             // Drain whenever ANY prompt is queued (meta OR non-meta).
             // Previously this only fired for non-meta prompts, which
             // meant slash commands (`/tasks`, `/market`, local actions)
@@ -794,7 +794,7 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
             // to silently ignore them.
             tracing::info!(
                 target: "jfc::stream",
-                queued = app.queued_prompts.len(),
+                queued = app.engine.queued_prompts.len(),
                 "agentic loop yielding to queued prompt before continuation"
             );
             drain_queued_prompts(app, tx).await;
@@ -805,10 +805,10 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
             );
             stream::continue_agentic_loop(app, tx).await;
         }
-    } else if !app.is_streaming
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty()
+    } else if !app.engine.is_streaming
+        && app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_tool_calls.is_empty()
     {
         tracing::debug!(
             target: "jfc::stream",
@@ -818,7 +818,7 @@ pub(crate) async fn handle_all_complete(app: &mut App, tx: &EventSender) {
         // iterations, no pending tools). Clear turn_started_at
         // so the spinner stops, then drain any prompts the user
         // typed during streaming.
-        app.turn_started_at = None;
+        app.engine.turn_started_at = None;
         // /goal stop-hook: if a goal is active, the agent
         // doesn't truly get to stop here. Fire the
         // evaluator in the background; the agentic loop
@@ -880,25 +880,25 @@ mod tests {
         tool.status = status;
 
         let mut app = App::new(Arc::new(TestProvider), "test-model");
-        app.task_store = jfc_session::TaskStore::in_memory();
-        app.messages.push(ChatMessage::user("run tool".into()));
-        app.messages
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.messages.push(ChatMessage::user("run tool".into()));
+        app.engine.messages
             .push(ChatMessage::assistant_parts(vec![MessagePart::tool(tool)]));
-        app.turn_started_at = Some(Instant::now());
-        app.is_streaming = false;
+        app.engine.turn_started_at = Some(Instant::now());
+        app.engine.is_streaming = false;
         (app, tool_id)
     }
 
     #[tokio::test]
     async fn all_complete_waits_for_out_of_order_tool_result() {
         let (mut app, _tool_id) = test_app_with_tool(ToolStatus::Pending);
-        app.in_flight_tool_batches = 1;
+        app.engine.in_flight_tool_batches = 1;
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
         handle_all_complete(&mut app, &tx).await;
 
-        assert_eq!(app.in_flight_tool_batches, 0);
-        assert!(app.turn_started_at.is_some());
+        assert_eq!(app.engine.in_flight_tool_batches, 0);
+        assert!(app.engine.turn_started_at.is_some());
         assert!(!should_recheck_completion_after_tool_result(&app));
     }
 
@@ -921,7 +921,7 @@ mod tests {
     fn stale_success_result_does_not_overwrite_failed_tool_output() {
         let (mut app, tool_id) = test_app_with_tool(ToolStatus::Failed);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        if let Some(MessagePart::Tool(tool)) = app.messages[1].parts.get_mut(0) {
+        if let Some(MessagePart::Tool(tool)) = app.engine.messages[1].parts.get_mut(0) {
             tool.output = ToolOutput::Text("Denied by permission mode".to_owned());
         }
 
@@ -932,7 +932,7 @@ mod tests {
             crate::runtime::ExecutionResult::success("late stale result"),
         );
 
-        let MessagePart::Tool(tool) = &app.messages[1].parts[0] else {
+        let MessagePart::Tool(tool) = &app.engine.messages[1].parts[0] else {
             panic!("expected tool part");
         };
         assert_eq!(tool.status, ToolStatus::Failed);
@@ -952,14 +952,14 @@ mod tests {
             "ls".into(),
             "awaiting_approval".into(),
         );
-        assert_eq!(app.deferred_tool_uses.len(), 1);
+        assert_eq!(app.engine.deferred_tool_uses.len(), 1);
 
         handle_set_in_progress_tool_use_ids(&mut app, "add".into(), vec!["tool-1".into()]);
-        assert!(app.in_progress_tool_use_ids.contains("tool-1"));
-        assert!(app.deferred_tool_uses.is_empty());
+        assert!(app.engine.in_progress_tool_use_ids.contains("tool-1"));
+        assert!(app.engine.deferred_tool_uses.is_empty());
 
         handle_set_in_progress_tool_use_ids(&mut app, "remove".into(), vec!["tool-1".into()]);
-        assert!(!app.in_progress_tool_use_ids.contains("tool-1"));
+        assert!(!app.engine.in_progress_tool_use_ids.contains("tool-1"));
     }
 
     #[test]

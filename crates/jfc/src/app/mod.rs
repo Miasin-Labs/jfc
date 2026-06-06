@@ -1,3 +1,4 @@
+mod engine_state;
 mod events;
 mod impls;
 mod permissions;
@@ -12,9 +13,12 @@ pub use permissions::{
     QuestionItem, QuestionOption,
 };
 pub use recent_models::{load_recent_models, push_recent_model};
+pub use engine_state::{
+    BackgroundTask, EngineState, NetworkRecoveryProvider, NetworkRecoveryReason,
+    NetworkRecoveryStatus,
+};
 pub use state::{
-    ANIM_TICK_MS, App, BackgroundTask, ExpandedView, IDLE_TICK_MS, NetworkRecoveryProvider,
-    NetworkRecoveryReason, NetworkRecoveryStatus, PromptSearch, SPINNER,
+    ANIM_TICK_MS, App, ExpandedView, IDLE_TICK_MS, PromptSearch, SPINNER,
     STREAM_WATCHDOG_TIMEOUT_SECS, SelectKind, SelectRequest, TOKEN_HISTORY_CAP, TextSelection,
     TranscriptSearch,
 };

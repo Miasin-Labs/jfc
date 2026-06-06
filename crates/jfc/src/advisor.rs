@@ -16,7 +16,7 @@
 //!   `MessagePart` so the renderer can style it distinctly).
 //!
 //! Default OFF semantics are upheld two ways:
-//!   1. The slash command is gated by `app.advisor_enabled` (config flag).
+//!   1. The slash command is gated by `app.engine.advisor_enabled` (config flag).
 //!   2. Even when "always available", the per-session token budget defaults to
 //!      a small ceiling (`DEFAULT_TOKEN_BUDGET`), so a runaway loop can't drain
 //!      the user's account.

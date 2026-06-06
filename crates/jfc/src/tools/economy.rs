@@ -234,7 +234,7 @@ impl EconomyAgentInvoker {
                     // Report the solver/validator model so the
                     // BackgroundTask's `model_used` is populated. Without
                     // it the per-progress token deltas this invoker emits
-                    // never roll into `app.usage_by_model` (the handler at
+                    // never roll into `app.engine.usage_by_model` (the handler at
                     // task.rs only credits usage when model_used is Some),
                     // and the bounty's API spend stays invisible in the
                     // status bar / cost panel — the billing blind spot.

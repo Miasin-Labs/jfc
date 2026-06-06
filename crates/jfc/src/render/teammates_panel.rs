@@ -24,12 +24,12 @@ pub(super) fn teammates_panel(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Clear, popup);
 
-    let alive: Vec<_> = app
+    let alive: Vec<_> = app.engine
         .background_tasks
         .values()
         .filter(|bt| bt.status.is_alive())
         .collect();
-    let terminal: Vec<_> = app
+    let terminal: Vec<_> = app.engine
         .background_tasks
         .values()
         .filter(|bt| bt.status.is_terminal())
@@ -53,7 +53,7 @@ pub(super) fn teammates_panel(f: &mut Frame, app: &mut App) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    if app.background_tasks.is_empty() && !app.team_context.is_active() {
+    if app.engine.background_tasks.is_empty() && !app.engine.team_context.is_active() {
         let placeholder = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -83,7 +83,7 @@ pub(super) fn teammates_panel(f: &mut Frame, app: &mut App) {
     let render_width = inner.width as usize;
 
     // Sort: alive first (by start time), then terminal
-    let mut all_tasks: Vec<_> = app.background_tasks.values().collect();
+    let mut all_tasks: Vec<_> = app.engine.background_tasks.values().collect();
     all_tasks.sort_by(|a, b| {
         let a_alive = a.status.is_alive();
         let b_alive = b.status.is_alive();
@@ -191,7 +191,7 @@ pub(super) fn teammates_panel(f: &mut Frame, app: &mut App) {
     }
 
     // Team teammates section (if team is active)
-    if app.team_context.is_active() && !app.team_context.teammates.is_empty() {
+    if app.engine.team_context.is_active() && !app.engine.team_context.teammates.is_empty() {
         if !lines.is_empty() && lines.len() < inner.height as usize {
             lines.push(Line::from(""));
         }
@@ -203,7 +203,7 @@ pub(super) fn teammates_panel(f: &mut Frame, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             )));
         }
-        let mut teammates: Vec<_> = app.team_context.teammates.values().collect();
+        let mut teammates: Vec<_> = app.engine.team_context.teammates.values().collect();
         teammates.sort_by_key(|tm| &tm.name);
         for tm in &teammates {
             if lines.len() >= inner.height as usize {

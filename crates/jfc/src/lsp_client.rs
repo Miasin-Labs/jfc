@@ -316,7 +316,7 @@ impl LspClient {
             // authoritative) set for ONE uri, and an EMPTY array is the
             // server's signal that that file is now clean. But the
             // `DiagnosticsUpdated` event contract is a *full snapshot* that
-            // replaces `app.diagnostics` wholesale (events.rs). Without this
+            // replaces `app.engine.diagnostics` wholesale (events.rs). Without this
             // map, each per-file push clobbered every other file's
             // diagnostics, so: opening a 2nd file erased the 1st file's
             // errors, and fixing one file (empty array) either wiped the
@@ -533,7 +533,7 @@ async fn handle_inbound(
 /// drops the key (the file stops contributing to the union — this is what
 /// makes "fix the issue → it disappears" work), and a non-empty array
 /// replaces whatever we held for that file. The union is what the consumer
-/// needs because `DiagnosticsUpdated` replaces `app.diagnostics` wholesale.
+/// needs because `DiagnosticsUpdated` replaces `app.engine.diagnostics` wholesale.
 fn apply_publish_diagnostics(
     diagnostics_by_uri: &mut std::collections::HashMap<
         String,

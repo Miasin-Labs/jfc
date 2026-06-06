@@ -883,7 +883,7 @@ mod pure_helper_tests {
     #[test]
     fn effort_status_badge_shows_pinned_level_normal() {
         let mut app = fake_app();
-        app.effort_state.set(crate::effort::ReasoningEffort::XHigh);
+        app.engine.effort_state.set(crate::effort::ReasoningEffort::XHigh);
         assert_eq!(effort_status_badge(&app), "effort xhigh".to_string());
     }
 
@@ -1042,7 +1042,7 @@ mod pure_helper_tests {
             started_at: None,
             thought_signature: None,
         };
-        app.messages.push(ChatMessage {
+        app.engine.messages.push(ChatMessage {
             role: Role::Assistant,
             parts: vec![MessagePart::tool(tool)],
             agent_name: None,
@@ -1089,7 +1089,7 @@ mod pure_helper_tests {
                 started_at: None,
                 thought_signature: None,
             };
-            app.messages.push(ChatMessage {
+            app.engine.messages.push(ChatMessage {
                 role: Role::Assistant,
                 parts: vec![MessagePart::tool(tool)],
                 agent_name: None,
@@ -1138,7 +1138,7 @@ mod pure_helper_tests {
                 started_at: None,
                 thought_signature: None,
             };
-            app.messages.push(ChatMessage {
+            app.engine.messages.push(ChatMessage {
                 role: Role::Assistant,
                 parts: vec![MessagePart::tool(tool)],
                 agent_name: None,

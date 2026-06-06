@@ -13,7 +13,7 @@ pub(crate) fn handle_stream_usage(
     cache_write_tokens: u32,
 ) {
     app.record_stream_activity();
-    app.stream_lifecycle = None;
+    app.engine.stream_lifecycle = None;
     // Anthropic sends *cumulative* token counts in every
     // `message_delta` event (sse.rs:212-218 — see also
     // anthropic-messaging spec). Naively calling `add_delta`
@@ -37,30 +37,30 @@ pub(crate) fn handle_stream_usage(
         // A new sub-stream restarts the message's cumulative `output_tokens`
         // lower than the last event we saw → snapshot the accumulator as the
         // baseline so the floor continues from what prior sub-streams built.
-        if output_tokens < app.last_usage_output {
-            app.streaming_response_baseline = app.streaming_response_bytes;
+        if output_tokens < app.engine.last_usage_output {
+            app.engine.streaming_response_baseline = app.engine.streaming_response_bytes;
         }
         // Self-heal a stale baseline left by a turn-boundary reset that zeroed
         // `streaming_response_bytes` without clearing the baseline.
-        if app.streaming_response_baseline > app.streaming_response_bytes {
-            app.streaming_response_baseline = 0;
+        if app.engine.streaming_response_baseline > app.engine.streaming_response_bytes {
+            app.engine.streaming_response_baseline = 0;
         }
-        let wire_floor = app.streaming_response_baseline + output_tokens as usize * 4;
-        app.streaming_response_bytes = app.streaming_response_bytes.max(wire_floor);
+        let wire_floor = app.engine.streaming_response_baseline + output_tokens as usize * 4;
+        app.engine.streaming_response_bytes = app.engine.streaming_response_bytes.max(wire_floor);
         // True output tokens (what the status row shows) — accumulate the real
         // per-event delta. `output_tokens` is cumulative within a sub-stream, so
         // the delta vs the previous event is its growth; a regression (a new
         // sub-stream restarting lower) contributes its tokens from zero. No
         // chars/4 anywhere.
-        let token_delta = if output_tokens >= app.last_usage_output {
-            output_tokens - app.last_usage_output
+        let token_delta = if output_tokens >= app.engine.last_usage_output {
+            output_tokens - app.engine.last_usage_output
         } else {
             output_tokens
         };
-        app.turn_output_tokens = app.turn_output_tokens.saturating_add(token_delta as u64);
+        app.engine.turn_output_tokens = app.engine.turn_output_tokens.saturating_add(token_delta as u64);
     }
-    app.last_usage_input = input_tokens;
-    app.last_usage_output = output_tokens;
+    app.engine.last_usage_input = input_tokens;
+    app.engine.last_usage_output = output_tokens;
     // v126's tokenCountWithEstimation uses input + cache_creation +
     // cache_read + output (all four count against the context window).
     // Previously this only summed input + output, under-reporting by
@@ -70,12 +70,12 @@ pub(crate) fn handle_stream_usage(
         + output_tokens as usize
         + cache_read_tokens as usize
         + cache_write_tokens as usize;
-    app.tool_ctx.approx_tokens = if partial_input_only {
+    app.engine.tool_ctx.approx_tokens = if partial_input_only {
         // ResponseMetadata can arrive before full Usage and carries only
         // input_tokens. Treat it as an early lower-bound so the context gauge
         // doesn't visibly drop from a calibrated cache-inclusive total to an
         // incomplete input-only value, then jump back on message_delta.
-        app.tool_ctx.approx_tokens.max(reported_total)
+        app.engine.tool_ctx.approx_tokens.max(reported_total)
     } else {
         reported_total
     };
@@ -113,18 +113,18 @@ pub(crate) fn handle_stream_usage(
             cost_usd: None,
         });
     }
-    let model_key = app.model.as_str().to_owned();
+    let model_key = app.engine.model.as_str().to_owned();
     let cum = (
         input_tokens,
         output_tokens,
         cache_read_tokens,
         cache_write_tokens,
     );
-    app.usage_apply_baseline = app
+    app.engine.usage_apply_baseline = app.engine
         .usage_by_model
         .entry(model_key)
         .or_default()
-        .apply_cumulative(cum, app.usage_apply_baseline);
+        .apply_cumulative(cum, app.engine.usage_apply_baseline);
 
     // Cache diagnosis: detect significant cache invalidation.
     // When cache_read_tokens is zero but input_tokens is high,
@@ -188,26 +188,26 @@ mod tests {
     #[test]
     fn partial_input_only_usage_does_not_lower_visible_context_regression() {
         let mut app = test_app();
-        app.tool_ctx.approx_tokens = 120_000;
+        app.engine.tool_ctx.approx_tokens = 120_000;
 
         handle_stream_usage(&mut app, 40_000, 0, 0, 0);
 
-        assert_eq!(app.tool_ctx.approx_tokens, 120_000);
-        assert_eq!(app.last_usage_input, 40_000);
-        assert_eq!(app.last_usage_output, 0);
+        assert_eq!(app.engine.tool_ctx.approx_tokens, 120_000);
+        assert_eq!(app.engine.last_usage_input, 40_000);
+        assert_eq!(app.engine.last_usage_output, 0);
     }
 
     #[test]
     fn full_usage_replaces_partial_visible_context_normal() {
         let mut app = test_app();
-        app.tool_ctx.approx_tokens = 120_000;
+        app.engine.tool_ctx.approx_tokens = 120_000;
         handle_stream_usage(&mut app, 40_000, 0, 0, 0);
 
         handle_stream_usage(&mut app, 40_000, 2_000, 75_000, 5_000);
 
-        assert_eq!(app.tool_ctx.approx_tokens, 122_000);
-        assert_eq!(app.last_usage_input, 40_000);
-        assert_eq!(app.last_usage_output, 2_000);
+        assert_eq!(app.engine.tool_ctx.approx_tokens, 122_000);
+        assert_eq!(app.engine.last_usage_input, 40_000);
+        assert_eq!(app.engine.last_usage_output, 2_000);
     }
 
     #[test]
@@ -217,15 +217,15 @@ mod tests {
         // fails before the final Usage event, the message would persist
         // with output_tokens:0 even though it contains actual content.
         let mut app = test_app();
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.streaming_assistant_idx = Some(0);
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.streaming_assistant_idx = Some(0);
 
         // Simulate ResponseMetadata arriving with input_tokens only
         handle_stream_usage(&mut app, 40_000, 0, 0, 0);
 
         // The message should NOT have usage stamped yet (prevents the bug)
         assert!(
-            app.messages[0].usage.is_none(),
+            app.engine.messages[0].usage.is_none(),
             "partial_input_only on first arrival must NOT stamp message"
         );
 
@@ -233,7 +233,7 @@ mod tests {
         handle_stream_usage(&mut app, 40_000, 2_000, 75_000, 5_000);
 
         // Now the full usage is stamped
-        let usage = app.messages[0].usage.as_ref().expect("usage");
+        let usage = app.engine.messages[0].usage.as_ref().expect("usage");
         assert_eq!(usage.output_tokens, 2_000);
         assert_eq!(usage.total_context_tokens(), 122_000);
     }
@@ -243,30 +243,30 @@ mod tests {
         let mut app = test_app();
         // Input-only metadata arrives first — must not move the output count.
         handle_stream_usage(&mut app, 12, 0, 0, 0);
-        assert_eq!(app.turn_output_tokens, 0);
+        assert_eq!(app.engine.turn_output_tokens, 0);
         // Sub-stream 1: cumulative output grows; we accumulate the real delta.
         handle_stream_usage(&mut app, 12, 100, 0, 0);
-        assert_eq!(app.turn_output_tokens, 100);
+        assert_eq!(app.engine.turn_output_tokens, 100);
         handle_stream_usage(&mut app, 12, 250, 0, 0);
-        assert_eq!(app.turn_output_tokens, 250);
+        assert_eq!(app.engine.turn_output_tokens, 250);
         // Sub-stream 2 restarts output_tokens lower (a regression). Its tokens
         // are counted from zero so the turn total stays true and monotonic.
         handle_stream_usage(&mut app, 12, 30, 0, 0);
-        assert_eq!(app.turn_output_tokens, 280);
+        assert_eq!(app.engine.turn_output_tokens, 280);
         handle_stream_usage(&mut app, 12, 80, 0, 0);
-        assert_eq!(app.turn_output_tokens, 330);
+        assert_eq!(app.engine.turn_output_tokens, 330);
     }
 
     #[test]
     fn partial_input_only_usage_does_not_clobber_richer_message_usage_regression() {
         let mut app = test_app();
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.streaming_assistant_idx = Some(0);
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.streaming_assistant_idx = Some(0);
         handle_stream_usage(&mut app, 40_000, 2_000, 75_000, 5_000);
 
         handle_stream_usage(&mut app, 41_000, 0, 0, 0);
 
-        let usage = app.messages[0].usage.as_ref().expect("usage");
+        let usage = app.engine.messages[0].usage.as_ref().expect("usage");
         assert_eq!(usage.total_context_tokens(), 122_000);
     }
 
@@ -279,10 +279,10 @@ mod tests {
         // accumulator up to 200*4 = 800 bytes so the count reads 200 — even
         // if only a few chars have streamed so far.
         let mut app = test_app();
-        app.streaming_response_bytes = 40; // 10 tokens of chars so far
+        app.engine.streaming_response_bytes = 40; // 10 tokens of chars so far
         handle_stream_usage(&mut app, 1_000, 200, 0, 0);
-        assert_eq!(app.streaming_response_bytes, 800);
-        assert_eq!(app.streaming_response_bytes / 4, 200);
+        assert_eq!(app.engine.streaming_response_bytes, 800);
+        assert_eq!(app.engine.streaming_response_bytes / 4, 200);
     }
 
     #[test]
@@ -292,16 +292,16 @@ mod tests {
         // to the next wire delta. This is the anti-"jumps by 50" guarantee.
         let mut app = test_app();
         handle_stream_usage(&mut app, 1_000, 200, 0, 0); // floor → 800
-        app.streaming_response_bytes += 120; // 30 tokens of chars arrive → 920
-        assert_eq!(app.streaming_response_bytes / 4, 230);
+        app.engine.streaming_response_bytes += 120; // 30 tokens of chars arrive → 920
+        assert_eq!(app.engine.streaming_response_bytes / 4, 230);
         // Next batched delta (210 tokens) is *below* the char-grown
         // accumulator, so it must NOT pull the count back down to 210.
         handle_stream_usage(&mut app, 1_000, 210, 0, 0);
         assert_eq!(
-            app.streaming_response_bytes, 920,
+            app.engine.streaming_response_bytes, 920,
             "wire must not lower a char-led count"
         );
-        assert_eq!(app.streaming_response_bytes / 4, 230);
+        assert_eq!(app.engine.streaming_response_bytes / 4, 230);
     }
 
     #[test]
@@ -315,12 +315,12 @@ mod tests {
         // New sub-stream: output restarts at 50 (< previous 200).
         handle_stream_usage(&mut app, 1_000, 50, 0, 0);
         assert_eq!(
-            app.streaming_response_baseline, 800,
+            app.engine.streaming_response_baseline, 800,
             "baseline snapshots prior accumulator"
         );
         // 50 more tokens this sub-stream → floor = 800 + 50*4 = 1000.
-        assert_eq!(app.streaming_response_bytes, 1_000);
-        assert_eq!(app.streaming_response_bytes / 4, 250);
+        assert_eq!(app.engine.streaming_response_bytes, 1_000);
+        assert_eq!(app.engine.streaming_response_bytes / 4, 250);
     }
 
     #[test]
@@ -329,14 +329,14 @@ mod tests {
         // may leave a stale baseline. The next usage event must clamp the
         // baseline back to 0 rather than over-flooring the fresh turn.
         let mut app = test_app();
-        app.streaming_response_baseline = 5_000; // stale from a prior turn
-        app.streaming_response_bytes = 0; // fresh turn
+        app.engine.streaming_response_baseline = 5_000; // stale from a prior turn
+        app.engine.streaming_response_bytes = 0; // fresh turn
         handle_stream_usage(&mut app, 1_000, 30, 0, 0);
         assert_eq!(
-            app.streaming_response_baseline, 0,
+            app.engine.streaming_response_baseline, 0,
             "stale baseline self-heals"
         );
-        assert_eq!(app.streaming_response_bytes, 120); // 30*4, not 5000+120
+        assert_eq!(app.engine.streaming_response_bytes, 120); // 30*4, not 5000+120
     }
 
     #[test]
@@ -344,9 +344,9 @@ mod tests {
         // An input-only metadata event (output_tokens == 0) carries no output
         // count, so it must not touch the accumulator or baseline.
         let mut app = test_app();
-        app.streaming_response_bytes = 640; // 160 tokens of content
+        app.engine.streaming_response_bytes = 640; // 160 tokens of content
         handle_stream_usage(&mut app, 50_000, 0, 0, 0);
-        assert_eq!(app.streaming_response_bytes, 640);
-        assert_eq!(app.streaming_response_baseline, 0);
+        assert_eq!(app.engine.streaming_response_bytes, 640);
+        assert_eq!(app.engine.streaming_response_baseline, 0);
     }
 }

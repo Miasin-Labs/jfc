@@ -134,7 +134,7 @@ pub(super) async fn skill_fallthrough(
         } else {
             format!("/{name}")
         };
-        app.messages.push(ChatMessage::user(echo));
+        app.engine.messages.push(ChatMessage::user(echo));
 
         // Phase A: inline-expand the body. If the user passed args
         // after the skill name, append them under an `# Args` heading
@@ -153,7 +153,7 @@ pub(super) async fn skill_fallthrough(
             // No tx in this dispatch path (e.g. queued-prompt drain).
             // Fall back to a hint rather than silently swallowing the
             // invocation.
-            app.messages.push(ChatMessage::assistant(format!(
+            app.engine.messages.push(ChatMessage::assistant(format!(
                 "Skill `/{name}` cannot be invoked from this context (no stream channel). \
                          Submit `/{name}` directly from the input bar instead."
             )));
@@ -165,69 +165,69 @@ pub(super) async fn skill_fallthrough(
         // fresh user turn: push the synthetic user message, push the
         // empty assistant placeholder, prime streaming flags, persist
         // the session, then spawn the provider stream.
-        let assistant_idx = app.messages.len() + 1;
-        app.messages.push(ChatMessage::user(body));
-        app.tool_ctx.total_user_turns += 1;
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.streaming_text.clear();
-        app.streaming_reasoning.clear();
-        app.streaming_response_bytes = 0;
-        app.network_recovery_status = None;
-        app.network_recovery_attempts = 0;
-        app.streaming_assistant_idx = Some(assistant_idx);
-        app.is_streaming = true;
+        let assistant_idx = app.engine.messages.len() + 1;
+        app.engine.messages.push(ChatMessage::user(body));
+        app.engine.tool_ctx.total_user_turns += 1;
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.streaming_text.clear();
+        app.engine.streaming_reasoning.clear();
+        app.engine.streaming_response_bytes = 0;
+        app.engine.network_recovery_status = None;
+        app.engine.network_recovery_attempts = 0;
+        app.engine.streaming_assistant_idx = Some(assistant_idx);
+        app.engine.is_streaming = true;
         let now = std::time::Instant::now();
-        app.streaming_started_at = Some(now);
-        app.last_stream_event_at = Some(now);
-        app.streaming_last_token_at = Some(now);
-        app.turn_started_at = Some(now);
-        app.turn_start_cost = crate::cost::total_cost(&app.usage_by_model);
-        app.agentic_turn_count = 0;
-        app.thinking_started_at = None;
-        app.pre_dispatched_tool_ids.clear();
-        app.deferred_tool_uses.clear();
-        app.in_progress_tool_use_ids.clear();
-        app.in_flight_eager_dispatches = 0;
-        app.in_flight_tool_batches = 0;
-        app.thinking_ended_at = None;
-        app.last_usage_output = 0;
-        app.usage_apply_baseline = (0, 0, 0, 0);
+        app.engine.streaming_started_at = Some(now);
+        app.engine.last_stream_event_at = Some(now);
+        app.engine.streaming_last_token_at = Some(now);
+        app.engine.turn_started_at = Some(now);
+        app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+        app.engine.agentic_turn_count = 0;
+        app.engine.thinking_started_at = None;
+        app.engine.pre_dispatched_tool_ids.clear();
+        app.engine.deferred_tool_uses.clear();
+        app.engine.in_progress_tool_use_ids.clear();
+        app.engine.in_flight_eager_dispatches = 0;
+        app.engine.in_flight_tool_batches = 0;
+        app.engine.thinking_ended_at = None;
+        app.engine.last_usage_output = 0;
+        app.engine.usage_apply_baseline = (0, 0, 0, 0);
         app.scroll_to_bottom();
 
-        let session_id = app
+        let session_id = app.engine
             .current_session_id
             .clone()
             .unwrap_or_else(jfc_session::generate_session_id);
         // Fire-and-forget — don't block UI on disk I/O
         {
             let sid = session_id.clone();
-            let msgs = app.messages.clone();
-            let model = app.model.clone();
+            let msgs = app.engine.messages.clone();
+            let model = app.engine.model.clone();
             tokio::spawn(async move {
                 crate::session::save_session(&sid, &msgs, None, Some(model.as_str())).await;
             });
         }
-        app.current_session_id = Some(session_id);
+        app.engine.current_session_id = Some(session_id);
 
-        let provider = app.provider.clone();
-        let messages = crate::stream::build_provider_messages(&app.messages[..assistant_idx]);
-        let model = app.model.clone();
+        let provider = app.engine.provider.clone();
+        let messages = crate::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
+        let model = app.engine.model.clone();
         let tx_stream = tx.clone();
-        let interrupt = app.interrupt_flag.clone();
+        let interrupt = app.engine.interrupt_flag.clone();
         interrupt.store(false, std::sync::atomic::Ordering::SeqCst);
-        app.cancel_token = tokio_util::sync::CancellationToken::new();
-        let cancel = app.cancel_token.clone();
+        app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel = app.engine.cancel_token.clone();
         let overrides = crate::runtime::StreamRequestOverrides {
-            background_reminders: app.take_background_reminders(),
-            disallowed_tools: app.effective_disallowed_tools(),
-            allowed_tools: app.allowed_tools.clone(),
-            custom_betas: app.custom_betas.clone(),
-            fine_grained_tool_streaming: app.fine_grained_tool_streaming,
-            strict_tool_schemas: app.strict_tool_schemas,
-            task_budget: app.cli_task_budget,
-            max_thinking_tokens: app.cli_max_thinking_tokens,
-            thinking_display: app.cli_thinking_display.clone(),
-            brief_mode: app.brief_mode,
+            background_reminders: app.engine.take_background_reminders(),
+            disallowed_tools: app.engine.effective_disallowed_tools(),
+            allowed_tools: app.engine.allowed_tools.clone(),
+            custom_betas: app.engine.custom_betas.clone(),
+            fine_grained_tool_streaming: app.engine.fine_grained_tool_streaming,
+            strict_tool_schemas: app.engine.strict_tool_schemas,
+            task_budget: app.engine.cli_task_budget,
+            max_thinking_tokens: app.engine.cli_max_thinking_tokens,
+            thinking_display: app.engine.cli_thinking_display.clone(),
+            brief_mode: app.engine.brief_mode,
             ..Default::default()
         };
         // wg-async: retry path mints a fresh cancel token for the
@@ -242,7 +242,7 @@ pub(super) async fn skill_fallthrough(
         return;
     }
 
-    app.messages.push(ChatMessage::assistant(format!(
+    app.engine.messages.push(ChatMessage::assistant(format!(
         "Unknown command: `{}`. Type `/help` for available commands.",
         parts[0]
     )));

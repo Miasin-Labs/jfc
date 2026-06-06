@@ -137,7 +137,7 @@ pub(super) fn model_picker(f: &mut Frame, app: &mut App) {
     let rows: Vec<Row> = visible
         .iter()
         .map(|m| {
-            let is_current = m.id == app.model;
+            let is_current = m.id == app.engine.model;
             let marker = if is_current { " ● " } else { "   " };
             let name_style = if is_current {
                 t.style_accent_bold

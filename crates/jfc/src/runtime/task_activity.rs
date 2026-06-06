@@ -2,7 +2,7 @@ use crate::{app, types};
 use jfc_session::{DeletedFilter, TaskId, TaskStatus};
 
 pub(crate) fn update_task_activities(app: &mut app::App, calls: &[types::ToolCall]) {
-    let in_progress: Vec<TaskId> = app
+    let in_progress: Vec<TaskId> = app.engine
         .task_store
         .list(DeletedFilter::Exclude)
         .iter()
@@ -19,7 +19,7 @@ pub(crate) fn update_task_activities(app: &mut app::App, calls: &[types::ToolCal
         .collect::<Vec<_>>()
         .join(", ");
     for task_id in in_progress {
-        app.task_activities.insert(task_id, description.clone());
+        app.engine.task_activities.insert(task_id, description.clone());
     }
 }
 
@@ -47,10 +47,10 @@ pub(crate) fn update_task_activities(app: &mut app::App, calls: &[types::ToolCal
 /// user turn — `did_substantive_work` scans the trailing messages for Edit /
 /// Write / MultiEdit / ApplyPatch / Bash tool calls.
 pub(crate) fn task_drift_reminder(app: &app::App) -> Option<String> {
-    if !did_substantive_work(&app.messages) {
+    if !did_substantive_work(&app.engine.messages) {
         return None;
     }
-    let counts = app.task_store.counts();
+    let counts = app.engine.task_store.counts();
     // No plan in play → nothing to reconcile.
     if counts.pending == 0 && counts.in_progress == 0 {
         return None;

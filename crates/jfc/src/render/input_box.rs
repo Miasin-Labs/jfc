@@ -18,7 +18,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
     let raw_setting = std::env::var("JFC_PROMPT_CHAR").unwrap_or_else(|_| "❯".to_string());
     let mode = parse_prompt_mode(&raw_setting);
     let now_ms = app.launched_at.elapsed().as_millis();
-    let streaming_for_anim = app.is_streaming && !crate::spinner::reduced_motion();
+    let streaming_for_anim = app.engine.is_streaming && !crate::spinner::reduced_motion();
     let prompt_char: String = if in_edit_mode {
         "✎".to_string()
     } else if let PromptMode::Static(s) = &mode {
@@ -29,7 +29,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
 
     let (prompt_color, border_color) = if in_edit_mode {
         (t.warning, t.warning)
-    } else if app.is_streaming {
+    } else if app.engine.is_streaming {
         (t.accent, t.text_muted)
     } else {
         (t.accent, t.border)
@@ -159,7 +159,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
     // not streaming (the spinner takes over the visual focus during
     // streaming) and not in edit mode (the orange edit border is
     // already a strong signal). Reduced-motion skips the pulse.
-    if !app.is_streaming
+    if !app.engine.is_streaming
         && !in_edit_mode
         && !crate::spinner::reduced_motion()
         && area.height > 1

@@ -132,7 +132,7 @@ pub(super) async fn cmd_audit(
     if let (Some(&"change"), Some(id)) = (parts.get(1), parts.get(2)) {
         filter.change_id = Some((*id).to_string());
     }
-    let root = std::path::PathBuf::from(&app.cwd);
+    let root = std::path::PathBuf::from(&app.engine.cwd);
     let events = crate::changeset::query_ledger_in(&root, &filter);
     let body = format!(
         "Audit ledger ({} event{}):\n{}",
@@ -140,7 +140,7 @@ pub(super) async fn cmd_audit(
         if events.len() == 1 { "" } else { "s" },
         crate::changeset::render_ledger(&events)
     );
-    app.messages.push(ChatMessage::assistant(body));
+    app.engine.messages.push(ChatMessage::assistant(body));
 }
 
 /// `/commands [manifest|completions]` — the unified command/tool list,
@@ -174,7 +174,7 @@ pub(super) async fn cmd_commands(
             crate::command_spec::render_all()
         ),
     };
-    app.messages.push(ChatMessage::assistant(body));
+    app.engine.messages.push(ChatMessage::assistant(body));
 }
 
 /// `/changes [show|test|apply|revert <id> [-- <cmd>]]` — review surface for
@@ -185,7 +185,7 @@ pub(super) async fn cmd_changes(
     text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    let root = std::path::PathBuf::from(&app.cwd);
+    let root = std::path::PathBuf::from(&app.engine.cwd);
     let body = match (parts.get(1), parts.get(2)) {
         (Some(&"show"), Some(id)) => crate::changeset::show_change(&root, id),
         (Some(&"apply"), Some(id)) => crate::changeset::apply_change(&root, id).await,
@@ -201,7 +201,7 @@ pub(super) async fn cmd_changes(
         }
         _ => crate::changeset::list_changes(&root),
     };
-    app.messages.push(ChatMessage::assistant(body));
+    app.engine.messages.push(ChatMessage::assistant(body));
 }
 
 pub(super) async fn cmd_bug(

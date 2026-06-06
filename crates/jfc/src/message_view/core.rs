@@ -74,16 +74,16 @@ impl<'a> RenderCtx<'a> {
     /// Main-chat path: pull everything from the live `App`.
     pub fn from_app(app: &'a App) -> Self {
         Self {
-            messages: &app.messages,
-            streaming_idx: app.streaming_assistant_idx,
-            is_streaming: app.is_streaming,
+            messages: &app.engine.messages,
+            streaming_idx: app.engine.streaming_assistant_idx,
+            is_streaming: app.engine.is_streaming,
             reasoning_expanded: &app.reasoning_expanded,
             active_reasoning_idx: {
                 // Only the live, still-thinking block defaults expanded.
                 let thinking_live =
-                    app.thinking_started_at.is_some() && app.thinking_ended_at.is_none();
+                    app.engine.thinking_started_at.is_some() && app.engine.thinking_ended_at.is_none();
                 if thinking_live {
-                    app.streaming_assistant_idx
+                    app.engine.streaming_assistant_idx
                 } else {
                     None
                 }
@@ -91,8 +91,8 @@ impl<'a> RenderCtx<'a> {
             tool_group_expanded: &app.tool_group_expanded,
             render_cache: &app.render_cache,
             theme: app.theme,
-            brief_mode: app.brief_mode
-                || crate::feature_gates::pewter_owl_brief_enabled(app.model.as_str(), false),
+            brief_mode: app.engine.brief_mode
+                || crate::feature_gates::pewter_owl_brief_enabled(app.engine.model.as_str(), false),
         }
     }
 
@@ -189,7 +189,7 @@ impl Widget for MessageView<'_> {
         tracing::trace!(
             target: "jfc::render::scroll",
             n_items = items.len(),
-            n_messages = self.app.messages.len(),
+            n_messages = self.app.engine.messages.len(),
             inner_w,
             viewport_h = area.height,
             total_h = total_h,
@@ -434,7 +434,7 @@ pub enum RenderItem<'a> {
     /// through the render-stack as a separate parameter at every
     /// helper. Only the tool-block path needs it; other items don't.
     /// Single tool block. We carry only the `&ToolCall` reference (not `&App`)
-    /// so the items Vec borrows just `app.messages` instead of the whole `App` —
+    /// so the items Vec borrows just `app.engine.messages` instead of the whole `App` —
     /// that lets `render::messages` mutate sibling fields like `scroll_offset`,
     /// `total_lines`, and `viewport_height` while the prebuilt items are still
     /// alive. Pre-fix the variant held `&App` and split-borrow rules forced
@@ -578,7 +578,7 @@ pub(super) fn diagnostics_for_path(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path);
-    for d in &app.diagnostics {
+    for d in &app.engine.diagnostics {
         let d_basename = std::path::Path::new(&d.file)
             .file_name()
             .and_then(|s| s.to_str())

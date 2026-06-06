@@ -13,7 +13,7 @@ impl App {
     /// Called once per tick so the tick task can adjust its sleep interval.
     pub fn update_wants_animation_frame(&self) {
         use std::sync::atomic::Ordering;
-        let any_alive_background = self
+        let any_alive_background = self.engine
             .background_tasks
             .values()
             .any(|bt| bt.status.is_alive());
@@ -25,17 +25,17 @@ impl App {
         // queued, or a compaction is running — none of which set
         // `is_streaming`, so without them the tick loop drops to the idle
         // cadence and stops redrawing mid-turn.
-        let turn_active = self.turn_started_at.is_some()
-            || self.compacting_started_at.is_some()
-            || !self.pending_tool_calls.is_empty()
-            || self.network_recovery_status.is_some()
-            || self.stream_lifecycle.is_some();
+        let turn_active = self.engine.turn_started_at.is_some()
+            || self.engine.compacting_started_at.is_some()
+            || !self.engine.pending_tool_calls.is_empty()
+            || self.engine.network_recovery_status.is_some()
+            || self.engine.stream_lifecycle.is_some();
         let dominated = self.launched_at.elapsed() < std::time::Duration::from_millis(1500)
-            || self.is_streaming
+            || self.engine.is_streaming
             || turn_active
             || any_alive_background
             || self.scroll_velocity.abs() > 0.5
-            || self
+            || self.engine
                 .toasts
                 .iter()
                 .any(|t| !t.is_expired_at(std::time::Instant::now()));
@@ -44,30 +44,30 @@ impl App {
     }
 
     pub fn record_stream_activity(&mut self) {
-        self.last_stream_event_at = Some(Instant::now());
+        self.engine.last_stream_event_at = Some(Instant::now());
     }
 
     pub fn pipeline_busy_for_submit(&self) -> bool {
-        self.compacting_started_at.is_some()
-            || self.pending_approval.is_some()
-            || !self.approval_queue.is_empty()
-            || !self.pending_tool_calls.is_empty()
-            || self.pending_classifications > 0
-            || self.in_flight_eager_dispatches > 0
-            || self.in_flight_tool_batches > 0
-            || !self.in_progress_tool_use_ids.is_empty()
+        self.engine.compacting_started_at.is_some()
+            || self.engine.pending_approval.is_some()
+            || !self.engine.approval_queue.is_empty()
+            || !self.engine.pending_tool_calls.is_empty()
+            || self.engine.pending_classifications > 0
+            || self.engine.in_flight_eager_dispatches > 0
+            || self.engine.in_flight_tool_batches > 0
+            || !self.engine.in_progress_tool_use_ids.is_empty()
     }
 
     pub fn has_interruptible_work(&self) -> bool {
-        self.is_streaming
-            || self
+        self.engine.is_streaming
+            || self.engine
                 .active_stream_handle
                 .as_ref()
                 .is_some_and(|handle| !handle.is_finished())
-            || self.turn_started_at.is_some()
+            || self.engine.turn_started_at.is_some()
             || self.pipeline_busy_for_submit()
-            || self.goal_evaluator_in_flight
-            || self
+            || self.engine.goal_evaluator_in_flight
+            || self.engine
                 .background_tasks
                 .values()
                 .any(|bt| bt.status.is_alive())
@@ -80,7 +80,7 @@ impl App {
         input_preview: String,
         reason: String,
     ) {
-        if let Some(existing) = self
+        if let Some(existing) = self.engine
             .deferred_tool_uses
             .iter_mut()
             .find(|deferred| deferred.id == id)
@@ -91,10 +91,10 @@ impl App {
             existing.queued_at = Instant::now();
             return;
         }
-        if self.deferred_tool_uses.len() >= DEFERRED_TOOL_USES_CAP {
-            self.deferred_tool_uses.pop_front();
+        if self.engine.deferred_tool_uses.len() >= DEFERRED_TOOL_USES_CAP {
+            self.engine.deferred_tool_uses.pop_front();
         }
-        self.deferred_tool_uses.push_back(DeferredToolUse {
+        self.engine.deferred_tool_uses.push_back(DeferredToolUse {
             id,
             name,
             input_preview,
@@ -104,27 +104,27 @@ impl App {
     }
 
     pub fn clear_deferred_tool_use(&mut self, id: &str) {
-        self.deferred_tool_uses.retain(|deferred| deferred.id != id);
+        self.engine.deferred_tool_uses.retain(|deferred| deferred.id != id);
     }
 
     pub fn set_in_progress_tool_use_ids(&mut self, action: &str, ids: &[String]) {
         match action {
             "set" => {
-                self.in_progress_tool_use_ids.clear();
-                self.in_progress_tool_use_ids.extend(ids.iter().cloned());
+                self.engine.in_progress_tool_use_ids.clear();
+                self.engine.in_progress_tool_use_ids.extend(ids.iter().cloned());
                 for id in ids {
                     self.clear_deferred_tool_use(id);
                 }
             }
             "add" => {
                 for id in ids {
-                    self.in_progress_tool_use_ids.insert(id.clone());
+                    self.engine.in_progress_tool_use_ids.insert(id.clone());
                     self.clear_deferred_tool_use(id);
                 }
             }
             "remove" => {
                 for id in ids {
-                    self.in_progress_tool_use_ids.remove(id);
+                    self.engine.in_progress_tool_use_ids.remove(id);
                     self.clear_deferred_tool_use(id);
                 }
             }
@@ -147,10 +147,10 @@ impl App {
         if summary.trim().is_empty() || preceding_tool_use_ids.is_empty() {
             return;
         }
-        if self.tool_use_summaries.len() >= TOOL_USE_SUMMARIES_CAP {
-            self.tool_use_summaries.pop_front();
+        if self.engine.tool_use_summaries.len() >= TOOL_USE_SUMMARIES_CAP {
+            self.engine.tool_use_summaries.pop_front();
         }
-        self.tool_use_summaries.push_back(ToolUseSummary {
+        self.engine.tool_use_summaries.push_back(ToolUseSummary {
             summary,
             preceding_tool_use_ids,
             created_at: Instant::now(),
@@ -158,28 +158,28 @@ impl App {
     }
 
     pub fn check_stream_watchdog(&mut self) {
-        if !self.is_streaming {
+        if !self.engine.is_streaming {
             return;
         }
         let Some(timeout_secs) = stream_watchdog_timeout_secs() else {
             return;
         };
-        let timed_out = self
+        let timed_out = self.engine
             .last_stream_event_at
             .map(|t| t.elapsed().as_secs() >= timeout_secs)
             .unwrap_or(false);
         if timed_out {
-            let streaming_assistant_idx = self.streaming_assistant_idx;
+            let streaming_assistant_idx = self.engine.streaming_assistant_idx;
             tracing::warn!(
                 target: "jfc::app",
-                elapsed_secs = self.last_stream_event_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                elapsed_secs = self.engine.last_stream_event_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
                 "stream watchdog: cancelling hard-idle stream"
             );
             // Cancel the stream task so it actually stops sending events.
             // Without this the stream task continues running in the
             // background, can still modify messages, and can dispatch
             // tools into a stale context — the "half-dead state" bug.
-            self.cancel_token.cancel();
+            self.engine.cancel_token.cancel();
             // Belt-and-suspenders: forcefully abort the spawned driver
             // task too. The cooperative cancel above only stops the
             // task if it polls `cancel_token`. A task wedged inside a
@@ -189,7 +189,7 @@ impl App {
             // writing the same conversation buffer — interleaved
             // assistant prose. `JoinHandle::abort` schedules a forced
             // unwind at the next await point.
-            if let Some(handle) = self.active_stream_handle.take() {
+            if let Some(handle) = self.engine.active_stream_handle.take() {
                 handle.abort();
             }
             // CRITICAL: replace the token after cancelling so the NEXT
@@ -199,66 +199,66 @@ impl App {
             // — that was the spurious-interrupt bug. The previous user
             // submission's cancel flowed forward forever because the
             // token is a single shared instance, not per-turn.
-            self.cancel_token = tokio_util::sync::CancellationToken::new();
-            self.is_streaming = false;
-            self.streaming_started_at = None;
-            self.last_stream_event_at = None;
-            self.streaming_last_token_at = None;
+            self.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+            self.engine.is_streaming = false;
+            self.engine.streaming_started_at = None;
+            self.engine.last_stream_event_at = None;
+            self.engine.streaming_last_token_at = None;
             self.token_rate_samples.clear();
-            self.thinking_started_at = None;
-            self.thinking_ended_at = None;
-            self.streaming_text.clear();
-            self.streaming_reasoning.clear();
-            self.streaming_response_bytes = 0;
-            self.streaming_assistant_idx = None;
-            self.current_stream_request = None;
-            self.stream_lifecycle = None;
-            self.turn_started_at = None;
+            self.engine.thinking_started_at = None;
+            self.engine.thinking_ended_at = None;
+            self.engine.streaming_text.clear();
+            self.engine.streaming_reasoning.clear();
+            self.engine.streaming_response_bytes = 0;
+            self.engine.streaming_assistant_idx = None;
+            self.engine.current_stream_request = None;
+            self.engine.stream_lifecycle = None;
+            self.engine.turn_started_at = None;
             // Clear any pending tool calls that accumulated during the
             // dead stream — they're stale and would dispatch into wrong
             // context if processed later.
-            self.pending_tool_calls.clear();
-            self.pre_dispatched_tool_ids.clear();
-            self.deferred_tool_uses.clear();
-            self.in_progress_tool_use_ids.clear();
-            self.in_flight_eager_dispatches = 0;
-            self.in_flight_tool_batches = 0;
+            self.engine.pending_tool_calls.clear();
+            self.engine.pre_dispatched_tool_ids.clear();
+            self.engine.deferred_tool_uses.clear();
+            self.engine.in_progress_tool_use_ids.clear();
+            self.engine.in_flight_eager_dispatches = 0;
+            self.engine.in_flight_tool_batches = 0;
             if let Some(idx) = streaming_assistant_idx
-                && idx < self.messages.len()
+                && idx < self.engine.messages.len()
             {
-                let msg = &self.messages[idx];
+                let msg = &self.engine.messages[idx];
                 let empty_stream_placeholder = msg.role == Role::Assistant
                     && msg.parts.iter().all(
                         |part| matches!(part, MessagePart::Text(text) if text.trim().is_empty()),
                     );
                 if empty_stream_placeholder {
-                    self.messages.remove(idx);
+                    self.engine.messages.remove(idx);
                 }
             }
         }
     }
 
     /// Resolve the git repository root by walking up from `cwd`.
-    /// Caches the result in `self.git_root`. Call `invalidate_git_root()`
+    /// Caches the result in `self.engine.git_root`. Call `invalidate_git_root()`
     /// on Resize to force re-resolution.
     pub fn resolve_git_root(&mut self) {
-        if self.git_root.is_some() {
+        if self.engine.git_root.is_some() {
             return;
         }
         let mut dir = std::env::current_dir().ok();
         while let Some(d) = dir {
             if d.join(".git").exists() {
-                self.git_root = Some(Some(d));
+                self.engine.git_root = Some(Some(d));
                 return;
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }
-        self.git_root = Some(None);
+        self.engine.git_root = Some(None);
     }
 
     /// Invalidate the cached git root so it will be re-resolved on next access.
     pub fn invalidate_git_root(&mut self) {
-        self.git_root = None;
+        self.engine.git_root = None;
     }
 
     /// Switch to a different session id and reset all per-session state
@@ -269,7 +269,7 @@ impl App {
     /// Pass `None` to mint a fresh session id; pass `Some(id)` to adopt an
     /// existing one (the session-load path through the sidebar / `/continue`).
     pub fn switch_session(&mut self, id: Option<crate::ids::SessionId>) {
-        let old_id = self.current_session_id.clone();
+        let old_id = self.engine.current_session_id.clone();
         let new_id = id.unwrap_or_else(jfc_session::generate_session_id);
         tracing::info!(
             target: "jfc::app",
@@ -277,19 +277,19 @@ impl App {
             new_session_id = %new_id,
             "switch_session"
         );
-        self.current_session_id = Some(new_id.clone());
-        self.task_store = jfc_session::TaskStore::open(new_id.as_str());
-        self.task_completion_times.clear();
-        self.task_activities.clear();
+        self.engine.current_session_id = Some(new_id.clone());
+        self.engine.task_store = jfc_session::TaskStore::open(new_id.as_str());
+        self.engine.task_completion_times.clear();
+        self.engine.task_activities.clear();
         self.task_panel_selected = 0;
         self.task_panel_state = ratatui::widgets::TableState::default().with_selected(Some(0));
         self.task_panel_detail = false;
         self.viewing_task_id = None;
         self.viewing_task_expanded.clear();
-        self.deferred_tool_uses.clear();
-        self.in_progress_tool_use_ids.clear();
-        self.tool_use_summaries.clear();
-        self.compact_suppressed = false;
+        self.engine.deferred_tool_uses.clear();
+        self.engine.in_progress_tool_use_ids.clear();
+        self.engine.tool_use_summaries.clear();
+        self.engine.compact_suppressed = false;
         self.recompute_token_estimate();
     }
 
@@ -309,52 +309,52 @@ impl App {
     /// `compact::estimate_tokens` over message content — same heuristic
     /// the live token counter uses.
     pub fn recompute_token_estimate(&mut self) {
-        let old_estimate = self.tool_ctx.approx_tokens;
+        let old_estimate = self.engine.tool_ctx.approx_tokens;
         // v126's `tokenCountWithEstimation` (tokens.ts:226-261): find the last
         // assistant message with API usage, use that as the authoritative base,
         // then rough-estimate any messages added AFTER it (user prompts, tool
         // results). This prevents the gap between API calls where the gauge
         // reads 0 or stale for newly-added messages.
-        let last_usage_idx = self
+        let last_usage_idx = self.engine
             .messages
             .iter()
             .enumerate()
             .rev()
             .find_map(|(i, m)| m.usage.as_ref().map(|u| (i, u.clone())));
         if let Some((idx, u)) = last_usage_idx {
-            self.last_usage_input = u.input_tokens as u32;
-            self.last_usage_output = u.output_tokens as u32;
+            self.engine.last_usage_input = u.input_tokens as u32;
+            self.engine.last_usage_output = u.output_tokens as u32;
             let base = u.total_context_tokens() as usize;
             // Estimate tokens for messages added after the usage-bearing
             // message — but exclude queued placeholders, since they
             // aren't actually in the prompt the model sees (see
             // `build_provider_messages`).
-            let tail: Vec<crate::types::ChatMessage> = self.messages[idx + 1..]
+            let tail: Vec<crate::types::ChatMessage> = self.engine.messages[idx + 1..]
                 .iter()
                 .filter(|m| !m.queued)
                 .cloned()
                 .collect();
             let tail_estimate = crate::compact::estimate_tokens(&tail);
-            self.tool_ctx.approx_tokens = base + tail_estimate;
+            self.engine.tool_ctx.approx_tokens = base + tail_estimate;
         } else {
-            self.last_usage_input = 0;
-            self.last_usage_output = 0;
+            self.engine.last_usage_input = 0;
+            self.engine.last_usage_output = 0;
             // Same queued filter as above. Without this, queueing a
             // long prompt during a streaming turn would visibly bump
             // the context gauge even though that text isn't part of
             // the current prompt.
-            let unqueued: Vec<crate::types::ChatMessage> = self
+            let unqueued: Vec<crate::types::ChatMessage> = self.engine
                 .messages
                 .iter()
                 .filter(|m| !m.queued)
                 .cloned()
                 .collect();
-            self.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&unqueued);
+            self.engine.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&unqueued);
         }
         tracing::debug!(
             target: "jfc::app",
             old_estimate,
-            new_estimate = self.tool_ctx.approx_tokens,
+            new_estimate = self.engine.tool_ctx.approx_tokens,
             "recompute_token_estimate"
         );
     }
@@ -415,19 +415,19 @@ impl App {
     }
 
     pub fn selected_model_info(&self) -> Option<ModelInfo> {
-        let provider_name = self.provider.name();
-        self.provider_models
+        let provider_name = self.engine.provider.name();
+        self.engine.provider_models
             .get(provider_name)
-            .and_then(|models| models.iter().find(|model| model.id == self.model).cloned())
+            .and_then(|models| models.iter().find(|model| model.id == self.engine.model).cloned())
             .or_else(|| {
-                self.providers
+                self.engine.providers
                     .iter()
                     .find(|provider| provider.name() == provider_name)
                     .and_then(|provider| {
                         provider
                             .available_models()
                             .into_iter()
-                            .find(|model| model.id == self.model)
+                            .find(|model| model.id == self.engine.model)
                     })
             })
     }
@@ -441,13 +441,13 @@ impl App {
                 // Use model-name heuristic to avoid the gauge showing 100% for
                 // large sessions on models with >200k windows (e.g. opus 4.6 = 1M).
                 crate::providers::openwebui::infer_context_window_from_model_name(
-                    self.model.as_str(),
+                    self.engine.model.as_str(),
                     None,
                 )
             });
         tracing::trace!(
             target: "jfc::app",
-            model = %self.model,
+            model = %self.engine.model,
             result,
             "selected_context_window_tokens"
         );
@@ -455,8 +455,8 @@ impl App {
     }
 
     pub fn sync_selected_context_window(&mut self) {
-        let old = self.max_context_tokens;
-        self.max_context_tokens = self.selected_context_window_tokens();
+        let old = self.engine.max_context_tokens;
+        self.engine.max_context_tokens = self.selected_context_window_tokens();
         // When the model/provider changes, re-estimate token count. But if
         // we already have a usage-based estimate from a loaded session
         // (recompute_token_estimate found a message with `usage`), prefer
@@ -464,25 +464,25 @@ impl App {
         // Without this guard, an async `ModelsLoaded` event firing after
         // session resume clobbers the 298k accurate value with a ~75k
         // chars/4 heuristic, making the gauge jump down to near-zero.
-        let has_usage_based_estimate = self.messages.iter().rev().any(|m| m.usage.is_some());
+        let has_usage_based_estimate = self.engine.messages.iter().rev().any(|m| m.usage.is_some());
         if !has_usage_based_estimate {
             // Exclude queued placeholders — same rationale as
             // `recompute_token_estimate`.
-            let unqueued: Vec<crate::types::ChatMessage> = self
+            let unqueued: Vec<crate::types::ChatMessage> = self.engine
                 .messages
                 .iter()
                 .filter(|m| !m.queued)
                 .cloned()
                 .collect();
-            self.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&unqueued);
+            self.engine.tool_ctx.approx_tokens = crate::compact::estimate_tokens(&unqueued);
         }
         tracing::info!(
             target: "jfc::app",
             old_max_context_tokens = old,
-            new_max_context_tokens = self.max_context_tokens,
-            approx_tokens = self.tool_ctx.approx_tokens,
+            new_max_context_tokens = self.engine.max_context_tokens,
+            approx_tokens = self.engine.tool_ctx.approx_tokens,
             has_usage_based_estimate,
-            model = %self.model,
+            model = %self.engine.model,
             "sync_selected_context_window"
         );
     }
@@ -518,7 +518,7 @@ impl App {
         }
 
         // Permission mode takes priority
-        match self.permission_mode.auto_approves(tool) {
+        match self.engine.permission_mode.auto_approves(tool) {
             PermissionDecision::Approved => return false,
             // Denied tools don't need a *prompt* — but they must not be
             // dispatched either. The StreamTool handler checks
@@ -530,7 +530,7 @@ impl App {
         }
 
         let name = tool.kind.label();
-        if self.always_approved.iter().any(|n| n == name) {
+        if self.engine.always_approved.iter().any(|n| n == name) {
             tracing::debug!(
                 target: "jfc::app",
                 tool_kind = name,
@@ -540,7 +540,7 @@ impl App {
             );
             return false;
         }
-        if self.session_approved.iter().any(|n| n == name) {
+        if self.engine.session_approved.iter().any(|n| n == name) {
             tracing::debug!(
                 target: "jfc::app",
                 tool_kind = name,
@@ -565,14 +565,14 @@ impl App {
 
     /// Check if a tool should be auto-denied by the current permission mode.
     pub fn tool_denied_by_mode(&self, tool: &ToolCall) -> Option<&'static str> {
-        let result = match self.permission_mode.auto_approves(tool) {
+        let result = match self.engine.permission_mode.auto_approves(tool) {
             PermissionDecision::Denied(reason) => Some(reason),
             _ => None,
         };
         tracing::debug!(
             target: "jfc::app",
             tool_kind = tool.kind.label(),
-            mode = ?self.permission_mode,
+            mode = ?self.engine.permission_mode,
             denied = result.is_some(),
             "tool_denied_by_mode"
         );
@@ -583,7 +583,7 @@ impl App {
     /// and signals the underlying cancellation token if available.
     pub fn cancel_background_task(&mut self, task_id: &str) {
         use crate::types::TaskLifecycle;
-        if let Some(bt) = self.background_tasks.get_mut(task_id) {
+        if let Some(bt) = self.engine.background_tasks.get_mut(task_id) {
             bt.status = TaskLifecycle::Cancelled;
         }
     }
@@ -592,17 +592,17 @@ impl App {
     /// completion instant so the footer can fade them out after 30 s.
     pub fn sync_task_completions(&mut self) {
         use jfc_session::TaskStatus;
-        for task in self.task_store.list(jfc_session::DeletedFilter::Exclude) {
+        for task in self.engine.task_store.list(jfc_session::DeletedFilter::Exclude) {
             if task.status == TaskStatus::Completed
-                && !self.task_completion_times.contains_key(&task.id)
+                && !self.engine.task_completion_times.contains_key(&task.id)
             {
-                self.task_completion_times
+                self.engine.task_completion_times
                     .insert(task.id.clone(), Instant::now());
             }
         }
         // Prune entries for tasks that are no longer completed (e.g. re-opened).
-        let store = &self.task_store;
-        self.task_completion_times.retain(|id, _| {
+        let store = &self.engine.task_store;
+        self.engine.task_completion_times.retain(|id, _| {
             store
                 .get(id)
                 .is_some_and(|t| t.status == TaskStatus::Completed)

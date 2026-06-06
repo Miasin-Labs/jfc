@@ -746,7 +746,7 @@ Do not use a colon before tool calls.";
     // Drain queued background reminders (file watcher / MCP refresh / …)
     // into this request's system prompt. The reminders were posted by
     // FS-event handlers and live wire-only — they never persist in
-    // `app.messages`, so re-issuing or compacting the conversation
+    // `app.engine.messages`, so re-issuing or compacting the conversation
     // doesn't re-show them. Each reminder is wrapped in the canonical
     // `<system-reminder>` envelope so the model treats it as background
     // context, not a user instruction.
@@ -782,7 +782,7 @@ Do not use a colon before tool calls.";
     // massively overestimates on large system prompts, causing false warnings
     // at 15% actual utilization. The real sprint budget is injected via the
     // CLAUDE.md system prompt section which uses actual API-reported token
-    // counts from `app.last_usage_input` / `app.max_context_tokens`.
+    // counts from `app.engine.last_usage_input` / `app.engine.max_context_tokens`.
 
     let thinking_mode = thinking_mode_for(model.as_str());
     tracing::debug!(

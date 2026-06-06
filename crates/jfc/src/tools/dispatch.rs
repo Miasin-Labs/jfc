@@ -119,7 +119,7 @@ pub async fn execute_tool(
     }
 
     // For task tools in team mode, prefer the caller-supplied store if
-    // one was passed (the UI keeps `app.task_store` pointing at the
+    // one was passed (the UI keeps `app.engine.task_store` pointing at the
     // team's `tasks.json` once team mode is active, and the event-loop
     // migration runs at TeammateSpawned). Only fall back to
     // `TaskStore::open_team` when the caller didn't thread a store —
@@ -776,7 +776,7 @@ pub async fn execute_tool(
         (ToolKind::AskUserQuestion, ToolInput::AskUserQuestion { questions }) => {
             // FALLBACK PATH ONLY. The normal route diverts AskUserQuestion
             // into the interactive modal in `handle_stream_tool` (see
-            // `app.pending_question` / `input/question.rs`) before it ever
+            // `app.engine.pending_question` / `input/question.rs`) before it ever
             // reaches dispatch, so this arm is effectively unreachable. It
             // remains as a defensive degrade-to-text path in case a future
             // code path dispatches the tool directly: surface the prompt(s) as

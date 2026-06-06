@@ -67,7 +67,7 @@ pub(crate) fn model_fqn(raw: &str) -> String {
 /// of HashMap-iteration order (arbitrary, and not failures-first).
 pub(crate) fn fleet_ordered_task_ids(app: &App) -> Vec<String> {
     use crate::types::TaskLifecycle;
-    let mut ids: Vec<(&str, u8)> = app
+    let mut ids: Vec<(&str, u8)> = app.engine
         .background_tasks
         .values()
         .map(|bt| {
@@ -111,7 +111,7 @@ pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
     // matches the task-fade-out window the pinned-tasks row uses.
     const COMPLETED_PIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
     let now = std::time::Instant::now();
-    let mut shown: Vec<&crate::app::BackgroundTask> = app
+    let mut shown: Vec<&crate::app::BackgroundTask> = app.engine
         .background_tasks
         .values()
         .filter(|bt| {
@@ -134,7 +134,7 @@ pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
     let mut n_idle = 0usize;
     let mut n_done = 0usize;
     let mut n_fail = 0usize;
-    for bt in app.background_tasks.values() {
+    for bt in app.engine.background_tasks.values() {
         match bt.status {
             TaskLifecycle::Idle => n_idle += 1,
             TaskLifecycle::Failed => n_fail += 1,
@@ -401,7 +401,7 @@ pub(crate) fn render_teammate_tree(f: &mut Frame, app: &App, area: Rect) {
 
     // Collect teammates (sorted by name for stability)
     let mut teammates: Vec<(&String, &swarm::TeammateInfo)> =
-        app.team_context.teammates.iter().collect();
+        app.engine.team_context.teammates.iter().collect();
     teammates.sort_by_key(|(_, info)| &info.name);
 
     // Filter out leader
@@ -435,7 +435,7 @@ pub(crate) fn render_teammate_tree(f: &mut Frame, app: &App, area: Rect) {
         // Look up activity from background tasks. Match by name suffix
         // so a teammate "ui-explorer" finds its task whose id is
         // "teammate-ui-explorer@<team>".
-        let bt = app
+        let bt = app.engine
             .background_tasks
             .values()
             .find(|bt| bt.task_id.as_str().contains(&info.name));

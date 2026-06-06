@@ -59,7 +59,7 @@ pub(super) fn apply_theme(app: &mut App, name: &str) {
         crate::markdown::clear_highlight_cache();
         if let Err(err) = crate::config::save_theme(choice.name) {
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Warning,
                     format!("Theme: {} (not persisted: {err})", choice.label),
@@ -67,7 +67,7 @@ pub(super) fn apply_theme(app: &mut App, name: &str) {
             );
         } else {
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Success,
                     format!("Theme: {}", choice.label),

@@ -11,7 +11,7 @@
 //! 4. Generate a handoff summary for the next session
 //!
 //! Integrates with `compact::compact_level` for context pressure and
-//! `app.last_usage_input` for actual token counts from the API.
+//! `app.engine.last_usage_input` for actual token counts from the API.
 
 use std::path::{Path, PathBuf};
 

@@ -13,7 +13,7 @@
 //! streaming `complete()` returning structured JSON), and the loop
 //! continuation logic is the same shape `continue_agentic_loop` already
 //! takes — so the goal layer just decides "continue" vs "stop" and
-//! mutates `app.messages` accordingly.
+//! mutates `app.engine.messages` accordingly.
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -657,7 +657,7 @@ mod tests {
     }
 
     // Normal: the sidecar round-trips an ActiveGoal through disk so
-    // /continue can rebuild app.goal on resume.
+    // /continue can rebuild app.engine.goal on resume.
     #[serial_test::serial]
     #[test]
     fn sidecar_round_trips_goal_normal() {

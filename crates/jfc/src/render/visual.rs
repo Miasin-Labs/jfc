@@ -236,8 +236,8 @@ pub struct DiffStats {
 /// is O(N_messages) but touches only `.parts.len()` — no content
 /// inspection — so it's negligible compared to the full HashMap walk.
 pub fn collect_diff_stats(app: &App) -> DiffStats {
-    let msg_count = app.messages.len();
-    let total_parts: usize = app.messages.iter().map(|m| m.parts.len()).sum();
+    let msg_count = app.engine.messages.len();
+    let total_parts: usize = app.engine.messages.iter().map(|m| m.parts.len()).sum();
 
     {
         let cache = app.diff_stats_cache.borrow();
@@ -260,7 +260,7 @@ pub fn compute_diff_stats(app: &App) -> DiffStats {
     let mut by_file: std::collections::HashMap<String, (usize, usize)> =
         std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
-    for msg in &app.messages {
+    for msg in &app.engine.messages {
         for part in &msg.parts {
             if let MessagePart::Tool(call) = part
                 && let ToolOutput::Diff(view) = &call.output

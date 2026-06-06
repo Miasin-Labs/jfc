@@ -22,11 +22,11 @@ pub(super) async fn handle_submit(
         let trimmed = text.trim_start();
         let fact = trimmed.trim_start_matches('#').trim();
         if trimmed.starts_with('#') && !fact.is_empty() {
-            let root = app
+            let root = app.engine
                 .git_root
                 .clone()
                 .flatten()
-                .unwrap_or_else(|| std::path::PathBuf::from(&app.cwd));
+                .unwrap_or_else(|| std::path::PathBuf::from(&app.engine.cwd));
             let toast_msg = match jfc_memory::create_memory(
                 jfc_memory::MemoryLevel::Project,
                 jfc_memory::MemoryType::Context,
@@ -43,7 +43,7 @@ pub(super) async fn handle_submit(
                 Err(e) => format!("memory save failed: {e}"),
             };
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(crate::toast::ToastKind::Info, toast_msg),
             );
             // Clear the prompt; this was a note, not a turn.
@@ -67,7 +67,7 @@ pub(super) async fn handle_submit(
         expanded
     };
 
-    if app.compacting_started_at.is_some() {
+    if app.engine.compacting_started_at.is_some() {
         tracing::info!(
             target: "jfc::ui::queue",
             "handle_submit: compaction active — queueing prompt instead of starting stream"
@@ -80,8 +80,8 @@ pub(super) async fn handle_submit(
         target: "jfc::input",
         text_len = text.len(),
         text_preview = %text.chars().take(80).collect::<String>(),
-        model = %app.model,
-        message_count = app.messages.len(),
+        model = %app.engine.model,
+        message_count = app.engine.messages.len(),
         editing_idx = ?app.editing_message_idx,
         "handle_submit"
     );
@@ -91,7 +91,7 @@ pub(super) async fn handle_submit(
     // veto the turn, or rewrite the text. Default registry has only
     // a Logger so production behavior is unchanged when no user hooks
     // are configured.
-    let session_id_for_hook = app
+    let session_id_for_hook = app.engine
         .current_session_id
         .as_ref()
         .map(|s| s.as_str().to_owned())
@@ -241,24 +241,24 @@ pub(super) async fn handle_submit(
     // user had typed it just now — agentic loop, tool calls, and
     // streaming all flow normally.
     if let Some(edit_idx) = app.editing_message_idx.take() {
-        if edit_idx < app.messages.len() {
+        if edit_idx < app.engine.messages.len() {
             tracing::info!(
                 target: "jfc::input",
                 edit_idx,
                 kept = edit_idx,
-                dropped = app.messages.len() - edit_idx,
+                dropped = app.engine.messages.len() - edit_idx,
                 "edit-resubmit: rewriting history"
             );
-            app.messages.truncate(edit_idx);
+            app.engine.messages.truncate(edit_idx);
         }
         // Clear streaming-related state that might be tied to the
         // dropped messages (assistant placeholder index, etc.).
-        app.streaming_text.clear();
-        app.streaming_reasoning.clear();
-        app.streaming_response_bytes = 0;
-        app.turn_output_tokens = 0;
-        app.refusal_fallback_attempted = false;
-        app.streaming_assistant_idx = None;
+        app.engine.streaming_text.clear();
+        app.engine.streaming_reasoning.clear();
+        app.engine.streaming_response_bytes = 0;
+        app.engine.turn_output_tokens = 0;
+        app.engine.refusal_fallback_attempted = false;
+        app.engine.streaming_assistant_idx = None;
     }
     if text.starts_with('/') {
         // `/check` re-runs the cargo-check producer. Handled here (not in
@@ -293,40 +293,40 @@ pub(super) async fn handle_submit(
     // also under-count by missing the cache_read contribution. Using the
     // calibrated value makes pre-submit and post-tool compaction agree on
     // when the session is actually full.
-    let est = app.tool_ctx.approx_tokens;
-    let level = crate::compact::compact_level(est, app.max_context_tokens);
+    let est = app.engine.tool_ctx.approx_tokens;
+    let level = crate::compact::compact_level(est, app.engine.max_context_tokens);
     let want_compact = matches!(
         level,
         crate::compact::CompactLevel::Compact | crate::compact::CompactLevel::Blocked
-    ) || app.force_compact_pending;
+    ) || app.engine.force_compact_pending;
     // Respect the suppression flag set by the post-response compact
     // path. Once compaction has permanently failed (provider doesn't
     // support it, breaker latched, retries exhausted), retrying on
     // every user message just re-fires the failing API call and
     // re-warns. The user clears it manually via /compact, which sets
     // `force_compact_pending` and bypasses this guard.
-    if want_compact && app.compact_suppressed && !app.force_compact_pending {
+    if want_compact && app.engine.compact_suppressed && !app.engine.force_compact_pending {
         tracing::debug!(
             target: "jfc::compact",
             est, level = ?level,
             "pre-submit compact skipped — compact_suppressed latched"
         );
     } else if want_compact {
-        let manual = std::mem::take(&mut app.force_compact_pending);
+        let manual = std::mem::take(&mut app.engine.force_compact_pending);
         tracing::info!(
             target: "jfc::compact",
             est, level = ?level, manual,
-            model = %app.model,
-            max_context_tokens = app.max_context_tokens,
-            message_count = app.messages.len(),
-            rapid_refill_count = app.tool_ctx.rapid_refill_count,
+            model = %app.engine.model,
+            max_context_tokens = app.engine.max_context_tokens,
+            message_count = app.engine.messages.len(),
+            rapid_refill_count = app.engine.tool_ctx.rapid_refill_count,
             "pre-submit compact triggered"
         );
-        let messages = app.messages.clone();
-        let provider = Arc::clone(&app.provider);
-        let model = app.model.clone();
-        let mut tool_ctx = app.tool_ctx.clone();
-        let window = app.max_context_tokens;
+        let messages = app.engine.messages.clone();
+        let provider = Arc::clone(&app.engine.provider);
+        let model = app.engine.model.clone();
+        let mut tool_ctx = app.engine.tool_ctx.clone();
+        let window = app.engine.max_context_tokens;
         let tx_pre = tx.clone();
         let user_text = text.clone();
         let is_blocked = matches!(level, crate::compact::CompactLevel::Blocked);
@@ -487,36 +487,36 @@ pub(super) async fn handle_submit(
             text.clone()
         };
 
-    let assistant_idx = app.messages.len() + 1;
+    let assistant_idx = app.engine.messages.len() + 1;
     let mut user_msg = ChatMessage::user(display_text.clone());
     // Combine pasted images ([Image #N] refs) with @-mention binary files.
     let mut all_attachments = submit_attachments;
     all_attachments.extend(mention_attachments);
     user_msg.attachments = all_attachments;
-    app.messages.push(user_msg);
-    app.tool_ctx.total_user_turns += 1;
+    app.engine.messages.push(user_msg);
+    app.engine.tool_ctx.total_user_turns += 1;
 
     // Ultrawork keyword: inject the system-reminder telling the model
     // to use the Workflow tool.
     if keyword_result.ultrawork {
         crate::system_reminder::append_to_last_user(
-            &mut app.messages,
+            &mut app.engine.messages,
             crate::keywords::ULTRAWORK_REMINDER,
         );
     }
     if keyword_result.ultrathink {
-        app.exploration_state
+        app.engine.exploration_state
             .force_next(crate::exploration::ExplorationLevel::MAX);
         crate::system_reminder::append_to_last_user(
-            &mut app.messages,
+            &mut app.engine.messages,
             crate::keywords::ULTRATHINK_REMINDER,
         );
     }
     if keyword_result.explore {
-        app.exploration_state
+        app.engine.exploration_state
             .force_next(crate::exploration::ExplorationLevel::new(3));
         crate::system_reminder::append_to_last_user(
-            &mut app.messages,
+            &mut app.engine.messages,
             crate::keywords::EXPLORE_REMINDER,
         );
     }
@@ -529,12 +529,12 @@ pub(super) async fn handle_submit(
     // on this very turn (via the TaskStatus serialization we added to
     // build_provider_messages). Mirrors oh-my-opencode's
     // background-task-notification-template.ts pattern.
-    let bg_completed = app.background_tasks_completed_since_last_turn;
+    let bg_completed = app.engine.background_tasks_completed_since_last_turn;
     if bg_completed > 0 {
-        app.background_tasks_completed_since_last_turn = 0;
+        app.engine.background_tasks_completed_since_last_turn = 0;
         let plural = if bg_completed == 1 { "" } else { "s" };
         crate::system_reminder::append_to_last_user(
-            &mut app.messages,
+            &mut app.engine.messages,
             &format!(
                 "{bg_completed} detached background task{plural} completed since your last turn. \
                  Their final summaries are visible in the assistant transcript as \
@@ -554,7 +554,7 @@ pub(super) async fn handle_submit(
     // previous turn). See the comment on `deferred_text_reminders` at
     // the scan site for why this had to be split.
     for body in deferred_text_reminders {
-        crate::system_reminder::append_to_last_user(&mut app.messages, &body);
+        crate::system_reminder::append_to_last_user(&mut app.engine.messages, &body);
     }
 
     // Task-state-drift nudge: if the previous turn did mutating work while a
@@ -563,7 +563,7 @@ pub(super) async fn handle_submit(
     // tasks". Surfaces state back to the agent (SWE-agent ACI principle)
     // rather than silently mutating task semantics the model owns.
     if let Some(body) = crate::runtime::task_drift_reminder(app) {
-        crate::system_reminder::append_to_last_user(&mut app.messages, &body);
+        crate::system_reminder::append_to_last_user(&mut app.engine.messages, &body);
         tracing::info!(
             target: "jfc::tasks",
             "injected task-state-drift reminder into user turn"
@@ -593,9 +593,9 @@ pub(super) async fn handle_submit(
 
         // (1) Graph-flavored intents → auto-inject structural context.
         if crate::intent::is_graph_intent(intent_for_inject) {
-            let cwd = std::path::PathBuf::from(&app.cwd);
+            let cwd = std::path::PathBuf::from(&app.engine.cwd);
             let injected = crate::intent::auto_inject_graph_context(
-                &mut app.messages,
+                &mut app.engine.messages,
                 intent_for_inject,
                 &text,
                 &cwd,
@@ -624,7 +624,7 @@ pub(super) async fn handle_submit(
                 "doc-request detected — surfacing slash-command suggestion"
             );
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Info,
                     format!(
@@ -643,19 +643,19 @@ pub(super) async fn handle_submit(
         if intent_for_inject == crate::intent::Intent::AutoPlanModeRequest
             && crate::intent::auto_plan_mode_enabled()
             && !matches!(
-                app.permission_mode,
+                app.engine.permission_mode,
                 crate::app::PermissionMode::Plan | crate::app::PermissionMode::Auto
             )
         {
-            let from = app.permission_mode;
-            app.permission_mode = crate::app::PermissionMode::Plan;
+            let from = app.engine.permission_mode;
+            app.engine.permission_mode = crate::app::PermissionMode::Plan;
             tracing::info!(
                 target: "jfc::intent::auto_plan_mode",
                 ?from,
                 "planning-shaped prompt — auto-flipped to Plan mode"
             );
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Info,
                     "Planning request detected — switched to Plan mode \
@@ -664,7 +664,7 @@ pub(super) async fn handle_submit(
                 ),
             );
             crate::system_reminder::append_to_last_user(
-                &mut app.messages,
+                &mut app.engine.messages,
                 "Permission mode auto-switched to `Plan` (read-only) because \
                  this request reads as planning/design work. Investigate and \
                  produce a plan; use ExitPlanMode with a finalized plan when \
@@ -673,117 +673,117 @@ pub(super) async fn handle_submit(
         }
     }
 
-    app.messages.push(ChatMessage::assistant(String::new()));
-    app.streaming_text.clear();
-    app.streaming_reasoning.clear();
-    app.streaming_response_bytes = 0;
+    app.engine.messages.push(ChatMessage::assistant(String::new()));
+    app.engine.streaming_text.clear();
+    app.engine.streaming_reasoning.clear();
+    app.engine.streaming_response_bytes = 0;
     // New turn — restart the true output-token counter (it accumulates across
     // this turn's agentic sub-streams, but starts fresh per user turn) and the
     // refusal-fallback guard (each user turn gets one fallback attempt).
-    app.turn_output_tokens = 0;
-    app.refusal_fallback_attempted = false;
-    app.network_recovery_status = None;
-    app.network_recovery_attempts = 0;
-    app.streaming_assistant_idx = Some(assistant_idx);
-    app.is_streaming = true;
+    app.engine.turn_output_tokens = 0;
+    app.engine.refusal_fallback_attempted = false;
+    app.engine.network_recovery_status = None;
+    app.engine.network_recovery_attempts = 0;
+    app.engine.streaming_assistant_idx = Some(assistant_idx);
+    app.engine.is_streaming = true;
     // Defensive: clear any stale mixed-mode pause_turn latch from a
     // previously-cancelled turn. The flag is normally single-shot
     // (cleared at dispatch time in event_loop's AllComplete /
     // CompactionDone handlers) but a user-initiated cancel + fresh
     // submit would leave it sticky otherwise.
-    app.pending_pause_turn_resume = false;
+    app.engine.pending_pause_turn_resume = false;
     let now = std::time::Instant::now();
-    app.streaming_started_at = Some(now);
-    app.last_stream_event_at = Some(now);
-    app.streaming_last_token_at = Some(now);
-    app.turn_started_at = Some(now);
-    app.turn_start_cost = crate::cost::total_cost(&app.usage_by_model);
+    app.engine.streaming_started_at = Some(now);
+    app.engine.last_stream_event_at = Some(now);
+    app.engine.streaming_last_token_at = Some(now);
+    app.engine.turn_started_at = Some(now);
+    app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
     // Fresh user turn → start a new per-turn edited-files set for `/turn-diff`.
-    app.turn_edited_files.clear();
-    app.pending_classifications = 0;
-    app.agentic_turn_count = 0;
+    app.engine.turn_edited_files.clear();
+    app.engine.pending_classifications = 0;
+    app.engine.agentic_turn_count = 0;
     // A genuine user submit resets the self-continuation budget — the human
     // is back in the loop, so the auto-driver starts fresh.
-    app.self_continuation_count = 0;
+    app.engine.self_continuation_count = 0;
     // New user turn — the empty-but-billed resend budget starts fresh too.
-    app.empty_billed_resend_count = 0;
+    app.engine.empty_billed_resend_count = 0;
     // Reset thinking-state for the new turn so the spinner doesn't carry
-    app.pre_dispatched_tool_ids.clear();
-    app.deferred_tool_uses.clear();
-    app.in_progress_tool_use_ids.clear();
-    app.in_flight_eager_dispatches = 0;
-    app.in_flight_tool_batches = 0;
+    app.engine.pre_dispatched_tool_ids.clear();
+    app.engine.deferred_tool_uses.clear();
+    app.engine.in_progress_tool_use_ids.clear();
+    app.engine.in_flight_eager_dispatches = 0;
+    app.engine.in_flight_tool_batches = 0;
     // a stale `thought for Ns` from the previous turn.
-    app.thinking_started_at = None;
-    app.thinking_ended_at = None;
-    app.last_usage_output = 0;
-    app.usage_apply_baseline = (0, 0, 0, 0);
+    app.engine.thinking_started_at = None;
+    app.engine.thinking_ended_at = None;
+    app.engine.last_usage_output = 0;
+    app.engine.usage_apply_baseline = (0, 0, 0, 0);
     app.scroll_to_bottom();
 
     // Auto-persist the session so the sidebar shows it. Reuses the existing
     // session id if one was loaded; otherwise mints a fresh one keyed on the
     // current timestamp.
-    let session_id = app
+    let session_id = app.engine
         .current_session_id
         .clone()
         .unwrap_or_else(jfc_session::generate_session_id);
     // Fire-and-forget session save — don't block the UI on disk I/O.
     {
         let sid = session_id.clone();
-        let msgs = app.messages.clone();
-        let cwd = app.cwd.clone();
-        let model = app.model.clone();
+        let msgs = app.engine.messages.clone();
+        let cwd = app.engine.cwd.clone();
+        let model = app.engine.model.clone();
         tokio::spawn(async move {
             crate::session::save_session(&sid, &msgs, Some(cwd.as_str()), Some(model.as_str()))
                 .await;
         });
     }
-    app.current_session_id = Some(session_id.clone());
+    app.engine.current_session_id = Some(session_id.clone());
 
-    let provider = app.provider.clone();
-    let messages = crate::stream::build_provider_messages(&app.messages[..assistant_idx]);
+    let provider = app.engine.provider.clone();
+    let messages = crate::stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
     // Slate per-turn model selection: when the router is configured (config
     // `slate_enabled = true`), classify the user's text and route to the
     // best-fit model for this turn. When None (default), use the pinned
-    // `app.model` — legacy behavior. The pinned model is also the fallback
+    // `app.engine.model` — legacy behavior. The pinned model is also the fallback
     // for unmatched classes inside the router itself.
-    let model = if let Some(ref router) = app.slate {
-        let (routed, class, rule_idx) = router.route_explained(&text, app.model.clone());
+    let model = if let Some(ref router) = app.engine.slate {
+        let (routed, class, rule_idx) = router.route_explained(&text, app.engine.model.clone());
         tracing::info!(
             target: "jfc::slate",
             class = ?class,
             matched_rule = ?rule_idx,
             routed_model = %routed,
-            pinned_model = %app.model,
+            pinned_model = %app.engine.model,
             "slate routed turn"
         );
         routed
     } else {
-        app.model.clone()
+        app.engine.model.clone()
     };
     let cfg = crate::config::load_arc();
-    app.exploration_state.begin_turn(&display_text, &cfg);
+    app.engine.exploration_state.begin_turn(&display_text, &cfg);
     let tx = tx.clone();
-    let interrupt = app.interrupt_flag.clone();
+    let interrupt = app.engine.interrupt_flag.clone();
     // Fresh user submission resets any prior interrupt state — the user
     // moved on, so the next stream should run unchecked.
     interrupt.store(false, std::sync::atomic::Ordering::SeqCst);
     // Mint a fresh cancel token. A token's `cancelled` is sticky, so a
     // previously cancelled turn would poison the next one if we reused
     // it. wg-async pattern: each unit of work gets its own token.
-    app.cancel_token = tokio_util::sync::CancellationToken::new();
-    let cancel = app.cancel_token.clone();
+    app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel = app.engine.cancel_token.clone();
     let overrides = crate::runtime::StreamRequestOverrides {
-        background_reminders: app.take_background_reminders(),
-        disallowed_tools: app.effective_disallowed_tools(),
-        allowed_tools: app.allowed_tools.clone(),
-        custom_betas: app.custom_betas.clone(),
-        fine_grained_tool_streaming: app.fine_grained_tool_streaming,
-        strict_tool_schemas: app.strict_tool_schemas,
-        task_budget: app.cli_task_budget,
-        max_thinking_tokens: app.cli_max_thinking_tokens,
-        thinking_display: app.cli_thinking_display.clone(),
-        brief_mode: app.brief_mode,
+        background_reminders: app.engine.take_background_reminders(),
+        disallowed_tools: app.engine.effective_disallowed_tools(),
+        allowed_tools: app.engine.allowed_tools.clone(),
+        custom_betas: app.engine.custom_betas.clone(),
+        fine_grained_tool_streaming: app.engine.fine_grained_tool_streaming,
+        strict_tool_schemas: app.engine.strict_tool_schemas,
+        task_budget: app.engine.cli_task_budget,
+        max_thinking_tokens: app.engine.cli_max_thinking_tokens,
+        thinking_display: app.engine.cli_thinking_display.clone(),
+        brief_mode: app.engine.brief_mode,
         ..Default::default()
     };
 
@@ -793,7 +793,7 @@ pub(super) async fn handle_submit(
         provider_message_count = messages.len(),
         assistant_idx,
         session_id = %session_id,
-        total_user_turns = app.tool_ctx.total_user_turns,
+        total_user_turns = app.engine.tool_ctx.total_user_turns,
         "spawning stream_response"
     );
 
@@ -810,7 +810,7 @@ pub(super) async fn handle_submit(
         )
         .await;
     });
-    app.active_stream_handle = Some(inner.abort_handle());
+    app.engine.active_stream_handle = Some(inner.abort_handle());
     tokio::spawn(async move {
         if let Err(join_err) = inner.await {
             let msg = if join_err.is_panic() {

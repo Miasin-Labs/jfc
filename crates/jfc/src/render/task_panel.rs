@@ -61,8 +61,8 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Clear, popup);
 
-    let all_tasks = app.task_store.list(DeletedFilter::Exclude);
-    let counts = app.task_store.counts();
+    let all_tasks = app.engine.task_store.list(DeletedFilter::Exclude);
+    let counts = app.engine.task_store.counts();
 
     let completed_ids: HashSet<&str> = all_tasks
         .iter()
@@ -309,7 +309,7 @@ fn render_task_detail(f: &mut Frame, app: &App, task: &Task, area: Rect) {
     }
 
     // Correlate with background_tasks to show agent-specific info
-    let agent_info = app.background_tasks.values().find(|bt| {
+    let agent_info = app.engine.background_tasks.values().find(|bt| {
         bt.task_id.as_str() == task.id.as_str()
             || task
                 .owner

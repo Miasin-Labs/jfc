@@ -9,14 +9,14 @@ use crate::types::ChatMessage;
 /// into the transcript.
 pub(super) async fn handle_dump_context_command(app: &mut App) {
     let mut report = String::new();
-    let cwd = std::path::PathBuf::from(&app.cwd);
+    let cwd = std::path::PathBuf::from(&app.engine.cwd);
 
     report.push_str("**Model context dump**\n\n");
-    report.push_str(&format!("- Model: `{}`\n", app.model));
-    report.push_str(&format!("- Cwd: `{}`\n", app.cwd));
-    report.push_str(&format!("- Provider: `{}`\n", app.provider.name()));
-    report.push_str(&format!("- Permission mode: `{:?}`\n", app.permission_mode));
-    if let Some(ref branch) = app.git_branch {
+    report.push_str(&format!("- Model: `{}`\n", app.engine.model));
+    report.push_str(&format!("- Cwd: `{}`\n", app.engine.cwd));
+    report.push_str(&format!("- Provider: `{}`\n", app.engine.provider.name()));
+    report.push_str(&format!("- Permission mode: `{:?}`\n", app.engine.permission_mode));
+    if let Some(ref branch) = app.engine.git_branch {
         report.push_str(&format!("- Git branch: `{branch}`\n"));
     }
     report.push('\n');
@@ -85,9 +85,9 @@ pub(super) async fn handle_dump_context_command(app: &mut App) {
     }
     report.push('\n');
 
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::user("/dump-context".to_string()));
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(report));
 }
 
@@ -102,7 +102,7 @@ pub(super) fn handle_theme_command(app: &mut App, args: &str) {
         Some(choice) => apply_theme(app, choice.name),
         None => {
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Warning,
                     format!(
@@ -118,21 +118,21 @@ pub(super) fn handle_theme_command(app: &mut App, args: &str) {
 /// `/fleet` prints a snapshot of every active teammate.
 pub(super) fn handle_fleet_command(app: &mut App) {
     let mut lines: Vec<String> = Vec::new();
-    if app.team_context.teammates.is_empty() {
+    if app.engine.team_context.teammates.is_empty() {
         lines.push("No active teammates.".into());
         lines.push("Spawn one via the Task tool with `name` + `team_name` set.".into());
     } else {
         lines.push(format!(
             "Fleet: {} teammate{} active",
-            app.team_context.teammates.len(),
-            if app.team_context.teammates.len() == 1 {
+            app.engine.team_context.teammates.len(),
+            if app.engine.team_context.teammates.len() == 1 {
                 ""
             } else {
                 "s"
             }
         ));
         lines.push("".into());
-        for tm in app.team_context.teammates.values() {
+        for tm in app.engine.team_context.teammates.values() {
             let elapsed = tm.spawned_at.elapsed();
             lines.push(format!(
                 "  {} · {} · spawned {}m{}s ago{}",
@@ -147,13 +147,13 @@ pub(super) fn handle_fleet_command(app: &mut App) {
             ));
         }
     }
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::user("/fleet".into()));
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(lines.join("\n")));
     tracing::info!(
         target: "jfc::ui::fleet",
-        teammates = app.team_context.teammates.len(),
+        teammates = app.engine.team_context.teammates.len(),
         "/fleet rendered"
     );
 }
@@ -183,9 +183,9 @@ pub(super) async fn handle_teleport_command(app: &mut App, target: &str) {
             s.push_str("\nRun `/teleport <branch>` to jump.");
             s
         };
-        app.messages
+        app.engine.messages
             .push(crate::types::ChatMessage::user("/teleport".into()));
-        app.messages
+        app.engine.messages
             .push(crate::types::ChatMessage::assistant(body));
         return;
     }
@@ -196,10 +196,10 @@ pub(super) async fn handle_teleport_command(app: &mut App, target: &str) {
         format!("jfc/{target}")
     };
     let result = crate::swarm::teleport::teleport_to_session(repo_root, &target_branch, None);
-    app.messages.push(crate::types::ChatMessage::user(format!(
+    app.engine.messages.push(crate::types::ChatMessage::user(format!(
         "/teleport {target}"
     )));
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(result.message.clone()));
     tracing::info!(
         target: "jfc::ui::teleport",
@@ -216,7 +216,7 @@ pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
     if arg.is_empty() {
         let mut lines = vec!["Available output styles:".to_string(), "".to_string()];
         for s in OutputStyle::all() {
-            let active = if *s == app.output_style {
+            let active = if *s == app.engine.output_style {
                 " · ACTIVE"
             } else {
                 ""
@@ -229,16 +229,16 @@ pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
         }
         lines.push("".into());
         lines.push("Use `/output-style <name>` to switch.".into());
-        app.messages
+        app.engine.messages
             .push(crate::types::ChatMessage::user("/output-style".into()));
-        app.messages
+        app.engine.messages
             .push(crate::types::ChatMessage::assistant(lines.join("\n")));
         return;
     }
     let parsed = OutputStyle::from_str_loose(arg);
     if parsed == OutputStyle::Default && !arg.eq_ignore_ascii_case("default") {
         crate::toast::push_with_cap(
-            &mut app.toasts,
+            &mut app.engine.toasts,
             crate::toast::Toast::new(
                 crate::toast::ToastKind::Warning,
                 format!(
@@ -253,7 +253,7 @@ pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
         );
         return;
     }
-    app.output_style = parsed;
+    app.engine.output_style = parsed;
     crate::output_style::set_active(parsed);
     let persist_msg = match save_output_style(parsed.name()) {
         Ok(_) => format!("output style: {}", parsed.name()),
@@ -263,7 +263,7 @@ pub(super) fn handle_output_style_command(app: &mut App, args: &str) {
         }
     };
     crate::toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         crate::toast::Toast::new(crate::toast::ToastKind::Success, persist_msg),
     );
 }
@@ -301,20 +301,20 @@ pub(super) async fn handle_doc_command(
     kind: crate::document_formats::DocKind,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    let cwd = std::path::PathBuf::from(&app.cwd);
+    let cwd = std::path::PathBuf::from(&app.engine.cwd);
     let target = crate::document_formats::doc_target(&cwd, kind);
     let exists = target.is_file();
     let echo = format!("/{}", kind.verb());
     let body = kind.prompt_body(&target, exists);
     let action = if exists { "Updating" } else { "Drafting" };
 
-    let idle = !app.is_streaming
-        && app.pending_approval.is_none()
-        && app.approval_queue.is_empty()
-        && app.pending_tool_calls.is_empty();
+    let idle = !app.engine.is_streaming
+        && app.engine.pending_approval.is_none()
+        && app.engine.approval_queue.is_empty()
+        && app.engine.pending_tool_calls.is_empty();
 
     if let (true, Some(tx)) = (idle, tx) {
-        app.messages.push(ChatMessage::user(echo));
+        app.engine.messages.push(ChatMessage::user(echo));
         app.scroll_to_bottom();
         let _ = tx.send(EngineEvent::Control(ControlEvent::SubmitPrompt(body))).await;
         tracing::info!(
@@ -323,12 +323,12 @@ pub(super) async fn handle_doc_command(
             "doc command dispatched immediately (idle session)"
         );
     } else {
-        app.messages.push(ChatMessage::user(echo));
-        app.messages.push(ChatMessage::assistant(format!(
+        app.engine.messages.push(ChatMessage::user(echo));
+        app.engine.messages.push(ChatMessage::assistant(format!(
             "{action} `{}` … (queued — will run when the current turn finishes)",
             target.display()
         )));
-        app.queued_prompts.push(crate::app::QueuedPrompt {
+        app.engine.queued_prompts.push(crate::app::QueuedPrompt {
             text: body,
             is_meta: false,
             priority: crate::app::QueuePriority::Later,
@@ -348,7 +348,7 @@ pub(super) async fn handle_init_command(app: &mut App) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let target = cwd.join("CLAUDE.md");
 
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::user("/init".into()));
 
     let overwrite_note = if target.exists() {
@@ -524,7 +524,7 @@ pub(super) async fn handle_init_command(app: &mut App) {
         Err(e) => format!("**Error:** Failed to write `{}`: {e}", target.display()),
     };
 
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(body));
 }
 
@@ -532,10 +532,10 @@ pub(super) async fn handle_init_command(app: &mut App) {
 pub(super) fn handle_cost_command(app: &mut App) {
     let mut total = 0.0f64;
     let mut lines: Vec<String> = vec!["Session cost so far:".into(), "".into()];
-    if app.usage_by_model.is_empty() {
+    if app.engine.usage_by_model.is_empty() {
         lines.push("  (no model usage yet — try a prompt first)".into());
     } else {
-        for (model, usage) in &app.usage_by_model {
+        for (model, usage) in &app.engine.usage_by_model {
             let cost = crate::cost::cost_for(model.as_str(), usage);
             total += cost;
             lines.push(format!(
@@ -551,16 +551,16 @@ pub(super) fn handle_cost_command(app: &mut App) {
     }
     lines.push("".into());
     lines.push(format!("**Total: {}**", crate::cost::fmt_cost(total)));
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::user("/cost".into()));
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(lines.join("\n")));
 }
 
 /// `/status` reports rich session status.
 pub(super) fn handle_status_command(app: &mut App) {
     let (total_in, total_out, total_cr, total_cw) =
-        app.usage_by_model
+        app.engine.usage_by_model
             .values()
             .fold((0u64, 0u64, 0u64, 0u64), |(i, o, cr, cw), u| {
                 (
@@ -570,23 +570,23 @@ pub(super) fn handle_status_command(app: &mut App) {
                     cw + u.cache_write_tokens,
                 )
             });
-    let total_cost: f64 = app
+    let total_cost: f64 = app.engine
         .usage_by_model
         .iter()
         .map(|(m, u)| crate::cost::cost_for(m.as_str(), u))
         .sum();
 
-    let model_str = app.model.as_str();
-    let provider_label = app.provider.name();
-    let turn_count = app
+    let model_str = app.engine.model.as_str();
+    let provider_label = app.engine.provider.name();
+    let turn_count = app.engine
         .messages
         .iter()
         .filter(|m| m.role == crate::types::Role::User)
         .count();
-    let mcp_count = app.mcp_servers.len();
-    let effort_label = app.effort_state.status();
-    let temperature_label = app.temperature_state.status();
-    let exploration_label = app.exploration_state.status();
+    let mcp_count = app.engine.mcp_servers.len();
+    let effort_label = app.engine.effort_state.status();
+    let temperature_label = app.engine.temperature_state.status();
+    let exploration_label = app.engine.exploration_state.status();
 
     let lines = vec![
         format!("**Version:** jfc v{}", env!("CARGO_PKG_VERSION")),
@@ -601,15 +601,15 @@ pub(super) fn handle_status_command(app: &mut App) {
         format!("**MCP servers:** {mcp_count} active"),
         format!(
             "**Fast mode:** {}",
-            if app.fast_mode { "ON" } else { "OFF" }
+            if app.engine.fast_mode { "ON" } else { "OFF" }
         ),
         format!("**Effort:** {effort_label}"),
         format!("**Temperature:** {temperature_label}"),
         format!("**Exploration:** {exploration_label}"),
     ];
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::user("/status".into()));
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(lines.join("\n")));
 }
 
@@ -619,7 +619,7 @@ pub(super) fn handle_status_command(app: &mut App) {
 /// --web` and Claude Code's `/bug`: the title carries the user's short
 /// summary; the body carries the structured environment block.
 pub(super) fn handle_bug_command(app: &mut App, description: String) {
-    let session_id = app
+    let session_id = app.engine
         .current_session_id
         .as_ref()
         .map(|s| s.as_str())
@@ -648,9 +648,9 @@ pub(super) fn handle_bug_command(app: &mut App, description: String) {
             trimmed_desc
         },
         env!("CARGO_PKG_VERSION"),
-        app.provider.name(),
-        app.model.as_str(),
-        app.permission_mode,
+        app.engine.provider.name(),
+        app.engine.model.as_str(),
+        app.engine.permission_mode,
         std::env::consts::OS,
     );
     let _url = super::support::bug_report_url(&title, &body);
@@ -663,10 +663,10 @@ pub(super) fn handle_bug_command(app: &mut App, description: String) {
     // let _ = std::process::Command::new("cmd")
     //     .args(["/C", "start", &url])
     //     .spawn();
-    app.messages.push(crate::types::ChatMessage::user(
+    app.engine.messages.push(crate::types::ChatMessage::user(
         format!("/bug {description}").trim_end().into(),
     ));
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(format!(
             "Opened a pre-filled bug report at {}/issues/new in your browser.\n\
              If nothing opened, copy the URL above. Context already attached:\n\
@@ -674,9 +674,9 @@ pub(super) fn handle_bug_command(app: &mut App, description: String) {
              - **Provider/model**: `{}` / `{}`\n\
              - **Mode**: {:?}",
             super::support::repo_url(),
-            app.provider.name(),
-            app.model.as_str(),
-            app.permission_mode,
+            app.engine.provider.name(),
+            app.engine.model.as_str(),
+            app.engine.permission_mode,
         )));
 }
 
@@ -686,15 +686,15 @@ pub(super) fn handle_rewind_command(app: &mut App, n_str: &str) {
     use crate::types::Role;
     let mut dropped_pairs = 0usize;
     while dropped_pairs < n {
-        let last_user_idx = app.messages.iter().rposition(|m| m.role == Role::User);
+        let last_user_idx = app.engine.messages.iter().rposition(|m| m.role == Role::User);
         match last_user_idx {
             Some(idx) => {
-                let removed = app.messages.split_off(idx).len();
+                let removed = app.engine.messages.split_off(idx).len();
                 tracing::info!(
                     target: "jfc::ui::rewind",
                     pair = dropped_pairs + 1,
                     removed,
-                    remaining = app.messages.len(),
+                    remaining = app.engine.messages.len(),
                     "rewind: dropped a turn pair"
                 );
                 dropped_pairs += 1;
@@ -710,14 +710,14 @@ pub(super) fn handle_rewind_command(app: &mut App, n_str: &str) {
              from this point — the trimmed history is gone for this session.",
             dropped_pairs,
             if dropped_pairs == 1 { "" } else { "s" },
-            app.messages.len(),
-            if app.messages.len() == 1 { "" } else { "s" },
+            app.engine.messages.len(),
+            if app.engine.messages.len() == 1 { "" } else { "s" },
         )
     };
     crate::toast::push_with_cap(
-        &mut app.toasts,
+        &mut app.engine.toasts,
         crate::toast::Toast::new(crate::toast::ToastKind::Info, body.clone()),
     );
-    app.messages
+    app.engine.messages
         .push(crate::types::ChatMessage::assistant(body));
 }

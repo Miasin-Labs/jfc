@@ -36,7 +36,7 @@ impl jfc_provider::seal::Sealed for TestProvider {}
 
 fn new_app() -> App {
     let mut app = App::new(Arc::new(TestProvider), "test-model");
-    app.task_store = jfc_session::TaskStore::in_memory();
+    app.engine.task_store = jfc_session::TaskStore::in_memory();
     app
 }
 
@@ -440,10 +440,10 @@ fn approval_queue_is_fifo_normal() {
     let mut app = new_app();
     let t1 = make_tool(ToolKind::Bash, "b1");
     let t2 = make_tool(ToolKind::Bash, "b2");
-    app.approval_queue.push_back(t1);
-    app.approval_queue.push_back(t2);
-    let first = app.approval_queue.pop_front().expect("first");
-    let second = app.approval_queue.pop_front().expect("second");
+    app.engine.approval_queue.push_back(t1);
+    app.engine.approval_queue.push_back(t2);
+    let first = app.engine.approval_queue.pop_front().expect("first");
+    let second = app.engine.approval_queue.pop_front().expect("second");
     assert_eq!(first.id, "b1");
     assert_eq!(second.id, "b2");
 }
@@ -453,14 +453,14 @@ fn approval_queue_is_fifo_normal() {
 #[test]
 fn pending_approval_and_queue_independent_normal() {
     let mut app = new_app();
-    app.pending_approval = Some(PendingApproval {
+    app.engine.pending_approval = Some(PendingApproval {
         tool: make_tool(ToolKind::Edit, "e1"),
         selected: 0,
     });
-    app.approval_queue
+    app.engine.approval_queue
         .push_back(make_tool(ToolKind::Bash, "b1"));
-    assert!(app.pending_approval.is_some());
-    assert_eq!(app.approval_queue.len(), 1);
+    assert!(app.engine.pending_approval.is_some());
+    assert_eq!(app.engine.approval_queue.len(), 1);
 }
 
 // ─────── tool_needs_approval / tool_denied_by_mode ────────────────
@@ -488,7 +488,7 @@ fn tool_needs_approval_default_mode_normal() {
 fn tool_needs_approval_respects_always_approved_normal() {
     let mut app = new_app();
     let bash = make_tool(ToolKind::Bash, "b");
-    app.always_approved.push(bash.kind.label().to_owned());
+    app.engine.always_approved.push(bash.kind.label().to_owned());
     assert!(!app.tool_needs_approval(&bash));
 }
 
@@ -497,7 +497,7 @@ fn tool_needs_approval_respects_always_approved_normal() {
 fn tool_needs_approval_respects_session_approved_normal() {
     let mut app = new_app();
     let edit = make_tool(ToolKind::Edit, "e");
-    app.session_approved.push(edit.kind.label().to_owned());
+    app.engine.session_approved.push(edit.kind.label().to_owned());
     assert!(!app.tool_needs_approval(&edit));
 }
 
@@ -506,7 +506,7 @@ fn tool_needs_approval_respects_session_approved_normal() {
 #[test]
 fn tool_denied_by_mode_plan_blocks_writes_normal() {
     let mut app = new_app();
-    app.permission_mode = PermissionMode::Plan;
+    app.engine.permission_mode = PermissionMode::Plan;
     let edit = make_tool(ToolKind::Edit, "e");
     let read = make_tool(ToolKind::Read, "r");
     let advisor = make_tool(ToolKind::Advisor, "a");
@@ -542,12 +542,12 @@ fn selected_context_window_tokens_falls_back_normal() {
 #[test]
 fn sync_selected_context_window_updates_max_normal() {
     let mut app = new_app();
-    app.messages
+    app.engine.messages
         .push(ChatMessage::user("0123456789abcdef".into()));
     app.sync_selected_context_window();
-    assert_eq!(app.max_context_tokens, app.selected_context_window_tokens());
+    assert_eq!(app.engine.max_context_tokens, app.selected_context_window_tokens());
     // 16 chars / 4 * 1.5 = 6 tokens.
-    assert_eq!(app.tool_ctx.approx_tokens, 6);
+    assert_eq!(app.engine.tool_ctx.approx_tokens, 6);
 }
 
 // Robust: when a message carries usage data, sync prefers the
@@ -563,16 +563,16 @@ fn sync_preserves_usage_based_estimate_robust() {
         cache_write_tokens: 5,
         cost_usd: None,
     });
-    app.messages.push(msg);
+    app.engine.messages.push(msg);
     // Without sync, approx_tokens is 0. recompute_token_estimate
     // is what reads the usage into approx_tokens.
     app.recompute_token_estimate();
-    assert_eq!(app.tool_ctx.approx_tokens, 165);
+    assert_eq!(app.engine.tool_ctx.approx_tokens, 165);
     // After sync, the usage-based estimate is preserved (not
     // clobbered by the heuristic over message text).
-    let preserved = app.tool_ctx.approx_tokens;
+    let preserved = app.engine.tool_ctx.approx_tokens;
     app.sync_selected_context_window();
-    assert_eq!(app.tool_ctx.approx_tokens, preserved);
+    assert_eq!(app.engine.tool_ctx.approx_tokens, preserved);
 }
 
 // ─────── recompute_token_estimate ─────────────────────────────────
@@ -582,14 +582,14 @@ fn sync_preserves_usage_based_estimate_robust() {
 #[test]
 fn recompute_no_usage_uses_estimator_normal() {
     let mut app = new_app();
-    app.messages
+    app.engine.messages
         .push(ChatMessage::user("0123456789abcdef".into()));
-    app.last_usage_input = 999;
-    app.last_usage_output = 999;
+    app.engine.last_usage_input = 999;
+    app.engine.last_usage_output = 999;
     app.recompute_token_estimate();
-    assert_eq!(app.last_usage_input, 0);
-    assert_eq!(app.last_usage_output, 0);
-    assert_eq!(app.tool_ctx.approx_tokens, 6);
+    assert_eq!(app.engine.last_usage_input, 0);
+    assert_eq!(app.engine.last_usage_output, 0);
+    assert_eq!(app.engine.tool_ctx.approx_tokens, 6);
 }
 
 // Normal: with a usage message followed by a tail, recompute uses
@@ -605,14 +605,14 @@ fn recompute_with_usage_plus_tail_normal() {
         cache_write_tokens: 0,
         cost_usd: None,
     });
-    app.messages.push(anchor);
+    app.engine.messages.push(anchor);
     // 16-char user message after the anchor → 6 tail tokens.
-    app.messages
+    app.engine.messages
         .push(ChatMessage::user("0123456789abcdef".into()));
     app.recompute_token_estimate();
-    assert_eq!(app.tool_ctx.approx_tokens, 1_500 + 6);
-    assert_eq!(app.last_usage_input, 1_000);
-    assert_eq!(app.last_usage_output, 500);
+    assert_eq!(app.engine.tool_ctx.approx_tokens, 1_500 + 6);
+    assert_eq!(app.engine.last_usage_input, 1_000);
+    assert_eq!(app.engine.last_usage_output, 500);
 }
 
 // ─────── cwd resolution ──────────────────────────────────────────
@@ -622,7 +622,7 @@ fn recompute_with_usage_plus_tail_normal() {
 #[test]
 fn app_new_resolves_cwd_normal() {
     let app = new_app();
-    assert!(!app.cwd.is_empty(), "cwd resolved");
+    assert!(!app.engine.cwd.is_empty(), "cwd resolved");
 }
 
 // ─────── switch_session ──────────────────────────────────────────
@@ -632,23 +632,23 @@ fn app_new_resolves_cwd_normal() {
 #[test]
 fn switch_session_resets_state_normal() {
     let mut app = new_app();
-    app.compact_suppressed = true;
+    app.engine.compact_suppressed = true;
     app.task_panel_selected = 5;
     app.viewing_task_id = Some("t1".into());
     app.viewing_task_expanded
         .insert("t1".into(), std::collections::HashSet::new());
-    app.task_completion_times
+    app.engine.task_completion_times
         .insert(jfc_session::TaskId::from("t1"), Instant::now());
 
     app.switch_session(Some(crate::ids::SessionId::new("ses_test_switch")));
 
-    assert!(!app.compact_suppressed);
+    assert!(!app.engine.compact_suppressed);
     assert_eq!(app.task_panel_selected, 0);
     assert!(app.viewing_task_id.is_none());
     assert!(app.viewing_task_expanded.is_empty());
-    assert!(app.task_completion_times.is_empty());
+    assert!(app.engine.task_completion_times.is_empty());
     assert_eq!(
-        app.current_session_id.as_ref().map(|s| s.as_str()),
+        app.engine.current_session_id.as_ref().map(|s| s.as_str()),
         Some("ses_test_switch"),
     );
 }
@@ -661,10 +661,10 @@ fn switch_session_resets_state_normal() {
 #[test]
 fn switch_session_none_mints_fresh_id_normal() {
     let mut app = new_app();
-    app.current_session_id = None;
+    app.engine.current_session_id = None;
     app.switch_session(None);
-    assert!(app.current_session_id.is_some());
-    let id = app.current_session_id.as_ref().unwrap().as_str();
+    assert!(app.engine.current_session_id.is_some());
+    let id = app.engine.current_session_id.as_ref().unwrap().as_str();
     assert!(id.starts_with("ses_"), "id has expected prefix: {id}");
 }
 
@@ -679,12 +679,12 @@ fn sync_task_completions_tracks_and_prunes_normal() {
     let mut app = new_app();
     // Create a task in the in-memory fixture store so tests never mutate
     // the project-level `.jfc/tasks.json`.
-    let t1 = app
+    let t1 = app.engine
         .task_store
         .create::<jfc_session::TaskId>("subj".into(), "desc".into(), None, Vec::new())
         .expect("created");
     // Mark it completed.
-    app.task_store
+    app.engine.task_store
         .update(
             t1.id.as_str(),
             TaskPatch {
@@ -695,10 +695,10 @@ fn sync_task_completions_tracks_and_prunes_normal() {
         .expect("update");
 
     app.sync_task_completions();
-    assert!(app.task_completion_times.contains_key(&t1.id));
+    assert!(app.engine.task_completion_times.contains_key(&t1.id));
 
     // Re-open: sync should prune the entry.
-    app.task_store
+    app.engine.task_store
         .update(
             t1.id.as_str(),
             TaskPatch {
@@ -708,7 +708,7 @@ fn sync_task_completions_tracks_and_prunes_normal() {
         )
         .expect("reopen");
     app.sync_task_completions();
-    assert!(!app.task_completion_times.contains_key(&t1.id));
+    assert!(!app.engine.task_completion_times.contains_key(&t1.id));
 }
 
 // ─────── recent_models helpers ────────────────────────────────────
@@ -986,7 +986,7 @@ fn selected_model_info_finds_in_cache_normal() {
     let mut app = new_app();
     let info =
         ModelInfo::new("test-model", "Test", "test").with_context_window_tokens(Some(50_000));
-    app.provider_models
+    app.engine.provider_models
         .insert(jfc_provider::ProviderId::from("test"), vec![info]);
     let got = app.selected_model_info().expect("found");
     assert_eq!(got.id.as_str(), "test-model");
@@ -1035,9 +1035,9 @@ fn message_part_tool_carries_input_output_normal() {
 #[test]
 fn queue_background_reminder_appends_normal() {
     let mut app = new_app();
-    app.queue_background_reminder("CLAUDE.md changed");
-    assert_eq!(app.pending_background_reminders.len(), 1);
-    assert_eq!(app.pending_background_reminders[0], "CLAUDE.md changed");
+    app.engine.queue_background_reminder("CLAUDE.md changed");
+    assert_eq!(app.engine.pending_background_reminders.len(), 1);
+    assert_eq!(app.engine.pending_background_reminders[0], "CLAUDE.md changed");
 }
 
 // Robust: pushing the same body twice does NOT duplicate. This is
@@ -1048,10 +1048,10 @@ fn queue_background_reminder_appends_normal() {
 #[test]
 fn queue_background_reminder_dedupes_on_repeat_robust() {
     let mut app = new_app();
-    app.queue_background_reminder("CLAUDE.md changed");
-    app.queue_background_reminder("CLAUDE.md changed");
-    app.queue_background_reminder("CLAUDE.md changed");
-    assert_eq!(app.pending_background_reminders.len(), 1);
+    app.engine.queue_background_reminder("CLAUDE.md changed");
+    app.engine.queue_background_reminder("CLAUDE.md changed");
+    app.engine.queue_background_reminder("CLAUDE.md changed");
+    assert_eq!(app.engine.pending_background_reminders.len(), 1);
 }
 
 // Normal: distinct bodies coexist in the queue — only exact matches
@@ -1059,9 +1059,9 @@ fn queue_background_reminder_dedupes_on_repeat_robust() {
 #[test]
 fn queue_background_reminder_keeps_distinct_bodies_normal() {
     let mut app = new_app();
-    app.queue_background_reminder("CLAUDE.md changed");
-    app.queue_background_reminder("MCP refreshed");
-    assert_eq!(app.pending_background_reminders.len(), 2);
+    app.engine.queue_background_reminder("CLAUDE.md changed");
+    app.engine.queue_background_reminder("MCP refreshed");
+    assert_eq!(app.engine.pending_background_reminders.len(), 2);
 }
 
 // Normal: take_background_reminders transfers ownership and empties
@@ -1069,11 +1069,11 @@ fn queue_background_reminder_keeps_distinct_bodies_normal() {
 #[test]
 fn take_background_reminders_drains_normal() {
     let mut app = new_app();
-    app.queue_background_reminder("a");
-    app.queue_background_reminder("b");
-    let drained = app.take_background_reminders();
+    app.engine.queue_background_reminder("a");
+    app.engine.queue_background_reminder("b");
+    let drained = app.engine.take_background_reminders();
     assert_eq!(drained, vec!["a".to_owned(), "b".to_owned()]);
-    assert!(app.pending_background_reminders.is_empty());
+    assert!(app.engine.pending_background_reminders.is_empty());
 }
 
 // Robust: draining an empty queue returns an empty vec rather than
@@ -1082,6 +1082,6 @@ fn take_background_reminders_drains_normal() {
 #[test]
 fn take_background_reminders_empty_is_empty_robust() {
     let mut app = new_app();
-    let drained = app.take_background_reminders();
+    let drained = app.engine.take_background_reminders();
     assert!(drained.is_empty());
 }

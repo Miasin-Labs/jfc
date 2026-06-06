@@ -4,7 +4,7 @@
 //! 26647 area) surfaces — "Compaction running…", "Bell muted",
 //! "Session saved", etc.
 //!
-//! Pure data model + lifecycle here; the renderer reads `app.toasts`
+//! Pure data model + lifecycle here; the renderer reads `app.engine.toasts`
 //! and the main-loop `Tick` handler calls `prune_expired` periodically.
 
 use std::time::{Duration, Instant};

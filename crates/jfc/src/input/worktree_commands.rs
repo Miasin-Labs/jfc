@@ -11,11 +11,11 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
     let mut it = args.split_whitespace();
     let sub = it.next().unwrap_or("");
     let arg = it.next().unwrap_or("");
-    let repo_root = std::path::PathBuf::from(&app.cwd);
+    let repo_root = std::path::PathBuf::from(&app.engine.cwd);
 
     fn echo(app: &mut App, raw: String, body: String) {
-        app.messages.push(ChatMessage::user(raw));
-        app.messages.push(ChatMessage::assistant(body));
+        app.engine.messages.push(ChatMessage::user(raw));
+        app.engine.messages.push(ChatMessage::assistant(body));
     }
 
     async fn list_body(cwd: &str) -> String {
@@ -39,7 +39,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
 
     match sub {
         "" | "list" => {
-            let body = list_body(&app.cwd).await;
+            let body = list_body(&app.engine.cwd).await;
             echo(app, "/worktree list".to_owned(), body);
         }
         "create" => {
@@ -113,7 +113,7 @@ pub(super) async fn handle_worktree_command(app: &mut App, args: &str) {
                 );
                 return;
             }
-            let target = std::path::PathBuf::from(&app.cwd)
+            let target = std::path::PathBuf::from(&app.engine.cwd)
                 .join(".jfc-worktrees")
                 .join(arg);
             // jfc's cwd is captured at startup, so we can't transparently

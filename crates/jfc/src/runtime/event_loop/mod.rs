@@ -65,34 +65,34 @@ pub(crate) async fn run(
     crate::tools::register_event_sender(tx.clone());
     tracing::info!(target: "jfc::ui::events", "registered AppEvent sender for non-Task agent paths");
     let mut app = App::new(provider, model);
-    app.providers = providers.clone();
+    app.engine.providers = providers.clone();
     // Transfer CLI-flag-derived runtime config onto the App. Done here
     // (not inside `App::new`) so unit tests that build a bare `App` can
     // skip the plumbing and so the flag → field mapping lives next to
     // the flag parser instead of buried deep in app/state.rs. Wiring
     // the *consumers* of these fields (stream builder, permission
     // gate, MCP init, session save) lives across focused handlers.
-    app.max_turns = cli_config.max_turns;
-    app.max_budget_usd = cli_config.max_budget_usd;
-    app.allowed_tools = cli_config.allowed_tools;
-    app.disallowed_tools = cli_config.disallowed_tools;
-    app.cli_system_prompt = cli_config.system_prompt;
-    app.dangerously_skip_permissions = cli_config.dangerously_skip_permissions;
+    app.engine.max_turns = cli_config.max_turns;
+    app.engine.max_budget_usd = cli_config.max_budget_usd;
+    app.engine.allowed_tools = cli_config.allowed_tools;
+    app.engine.disallowed_tools = cli_config.disallowed_tools;
+    app.engine.cli_system_prompt = cli_config.system_prompt;
+    app.engine.dangerously_skip_permissions = cli_config.dangerously_skip_permissions;
     app.json_mode = cli_config.json_mode;
-    app.extra_dirs = cli_config.extra_dirs;
-    app.cli_max_thinking_tokens = cli_config.max_thinking_tokens;
-    app.cli_thinking_display = cli_config.thinking_display;
-    app.no_session_persistence = cli_config.no_session_persistence;
-    app.cli_task_budget = cli_config.task_budget;
-    app.mcp_config_path = cli_config.mcp_config_path;
-    app.cowork = cli_config.cowork;
-    app.local_advisor_provider = cli_config.local_advisor_provider.clone();
-    app.local_advisor_model = cli_config.local_advisor_model.clone();
-    app.advisor_enabled = app.advisor_enabled || app.local_advisor_model.is_some();
-    app.server_advisor_model = cli_config.server_advisor_model.clone();
-    app.custom_betas = cli_config.custom_betas;
-    app.fine_grained_tool_streaming = cli_config.fine_grained_tool_streaming;
-    app.strict_tool_schemas = cli_config.strict_tool_schemas;
+    app.engine.extra_dirs = cli_config.extra_dirs;
+    app.engine.cli_max_thinking_tokens = cli_config.max_thinking_tokens;
+    app.engine.cli_thinking_display = cli_config.thinking_display;
+    app.engine.no_session_persistence = cli_config.no_session_persistence;
+    app.engine.cli_task_budget = cli_config.task_budget;
+    app.engine.mcp_config_path = cli_config.mcp_config_path;
+    app.engine.cowork = cli_config.cowork;
+    app.engine.local_advisor_provider = cli_config.local_advisor_provider.clone();
+    app.engine.local_advisor_model = cli_config.local_advisor_model.clone();
+    app.engine.advisor_enabled = app.engine.advisor_enabled || app.engine.local_advisor_model.is_some();
+    app.engine.server_advisor_model = cli_config.server_advisor_model.clone();
+    app.engine.custom_betas = cli_config.custom_betas;
+    app.engine.fine_grained_tool_streaming = cli_config.fine_grained_tool_streaming;
+    app.engine.strict_tool_schemas = cli_config.strict_tool_schemas;
     let startup_config = config::load_arc();
 
     // Remote-control auto-start: from --remote-control flag or config.
@@ -138,18 +138,18 @@ pub(crate) async fn run(
             ?mode,
             "applying --permission-mode at startup"
         );
-        app.permission_mode = mode;
+        app.engine.permission_mode = mode;
     }
     // `--dangerously-skip-permissions` overrides any explicit
     // `--permission-mode` (the user asked for "no prompts ever";
     // bypass is the strongest mode and the closest match). Logged
     // loud — this is the foot-gun flag.
-    if app.dangerously_skip_permissions {
+    if app.engine.dangerously_skip_permissions {
         tracing::warn!(
             target: "jfc::ui",
             "--dangerously-skip-permissions: forcing permission mode to BypassPermissions"
         );
-        app.permission_mode = crate::app::PermissionMode::BypassPermissions;
+        app.engine.permission_mode = crate::app::PermissionMode::BypassPermissions;
     }
     // Apply the user's persisted theme choice from
     // ~/.config/jfc/config.toml. Unknown / missing names fall back
@@ -176,7 +176,7 @@ pub(crate) async fn run(
             style = %parsed.name(),
             "applied persisted output style"
         );
-        app.output_style = parsed;
+        app.engine.output_style = parsed;
         crate::output_style::set_active(parsed);
     }
 
@@ -208,7 +208,7 @@ pub(crate) async fn run(
             .join("jfc")
             .join("auto_nudge_seen");
         if !marker.exists() {
-            app.messages.push(crate::types::ChatMessage::assistant(
+            app.engine.messages.push(crate::types::ChatMessage::assistant(
                 "\u{2139}\u{fe0f} Auto mode is now the default permission mode. Use /permissions to change.".to_string(),
             ));
             // Create the marker file so the nudge doesn't repeat.
@@ -225,8 +225,8 @@ pub(crate) async fn run(
     }
 
     // Wire the Slate router from config. Default OFF — `slate_enabled = false`
-    // in `~/.config/jfc/config.toml` means `app.slate = None` and every turn
-    // uses the pinned `app.model` (legacy behavior). When ON, each user
+    // in `~/.config/jfc/config.toml` means `app.engine.slate = None` and every turn
+    // uses the pinned `app.engine.model` (legacy behavior). When ON, each user
     // submission consults the router to pick a per-turn model based on the
     // classifier's `QueryClass`. See `crates/jfc/src/slate.rs`.
     {
@@ -239,7 +239,7 @@ pub(crate) async fn run(
                 rule_count,
                 "slate router enabled"
             );
-            app.slate = Some(router);
+            app.engine.slate = Some(router);
         } else {
             tracing::debug!(
                 target: "jfc::slate",
@@ -286,8 +286,8 @@ pub(crate) async fn run(
                     cwd = ?cwd_str,
                     "continuing most recent session"
                 );
-                app.messages = messages;
-                app.current_session_id = Some(session_id.clone());
+                app.engine.messages = messages;
+                app.engine.current_session_id = Some(session_id.clone());
                 // Task store: prefer the project store (`.jfc/tasks.json`)
                 // that `App::new` already opened — it survives across every
                 // session in the repo. ONLY fall back to the per-session store
@@ -295,8 +295,8 @@ pub(crate) async fn run(
                 // root. Unconditionally reopening the per-session store here
                 // was the `--continue` subj/desc-resurrection bug: it clobbered
                 // the live project store with stale placeholder rows.
-                if !matches!(app.git_root, Some(Some(_))) {
-                    app.task_store = jfc_session::TaskStore::open(session_id.as_str());
+                if !matches!(app.engine.git_root, Some(Some(_))) {
+                    app.engine.task_store = jfc_session::TaskStore::open(session_id.as_str());
                 }
                 // Rebuild any active stop-condition from the goal
                 // sidecar — without this, /continue forgets the
@@ -309,10 +309,10 @@ pub(crate) async fn run(
                         iterations = goal.iterations,
                         "restored goal from sidecar"
                     );
-                    app.goal = Some(goal);
+                    app.engine.goal = Some(goal);
                 }
                 if let Some(model_id) = saved_model {
-                    if let Some(resolved) = crate::resolve_provider_model(&app.providers, &model_id)
+                    if let Some(resolved) = crate::resolve_provider_model(&app.engine.providers, &model_id)
                     {
                         tracing::info!(
                             target: "jfc::session",
@@ -320,10 +320,10 @@ pub(crate) async fn run(
                             routed_provider = %resolved.provider.name(),
                             "rerouting active provider to match saved session model"
                         );
-                        app.provider = resolved.provider;
-                        app.model = resolved.model;
+                        app.engine.provider = resolved.provider;
+                        app.engine.model = resolved.model;
                     } else {
-                        app.model = model_id.into();
+                        app.engine.model = model_id.into();
                     }
                 }
                 app.recompute_token_estimate();
@@ -338,7 +338,7 @@ pub(crate) async fn run(
                         "no session for this cwd — continued the globally-most-recent session from another project"
                     );
                     crate::toast::push_with_cap(
-                        &mut app.toasts,
+                        &mut app.engine.toasts,
                         crate::toast::Toast::new(
                             crate::toast::ToastKind::Warning,
                             "No session for this directory — continued the most recent session from \
@@ -387,15 +387,15 @@ pub(crate) async fn run(
                         "{msg}"
                     );
                 }
-                app.messages = messages;
-                app.current_session_id = Some(session_id.clone());
+                app.engine.messages = messages;
+                app.engine.current_session_id = Some(session_id.clone());
                 // Same project-store-first rule as --continue (see above):
                 // keep the project `.jfc/tasks.json` and only fall back to the
                 // per-session store when no git root exists. Prevents the
                 // resumed session's old per-session placeholders from
                 // overwriting the live project task list.
-                if !matches!(app.git_root, Some(Some(_))) {
-                    app.task_store = jfc_session::TaskStore::open(session_id.as_str());
+                if !matches!(app.engine.git_root, Some(Some(_))) {
+                    app.engine.task_store = jfc_session::TaskStore::open(session_id.as_str());
                 }
                 // Rebuild any active stop-condition from the goal sidecar.
                 if let Some(goal) = crate::goal::load_sidecar(session_id.as_str()) {
@@ -406,10 +406,10 @@ pub(crate) async fn run(
                         iterations = goal.iterations,
                         "restored goal from sidecar"
                     );
-                    app.goal = Some(goal);
+                    app.engine.goal = Some(goal);
                 }
                 if let Some(model_id) = saved_model {
-                    if let Some(resolved) = crate::resolve_provider_model(&app.providers, &model_id)
+                    if let Some(resolved) = crate::resolve_provider_model(&app.engine.providers, &model_id)
                     {
                         tracing::info!(
                             target: "jfc::session",
@@ -417,10 +417,10 @@ pub(crate) async fn run(
                             routed_provider = %resolved.provider.name(),
                             "rerouting active provider to match saved session model"
                         );
-                        app.provider = resolved.provider;
-                        app.model = resolved.model;
+                        app.engine.provider = resolved.provider;
+                        app.engine.model = resolved.model;
                     } else {
-                        app.model = model_id.into();
+                        app.engine.model = model_id.into();
                     }
                 }
                 app.recompute_token_estimate();
@@ -457,8 +457,8 @@ pub(crate) async fn run(
                     message_count = messages.len(),
                     "forking session"
                 );
-                app.messages = messages;
-                app.current_session_id = Some(new_id);
+                app.engine.messages = messages;
+                app.engine.current_session_id = Some(new_id);
                 app.recompute_token_estimate();
             } else {
                 // Try loading from teleport export
@@ -481,10 +481,10 @@ pub(crate) async fn run(
                                 } else {
                                     crate::types::ChatMessage::user(content.to_owned())
                                 };
-                                app.messages.push(chat_msg);
+                                app.engine.messages.push(chat_msg);
                             }
                         }
-                        app.current_session_id = Some(new_id);
+                        app.engine.current_session_id = Some(new_id);
                         app.recompute_token_estimate();
                     }
                 } else {
@@ -500,15 +500,15 @@ pub(crate) async fn run(
     restore_persistent_background_agents(&mut app);
 
     // Check for pending historian transcripts from previous sessions.
-    crate::learn_lifecycle::on_session_start(&app.cwd);
+    crate::learn_lifecycle::on_session_start(&app.engine.cwd);
 
     // Apply persisted reasoning_effort from config.toml. MUST run AFTER
-    // the --continue/--resume block above (which may switch `app.model` to
+    // the --continue/--resume block above (which may switch `app.engine.model` to
     // the session's saved model) so the effort resolves for the ACTUAL
     // model in use, not the initial CLI-provided one.
     {
         let cfg = crate::config::load_arc();
-        let effort_str = resolve_effort_for_model(&cfg, &app.model);
+        let effort_str = resolve_effort_for_model(&cfg, &app.engine.model);
         if let Some(level) = effort_str
             .as_deref()
             .and_then(crate::effort::ReasoningEffort::from_str_loose)
@@ -516,23 +516,23 @@ pub(crate) async fn run(
             tracing::info!(
                 target: "jfc::ui::effort",
                 effort = %level,
-                model = %app.model,
+                model = %app.engine.model,
                 "applied persisted reasoning_effort (post-session-restore)"
             );
-            app.effort_state.set(level);
+            app.engine.effort_state.set(level);
         }
         if let Some(temperature) = crate::exploration::temperature_from_env()
-            .or_else(|| crate::exploration::resolve_temperature_for_model(&cfg, &app.model))
+            .or_else(|| crate::exploration::resolve_temperature_for_model(&cfg, &app.engine.model))
         {
             tracing::info!(
                 target: "jfc::exploration",
                 temperature,
-                model = %app.model,
+                model = %app.engine.model,
                 "applied persisted/session temperature (post-session-restore)"
             );
-            let _ = app.temperature_state.set(temperature);
+            let _ = app.engine.temperature_state.set(temperature);
         }
-        app.exploration_state
+        app.engine.exploration_state
             .configure(crate::exploration::ExplorationSettings::from_config(&cfg));
     }
 
@@ -615,7 +615,7 @@ pub(crate) async fn run(
     // Forward teammate runner events into the main event channel.
     {
         let tx = tx.clone();
-        let mut teammate_rx = app.teammate_event_rx.take().unwrap();
+        let mut teammate_rx = app.engine.teammate_event_rx.take().unwrap();
         tokio::spawn(async move {
             while let Some(ev) = teammate_rx.recv().await {
                 _ = tx.send(EngineEvent::Team(TeamEvent::Runner(ev))).await;
@@ -692,71 +692,71 @@ pub(crate) async fn run(
     // Submit initial prompt if provided via --prompt flag
     if let Some(prompt) = queued_initial_prompt {
         // Use the same logic as handle_submit but without waiting for user input
-        let assistant_idx = app.messages.len() + 1;
-        app.messages.push(ChatMessage::user(prompt.clone()));
-        app.tool_ctx.total_user_turns += 1;
-        app.messages.push(ChatMessage::assistant(String::new()));
-        app.streaming_assistant_idx = Some(assistant_idx);
-        app.is_streaming = true;
+        let assistant_idx = app.engine.messages.len() + 1;
+        app.engine.messages.push(ChatMessage::user(prompt.clone()));
+        app.engine.tool_ctx.total_user_turns += 1;
+        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine.streaming_assistant_idx = Some(assistant_idx);
+        app.engine.is_streaming = true;
         let now = std::time::Instant::now();
-        app.streaming_started_at = Some(now);
-        app.last_stream_event_at = Some(now);
-        app.streaming_last_token_at = Some(now);
-        app.turn_started_at = Some(now);
-        app.turn_start_cost = crate::cost::total_cost(&app.usage_by_model);
-        app.last_usage_output = 0;
-        app.usage_apply_baseline = (0, 0, 0, 0);
+        app.engine.streaming_started_at = Some(now);
+        app.engine.last_stream_event_at = Some(now);
+        app.engine.streaming_last_token_at = Some(now);
+        app.engine.turn_started_at = Some(now);
+        app.engine.turn_start_cost = crate::cost::total_cost(&app.engine.usage_by_model);
+        app.engine.last_usage_output = 0;
+        app.engine.usage_apply_baseline = (0, 0, 0, 0);
 
         // Create session if not resuming one
-        let session_id = app
+        let session_id = app.engine
             .current_session_id
             .clone()
             .unwrap_or_else(jfc_session::generate_session_id);
         {
             let sid = session_id.clone();
-            let msgs = app.messages.clone();
-            let cwd = app.cwd.clone();
-            let model = app.model.clone();
+            let msgs = app.engine.messages.clone();
+            let cwd = app.engine.cwd.clone();
+            let model = app.engine.model.clone();
             tokio::spawn(async move {
                 session::save_session(&sid, &msgs, Some(cwd.as_str()), Some(model.as_str())).await;
             });
         }
-        app.current_session_id = Some(session_id);
+        app.engine.current_session_id = Some(session_id);
 
-        let provider = app.provider.clone();
-        let messages = stream::build_provider_messages(&app.messages[..assistant_idx]);
+        let provider = app.engine.provider.clone();
+        let messages = stream::build_provider_messages(&app.engine.messages[..assistant_idx]);
         // Slate per-turn routing for the `--prompt` startup path.
-        let model = if let Some(ref router) = app.slate {
-            router.route(&prompt, app.model.clone())
+        let model = if let Some(ref router) = app.engine.slate {
+            router.route(&prompt, app.engine.model.clone())
         } else {
-            app.model.clone()
+            app.engine.model.clone()
         };
         let cfg = crate::config::load_arc();
-        app.exploration_state.begin_turn(&prompt, &cfg);
+        app.engine.exploration_state.begin_turn(&prompt, &cfg);
         let tx_clone = tx.clone();
-        let interrupt = app.interrupt_flag.clone();
+        let interrupt = app.engine.interrupt_flag.clone();
         // wg-async: --prompt startup spawns a stream that holds critical
         // state (SSE conn + tx). Wire the cancel token in so an early
         // ESC can drop it cleanly.
-        app.cancel_token = tokio_util::sync::CancellationToken::new();
-        let cancel = app.cancel_token.clone();
-        let prev_msg_id = app.last_response_id.take();
+        app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel = app.engine.cancel_token.clone();
+        let prev_msg_id = app.engine.last_response_id.take();
         // Refresh CLAUDE.md frontmatter disallowed tools before each turn.
         if let Ok(cwd_path) = std::env::current_dir() {
             let hierarchy = crate::context::ClaudeMdHierarchy::load(&cwd_path);
-            app.claudemd_disallowed_tools = hierarchy.collect_disallowed_tools();
+            app.engine.claudemd_disallowed_tools = hierarchy.collect_disallowed_tools();
         }
         let overrides = StreamRequestOverrides {
-            background_reminders: app.take_background_reminders(),
-            disallowed_tools: app.effective_disallowed_tools(),
-            allowed_tools: app.allowed_tools.clone(),
-            custom_betas: app.custom_betas.clone(),
-            fine_grained_tool_streaming: app.fine_grained_tool_streaming,
-            strict_tool_schemas: app.strict_tool_schemas,
-            task_budget: app.cli_task_budget,
-            max_thinking_tokens: app.cli_max_thinking_tokens,
-            thinking_display: app.cli_thinking_display.clone(),
-            brief_mode: app.brief_mode,
+            background_reminders: app.engine.take_background_reminders(),
+            disallowed_tools: app.engine.effective_disallowed_tools(),
+            allowed_tools: app.engine.allowed_tools.clone(),
+            custom_betas: app.engine.custom_betas.clone(),
+            fine_grained_tool_streaming: app.engine.fine_grained_tool_streaming,
+            strict_tool_schemas: app.engine.strict_tool_schemas,
+            task_budget: app.engine.cli_task_budget,
+            max_thinking_tokens: app.engine.cli_max_thinking_tokens,
+            thinking_display: app.engine.cli_thinking_display.clone(),
+            brief_mode: app.engine.brief_mode,
             ..Default::default()
         };
         let tx_guard = tx.clone();
@@ -778,7 +778,7 @@ pub(crate) async fn run(
             )
             .await;
         });
-        app.active_stream_handle = Some(inner.abort_handle());
+        app.engine.active_stream_handle = Some(inner.abort_handle());
         tokio::spawn(async move {
             if let Err(join_err) = inner.await {
                 let msg = if join_err.is_panic() {
@@ -931,9 +931,9 @@ pub(crate) async fn run(
         // to remote-control clients.
         if let Some(ref rc) = app.remote_host {
             // Session status (transition-only).
-            let status = if app.is_streaming {
+            let status = if app.engine.is_streaming {
                 jfc_remote::protocol::SessionState::Running
-            } else if app.pending_approval.is_some() {
+            } else if app.engine.pending_approval.is_some() {
                 jfc_remote::protocol::SessionState::WaitingApproval
             } else {
                 jfc_remote::protocol::SessionState::Idle
@@ -941,7 +941,7 @@ pub(crate) async fn run(
             rc.mirror_status(status);
 
             // Pending approval → PermissionRequest with diff preview.
-            if let Some(ref approval) = app.pending_approval {
+            if let Some(ref approval) = app.engine.pending_approval {
                 let diff = crate::remote_host::tool_diff_preview(&approval.tool);
                 rc.mirror_pending_approval(
                     approval.tool.id.as_ref(),
@@ -964,13 +964,13 @@ pub(crate) async fn run(
         // pending or approval is active — without this, the screen stalls
         // between StreamDone and the next stream start (the user has to
         // move their cursor to trigger a redraw).
-        let want_streaming_cursor = app.is_streaming
-            || app.compacting_started_at.is_some()
-            || !app.pending_tool_calls.is_empty()
-            || app.pending_approval.is_some()
-            || !app.approval_queue.is_empty()
-            || app.background_tasks.values().any(|bt| bt.status.is_alive())
-            || app.turn_started_at.is_some();
+        let want_streaming_cursor = app.engine.is_streaming
+            || app.engine.compacting_started_at.is_some()
+            || !app.engine.pending_tool_calls.is_empty()
+            || app.engine.pending_approval.is_some()
+            || !app.engine.approval_queue.is_empty()
+            || app.engine.background_tasks.values().any(|bt| bt.status.is_alive())
+            || app.engine.turn_started_at.is_some();
         if want_streaming_cursor {
             needs_draw = true;
         }
@@ -1009,7 +1009,7 @@ pub(crate) async fn run(
     // transcript. Runs synchronously (blocking on exit is acceptable — it's a
     // single LLM call, ~2-5s) so the user's learning is captured before the
     // process exits. Best-effort: failures are logged, never surfaced.
-    crate::learn_lifecycle::on_session_end(&app.messages, &app.cwd);
+    crate::learn_lifecycle::on_session_end(&app.engine.messages, &app.engine.cwd);
 
     Ok(())
 }
@@ -1207,7 +1207,7 @@ pub(crate) async fn handle_engine_event(
             // token figure in the UI, not flagged as a guess).
             let tokens = chars / 4;
             crate::toast::push_with_cap(
-                &mut app.toasts,
+                &mut app.engine.toasts,
                 crate::toast::Toast::new(
                     crate::toast::ToastKind::Info,
                     format!("↻ Recalled memory ({tokens} tokens of context)"),
@@ -1268,7 +1268,7 @@ pub(crate) async fn handle_engine_event(
             handlers::ui_actions::handle_load_session(app, session_id).await;
         }
         EngineEvent::Control(ControlEvent::WorktreeCountLoaded(count)) => {
-            app.worktree_count = count;
+            app.engine.worktree_count = count;
         }
         EngineEvent::Control(ControlEvent::ResolveApproval {
             tool_use_id,
@@ -1351,7 +1351,7 @@ pub(crate) async fn handle_engine_event(
             // Resolve the pending plan-gate approval (the ExitPlanMode tool
             // parked in `pending_approval`). Replaces the remote host's
             // synthetic 'y'/'n' keystrokes with an addressed resolution.
-            let target = app
+            let target = app.engine
                 .pending_approval
                 .as_ref()
                 .map(|p| p.tool.id.as_str().to_owned());

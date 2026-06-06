@@ -3,7 +3,7 @@
 //! Unlike tool *approval* (which gates a dispatch — see `input/approval.rs`),
 //! a question *collects answers that become the tool_result*. The model emits
 //! an `AskUserQuestion` tool_use; `handle_stream_tool` diverts it into
-//! `app.pending_question` instead of dispatching; this module renders the
+//! `app.engine.pending_question` instead of dispatching; this module renders the
 //! interaction and, once every question is committed, synthesizes a
 //! `ToolEvent::Result` for the tool_use + an `AllComplete` so the existing
 //! result-recording and agentic-loop-continuation machinery resumes the turn.
@@ -109,7 +109,7 @@ pub(super) fn handle_question_key(
     key: event::KeyEvent,
     tx: &mpsc::Sender<EngineEvent>,
 ) -> bool {
-    if app.pending_question.is_none() {
+    if app.engine.pending_question.is_none() {
         return false;
     }
     // Let Ctrl-C fall through to the global interrupt handler.
@@ -120,7 +120,7 @@ pub(super) fn handle_question_key(
     }
 
     // Decided after the borrow on `pending` ends, so submit/decline can re-take
-    // `app.pending_question` without a borrow conflict.
+    // `app.engine.pending_question` without a borrow conflict.
     enum Act {
         None,
         Submit,
@@ -129,7 +129,7 @@ pub(super) fn handle_question_key(
     let mut act = Act::None;
 
     {
-        let pending = app.pending_question.as_mut().expect("checked above");
+        let pending = app.engine.pending_question.as_mut().expect("checked above");
 
         if pending.editing_other {
             let other_row = pending.cur().other_row();
@@ -245,7 +245,7 @@ fn commit_current(pending: &mut PendingQuestion) -> bool {
 }
 
 fn submit_question(app: &mut App, tx: &mpsc::Sender<EngineEvent>) {
-    let Some(pending) = app.pending_question.take() else {
+    let Some(pending) = app.engine.pending_question.take() else {
         return;
     };
     let tool_id = pending.tool_id.clone();
@@ -272,7 +272,7 @@ fn submit_question(app: &mut App, tx: &mpsc::Sender<EngineEvent>) {
 }
 
 fn decline_question(app: &mut App, tx: &mpsc::Sender<EngineEvent>) {
-    let Some(pending) = app.pending_question.take() else {
+    let Some(pending) = app.engine.pending_question.take() else {
         return;
     };
     let tool_id = pending.tool_id;

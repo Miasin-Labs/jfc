@@ -13,7 +13,7 @@ pub(super) fn toast_overlay(f: &mut Frame, app: &App) {
     // reads as a contained unit rather than text bleeding into the
     // transcript below it.
     let w = MAX_W.min(frame_area.width.saturating_sub(2));
-    let count = app.toasts.len() as u16;
+    let count = app.engine.toasts.len() as u16;
     let body_h = count.min(5); // MAX_TOASTS, but bound to layout
     if body_h == 0 {
         *app.toasts_rect.borrow_mut() = None;
@@ -27,7 +27,7 @@ pub(super) fn toast_overlay(f: &mut Frame, app: &App) {
     let slide_offset: u16 = if crate::spinner::reduced_motion() {
         0
     } else {
-        let freshest_age = app
+        let freshest_age = app.engine
             .toasts
             .iter()
             .map(|tt| tt.created_at.elapsed())
@@ -72,7 +72,7 @@ pub(super) fn toast_overlay(f: &mut Frame, app: &App) {
     // an Error toast pulls a red border even when surrounded by Info
     // entries. The user's eye finds the strip faster than reading
     // each row.
-    let border_color = app
+    let border_color = app.engine
         .toasts
         .iter()
         .map(|tt| match tt.kind {
@@ -97,7 +97,7 @@ pub(super) fn toast_overlay(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let mut lines: Vec<Line> = Vec::new();
-    for toast in app
+    for toast in app.engine
         .toasts
         .iter()
         .rev()
@@ -136,7 +136,7 @@ pub(super) fn toast_overlay(f: &mut Frame, app: &App) {
 /// One-line diagnostic summary row. v126 cli.js:338035-338038 renders this
 /// as `Found <bold>N</bold> new diagnostic <issue/issues> in M <file/files>
 /// (ctrl+o to expand)` in dim color. Shown above the spinner row when
-/// `app.diagnostics` has any entries; the formatter and dedup-by-file
+/// `app.engine.diagnostics` has any entries; the formatter and dedup-by-file
 /// logic live in `diagnostics.rs`.
 pub(super) fn diagnostic_row(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
@@ -148,7 +148,7 @@ pub(super) fn diagnostic_row(f: &mut Frame, app: &App, area: Rect) {
     // cli.js:231036 surfaces the same delta-only count: `Found N new
     // diagnostic issue(s)` — the word "new" is load-bearing.
     let new_entries: Vec<&crate::diagnostics::DiagnosticEntry> =
-        crate::diagnostics::unacknowledged(&app.diagnostics, &app.delivered_diagnostics);
+        crate::diagnostics::unacknowledged(&app.engine.diagnostics, &app.delivered_diagnostics);
     let issues = new_entries.len();
     let files = {
         let mut s: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -603,13 +603,13 @@ pub(super) fn diagnostic_panel(f: &mut Frame, app: &App) {
         height: h,
     };
     f.render_widget(Clear, rect);
-    let issues = app.diagnostics.len();
-    let files = crate::diagnostics::count_files(&app.diagnostics);
+    let issues = app.engine.diagnostics.len();
+    let files = crate::diagnostics::count_files(&app.engine.diagnostics);
 
     // Group entries by file in first-seen order. Avoid HashMap iteration
     // for ordering stability — use a Vec of (file, Vec<&entry>).
     let mut groups: Vec<(String, Vec<&crate::diagnostics::DiagnosticEntry>)> = Vec::new();
-    for entry in &app.diagnostics {
+    for entry in &app.engine.diagnostics {
         if let Some(g) = groups.iter_mut().find(|(f, _)| f == &entry.file) {
             g.1.push(entry);
         } else {
