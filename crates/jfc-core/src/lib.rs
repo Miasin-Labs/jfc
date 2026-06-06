@@ -8,20 +8,28 @@ mod agent_def;
 mod assertions;
 mod attachment;
 mod compaction;
+pub mod context;
 mod decision_quality;
 pub mod diff;
 mod execution;
 mod execution_result;
 mod fanout;
 mod ids;
+mod message;
 mod paging;
 mod plan_cache;
 mod prompt_queue;
 mod routing;
+mod server_tool;
+mod status;
 mod task;
 mod task_store;
+mod tool;
+pub mod tool_call;
+pub mod tool_display;
 mod tool_input;
 mod tool_kind;
+pub mod tool_output;
 mod tool_retrieval;
 mod usage;
 mod workflow_search;
@@ -41,6 +49,7 @@ pub use execution_result::{
 };
 pub use fanout::{FanoutDecision, FanoutPlan, FanoutPredictor, PlannedAgent};
 pub use ids::{AgentId, SessionId, TaskId, ToolId};
+pub use message::*;
 pub use paging::{PageStore, Pressure, estimate_tokens};
 pub use plan_cache::{CachedPlan, PlanCache, normalize_signature};
 pub use prompt_queue::{
@@ -48,13 +57,19 @@ pub use prompt_queue::{
     TOOL_USE_SUMMARIES_CAP, ToolUseSummary,
 };
 pub use routing::{cascade_pick, knapsack_select};
+pub use server_tool::ServerToolResultKind;
+pub use status::*;
 pub use task::{TaskInput, TaskStatusPart};
 pub use task_store::{
     FactoryMetrics, Task, TaskCounts, TaskError, TaskKind, TaskPatch, TaskRisk, TaskStatus,
     TaskValidation, TodoTaskId,
 };
+pub use tool::*;
+pub use tool_call::{InvalidToolTransition, ToolCall, ToolUndoEntry};
+pub use tool_display::ToolDisplayState;
 pub use tool_input::{ReplacementMode, ToolInput, ToolInputError};
 pub use tool_kind::ToolKind;
+pub use tool_output::{LargeText, ToolOutput, format_server_tool_result_text_public};
 pub use tool_retrieval::{IdentityQueryGen, QueryGen, ToolIndex, retrieve_multi, should_defer};
 pub use usage::ModelUsage;
 pub use workflow_search::{

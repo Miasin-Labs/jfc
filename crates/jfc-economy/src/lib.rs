@@ -9,6 +9,7 @@
 //! recording ledger usage. A charter layer enforces spending limits and a
 //! collusion detector flags rubber-stamping and griefing.
 
+pub mod cost;
 pub mod auction;
 pub mod bounty;
 pub mod charter;

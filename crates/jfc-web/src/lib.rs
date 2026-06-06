@@ -49,6 +49,8 @@
 //! and CORE (`CORE_API_KEY`) read their keys from the environment and return a
 //! clear setup error when the key is missing.
 
+pub mod cache;
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};

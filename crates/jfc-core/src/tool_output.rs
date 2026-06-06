@@ -65,7 +65,7 @@ pub enum ToolOutput {
     /// etc.) so future server-tool result shapes round-trip without
     /// code changes.
     ServerToolResult {
-        tool_kind: jfc_provider::ServerToolResultKind,
+        tool_kind: crate::ServerToolResultKind,
         content: serde_json::Value,
     },
     Empty,
@@ -76,7 +76,7 @@ pub enum ToolOutput {
 /// can use the same formatting rules without duplicating the cli.js
 /// consumer logic.
 pub fn format_server_tool_result_text_public(
-    tool_kind: &jfc_provider::ServerToolResultKind,
+    tool_kind: &crate::ServerToolResultKind,
     content: &serde_json::Value,
 ) -> String {
     format_server_tool_result_text(tool_kind, content)
@@ -92,10 +92,10 @@ pub fn format_server_tool_result_text_public(
 /// `ToolOutput::ServerToolResult` variant for byte-faithful resend;
 /// this function is only for display + log.
 fn format_server_tool_result_text(
-    tool_kind: &jfc_provider::ServerToolResultKind,
+    tool_kind: &crate::ServerToolResultKind,
     content: &serde_json::Value,
 ) -> String {
-    use jfc_provider::ServerToolResultKind;
+    use crate::ServerToolResultKind;
     if matches!(tool_kind, ServerToolResultKind::Advisor)
         && let Some(obj) = content.as_object()
     {
@@ -264,7 +264,7 @@ impl ToolOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::parse_unified_diff;
+    use crate::diff::parse_unified_diff;
 
     // ─── LargeText ────────────────────────────────────────────────────────
 

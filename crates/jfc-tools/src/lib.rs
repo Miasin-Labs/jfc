@@ -4,6 +4,7 @@
 //! the TUI application state, event loop, or runtime. The dispatch
 //! orchestration (permissions, caching, slop guard) remains in `jfc`.
 
+pub mod bash_processes;
 pub mod filesystem;
 pub mod notebook;
 

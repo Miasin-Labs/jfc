@@ -2611,7 +2611,9 @@ dependencies = [
 name = "jfc-auth"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
+ "chrono",
  "dirs 5.0.1",
  "rand 0.10.1",
  "reqwest",
@@ -2623,6 +2625,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "urlencoding",
 ]
 
 [[package]]
@@ -2677,9 +2680,13 @@ dependencies = [
 name = "jfc-core"
 version = "0.1.0"
 dependencies = [
+ "dirs 5.0.1",
  "serde",
  "serde_json",
+ "serde_norway",
+ "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2724,6 +2731,7 @@ name = "jfc-economy"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "jfc-core",
  "jfc-graph",
  "serde",
  "serde_json",
@@ -2772,6 +2780,7 @@ name = "jfc-learn"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs 5.0.1",
  "jfc-core",
  "regex",
@@ -2928,6 +2937,7 @@ name = "jfc-tools"
 version = "0.1.0"
 dependencies = [
  "jfc-core",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",

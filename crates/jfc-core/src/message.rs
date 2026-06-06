@@ -138,7 +138,7 @@ pub struct ChatMessage {
     /// Populated at submit time from `app.pasted_images` by matching
     /// `[Image #N]` markers in the message text. Replaces the old
     /// process-global queue for paste-originated images.
-    pub attachments: Vec<crate::attachments::Attachment>,
+    pub attachments: Vec<crate::Attachment>,
 }
 
 impl ChatMessage {
@@ -301,7 +301,7 @@ pub fn validate_turn_invariants(messages: &[ChatMessage]) -> Result<(), TurnInva
 
 /// Inner form that allows the trailing message to be a (possibly empty)
 /// assistant streaming placeholder.
-pub(crate) fn validate_turn_invariants_inner(
+pub fn validate_turn_invariants_inner(
     messages: &[ChatMessage],
     allow_streaming_tail: bool,
 ) -> Result<(), TurnInvariantError> {

@@ -159,7 +159,7 @@ impl ToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{McpStatus, TaskLifecycle, ToolInput, ToolKind, ToolOutput};
+    use crate::{McpStatus, TaskLifecycle, ToolInput, ToolKind, ToolOutput};
 
     // ─── TaskLifecycle ────────────────────────────────────────────────────
 
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn tool_status_labels_normal() {
-        use crate::types::ToolStatus;
+        use crate::ToolStatus;
         assert_eq!(ToolStatus::Pending.label(), "pending");
         assert_eq!(ToolStatus::Running.label(), "running");
         assert_eq!(ToolStatus::Completed.label(), "completed");
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn tool_status_alias_equals_task_lifecycle_normal() {
         // Both names alias the same underlying ExecutionStatus enum.
-        use crate::types::ToolStatus;
+        use crate::ToolStatus;
         let a: ToolStatus = ToolStatus::Completed;
         let b: TaskLifecycle = TaskLifecycle::Completed;
         assert_eq!(a, b);

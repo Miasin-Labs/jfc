@@ -1,7 +1,7 @@
-#[cfg(test)]
-use super::{ReplacementMode, TaskInput, ToolInput, ToolInputError};
 
-#[cfg(test)]
+use jfc_core::{ReplacementMode, TaskInput, ToolInput, ToolInputError};
+
+
 mod tests {
     use super::*;
 

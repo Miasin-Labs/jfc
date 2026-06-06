@@ -1,7 +1,7 @@
-#[cfg(test)]
-use super::ToolKind;
 
-#[cfg(test)]
+use jfc_core::ToolKind;
+
+
 mod tests {
     use super::*;
 
