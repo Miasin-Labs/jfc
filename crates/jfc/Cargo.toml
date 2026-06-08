@@ -113,7 +113,13 @@ serial_test = "3"
 tempfile = "3.27.0"
 
 [features]
-default = ["hooks", "permission-automation", "anthropic-oauth-sensitive", "intent-gate"]
+default = ["hooks", "permission-automation", "anthropic-oauth-sensitive", "intent-gate", "vad-neural"]
+# Compile the neural (Silero) VAD backend into the binary and make it the
+# default hands-free engine. Pulls in ort + ONNX Runtime. Disable with
+# `--no-default-features` (plus the other defaults) for a lighter build that
+# uses the energy VAD; at runtime `JFC_VAD_ENGINE=energy` opts out without a
+# rebuild.
+vad-neural = ["jfc-voice/vad-neural"]
 # Feature-gated Anthropic OAuth sensitive implementation (CCH, billing attestation,
 # OAuth PKCE client id, etc.). Public builds can disable this via
 # `--no-default-features --features hooks,permission-automation` or similar.
