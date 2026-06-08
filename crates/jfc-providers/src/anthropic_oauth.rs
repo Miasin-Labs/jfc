@@ -1767,6 +1767,41 @@ impl Provider for AnthropicOAuthProvider {
                                 body_preview = %&body[..body.len().min(200)],
                                 "account-level failure — rotating"
                             );
+                            // Last-resort fallback: a server error (5xx) that
+                            // isn't an overload still suggests the primary model
+                            // / route is unhealthy. If we haven't already fallen
+                            // back, switch to the fallback model so a transient
+                            // server-side problem on the primary model doesn't
+                            // fail the whole turn. Only on genuine 5xx (not 401
+                            // auth failures, which a model swap can't fix).
+                            if status.is_server_error()
+                                && !model_in_use
+                                    .eq_ignore_ascii_case(DEFAULT_OVERLOAD_FALLBACK_MODEL)
+                            {
+                                tracing::warn!(
+                                    target: "jfc::provider::anthropic_oauth::rotation",
+                                    from_model = %model_in_use,
+                                    to_model = %DEFAULT_OVERLOAD_FALLBACK_MODEL,
+                                    status = %status,
+                                    "server error — last-resort fallback to alternate model"
+                                );
+                                model_in_use = DEFAULT_OVERLOAD_FALLBACK_MODEL.to_owned();
+                                fallback_reason = FallbackReason::ServerError;
+                                let mut patched: Value = serde_json::from_str(&body_str)?;
+                                patched["model"] =
+                                    Value::String(DEFAULT_OVERLOAD_FALLBACK_MODEL.to_owned());
+                                let patched_str = serde_json::to_string(&patched)?;
+                                effective_body = {
+                                    #[cfg(feature = "anthropic-oauth-sensitive")]
+                                    {
+                                        compute_body_attestation(&patched_str)
+                                    }
+                                    #[cfg(not(feature = "anthropic-oauth-sensitive"))]
+                                    {
+                                        patched_str.clone()
+                                    }
+                                };
+                            }
                             last_err = Some(anyhow::anyhow!(
                                 "Anthropic API error {status} on account '{}': {body}",
                                 account.name
@@ -1815,6 +1850,43 @@ impl Provider for AnthropicOAuthProvider {
                                 "{model} is not enabled on your Anthropic account. \
                                  Pin a model you have access to (Ctrl+M)."
                             );
+                        }
+                        // 403 referencing the requested model: the model exists
+                        // but this account lacks permission for it. Distinct from
+                        // a 404 not-found — try the fallback model rather than
+                        // bailing, mirroring the content-policy fallback below.
+                        if status.as_u16() == 403
+                            && body.contains("\"model\"")
+                            && !model_in_use.eq_ignore_ascii_case(DEFAULT_OVERLOAD_FALLBACK_MODEL)
+                        {
+                            tracing::warn!(
+                                target: "jfc::provider::anthropic_oauth::rotation",
+                                account = %account.name,
+                                from_model = %model_in_use,
+                                to_model = %DEFAULT_OVERLOAD_FALLBACK_MODEL,
+                                "403 model access denied — switching to fallback model"
+                            );
+                            model_in_use = DEFAULT_OVERLOAD_FALLBACK_MODEL.to_owned();
+                            fallback_reason = FallbackReason::PermissionDenied;
+                            let mut patched: Value = serde_json::from_str(&body_str)?;
+                            patched["model"] =
+                                Value::String(DEFAULT_OVERLOAD_FALLBACK_MODEL.to_owned());
+                            let patched_str = serde_json::to_string(&patched)?;
+                            effective_body = {
+                                #[cfg(feature = "anthropic-oauth-sensitive")]
+                                {
+                                    compute_body_attestation(&patched_str)
+                                }
+                                #[cfg(not(feature = "anthropic-oauth-sensitive"))]
+                                {
+                                    patched_str.clone()
+                                }
+                            };
+                            last_err = Some(anyhow::anyhow!(
+                                "Anthropic 403 model access denied on account '{}': {body}",
+                                account.name,
+                            ));
+                            continue;
                         }
                         // Detect content policy refusal: the API returns a 400
                         // with error.type "invalid_request_error" and a message
@@ -3164,6 +3236,34 @@ mod tests {
     fn parse_model_not_found_invalid_json_returns_none_robust() {
         assert!(parse_model_not_found("not json at all").is_none());
         assert!(parse_model_not_found("").is_none());
+    }
+
+    // The two new fallback triggers (403 PermissionDenied, 5xx last-resort
+    // ServerError) depend on this routing: 403 must land in the Permanent
+    // branch (where the model-access-denied fallback lives) and 5xx in the
+    // AccountFailure branch (where the last-resort fallback lives).
+    #[test]
+    fn classify_for_rotation_routes_403_permanent_and_5xx_account_failure_normal() {
+        use reqwest::StatusCode;
+        assert!(matches!(
+            classify_for_rotation(StatusCode::FORBIDDEN),
+            RotationDecision::Permanent
+        ));
+        assert!(matches!(
+            classify_for_rotation(StatusCode::INTERNAL_SERVER_ERROR),
+            RotationDecision::AccountFailure
+        ));
+        assert!(matches!(
+            classify_for_rotation(StatusCode::BAD_GATEWAY),
+            RotationDecision::AccountFailure
+        ));
+        // 401 also routes to AccountFailure but the last-resort fallback is
+        // gated on is_server_error(), so a model swap won't fire for auth.
+        assert!(matches!(
+            classify_for_rotation(StatusCode::UNAUTHORIZED),
+            RotationDecision::AccountFailure
+        ));
+        assert!(!StatusCode::UNAUTHORIZED.is_server_error());
     }
 
     // Normal: Anthropic can emit rate limits as SSE error messages after a
