@@ -355,12 +355,19 @@ pub enum StreamEvent {
 /// Why a model fallback was triggered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallbackReason {
-    /// The requested model was not found / not enabled on the account.
+    /// The requested model was not found / not enabled on the account (404).
     ModelNotFound,
     /// The model endpoint returned 529 (overloaded).
     Overloaded,
     /// The model refused the request (content policy, refusal stop_reason, etc.).
     ModelRefusal,
+    /// The account lacks permission for the requested model (403 referencing the
+    /// model) — distinct from "not found": the model exists but isn't allowed.
+    PermissionDenied,
+    /// Last-resort fallback: a non-retryable server error (5xx that isn't
+    /// transient-retryable) exhausted the primary model and a fallback was
+    /// configured, so we try it rather than fail the turn outright.
+    ServerError,
 }
 
 impl fmt::Display for FallbackReason {
@@ -369,6 +376,8 @@ impl fmt::Display for FallbackReason {
             Self::ModelNotFound => f.write_str("model not found"),
             Self::Overloaded => f.write_str("overloaded (529 threshold crossed)"),
             Self::ModelRefusal => f.write_str("model refused request"),
+            Self::PermissionDenied => f.write_str("model access denied (403)"),
+            Self::ServerError => f.write_str("server error (last-resort fallback)"),
         }
     }
 }
@@ -1012,6 +1021,29 @@ pub trait Provider: Send + Sync + seal::Sealed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_reason_display_is_distinct_normal() {
+        // Every variant must render a distinct, human-readable label so the
+        // fallback toast tells the user *why* the model switched.
+        let labels: Vec<String> = [
+            FallbackReason::ModelNotFound,
+            FallbackReason::Overloaded,
+            FallbackReason::ModelRefusal,
+            FallbackReason::PermissionDenied,
+            FallbackReason::ServerError,
+        ]
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
+        // All distinct.
+        let mut deduped = labels.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), labels.len(), "labels must be distinct: {labels:?}");
+        assert!(labels[3].contains("access denied"));
+        assert!(labels[4].contains("last-resort"));
+    }
 
     // ─── ModelSpec parsing ────────────────────────────────────────────────
 

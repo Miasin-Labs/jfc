@@ -407,7 +407,18 @@ pub fn handle_fallback_triggered(
         FallbackReason::ModelRefusal => {
             format!("⚠ Model refused request, falling back to {fallback_model}")
         }
-        _ => format!("Model fallback: using {fallback_model} (from {original_model})"),
+        FallbackReason::ModelNotFound => {
+            format!("{original_model} unavailable (not found) — using {fallback_model}")
+        }
+        FallbackReason::PermissionDenied => {
+            format!("{original_model} access denied — using {fallback_model}")
+        }
+        FallbackReason::Overloaded => {
+            format!("{original_model} overloaded — using {fallback_model}")
+        }
+        FallbackReason::ServerError => {
+            format!("{original_model} server error — last-resort fallback to {fallback_model}")
+        }
     };
     toast::push_with_cap(
         &mut state.toasts,
