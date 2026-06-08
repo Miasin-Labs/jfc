@@ -10,8 +10,8 @@
 //! blessed for: generating a static table AND a dispatch match from one
 //! declarative list, so the two can never drift.
 
-use super::*;
 use super::view_commands::*;
+use super::*;
 use crate::runtime::EngineEvent;
 
 /// Generate the `VIEW_SLASH_COMMANDS` metadata table and the `dispatch_view`
@@ -58,6 +58,7 @@ slash_commands! {
         "/vim" [] "toggle vim modal editing in the prompt" => cmd_vim,
         "/help" [] "show jfc help" => cmd_help,
         "/theme" [] "open picker or switch theme" => cmd_theme,
+        "/voice" [] "voice mode: /voice [hold|tap|vad|off|doctor]" => cmd_voice,
 }
 
 /// The complete autocomplete/help surface: view commands plus the engine's
@@ -127,10 +128,16 @@ mod tests {
     fn merged_table_covers_both_surfaces_robust() {
         let table = slash_commands_table();
         assert!(table.iter().any(|(n, _)| *n == "/theme"), "view command");
-        assert!(table.iter().any(|(n, _)| *n == "/compact"), "engine command");
+        assert!(
+            table.iter().any(|(n, _)| *n == "/compact"),
+            "engine command"
+        );
         let mut seen = std::collections::HashSet::new();
         for (n, _) in table {
-            assert!(seen.insert(*n), "duplicate command name in merged table: {n}");
+            assert!(
+                seen.insert(*n),
+                "duplicate command name in merged table: {n}"
+            );
         }
     }
 }

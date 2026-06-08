@@ -64,6 +64,7 @@ ansi-to-tui = "8"
 itertools = "0.14"
 clap = { version = "4", features = ["derive"] }
 jfc-engine = { path = "../jfc-engine" }
+jfc-voice = { path = "../jfc-voice" }
 jfc-config = { path = "../jfc-config" }
 jfc-anthropic-sdk = { path = "../jfc-anthropic-sdk" }
 jfc-auth = { path = "../jfc-auth" }

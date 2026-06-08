@@ -102,7 +102,8 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Problems / actionable state — high priority, coloured to draw the eye.
-    let mcp_down: Vec<&str> = app.engine
+    let mcp_down: Vec<&str> = app
+        .engine
         .mcp_servers
         .iter()
         .filter(|s| matches!(s.status, jfc_core::McpStatus::Error))
@@ -126,8 +127,12 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
             92
         );
     }
-    let approval_count =
-        app.engine.approval_queue.len() + if app.engine.pending_approval.is_some() { 1 } else { 0 };
+    let approval_count = app.engine.approval_queue.len()
+        + if app.engine.pending_approval.is_some() {
+            1
+        } else {
+            0
+        };
     if approval_count > 0 {
         push1!(
             format!("{approval_count} pending"),
@@ -141,15 +146,21 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         push1!("[task view]".to_owned(), Style::default().fg(t.accent), 88);
     }
     if !app.engine.queued_prompts.is_empty() {
-        push1!(format!("⏳ {} queued", app.engine.queued_prompts.len()), muted, 80);
+        push1!(
+            format!("⏳ {} queued", app.engine.queued_prompts.len()),
+            muted,
+            80
+        );
     }
-    let alive_n = app.engine
+    let alive_n = app
+        .engine
         .background_tasks
         .values()
         .filter(|bt| bt.status.is_alive())
         .count();
     if alive_n > 0 {
-        let tools: u32 = app.engine
+        let tools: u32 = app
+            .engine
             .background_tasks
             .values()
             .filter(|bt| bt.status.is_alive())
@@ -208,10 +219,14 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
     push1!(cwd_display, muted, 45);
 
-    if let Some(badge) = plan_badge(app.engine.subscription_type.as_deref(), app.engine.seat_tier.as_deref()) {
+    if let Some(badge) = plan_badge(
+        app.engine.subscription_type.as_deref(),
+        app.engine.seat_tier.as_deref(),
+    ) {
         push1!(badge, muted, 40);
     }
-    if app.engine
+    if app
+        .engine
         .last_session_save_at
         .is_some_and(|t| t.elapsed().as_millis() < 2000)
     {
@@ -264,6 +279,41 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
     ];
+    // Voice mode indicator — shown when recording or processing.
+    match app.voice_state {
+        jfc_voice::VoiceState::Recording => {
+            spans.push(Span::styled(" · ", muted));
+            spans.push(Span::styled(
+                "●REC",
+                Style::default()
+                    .fg(app.theme.error)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+        }
+        jfc_voice::VoiceState::Processing => {
+            spans.push(Span::styled(" · ", muted));
+            spans.push(Span::styled(
+                "…STT",
+                Style::default().fg(app.theme.warning),
+            ));
+        }
+        jfc_voice::VoiceState::Idle => {
+            // Also show interim transcript if available
+            if let Some(ref interim) = app.voice_interim {
+                spans.push(Span::styled(" · ", muted));
+                let preview = if interim.len() > 40 {
+                    format!("{}…", &interim[..37])
+                } else {
+                    interim.clone()
+                };
+                spans.push(Span::styled(
+                    format!("\"{preview}\""),
+                    Style::default().fg(app.theme.text_muted),
+                ));
+            }
+        }
+    }
+
     for s in segs {
         spans.push(Span::styled(" · ", muted));
         spans.extend(s.spans);

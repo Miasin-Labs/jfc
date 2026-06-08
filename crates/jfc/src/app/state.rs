@@ -1,9 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    sync::Arc,
-    time::Instant,
-};
+use std::{cell::RefCell, collections::HashMap, sync::Arc, time::Instant};
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -16,7 +11,6 @@ use crate::theme::Theme;
 use jfc_provider::{ModelId, ModelInfo, Provider};
 
 use super::EngineState;
-
 
 /// The expanded panel state cycled by Ctrl+T — mirrors Claude Code's
 /// `expandedView: "none" | "tasks" | "teammates"` state machine.
@@ -128,7 +122,6 @@ pub struct SelectRequest {
 pub const SPINNER: &[&str] = crate::glyphs::TASK_FRAMES;
 pub const IDLE_TICK_MS: u64 = 80;
 pub const ANIM_TICK_MS: u64 = 33;
-
 
 pub struct App {
     /// The frontend-neutral engine state: conversation, streaming,
@@ -393,6 +386,19 @@ pub struct App {
     pub paste_counter: u32,
     /// Monotonically incrementing counter for paste IDs within a session.
     pub image_counter: u32,
+    /// Current user input state for the front-most MCP elicitation form.
+    /// Reset whenever a new elicitation arrives.
+    pub elicitation_input: crate::render::elicitation::ElicitationInputState,
+    /// Voice mode state — `None` when voice is disabled or not yet activated.
+    pub voice_state: jfc_voice::VoiceState,
+    /// Latest interim transcript text (shown in the status bar while recording).
+    pub voice_interim: Option<String>,
+    /// Whether voice mode is configured and available.
+    pub voice_enabled: bool,
+    /// Char count of the interim transcript currently typed into the input box.
+    /// Used to delete the previous interim before inserting an updated one so
+    /// live transcription replaces in place rather than appending.
+    pub voice_interim_chars: usize,
     /// Per-frame map of `(tool_id, screen_rect)` populated by the message
     /// renderer as each `ToolBlock` paints. The mouse handler reads this to
     /// translate a left-click into the tool whose body should expand —
@@ -465,7 +471,6 @@ pub struct App {
     /// segment animates in from the start instead of inheriting the prior count.
     pub(crate) paced_stream_key: Option<(usize, usize)>,
 }
-
 
 impl App {
     pub fn new(provider: Arc<dyn Provider>, model: impl Into<ModelId>) -> Self {
@@ -556,6 +561,11 @@ impl App {
             pasted_texts: Vec::new(),
             paste_counter: 0,
             image_counter: 0,
+            elicitation_input: crate::render::elicitation::ElicitationInputState::default(),
+            voice_state: jfc_voice::VoiceState::Idle,
+            voice_interim: None,
+            voice_enabled: false,
+            voice_interim_chars: 0,
             tool_hit_regions: RefCell::new(Vec::new()),
             render_cache: RefCell::new(RenderCache::new()),
             diff_stats_cache: RefCell::new(None),

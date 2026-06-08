@@ -114,20 +114,38 @@ pub(crate) async fn run(
     app.engine.cowork = cli_config.cowork;
     app.engine.local_advisor_provider = cli_config.local_advisor_provider.clone();
     app.engine.local_advisor_model = cli_config.local_advisor_model.clone();
-    app.engine.advisor_enabled = app.engine.advisor_enabled || app.engine.local_advisor_model.is_some();
+    app.engine.advisor_enabled =
+        app.engine.advisor_enabled || app.engine.local_advisor_model.is_some();
     app.engine.server_advisor_model = cli_config.server_advisor_model.clone();
     app.engine.custom_betas = cli_config.custom_betas;
     app.engine.fine_grained_tool_streaming = cli_config.fine_grained_tool_streaming;
     app.engine.strict_tool_schemas = cli_config.strict_tool_schemas;
     let startup_config = config::load_arc();
+    for dir in &startup_config.claude.permissions.additional_directories {
+        let path = std::path::PathBuf::from(dir);
+        if !app.engine.extra_dirs.contains(&path) {
+            app.engine.extra_dirs.push(path);
+        }
+    }
+    if let Some(sandbox) = startup_config.sandbox.as_ref() {
+        let bash_sandbox = jfc_engine::sandbox::bash_sandbox_config_from_settings(sandbox);
+        if bash_sandbox.enabled {
+            jfc_engine::sandbox::install_bash_sandbox_config(bash_sandbox.clone());
+        }
+        app.engine.bash_sandbox = bash_sandbox;
+    }
 
     // Remote-control auto-start: from --remote-control flag or config.
+    let rc_disabled = startup_config
+        .remote_control
+        .as_ref()
+        .is_some_and(|rc| rc.disabled);
     let rc_wanted = cli_config.remote_control
         || startup_config
             .remote_control
             .as_ref()
             .is_some_and(|rc| rc.auto_start);
-    if rc_wanted {
+    if rc_wanted && !rc_disabled {
         let rc_port = startup_config
             .remote_control
             .as_ref()
@@ -228,7 +246,9 @@ pub(crate) async fn run(
     // AutoDefaultNudge: show a one-time notice that auto is the default
     // permission mode. Only fires when the gate is enabled AND the
     // marker file `~/.config/jfc/auto_nudge_seen` does not exist.
-    if jfc_engine::feature_gates::is_enabled(jfc_engine::feature_gates::FeatureGate::AutoDefaultNudge) {
+    if jfc_engine::feature_gates::is_enabled(
+        jfc_engine::feature_gates::FeatureGate::AutoDefaultNudge,
+    ) {
         let marker = dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("jfc")
@@ -338,7 +358,8 @@ pub(crate) async fn run(
                     app.engine.goal = Some(goal);
                 }
                 if let Some(model_id) = saved_model {
-                    if let Some(resolved) = crate::resolve_provider_model(&app.engine.providers, &model_id)
+                    if let Some(resolved) =
+                        crate::resolve_provider_model(&app.engine.providers, &model_id)
                     {
                         tracing::info!(
                             target: "jfc::session",
@@ -435,7 +456,8 @@ pub(crate) async fn run(
                     app.engine.goal = Some(goal);
                 }
                 if let Some(model_id) = saved_model {
-                    if let Some(resolved) = crate::resolve_provider_model(&app.engine.providers, &model_id)
+                    if let Some(resolved) =
+                        crate::resolve_provider_model(&app.engine.providers, &model_id)
                     {
                         tracing::info!(
                             target: "jfc::session",
@@ -494,7 +516,8 @@ pub(crate) async fn run(
                     if let Ok(content) = std::fs::read_to_string(&export_path)
                         && let Ok(export) = serde_json::from_str::<serde_json::Value>(&content)
                     {
-                        let new_id = jfc_engine::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
+                        let new_id =
+                            jfc_engine::ids::SessionId::new(uuid::Uuid::new_v4().to_string());
                         // Load messages from the export
                         if let Some(msgs) = export.get("messages").and_then(|m| m.as_array()) {
                             for msg in msgs {
@@ -547,9 +570,9 @@ pub(crate) async fn run(
             );
             app.engine.effort_state.set(level);
         }
-        if let Some(temperature) = jfc_engine::exploration::temperature_from_env()
-            .or_else(|| jfc_engine::exploration::resolve_temperature_for_model(&cfg, &app.engine.model))
-        {
+        if let Some(temperature) = jfc_engine::exploration::temperature_from_env().or_else(|| {
+            jfc_engine::exploration::resolve_temperature_for_model(&cfg, &app.engine.model)
+        }) {
             tracing::info!(
                 target: "jfc::exploration",
                 temperature,
@@ -558,8 +581,9 @@ pub(crate) async fn run(
             );
             let _ = app.engine.temperature_state.set(temperature);
         }
-        app.engine.exploration_state
-            .configure(jfc_engine::exploration::ExplorationSettings::from_config(&cfg));
+        app.engine.exploration_state.configure(
+            jfc_engine::exploration::ExplorationSettings::from_config(&cfg),
+        );
     }
 
     // Handle --prompt flag: queue an initial prompt to submit after startup
@@ -721,7 +745,9 @@ pub(crate) async fn run(
         let assistant_idx = app.engine.messages.len() + 1;
         app.engine.messages.push(ChatMessage::user(prompt.clone()));
         app.engine.tool_ctx.total_user_turns += 1;
-        app.engine.messages.push(ChatMessage::assistant(String::new()));
+        app.engine
+            .messages
+            .push(ChatMessage::assistant(String::new()));
         app.engine.streaming_assistant_idx = Some(assistant_idx);
         app.engine.is_streaming = true;
         let now = std::time::Instant::now();
@@ -734,7 +760,8 @@ pub(crate) async fn run(
         app.engine.usage_apply_baseline = (0, 0, 0, 0);
 
         // Create session if not resuming one
-        let session_id = app.engine
+        let session_id = app
+            .engine
             .current_session_id
             .clone()
             .unwrap_or_else(jfc_session::generate_session_id);
@@ -947,7 +974,12 @@ pub(crate) async fn run(
                     }
                 }
 
+                AppEvent::Engine(crate::runtime::EngineEvent::Voice(ref voice_ev)) => {
+                    handle_voice_event(&mut app, voice_ev, &tx).await;
+                    needs_draw = true;
+                }
                 AppEvent::Engine(ev) => {
+                    let elicit_before = app.engine.pending_elicitations.len();
                     match crate::runtime::handle_engine_event(&mut app.engine, &tx, ev).await? {
                         Some(crate::runtime::FrontendDirective::SubmitPrompt(text)) => {
                             handlers::ui_actions::handle_submit(&mut app, text, &tx).await?;
@@ -956,6 +988,20 @@ pub(crate) async fn run(
                             crate::input::run_slash_command(&mut app, &text).await;
                         }
                         None => {}
+                    }
+                    // If a new elicitation arrived and there was none before,
+                    // initialize the input state from its schema.
+                    if app.engine.pending_elicitations.len() > elicit_before {
+                        if let Some(e) = app.engine.pending_elicitations.front() {
+                            app.elicitation_input =
+                                match &e.kind {
+                                    jfc_core::mcp_elicitation::ElicitationKind::Form {
+                                        schema,
+                                        ..
+                                    } => crate::render::elicitation::ElicitationInputState::from_schema(schema),
+                                    _ => crate::render::elicitation::ElicitationInputState::default(),
+                                };
+                        }
                     }
                 }
             }
@@ -1007,7 +1053,11 @@ pub(crate) async fn run(
             || !app.engine.pending_tool_calls.is_empty()
             || app.engine.pending_approval.is_some()
             || !app.engine.approval_queue.is_empty()
-            || app.engine.background_tasks.values().any(|bt| bt.status.is_alive())
+            || app
+                .engine
+                .background_tasks
+                .values()
+                .any(|bt| bt.status.is_alive())
             || app.engine.turn_started_at.is_some();
         if want_streaming_cursor {
             needs_draw = true;
@@ -1104,7 +1154,6 @@ fn resolve_effort_for_model(cfg: &jfc_engine::config::Config, model: &str) -> Op
     cfg.default.reasoning_effort.clone()
 }
 
-
 /// Drain and apply the view-facing effects queued by engine handlers during
 /// this burst. The engine never touches scroll/render state directly — it
 /// queues `EngineEffect`s and this is the TUI's interpretation of them.
@@ -1151,7 +1200,136 @@ pub(crate) fn apply_engine_effects(app: &mut App) {
     }
 }
 
+/// Handle a voice event from the jfc-voice STT pipeline.
+async fn handle_voice_event(
+    app: &mut App,
+    ev: &crate::runtime::VoiceEvent,
+    tx: &crate::runtime::EventSender,
+) {
+    use crate::runtime::VoiceEvent;
+    use jfc_voice::VoiceState;
+    match ev {
+        VoiceEvent::StateChanged(raw) => {
+            let state = match raw {
+                0 => VoiceState::Idle,
+                1 => VoiceState::Recording,
+                _ => VoiceState::Processing,
+            };
+            app.voice_state = state;
+            if state == VoiceState::Idle {
+                app.voice_interim = None;
+            }
+        }
+        VoiceEvent::Interim(text) => {
+            // Live transcription: type the partial transcript into the input
+            // box, replacing the previous interim in place. CC types interims
+            // live; we mirror that so the box feels alive while you speak.
+            app.voice_interim = if text.is_empty() { None } else { Some(text.clone()) };
+            replace_interim_in_input(app, text);
+        }
+        VoiceEvent::Final(text) => {
+            app.voice_interim = None;
+            // Clear the live interim text first so the final transcript
+            // replaces it cleanly (no double-typing).
+            clear_interim_from_input(app);
+            if !text.is_empty() {
+                inject_voice_transcript(app, text, tx).await;
+            }
+        }
+        VoiceEvent::Error(msg) => {
+            app.voice_interim = None;
+            app.voice_state = VoiceState::Idle;
+            // Drop any partial interim text we'd typed into the box.
+            clear_interim_from_input(app);
+            // Show as a toast notification
+            let _ = tx
+                .send(crate::runtime::EngineEvent::Control(
+                    crate::runtime::ControlEvent::Notice {
+                        kind: jfc_engine::toast::ToastKind::Error,
+                        text: format!("Voice error: {msg}"),
+                    },
+                ))
+                .await;
+        }
+    }
+}
 
+/// Replace the live interim transcript in the input box.
+///
+/// Deletes the chars from the previous interim, then types the new one.
+/// Tracks `voice_interim_chars` so successive interims overwrite in place
+/// rather than appending. Only safe to call while recording — the user
+/// isn't typing concurrently in voice mode.
+fn replace_interim_in_input(app: &mut App, text: &str) {
+    use ratatui_textarea::CursorMove;
+    // Delete the previous interim (cursor is at the end of it).
+    if app.voice_interim_chars > 0 {
+        app.textarea.move_cursor(CursorMove::End);
+        for _ in 0..app.voice_interim_chars {
+            app.textarea.delete_char();
+        }
+    }
+    // Type the new interim.
+    for ch in text.chars() {
+        app.textarea.insert_char(ch);
+    }
+    app.voice_interim_chars = text.chars().count();
+}
+
+/// Remove any live interim text from the input box and reset the counter.
+fn clear_interim_from_input(app: &mut App) {
+    use ratatui_textarea::CursorMove;
+    if app.voice_interim_chars > 0 {
+        app.textarea.move_cursor(CursorMove::End);
+        for _ in 0..app.voice_interim_chars {
+            app.textarea.delete_char();
+        }
+        app.voice_interim_chars = 0;
+    }
+}
+
+/// Inject the STT transcript into the textarea (and optionally submit).
+async fn inject_voice_transcript(
+    app: &mut App,
+    text: &str,
+    tx: &crate::runtime::EventSender,
+) {
+    let cfg = jfc_engine::config::load_arc();
+    let auto_submit = cfg
+        .claude
+        .voice
+        .as_ref()
+        .and_then(|v| v.get("autoSubmit"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    tracing::info!(
+        target: "jfc::voice",
+        chars = text.len(),
+        auto_submit,
+        "voice transcript injected"
+    );
+
+    if auto_submit {
+        // Clear any leftover input, then submit the transcript directly —
+        // same path as pressing Enter. We don't type into the box first
+        // because handle_submit doesn't drain it (the Enter path resets the
+        // input before calling submit), which would leave the text behind.
+        app.textarea.select_all();
+        app.textarea.cut();
+        handlers::ui_actions::handle_submit(app, text.to_owned(), tx)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(target: "jfc::voice", error = %err, "auto-submit failed");
+            });
+    } else {
+        // No auto-submit: type the transcript into the box and leave it for
+        // the user to edit and send manually.
+        for ch in text.chars() {
+            app.textarea.insert_char(ch);
+        }
+    }
+}
 
 #[cfg(test)]
 mod event_priority_tests {

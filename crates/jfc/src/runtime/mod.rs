@@ -11,6 +11,7 @@ pub use jfc_engine::runtime::{
     GoalEvent, MessageQueue, ProviderEvent, QueuePriority, QueuedPrompt, StreamEvent,
     StreamLifecyclePhase, StreamLifecycleStatus, StreamRequestMetadata, StreamRequestOverrides,
     StreamToolChoice, TOOL_USE_SUMMARIES_CAP, TaskEvent, TeamEvent, ToolEvent, ToolProvenance,
+    VoiceEvent,
     ToolSource, ToolUseSummary, WorkflowProgressEvent, approvals, bootstrap,
     dispatch_goal_evaluator_if_active, drain_queued_prompts, durations, factory_mode_enabled,
     handle_engine_event, handle_goal_verdict, maybe_continue_task_factory, ops,

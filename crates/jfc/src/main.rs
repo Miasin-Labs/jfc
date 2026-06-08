@@ -16,10 +16,10 @@ pub mod render_cache;
 pub mod runtime;
 pub mod spinner;
 pub mod theme;
+pub mod voice;
 
 pub(crate) use cli::{
-    CliRuntimeConfig, StartupSession, qualified_model_id,
-    resolve_provider_model,
+    CliRuntimeConfig, StartupSession, qualified_model_id, resolve_provider_model,
 };
 
 use clap::Parser;

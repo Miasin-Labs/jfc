@@ -27,6 +27,26 @@ pub async fn handle_key(
     key: event::KeyEvent,
     tx: &mpsc::Sender<crate::runtime::EngineEvent>,
 ) -> anyhow::Result<bool> {
+    // MCP elicitation modal has highest priority — it blocks tool execution.
+    if elicitation::handle_elicitation_key(app, key, tx) {
+        return Ok(false);
+    }
+
+    // Voice push-to-talk: Space activates recording when voice is enabled,
+    // the input is empty, and no modal is blocking.
+    if app.voice_enabled
+        && crate::voice::is_initialized()
+        && key.code == crossterm::event::KeyCode::Char(' ')
+        && key.modifiers == crossterm::event::KeyModifiers::NONE
+        && app.textarea.lines().iter().all(|l| l.is_empty())
+        && app.engine.pending_approval.is_none()
+        && app.engine.pending_question.is_none()
+        && app.engine.pending_elicitations.is_empty()
+    {
+        crate::voice::activate(true).await;
+        return Ok(false);
+    }
+
     if approval::handle_approval_key(app, key, tx) {
         return Ok(false);
     }
@@ -203,7 +223,10 @@ fn last_reasoning_message_idx(app: &App) -> Option<usize> {
         .find(|&i| message_has_reasoning(app, i))
 }
 
-pub(crate) fn request_user_interrupt(app: &mut App, tx: &mpsc::Sender<crate::runtime::EngineEvent>) {
+pub(crate) fn request_user_interrupt(
+    app: &mut App,
+    tx: &mpsc::Sender<crate::runtime::EngineEvent>,
+) {
     // View bookkeeping: a real interrupt resets the double-Esc timer.
     app.last_esc_at = None;
     crate::runtime::ops::interrupt(&mut app.engine, tx);
@@ -374,10 +397,23 @@ async fn handle_command_keys(
         }
         // Ctrl+T cycles the expanded view: none → tasks → teammates → none.
         // Mirrors Claude Code's `app:toggleTodos` keybinding behavior.
+        // Gated on `todoFeatureEnabled` (CC 2.1.167 settings key).
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             use crate::app::ExpandedView;
+            // todoFeatureEnabled defaults to true; only hide when explicitly false.
+            let todo_enabled = jfc_engine::config::load_arc()
+                .claude
+                .todo_feature_enabled
+                .unwrap_or(true);
+            if !todo_enabled {
+                return Some(Ok(false));
+            }
             let has_teammates = app.engine.team_context.is_active()
-                || app.engine.background_tasks.values().any(|bt| bt.status.is_alive());
+                || app
+                    .engine
+                    .background_tasks
+                    .values()
+                    .any(|bt| bt.status.is_alive());
             app.expanded_view = match app.expanded_view {
                 ExpandedView::None => ExpandedView::Tasks,
                 ExpandedView::Tasks if has_teammates => ExpandedView::Teammates,
@@ -434,7 +470,8 @@ async fn handle_command_keys(
             // before flipping — otherwise the first press seeded `false` and
             // flipped back to `true`, a visible no-op (the block stayed open
             // while the hint said "collapse").
-            let target = app.engine
+            let target = app
+                .engine
                 .streaming_assistant_idx
                 .filter(|&i| message_has_reasoning(app, i))
                 .or_else(|| last_reasoning_message_idx(app));
@@ -702,7 +739,10 @@ async fn handle_command_keys(
 
 /// Ctrl+E — edit the most recent user message in place.
 fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
-    if app.engine.is_streaming || !app.engine.pending_tool_calls.is_empty() || app.engine.pending_approval.is_some() {
+    if app.engine.is_streaming
+        || !app.engine.pending_tool_calls.is_empty()
+        || app.engine.pending_approval.is_some()
+    {
         jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
             jfc_engine::toast::Toast::new(
@@ -713,18 +753,23 @@ fn cmd_edit_last_user_message(app: &mut App) -> Option<anyhow::Result<bool>> {
         return Some(Ok(false));
     }
     let last_user: Option<(usize, String)> =
-        app.engine.messages.iter().enumerate().rev().find_map(|(i, m)| {
-            if m.role_is_user() && !m.is_compact_boundary() {
-                m.parts.iter().find_map(|p| match p {
-                    MessagePart::Text(s) if !s.is_empty() && !s.starts_with('/') => {
-                        Some((i, s.clone()))
-                    }
-                    _ => None,
-                })
-            } else {
-                None
-            }
-        });
+        app.engine
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, m)| {
+                if m.role_is_user() && !m.is_compact_boundary() {
+                    m.parts.iter().find_map(|p| match p {
+                        MessagePart::Text(s) if !s.is_empty() && !s.starts_with('/') => {
+                            Some((i, s.clone()))
+                        }
+                        _ => None,
+                    })
+                } else {
+                    None
+                }
+            });
     if let Some((idx, text)) = last_user {
         app.textarea.select_all();
         app.textarea.cut();
@@ -940,7 +985,10 @@ fn cmd_handle_escape(
         app.textarea.cut();
         jfc_engine::toast::push_with_cap(
             &mut app.engine.toasts,
-            jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Info, "edit cancelled".to_string()),
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
+                "edit cancelled".to_string(),
+            ),
         );
         return Some(Ok(false));
     }
@@ -1080,7 +1128,8 @@ async fn handle_enter_submit(
                         handle.abort();
                     }
                     app.engine.cancel_token = tokio_util::sync::CancellationToken::new();
-                    app.engine.interrupt_flag
+                    app.engine
+                        .interrupt_flag
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                     app.engine.is_streaming = false;
                     app.engine.streaming_started_at = None;
@@ -1167,7 +1216,8 @@ pub(super) fn queue_prompt_for_later(app: &mut App, text: String) {
         priority: crate::app::QueuePriority::Later,
         attachments,
     });
-    app.engine.messages
+    app.engine
+        .messages
         .push(ChatMessage::user_queued(format!("{glyph} {text}")));
     app.scroll_to_bottom();
 }
@@ -1365,12 +1415,17 @@ fn handle_arrow_history_keys(app: &mut App, key: event::KeyEvent) -> Option<anyh
             // results list.
             if !input_has_text(app)
                 && app.viewing_task_id.is_none()
-                && app.engine.background_tasks.values().any(|bt| bt.status.is_alive())
+                && app
+                    .engine
+                    .background_tasks
+                    .values()
+                    .any(|bt| bt.status.is_alive())
             {
                 // Pick the most-recent alive agent (matches the
                 // existing `↓ jump to latest` semantics inside the
                 // task view).
-                let mut alive_ids: Vec<String> = app.engine
+                let mut alive_ids: Vec<String> = app
+                    .engine
                     .background_tasks
                     .iter()
                     .filter(|(_, bt)| bt.status.is_alive())

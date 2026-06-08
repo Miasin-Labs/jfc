@@ -2469,6 +2469,7 @@ dependencies = [
  "jfc-session",
  "jfc-theme",
  "jfc-tools",
+ "jfc-voice",
  "jfc-web",
  "notify",
  "parking_lot",
@@ -2503,6 +2504,7 @@ name = "jfc-agents"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "jfc-config",
  "jfc-core",
  "serde",
  "serde_json",
@@ -2624,6 +2626,7 @@ dependencies = [
  "serde_norway",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -2781,6 +2784,7 @@ dependencies = [
 name = "jfc-mcp"
 version = "0.1.0"
 dependencies = [
+ "jfc-core",
  "jfc-provider",
  "reqwest",
  "rmcp",
@@ -2911,6 +2915,21 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "jfc-voice"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]
@@ -5608,7 +5627,11 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
 ]
 
@@ -5898,6 +5921,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.6",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",

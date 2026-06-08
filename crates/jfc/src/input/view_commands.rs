@@ -39,8 +39,6 @@ pub(super) async fn cmd_vim(
     );
 }
 
-
-
 pub(super) async fn cmd_help(
     app: &mut App,
     _parts: &[&str],
@@ -86,8 +84,6 @@ pub(super) async fn cmd_help(
     app.engine.messages.push(ChatMessage::assistant(body));
 }
 
-
-
 pub(super) async fn cmd_verbose(
     app: &mut App,
     parts: &[&str],
@@ -127,7 +123,6 @@ pub(super) async fn cmd_verbose(
     }
 }
 
-
 /// `/remote-control` (alias `/rc`) — toggle the remote-control WebSocket
 /// server on the current session. When enabling, prints the pairing token +
 /// connection URL. When already active, prints status; `/rc off` disables it.
@@ -144,7 +139,8 @@ pub(super) async fn cmd_remote_control(
         match app.remote_host.take() {
             Some(host) => {
                 host.shutdown();
-                app.engine.messages
+                app.engine
+                    .messages
                     .push(ChatMessage::assistant("Remote control disabled.".into()));
             }
             None => {
@@ -230,8 +226,6 @@ pub(super) async fn cmd_remote_control(
     }
 }
 
-
-
 pub(super) async fn cmd_copy(
     app: &mut App,
     parts: &[&str],
@@ -285,8 +279,6 @@ pub(super) async fn cmd_copy(
     }
 }
 
-
-
 pub(super) async fn cmd_theme(
     app: &mut App,
     parts: &[&str],
@@ -317,5 +309,105 @@ pub(super) fn handle_theme_command(app: &mut App, args: &str) {
                 ),
             );
         }
+    }
+}
+
+/// `/voice [hold|tap|off]` — enable/disable/configure voice mode.
+pub(super) async fn cmd_voice(
+    app: &mut App,
+    parts: &[&str],
+    _text: &str,
+    tx: Option<&mpsc::Sender<EngineEvent>>,
+) {
+    let arg = parts.get(1).copied().unwrap_or("").trim().to_lowercase();
+
+    if arg == "off" {
+        jfc_engine::toast::push_with_cap(
+            &mut app.engine.toasts,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
+                "Voice mode disabled.".to_string(),
+            ),
+        );
+        app.voice_enabled = false;
+        crate::voice::cancel().await;
+        return;
+    }
+
+    // `/voice doctor` — record a 3s sample and report mic signal level.
+    // Surfaces muted mic / wrong device / too-quiet failure modes.
+    if arg == "doctor" || arg == "test" || arg == "check" {
+        jfc_engine::toast::push_with_cap(
+            &mut app.engine.toasts,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Info,
+                "Voice doctor: recording 3s — speak now…".to_string(),
+            ),
+        );
+        let diag = jfc_voice::run_diagnostic().await;
+        let report = jfc_voice::format_report(&diag);
+        let kind = if diag.verdict.is_ok() {
+            jfc_engine::toast::ToastKind::Info
+        } else {
+            jfc_engine::toast::ToastKind::Error
+        };
+        // Push the full report into the transcript as an assistant note
+        app.engine
+            .messages
+            .push(jfc_core::ChatMessage::assistant(format!("```\n{report}\n```")));
+        jfc_engine::toast::push_with_cap(
+            &mut app.engine.toasts,
+            jfc_engine::toast::Toast::new(kind, diag.verdict.summary()),
+        );
+        return;
+    }
+
+    // Check availability
+    if jfc_voice::AudioCapture::detect_backend().await.is_none() {
+        jfc_engine::toast::push_with_cap(
+            &mut app.engine.toasts,
+            jfc_engine::toast::Toast::new(
+                jfc_engine::toast::ToastKind::Error,
+                "Voice mode unavailable: install arecord, sox, or ffmpeg.".to_string(),
+            ),
+        );
+        return;
+    }
+
+    if !crate::voice::is_initialized() {
+        // Initialize with current config + user-supplied mode override
+        let mut val = jfc_engine::config::load_arc()
+            .claude
+            .voice
+            .clone()
+            .unwrap_or(serde_json::json!({}));
+        if let Some(obj) = val.as_object_mut() {
+            obj.insert("enabled".to_owned(), serde_json::json!(true));
+            if arg == "hold" || arg == "tap" {
+                obj.insert("mode".to_owned(), serde_json::json!(arg));
+            }
+        }
+        if let Some(tx_inner) = tx {
+            crate::voice::init(Some(&val), tx_inner.clone());
+        }
+    }
+    app.voice_enabled = true;
+
+    let mode = jfc_voice::VoiceMode::from_str(&arg).unwrap_or(jfc_voice::VoiceMode::Hold);
+    let hint = jfc_voice::VoiceConfig {
+        mode,
+        ..Default::default()
+    }.mode_hint();
+    jfc_engine::toast::push_with_cap(
+        &mut app.engine.toasts,
+        jfc_engine::toast::Toast::new(
+            jfc_engine::toast::ToastKind::Info,
+            format!("Voice mode enabled ({}). {}", mode.label(), hint),
+        ),
+    );
+
+    // Start the VAD listen loop for hands-free mode
+    if mode == jfc_voice::VoiceMode::Vad {
+        crate::voice::start_vad().await;
     }
 }
