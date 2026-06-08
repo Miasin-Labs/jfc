@@ -14,6 +14,18 @@ tracing = { workspace = true }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "rustls", "multipart", "http2"] }
 futures-util = "0.3"
 
+# Optional neural VAD backend (Silero VAD v5 via ONNX Runtime). Off by default
+# so the standard build stays dependency-light and the energy VAD remains the
+# default; enable with `--features vad-neural`. The crate bundles the ~2MB
+# Silero model and downloads a prebuilt ONNX Runtime at build time.
+voice_activity_detector = { version = "0.2.1", optional = true }
+
+[features]
+default = []
+# Enable the neural (Silero) VAD engine, selectable at runtime via
+# JFC_VAD_ENGINE=neural (falls back to the energy VAD when unset/unavailable).
+vad-neural = ["dep:voice_activity_detector"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 

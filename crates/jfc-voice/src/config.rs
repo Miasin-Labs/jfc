@@ -36,6 +36,49 @@ impl VoiceMode {
     }
 }
 
+/// Which VAD engine drives hands-free speech detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VadEngine {
+    /// Dependency-free energy + periodicity + modulation detector (default).
+    #[default]
+    Energy,
+    /// Neural Silero VAD (requires the `vad-neural` build feature). Far more
+    /// robust to tonal noise / babble / low SNR; falls back to Energy when the
+    /// feature isn't compiled in or the model fails to load.
+    Neural,
+}
+
+impl VadEngine {
+    /// Resolve the configured engine from `JFC_VAD_ENGINE`
+    /// (`neural`/`silero`/`onnx` → Neural, anything else → Energy).
+    pub fn from_env() -> Self {
+        match std::env::var("JFC_VAD_ENGINE")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "neural" | "silero" | "onnx" | "ml" => Self::Neural,
+            _ => Self::Energy,
+        }
+    }
+
+    /// Parse from a config-file string. `None` for unrecognized values.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "energy" | "classic" | "default" => Some(Self::Energy),
+            "neural" | "silero" | "onnx" | "ml" => Some(Self::Neural),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Energy => "energy",
+            Self::Neural => "neural",
+        }
+    }
+}
+
 /// Resolved voice configuration.
 #[derive(Debug, Clone, Default)]
 pub struct VoiceConfig {
@@ -43,6 +86,8 @@ pub struct VoiceConfig {
     pub enabled: bool,
     /// Hold or tap mode.
     pub mode: VoiceMode,
+    /// Which VAD engine drives hands-free mode (energy vs neural Silero).
+    pub vad_engine: VadEngine,
     /// Auto-submit after hold-to-talk release (hold mode only).
     pub auto_submit: bool,
     /// BCP-47 language code for STT (default "en").
@@ -86,6 +131,7 @@ impl VoiceConfig {
             local_whisper_bin: std::env::var("JFC_WHISPER_BIN").ok(),
             local_whisper_model: std::env::var("JFC_WHISPER_MODEL").ok(),
             backend: parse_backend_env(),
+            vad_engine: VadEngine::from_env(),
             ..Default::default()
         };
 
@@ -100,6 +146,15 @@ impl VoiceConfig {
         if let Some(mode_str) = v.get("mode").and_then(|m| m.as_str()) {
             if let Some(mode) = VoiceMode::from_str(mode_str) {
                 cfg.mode = mode;
+            }
+        }
+
+        // voice.vadEngine: "energy" | "neural" (env JFC_VAD_ENGINE wins).
+        if let Some(engine_str) = v.get("vadEngine").and_then(|m| m.as_str()) {
+            if std::env::var("JFC_VAD_ENGINE").is_err() {
+                if let Some(engine) = VadEngine::from_str(engine_str) {
+                    cfg.vad_engine = engine;
+                }
             }
         }
 
@@ -128,7 +183,10 @@ impl VoiceConfig {
         match self.mode {
             VoiceMode::Hold => format!("Hold {key} to record, release to send."),
             VoiceMode::Tap => format!("Tap {key} (empty input) to start, tap again to send."),
-            VoiceMode::Vad => "Hands-free — just speak. VAD detects speech automatically.".to_owned(),
+            VoiceMode::Vad => format!(
+                "Hands-free — just speak. {} VAD detects speech automatically.",
+                self.vad_engine.label()
+            ),
         }
     }
 }
@@ -175,5 +233,32 @@ mod tests {
         let cfg = VoiceConfig::from_settings(None);
         assert!(!cfg.enabled);
         assert_eq!(cfg.mode, VoiceMode::Hold);
+        assert_eq!(cfg.vad_engine, VadEngine::Energy);
+    }
+
+    #[test]
+    fn vad_engine_from_str_normal() {
+        assert_eq!(VadEngine::from_str("energy"), Some(VadEngine::Energy));
+        assert_eq!(VadEngine::from_str("neural"), Some(VadEngine::Neural));
+        assert_eq!(VadEngine::from_str("silero"), Some(VadEngine::Neural));
+        assert_eq!(VadEngine::from_str("ONNX"), Some(VadEngine::Neural));
+        assert_eq!(VadEngine::from_str("bogus"), None);
+    }
+
+    #[test]
+    fn vad_engine_default_is_energy_normal() {
+        assert_eq!(VadEngine::default(), VadEngine::Energy);
+        assert_eq!(VadEngine::Energy.label(), "energy");
+        assert_eq!(VadEngine::Neural.label(), "neural");
+    }
+
+    #[test]
+    fn voice_config_reads_vad_engine_from_settings_normal() {
+        // Only when the env override isn't set (env wins over file).
+        if std::env::var("JFC_VAD_ENGINE").is_err() {
+            let val = json!({"enabled": true, "mode": "vad", "vadEngine": "neural"});
+            let cfg = VoiceConfig::from_settings(Some(&val));
+            assert_eq!(cfg.vad_engine, VadEngine::Neural);
+        }
     }
 }

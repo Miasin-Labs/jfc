@@ -31,11 +31,15 @@ pub mod audio;
 pub mod backends;
 pub mod config;
 pub mod doctor;
+#[cfg(feature = "vad-neural")]
+pub mod neural_vad;
 pub mod platform;
 pub mod recorder;
 pub mod vad;
 
 pub use audio::AudioCapture;
-pub use config::{VoiceConfig, VoiceMode};
+pub use config::{VadEngine, VoiceConfig, VoiceMode};
 pub use doctor::{format_report, run_diagnostic, Verdict, VoiceDiagnostic};
+#[cfg(feature = "vad-neural")]
+pub use neural_vad::NeuralVad;
 pub use recorder::{VoiceRecorder, VoiceState, VoiceTranscriptEvent};

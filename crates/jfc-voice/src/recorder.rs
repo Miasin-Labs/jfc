@@ -18,8 +18,72 @@ use tracing::{debug, info, warn};
 
 use crate::audio::{AudioCapture, CaptureBackend};
 use crate::backends;
-use crate::config::{VoiceConfig, VoiceMode};
+use crate::config::{VadEngine, VoiceConfig, VoiceMode};
 use crate::vad::{Vad, VadEvent};
+
+/// Runtime dispatch over the available VAD engines, so the listen loop is
+/// engine-agnostic. The neural variant only exists when the `vad-neural`
+/// feature is compiled in; selection happens once per loop based on
+/// `VoiceConfig::vad_engine`, falling back to energy if the neural model
+/// can't be constructed.
+enum VadDetector {
+    Energy(Vad),
+    #[cfg(feature = "vad-neural")]
+    Neural(crate::neural_vad::NeuralVad),
+}
+
+impl VadDetector {
+    /// Choose the engine from config, falling back to the energy detector if
+    /// neural is requested but unavailable (feature off, or model load failed).
+    fn select(cfg: &VoiceConfig) -> Self {
+        match cfg.vad_engine {
+            VadEngine::Neural => {
+                #[cfg(feature = "vad-neural")]
+                {
+                    match crate::neural_vad::NeuralVad::new() {
+                        Ok(nv) => {
+                            info!(target: "jfc::voice::vad", "using neural (Silero) VAD engine");
+                            return Self::Neural(nv);
+                        }
+                        Err(err) => {
+                            warn!(
+                                target: "jfc::voice::vad",
+                                error = %err,
+                                "neural VAD unavailable, falling back to energy VAD"
+                            );
+                        }
+                    }
+                }
+                #[cfg(not(feature = "vad-neural"))]
+                {
+                    warn!(
+                        target: "jfc::voice::vad",
+                        "neural VAD requested but jfc-voice was built without the \
+                         `vad-neural` feature; using energy VAD"
+                    );
+                }
+                Self::Energy(Vad::new())
+            }
+            VadEngine::Energy => Self::Energy(Vad::new()),
+        }
+    }
+
+    fn push(&mut self, pcm: &[u8]) -> Vec<VadEvent> {
+        match self {
+            Self::Energy(v) => v.push(pcm),
+            #[cfg(feature = "vad-neural")]
+            Self::Neural(v) => v.push(pcm),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Energy(v) => v.reset(),
+            #[cfg(feature = "vad-neural")]
+            Self::Neural(v) => v.reset(),
+        }
+    }
+}
 
 /// Current voice state (exposed to the TUI for rendering).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -339,7 +403,7 @@ async fn vad_listen_loop(
             }
         };
 
-        let mut detector = Vad::new();
+        let mut detector = VadDetector::select(&cfg);
         let mut utterance_buf: Vec<u8> = Vec::new();
         let mut chunk = vec![0u8; 640]; // 20ms at 16kHz 16-bit mono
 
@@ -540,5 +604,49 @@ mod tests {
         let mut rec = VoiceRecorder::new(VoiceConfig::default(), tx);
         rec.cancel().await; // should not panic
         assert_eq!(rec.state().await, VoiceState::Idle);
+    }
+
+    #[test]
+    fn vad_detector_energy_engine_selects_energy_normal() {
+        let cfg = VoiceConfig {
+            vad_engine: VadEngine::Energy,
+            ..Default::default()
+        };
+        assert!(matches!(VadDetector::select(&cfg), VadDetector::Energy(_)));
+    }
+
+    #[test]
+    fn vad_detector_processes_audio_through_dispatch_normal() {
+        // The dispatch enum must forward push/reset to the underlying engine.
+        let cfg = VoiceConfig::default();
+        let mut det = VadDetector::select(&cfg);
+        let loud: Vec<u8> = (0..320)
+            .flat_map(|i| (if i % 2 == 0 { 5000i16 } else { -5000 }).to_le_bytes())
+            .collect();
+        let _ = det.push(&loud);
+        det.reset(); // must not panic
+    }
+
+    #[cfg(not(feature = "vad-neural"))]
+    #[test]
+    fn vad_detector_neural_falls_back_to_energy_without_feature_robust() {
+        // When the neural feature isn't compiled in, requesting it must fall
+        // back to the energy engine rather than failing.
+        let cfg = VoiceConfig {
+            vad_engine: VadEngine::Neural,
+            ..Default::default()
+        };
+        assert!(matches!(VadDetector::select(&cfg), VadDetector::Energy(_)));
+    }
+
+    #[cfg(feature = "vad-neural")]
+    #[test]
+    fn vad_detector_neural_engine_selects_neural_normal() {
+        // With the feature on, the neural engine loads the bundled Silero model.
+        let cfg = VoiceConfig {
+            vad_engine: VadEngine::Neural,
+            ..Default::default()
+        };
+        assert!(matches!(VadDetector::select(&cfg), VadDetector::Neural(_)));
     }
 }
