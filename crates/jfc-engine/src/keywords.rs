@@ -26,6 +26,20 @@ pub struct KeywordScanResult {
     pub ultrathink: bool,
     /// Whether the explicit per-turn exploration marker `//explore` was detected.
     pub explore: bool,
+    /// Per-turn reasoning-effort override from a `//effort <level>` marker
+    /// (e.g. `//effort high`). Applies to this turn only, then reverts to the
+    /// session default — Claude Code's `turnEffort`. `None` when absent or the
+    /// level didn't parse.
+    pub turn_effort: Option<crate::effort::ReasoningEffort>,
+}
+
+/// `//effort <level>` per-turn marker. Captures the level token so it can be
+/// parsed via `ReasoningEffort::from_str_loose`.
+fn turn_effort_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(^|\s)//effort\s+([a-z-]+)").expect("turn-effort regex is valid")
+    })
 }
 
 /// Case-insensitive whole-word match for "ultrawork".
@@ -63,6 +77,26 @@ pub fn scan_and_strip(input: &str) -> KeywordScanResult {
     let mut ultracode = false;
     let mut ultrathink = false;
     let mut explore = false;
+    let mut turn_effort = None;
+
+    // `//effort <level>` per-turn override — capture + strip the whole marker.
+    if let Some(caps) = turn_effort_regex().captures(&text) {
+        let whole = caps.get(0).expect("group 0 always present");
+        let lead = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        turn_effort = caps
+            .get(2)
+            .and_then(|m| crate::effort::ReasoningEffort::from_str_loose(m.as_str()));
+        // Preserve a leading space (if the marker wasn't at the start) so words
+        // don't get glued together, then collapse whitespace.
+        let replacement = if lead.is_empty() { "" } else { " " };
+        text = format!(
+            "{}{replacement}{}",
+            &text[..whole.start()],
+            &text[whole.end()..]
+        );
+        text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        text = text.trim().to_owned();
+    }
 
     // "ultracode" is checked before "ultrawork" so the more specific
     // session-mode keyword wins and isn't shadowed.
@@ -105,6 +139,7 @@ pub fn scan_and_strip(input: &str) -> KeywordScanResult {
         ultracode,
         ultrathink,
         explore,
+        turn_effort,
     }
 }
 
@@ -231,6 +266,35 @@ mod tests {
         let result = scan_and_strip("please //explore scheduler.rs");
         assert!(result.explore);
         assert_eq!(result.text, "please scheduler.rs");
+    }
+
+    #[test]
+    fn detects_and_strips_turn_effort_marker_normal() {
+        let result = scan_and_strip("//effort high refactor the parser");
+        assert_eq!(result.turn_effort, Some(crate::effort::ReasoningEffort::High));
+        assert_eq!(result.text, "refactor the parser");
+    }
+
+    #[test]
+    fn turn_effort_marker_mid_text_normal() {
+        let result = scan_and_strip("fix the bug //effort max please");
+        assert_eq!(result.turn_effort, Some(crate::effort::ReasoningEffort::Max));
+        assert_eq!(result.text, "fix the bug please");
+    }
+
+    #[test]
+    fn turn_effort_unknown_level_strips_but_no_effort_robust() {
+        let result = scan_and_strip("//effort bogus do it");
+        assert_eq!(result.turn_effort, None);
+        // The marker is still stripped even when the level doesn't parse.
+        assert_eq!(result.text, "do it");
+    }
+
+    #[test]
+    fn plain_text_has_no_turn_effort_robust() {
+        let result = scan_and_strip("the effort was high");
+        assert_eq!(result.turn_effort, None);
+        assert_eq!(result.text, "the effort was high");
     }
 
     #[test]

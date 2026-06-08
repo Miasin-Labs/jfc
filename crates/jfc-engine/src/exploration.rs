@@ -545,7 +545,9 @@ pub fn apply_to_stream_options(
     let has_anthropic_thinking = matches!(convention, StreamConvention::AnthropicNative)
         && (opts.adaptive_thinking || opts.thinking_budget.is_some());
     let oauth_locked_temperature = provider_name == "anthropic-oauth";
-    let manual_effort = crate::effort::active_global();
+    // A pending per-turn effort override wins over the session pin and is
+    // consumed here (one request only); otherwise fall back to the session pin.
+    let manual_effort = crate::effort::resolve_effort_for_request();
     let manual_temperature = active_temperature();
 
     if let Some(effort) = manual_effort {

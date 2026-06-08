@@ -13,6 +13,43 @@ use std::sync::RwLock;
 /// through without threading state through every call site.
 static ACTIVE_EFFORT: RwLock<Option<String>> = RwLock::new(None);
 
+/// One-shot per-turn effort override. When set, it wins over the session pin
+/// (`ACTIVE_EFFORT`) for exactly ONE outbound request, then is consumed back to
+/// `None` — so the next turn reverts to the session default. Mirrors Claude
+/// Code's `turnEffort` (a turn-scoped effort that doesn't change the standing
+/// session setting). Set via a per-turn `//effort <level>` marker.
+static TURN_EFFORT: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set the one-shot per-turn effort override (consumed by the next request).
+pub fn set_turn_effort(level: Option<ReasoningEffort>) {
+    let mut guard = TURN_EFFORT.write().unwrap_or_else(|e| e.into_inner());
+    *guard = level.map(|e| e.api_value().to_owned());
+}
+
+/// Peek the per-turn effort override without consuming it (for status/UI).
+pub fn peek_turn_effort() -> Option<String> {
+    TURN_EFFORT.read().ok().and_then(|g| g.clone())
+}
+
+/// Consume the one-shot per-turn effort override, returning it and clearing the
+/// slot. Returns `None` when no per-turn override is pending. Called once per
+/// outbound request by the effort resolver so the override applies to exactly
+/// one turn.
+pub fn take_turn_effort() -> Option<String> {
+    let mut guard = TURN_EFFORT.write().unwrap_or_else(|e| e.into_inner());
+    guard.take()
+}
+
+/// The effective effort for the next request: a pending per-turn override wins
+/// over the session pin. Consumes the per-turn override. Returns `None` when
+/// neither is set (adaptive exploration then decides).
+pub fn resolve_effort_for_request() -> Option<String> {
+    if let Some(turn) = take_turn_effort() {
+        return Some(turn);
+    }
+    active_global()
+}
+
 /// Process-global fast-mode flag. When true, `stream_response` adds the
 /// `fast-mode-2026-02-01` value to the `anthropic-beta` header so requests
 /// are routed to Anthropic's low-latency inference path.
@@ -288,6 +325,37 @@ mod tests {
         assert!(!state.is_ultracode());
         assert_eq!(state.api_param(), None);
         assert_eq!(state.badge(), None);
+    }
+
+    #[test]
+    fn turn_effort_overrides_session_and_is_consumed_normal() {
+        // Session pin = low; per-turn override = max. The override wins for one
+        // request, then is consumed so the next request reverts to the pin.
+        let mut state = EffortState::new();
+        state.set(ReasoningEffort::Low);
+        set_turn_effort(Some(ReasoningEffort::Max));
+        assert_eq!(peek_turn_effort().as_deref(), Some("max"));
+
+        // First request: override wins.
+        assert_eq!(resolve_effort_for_request().as_deref(), Some("max"));
+        // Consumed: next request falls back to the session pin (low).
+        assert_eq!(peek_turn_effort(), None);
+        assert_eq!(resolve_effort_for_request().as_deref(), Some("low"));
+
+        // Cleanup global state for other tests.
+        set_turn_effort(None);
+        state.clear();
+    }
+
+    #[test]
+    fn turn_effort_without_session_pin_then_reverts_robust() {
+        // No session pin; a per-turn override applies once then leaves None.
+        set_turn_effort(None);
+        let mut state = EffortState::new();
+        state.clear(); // ensure ACTIVE_EFFORT is None
+        set_turn_effort(Some(ReasoningEffort::High));
+        assert_eq!(resolve_effort_for_request().as_deref(), Some("high"));
+        assert_eq!(resolve_effort_for_request(), None);
     }
 
     #[test]

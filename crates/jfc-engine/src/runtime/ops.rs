@@ -517,7 +517,8 @@ pub async fn submit_prompt(
     let any_keyword = keyword_result.ultrawork
         || keyword_result.ultracode
         || keyword_result.ultrathink
-        || keyword_result.explore;
+        || keyword_result.explore
+        || keyword_result.turn_effort.is_some();
     let display_text = if any_keyword {
         tracing::info!(
             target: "jfc::keywords",
@@ -537,6 +538,17 @@ pub async fn submit_prompt(
     // clears it; the reminder below is injected every turn while active.
     if keyword_result.ultracode && !state.effort_state.is_ultracode() {
         state.effort_state.set_ultracode();
+    }
+
+    // `//effort <level>` sets a one-shot per-turn effort override that wins over
+    // the session pin for this request only, then reverts.
+    if let Some(level) = keyword_result.turn_effort {
+        crate::effort::set_turn_effort(Some(level));
+        tracing::info!(
+            target: "jfc::keywords",
+            effort = %level,
+            "per-turn effort override set via //effort marker"
+        );
     }
 
     let mut user_msg = ChatMessage::user(display_text.clone());
