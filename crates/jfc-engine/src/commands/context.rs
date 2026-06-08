@@ -595,12 +595,17 @@ pub(super) async fn cmd_effort(
     } else if arg == "clear" || arg == "off" {
         let msg = state.effort_state.clear();
         state.messages.push(ChatMessage::assistant(msg));
+    } else if arg.eq_ignore_ascii_case("ultracode") {
+        // Claude Code's `/effort ultracode`: standing session mode that pins
+        // xhigh effort and instructs the model to use Workflow by default.
+        let msg = state.effort_state.set_ultracode();
+        state.messages.push(ChatMessage::assistant(msg));
     } else if let Some(level) = crate::effort::ReasoningEffort::from_str_loose(arg) {
         let msg = state.effort_state.set(level);
         state.messages.push(ChatMessage::assistant(msg));
     } else {
         state.messages.push(ChatMessage::assistant(format!(
-            "Unknown effort `{arg}`. Use one of: low, medium, high, xhigh, max, clear."
+            "Unknown effort `{arg}`. Use one of: low, medium, high, xhigh, max, ultracode, clear."
         )));
     }
 }

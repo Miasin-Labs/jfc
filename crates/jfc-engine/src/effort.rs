@@ -111,16 +111,27 @@ impl fmt::Display for ReasoningEffort {
 pub struct EffortState {
     /// Current effort level. None means "don't send the parameter" (server default).
     pub current: Option<ReasoningEffort>,
+    /// Session-scoped `ultracode` standing mode (Claude Code parity). When on,
+    /// effort is coerced to XHigh AND a standing system reminder tells the model
+    /// to use the Workflow tool for every substantive task by default. Unlike
+    /// the per-turn `ultrawork` keyword, this persists across turns until
+    /// `/effort` clears it.
+    pub ultracode: bool,
 }
 
 impl EffortState {
     pub fn new() -> Self {
-        Self { current: None }
+        Self {
+            current: None,
+            ultracode: false,
+        }
     }
 
-    /// Set effort level. Returns a status message.
+    /// Set effort level. Returns a status message. Clears `ultracode` since an
+    /// explicit lower level is an intentional downgrade from the standing mode.
     pub fn set(&mut self, level: ReasoningEffort) -> String {
         self.current = Some(level);
+        self.ultracode = false;
         self.publish_global();
         format!(
             "Reasoning effort set to: {} ({})",
@@ -129,9 +140,27 @@ impl EffortState {
         )
     }
 
-    /// Clear effort (use server default).
+    /// Enable session `ultracode` mode: coerce effort to XHigh and turn on the
+    /// standing "use Workflow by default" instruction. Returns a status message.
+    pub fn set_ultracode(&mut self) -> String {
+        self.current = Some(ReasoningEffort::XHigh);
+        self.ultracode = true;
+        self.publish_global();
+        "ultracode ON \u{2014} xhigh effort + workflow-by-default for this session. \
+         Token cost is not a constraint; chain multi-phase workflows for substantive tasks. \
+         Use `/effort clear` to turn off."
+            .to_string()
+    }
+
+    /// Whether `ultracode` standing mode is active.
+    pub fn is_ultracode(&self) -> bool {
+        self.ultracode
+    }
+
+    /// Clear effort (use server default) and exit `ultracode` mode.
     pub fn clear(&mut self) -> String {
         self.current = None;
+        self.ultracode = false;
         self.publish_global();
         "Reasoning effort cleared (using server default)".to_string()
     }
@@ -151,10 +180,23 @@ impl EffortState {
 
     /// Format current status for display.
     pub fn status(&self) -> String {
+        if self.ultracode {
+            return "Reasoning effort: ultracode (xhigh + workflow orchestration; this session only)"
+                .to_string();
+        }
         match self.current {
             Some(e) => format!("Reasoning effort: {} ({})", e, e.description()),
             None => "Reasoning effort: default (not set)".to_string(),
         }
+    }
+
+    /// Short status-bar label for the effort/ultracode state, or `None` when
+    /// nothing is pinned.
+    pub fn badge(&self) -> Option<String> {
+        if self.ultracode {
+            return Some("ultracode".to_string());
+        }
+        self.current.map(|e| format!("effort {e}"))
     }
 }
 
@@ -210,6 +252,42 @@ mod tests {
 
         state.clear();
         assert_eq!(state.api_param(), None);
+    }
+
+    #[test]
+    fn ultracode_mode_sets_xhigh_and_flag_normal() {
+        let mut state = EffortState::new();
+        assert!(!state.is_ultracode());
+        state.set_ultracode();
+        assert!(state.is_ultracode());
+        // ultracode pins xhigh effort.
+        assert_eq!(state.api_param(), Some("xhigh"));
+        assert_eq!(state.badge().as_deref(), Some("ultracode"));
+        // Reset the process-global effort slot so this test doesn't leak state
+        // into other tests that read ACTIVE_EFFORT (e.g. exploration tests).
+        state.clear();
+    }
+
+    #[test]
+    fn explicit_effort_clears_ultracode_normal() {
+        let mut state = EffortState::new();
+        state.set_ultracode();
+        assert!(state.is_ultracode());
+        // An explicit `/effort high` is an intentional downgrade.
+        state.set(ReasoningEffort::High);
+        assert!(!state.is_ultracode());
+        assert_eq!(state.api_param(), Some("high"));
+        state.clear();
+    }
+
+    #[test]
+    fn clear_exits_ultracode_robust() {
+        let mut state = EffortState::new();
+        state.set_ultracode();
+        state.clear();
+        assert!(!state.is_ultracode());
+        assert_eq!(state.api_param(), None);
+        assert_eq!(state.badge(), None);
     }
 
     #[test]

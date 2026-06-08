@@ -333,10 +333,12 @@ pub(super) fn context_gauge_label(used: usize, max: usize, pct: u32) -> String {
 }
 
 pub(super) fn effort_status_badge(app: &App) -> String {
-    match app.engine.effort_state.current {
-        Some(effort) => format!("effort {effort}"),
-        None => "effort default".to_string(),
+    // ultracode standing mode takes precedence over the raw effort level so the
+    // status bar shows the session mode the user enabled.
+    if let Some(badge) = app.engine.effort_state.badge() {
+        return badge;
     }
+    "effort default".to_string()
 }
 
 /// Render the Anthropic plan/seat badge for the status bar, or `None` when no

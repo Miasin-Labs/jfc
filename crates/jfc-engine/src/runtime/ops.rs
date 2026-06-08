@@ -514,19 +514,30 @@ pub async fn submit_prompt(
     // text is what gets stored in the conversation; the keyword's effect
     // is delivered via a system-reminder injected after the message push.
     let keyword_result = crate::keywords::scan_and_strip(&text);
-    let display_text =
-        if keyword_result.ultrawork || keyword_result.ultrathink || keyword_result.explore {
-            tracing::info!(
-                target: "jfc::keywords",
-                ultrawork = keyword_result.ultrawork,
-                ultrathink = keyword_result.ultrathink,
-                explore = keyword_result.explore,
-                "detected turn keyword — stripping and injecting reminder"
-            );
-            keyword_result.text.clone()
-        } else {
-            text.clone()
-        };
+    let any_keyword = keyword_result.ultrawork
+        || keyword_result.ultracode
+        || keyword_result.ultrathink
+        || keyword_result.explore;
+    let display_text = if any_keyword {
+        tracing::info!(
+            target: "jfc::keywords",
+            ultrawork = keyword_result.ultrawork,
+            ultracode = keyword_result.ultracode,
+            ultrathink = keyword_result.ultrathink,
+            explore = keyword_result.explore,
+            "detected turn keyword — stripping and injecting reminder"
+        );
+        keyword_result.text.clone()
+    } else {
+        text.clone()
+    };
+
+    // The `ultracode` keyword turns on the standing session mode (xhigh +
+    // workflow-by-default). Once on it persists across turns until `/effort`
+    // clears it; the reminder below is injected every turn while active.
+    if keyword_result.ultracode && !state.effort_state.is_ultracode() {
+        state.effort_state.set_ultracode();
+    }
 
     let mut user_msg = ChatMessage::user(display_text.clone());
     // Combine pasted images ([Image #N] refs) with @-mention binary files.
@@ -542,6 +553,14 @@ pub async fn submit_prompt(
         crate::system_reminder::append_to_last_user(
             &mut state.messages,
             crate::keywords::ULTRAWORK_REMINDER,
+        );
+    }
+    // Standing ultracode reminder: injected on EVERY turn while the session
+    // mode is active, not just the turn that enabled it.
+    if state.effort_state.is_ultracode() {
+        crate::system_reminder::append_to_last_user(
+            &mut state.messages,
+            crate::keywords::ULTRACODE_REMINDER,
         );
     }
     if keyword_result.ultrathink {

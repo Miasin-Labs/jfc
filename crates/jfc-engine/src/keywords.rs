@@ -19,6 +19,9 @@ pub struct KeywordScanResult {
     pub text: String,
     /// Whether the "ultrawork" keyword was detected.
     pub ultrawork: bool,
+    /// Whether the "ultracode" keyword was detected — enables the standing,
+    /// session-scoped workflow-by-default mode (vs `ultrawork`'s per-turn nudge).
+    pub ultracode: bool,
     /// Whether the "ultrathink" keyword was detected.
     pub ultrathink: bool,
     /// Whether the explicit per-turn exploration marker `//explore` was detected.
@@ -29,6 +32,12 @@ pub struct KeywordScanResult {
 fn ultrawork_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)\bultrawork\b").expect("ultrawork regex is valid"))
+}
+
+/// Case-insensitive whole-word match for "ultracode".
+fn ultracode_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\bultracode\b").expect("ultracode regex is valid"))
 }
 
 /// Case-insensitive whole-word match for "ultrathink".
@@ -51,8 +60,18 @@ fn explore_regex() -> &'static Regex {
 pub fn scan_and_strip(input: &str) -> KeywordScanResult {
     let mut text = input.to_owned();
     let mut ultrawork = false;
+    let mut ultracode = false;
     let mut ultrathink = false;
     let mut explore = false;
+
+    // "ultracode" is checked before "ultrawork" so the more specific
+    // session-mode keyword wins and isn't shadowed.
+    if let Some(m) = ultracode_regex().find(&text) {
+        ultracode = true;
+        text = format!("{}{}", &text[..m.start()], &text[m.end()..]);
+        text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        text = text.trim().to_owned();
+    }
 
     if let Some(m) = ultrawork_regex().find(&text) {
         ultrawork = true;
@@ -83,6 +102,7 @@ pub fn scan_and_strip(input: &str) -> KeywordScanResult {
     KeywordScanResult {
         text,
         ultrawork,
+        ultracode,
         ultrathink,
         explore,
     }
@@ -91,6 +111,14 @@ pub fn scan_and_strip(input: &str) -> KeywordScanResult {
 /// The system-reminder body injected when "ultrawork" is detected.
 pub const ULTRAWORK_REMINDER: &str = "The user included the keyword \"ultrawork\", which means you should \
      use the Workflow tool to fulfill their request.";
+
+/// The standing system-reminder body injected on every turn while session
+/// `ultracode` mode is active (set via the `ultracode` keyword or
+/// `/effort ultracode`). Mirrors Claude Code's ultracode reminder.
+pub const ULTRACODE_REMINDER: &str = "ultracode mode is active for this session. Use the Workflow tool \
+     for every substantive task by default — chain multi-phase workflows (understand, design, \
+     implement, review) rather than doing the work inline. Token cost is not a constraint here; \
+     prioritize thoroughness and verification.";
 
 /// The system-reminder body injected when "ultrathink" is detected.
 pub const ULTRATHINK_REMINDER: &str = "The user included the keyword \"ultrathink\", requesting deeper reasoning on this turn. Reason as thoroughly as the task warrants.";
@@ -167,6 +195,28 @@ mod tests {
         let result = scan_and_strip("ultrawork");
         assert!(result.ultrawork);
         assert_eq!(result.text, "");
+    }
+
+    #[test]
+    fn detects_and_strips_ultracode_normal() {
+        let result = scan_and_strip("ultracode rewrite the parser");
+        assert!(result.ultracode);
+        assert!(!result.ultrawork);
+        assert_eq!(result.text, "rewrite the parser");
+    }
+
+    #[test]
+    fn ultracode_is_case_insensitive_normal() {
+        let result = scan_and_strip("ULTRACODE do the migration");
+        assert!(result.ultracode);
+        assert_eq!(result.text, "do the migration");
+    }
+
+    #[test]
+    fn ultracode_not_partial_matched_robust() {
+        let result = scan_and_strip("the ultracodebase is large");
+        assert!(!result.ultracode);
+        assert_eq!(result.text, "the ultracodebase is large");
     }
 
     #[test]
