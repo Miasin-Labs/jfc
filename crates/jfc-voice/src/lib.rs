@@ -27,6 +27,7 @@
 //! 2. `rec -r 16000 -c 1 -e signed -b 16` (SoX)
 //! 3. `ffmpeg -f alsa -i default -ar 16000 -ac 1 -f s16le` (ffmpeg)
 
+pub mod anthropic_ws;
 pub mod audio;
 pub mod backends;
 pub mod config;
@@ -39,7 +40,7 @@ pub mod vad;
 
 pub use audio::AudioCapture;
 pub use config::{VadEngine, VoiceConfig, VoiceMode};
-pub use doctor::{format_report, run_diagnostic, Verdict, VoiceDiagnostic};
+pub use doctor::{Verdict, VoiceDiagnostic, format_report, run_diagnostic};
 #[cfg(feature = "vad-neural")]
 pub use neural_vad::NeuralVad;
 pub use recorder::{VoiceRecorder, VoiceState, VoiceTranscriptEvent};

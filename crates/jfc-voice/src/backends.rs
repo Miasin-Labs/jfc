@@ -61,23 +61,43 @@ pub async fn transcribe(pcm: &[u8], cfg: &VoiceConfig) -> anyhow::Result<Option<
 
     match cfg.effective_backend() {
         SttBackendKind::Anthropic | SttBackendKind::Auto => {
-            // Try Anthropic first. On any error (e.g. no OAuth token), fall
-            // through to OpenAI then local. A successful-but-empty result
-            // (Ok(None)) means the provider heard silence — return it.
-            match try_anthropic_batch(&wav, cfg).await {
+            // Anthropic STT, in order of fidelity to Claude Code:
+            //   1. The real WebSocket voice_stream protocol (needs raw PCM).
+            //   2. An explicitly-configured Whisper-compatible gateway (WAV).
+            //   3. Fall through to OpenAI Whisper, then local.
+            // Any error (e.g. no OAuth token) falls through; a successful-but-
+            // empty result (Ok(None)) means the provider heard silence.
+            match try_anthropic_ws(pcm, cfg).await {
                 Ok(Some(text)) => {
-                    debug!(target: "jfc::voice::stt", "Anthropic STT succeeded");
+                    debug!(target: "jfc::voice::stt", "Anthropic WS STT succeeded");
                     return Ok(Some(text));
                 }
                 Ok(None) => {
-                    debug!(target: "jfc::voice::stt", "Anthropic STT returned empty");
+                    debug!(target: "jfc::voice::stt", "Anthropic WS STT returned empty");
                     return Ok(None);
                 }
                 Err(err) => {
                     warn!(
                         target: "jfc::voice::stt",
                         error = %err,
-                        "Anthropic STT unavailable, trying OpenAI Whisper"
+                        "Anthropic WS STT unavailable, trying configured gateway"
+                    );
+                }
+            }
+            match try_anthropic_batch(&wav, cfg).await {
+                Ok(Some(text)) => {
+                    debug!(target: "jfc::voice::stt", "Anthropic gateway STT succeeded");
+                    return Ok(Some(text));
+                }
+                Ok(None) => {
+                    debug!(target: "jfc::voice::stt", "Anthropic gateway STT returned empty");
+                    return Ok(None);
+                }
+                Err(err) => {
+                    warn!(
+                        target: "jfc::voice::stt",
+                        error = %err,
+                        "Anthropic gateway STT unavailable, trying OpenAI Whisper"
                     );
                 }
             }
@@ -114,6 +134,35 @@ pub async fn transcribe(pcm: &[u8], cfg: &VoiceConfig) -> anyhow::Result<Option<
 // configures `voice.anthropic_voice_url` to a Whisper-compatible gateway that
 // implements `/v1/audio/transcriptions`; otherwise it fails fast (no doomed
 // upload to api.anthropic.com) and the chain falls through to OpenAI Whisper.
+
+/// Anthropic STT over the real WebSocket `voice_stream` protocol (the path
+/// Claude Code actually uses). Faithfully ported from the CLI — see
+/// [`crate::anthropic_ws`]. Needs an OAuth access token; errors (no token,
+/// connect failure) fall through to the gateway/OpenAI paths.
+async fn try_anthropic_ws(pcm: &[u8], cfg: &VoiceConfig) -> anyhow::Result<Option<String>> {
+    let token = std::env::var("CLAUDE_ACCESS_TOKEN")
+        .or_else(|_| std::env::var("ANTHROPIC_ACCESS_TOKEN"))
+        .or_else(|_| std::env::var("JFC_ANTHROPIC_ACCESS_TOKEN"))
+        .context("no Anthropic OAuth token available for voice STT")?;
+
+    // Base WS origin: explicit override (VOICE_STREAM_BASE_URL or the configured
+    // voice URL) → wss form; else the default api host. Mirrors the CLI, which
+    // converts the REST base to wss://.
+    let base_wss = std::env::var("VOICE_STREAM_BASE_URL")
+        .ok()
+        .unwrap_or_else(|| {
+            let http = cfg
+                .anthropic_voice_url
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .unwrap_or("https://api.anthropic.com");
+            http.replacen("https://", "wss://", 1)
+                .replacen("http://", "ws://", 1)
+        });
+
+    let user_agent = format!("jfc-voice/{}", env!("CARGO_PKG_VERSION"));
+    crate::anthropic_ws::transcribe_pcm(pcm, &token, &base_wss, &cfg.language, &user_agent).await
+}
 
 async fn try_anthropic_batch(wav: &[u8], cfg: &VoiceConfig) -> anyhow::Result<Option<String>> {
     // IMPORTANT — Anthropic has no public batch REST transcription endpoint.
