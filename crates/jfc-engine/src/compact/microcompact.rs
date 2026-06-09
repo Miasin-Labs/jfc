@@ -21,37 +21,75 @@ use tracing::{debug, info};
 /// A tool result larger than this many chars is a microcompaction candidate.
 /// Smaller results aren't worth the fidelity loss.
 const MICROCOMPACT_MIN_CHARS: usize = 2_000;
-/// Chars of the head kept verbatim when a tool result is truncated.
+/// Chars of the head kept verbatim when a tool result is truncated (depth 0).
 const KEEP_HEAD_CHARS: usize = 600;
 /// Chars of the tail kept verbatim (errors/summaries often live at the end).
 const KEEP_TAIL_CHARS: usize = 400;
 /// The newest N messages are never microcompacted — recent tool results are
 /// what the model is actively reasoning about.
 const PROTECT_RECENT_MESSAGES: usize = 12;
+/// Age-tiered compression (ported from magic-context's "caveman" depth tiers):
+/// the older a tool result is, the smaller the verbatim window we keep. Each
+/// depth tier past 0 shrinks the kept head+tail by this factor, so ancient
+/// outputs are reduced harder than recent-but-unprotected ones. A floor keeps
+/// every tier readable. `MAX_DEPTH` bounds how aggressive the oldest tier gets.
+const DEPTH_SHRINK_NUM: usize = 2;
+const DEPTH_SHRINK_DEN: usize = 3;
+const MIN_HEAD_CHARS: usize = 160;
+const MIN_TAIL_CHARS: usize = 120;
+const MAX_DEPTH: usize = 4;
+/// How many older messages share one depth tier. Messages are bucketed by
+/// distance before the protect window: the oldest tiers compress hardest.
+const MESSAGES_PER_DEPTH: usize = 8;
 
-/// Truncate one large tool-output string to a head + marker + tail window.
-/// Returns `None` when the text is already small enough to leave untouched.
-fn truncate_middle(text: &str) -> Option<String> {
+/// Keep window (head, tail) chars for a given age `depth`. Depth 0 = the
+/// newest-eligible tier (full window); each tier multiplies by 2/3 down to a
+/// readable floor.
+fn keep_window(depth: usize) -> (usize, usize) {
+    let depth = depth.min(MAX_DEPTH);
+    let mut head = KEEP_HEAD_CHARS;
+    let mut tail = KEEP_TAIL_CHARS;
+    for _ in 0..depth {
+        head = head * DEPTH_SHRINK_NUM / DEPTH_SHRINK_DEN;
+        tail = tail * DEPTH_SHRINK_NUM / DEPTH_SHRINK_DEN;
+    }
+    (head.max(MIN_HEAD_CHARS), tail.max(MIN_TAIL_CHARS))
+}
+
+/// Truncate one large tool-output string to a head + marker + tail window,
+/// where the window size shrinks with age `depth` (0 = newest-eligible). Returns
+/// `None` when the text is already at or below the kept window for that depth.
+fn truncate_middle_at_depth(text: &str, depth: usize) -> Option<String> {
     let len = text.chars().count();
     if len <= MICROCOMPACT_MIN_CHARS {
         return None;
     }
-    let head: String = text.chars().take(KEEP_HEAD_CHARS).collect();
-    let tail: String = text
-        .chars()
-        .skip(len.saturating_sub(KEEP_TAIL_CHARS))
-        .collect();
-    let dropped = len - KEEP_HEAD_CHARS - KEEP_TAIL_CHARS;
+    let (keep_head, keep_tail) = keep_window(depth);
+    // Nothing to gain if the window already covers the text.
+    if len <= keep_head + keep_tail {
+        return None;
+    }
+    let head: String = text.chars().take(keep_head).collect();
+    let tail: String = text.chars().skip(len.saturating_sub(keep_tail)).collect();
+    let dropped = len - keep_head - keep_tail;
     Some(format!(
         "{head}\n\n[… {dropped} chars elided by microcompaction …]\n\n{tail}"
     ))
+}
+
+/// Age depth for a message at index `idx` given the compaction `cutoff` (the
+/// first protected index). Index 0 is the oldest → highest depth; messages just
+/// before the cutoff → depth 0. Buckets of [`MESSAGES_PER_DEPTH`].
+fn depth_for_index(idx: usize, cutoff: usize) -> usize {
+    let distance_from_cutoff = cutoff.saturating_sub(idx + 1);
+    (distance_from_cutoff / MESSAGES_PER_DEPTH).min(MAX_DEPTH)
 }
 
 /// Truncate the high-volume textual field of one tool output in place,
 /// returning the chars saved (0 if nothing was trimmed). Structured outputs
 /// (diffs, file lists, server-tool results) carry no large free-text field and
 /// are intentionally left untouched so their wire shape round-trips faithfully.
-fn trim_tool_output(output: &mut ToolOutput) -> usize {
+fn trim_tool_output(output: &mut ToolOutput, depth: usize) -> usize {
     // Borrow the mutable string field this output type exposes, if any.
     let field: Option<&mut String> = match output {
         ToolOutput::Text(s) => Some(s),
@@ -70,7 +108,7 @@ fn trim_tool_output(output: &mut ToolOutput) -> usize {
     let Some(text) = field else {
         return 0;
     };
-    let Some(new) = truncate_middle(text) else {
+    let Some(new) = truncate_middle_at_depth(text, depth) else {
         return 0;
     };
     let saved = text.chars().count() - new.chars().count();
@@ -93,12 +131,14 @@ pub fn microcompact(messages: &mut [ChatMessage]) -> usize {
     let mut saved = 0usize;
     let mut trimmed = 0usize;
 
-    for msg in messages[..cutoff].iter_mut() {
+    for (idx, msg) in messages[..cutoff].iter_mut().enumerate() {
+        // Older messages compress to a smaller window (age-tiered depth).
+        let depth = depth_for_index(idx, cutoff);
         for part in msg.parts.iter_mut() {
             let MessagePart::Tool(tc) = part else {
                 continue;
             };
-            let s = trim_tool_output(&mut tc.output);
+            let s = trim_tool_output(&mut tc.output, depth);
             if s > 0 {
                 saved += s;
                 trimmed += 1;
@@ -158,7 +198,8 @@ pub fn microcompact_savings(messages: &[ChatMessage]) -> usize {
     }
     let cutoff = messages.len() - PROTECT_RECENT_MESSAGES;
     let mut saved = 0usize;
-    for msg in &messages[..cutoff] {
+    for (idx, msg) in messages[..cutoff].iter().enumerate() {
+        let (keep_head, keep_tail) = keep_window(depth_for_index(idx, cutoff));
         for part in &msg.parts {
             let MessagePart::Tool(tc) = part else {
                 continue;
@@ -171,8 +212,8 @@ pub fn microcompact_savings(messages: &[ChatMessage]) -> usize {
             };
             if let Some(t) = text {
                 let len = t.chars().count();
-                if len > MICROCOMPACT_MIN_CHARS {
-                    saved += len - KEEP_HEAD_CHARS - KEEP_TAIL_CHARS;
+                if len > MICROCOMPACT_MIN_CHARS && len > keep_head + keep_tail {
+                    saved += len - keep_head - keep_tail;
                 }
             }
         }
@@ -183,6 +224,11 @@ pub fn microcompact_savings(messages: &[ChatMessage]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: depth-0 (full-window) truncation, the original behavior.
+    fn truncate_middle(text: &str) -> Option<String> {
+        truncate_middle_at_depth(text, 0)
+    }
     use jfc_core::{ToolCall, ToolKind};
 
     fn tool_msg(output: ToolOutput) -> ChatMessage {
@@ -255,5 +301,67 @@ mod tests {
     fn microcompact_noop_on_small_transcript_robust() {
         let mut messages = padding(3);
         assert_eq!(microcompact(&mut messages), 0);
+    }
+
+    // ── Age-tiered depth (magic-context caveman parity) ──────────────────
+
+    // Normal: keep_window shrinks monotonically with depth, down to a floor.
+    #[test]
+    fn keep_window_shrinks_with_depth_normal() {
+        let (h0, t0) = keep_window(0);
+        let (h1, t1) = keep_window(1);
+        let (hmax, tmax) = keep_window(MAX_DEPTH);
+        assert_eq!((h0, t0), (KEEP_HEAD_CHARS, KEEP_TAIL_CHARS));
+        assert!(h1 < h0 && t1 < t0, "depth 1 keeps less than depth 0");
+        assert!(hmax >= MIN_HEAD_CHARS && tmax >= MIN_TAIL_CHARS, "never below the floor");
+        // Beyond MAX_DEPTH is clamped (no further shrink / no panic).
+        assert_eq!(keep_window(MAX_DEPTH + 5), keep_window(MAX_DEPTH));
+    }
+
+    // Normal: depth_for_index increases for older messages (smaller index).
+    #[test]
+    fn depth_for_index_increases_with_age_normal() {
+        let cutoff = 40;
+        // Just before the cutoff → depth 0; far older → higher depth.
+        assert_eq!(depth_for_index(cutoff - 1, cutoff), 0);
+        assert!(depth_for_index(0, cutoff) > depth_for_index(cutoff - 1, cutoff));
+        // Clamped at MAX_DEPTH for arbitrarily old messages.
+        assert!(depth_for_index(0, 10_000) <= MAX_DEPTH);
+    }
+
+    // Robust: an OLD large tool result is compressed harder (smaller kept head)
+    // than a RECENT-but-unprotected one of the same size.
+    #[test]
+    fn older_results_compress_harder_robust() {
+        // Oldest message is the big one; fill many messages between it and the
+        // protect window so it lands in a high depth tier.
+        let mut old_first = vec![tool_msg(ToolOutput::Text("Z".repeat(8_000)))];
+        old_first.extend(padding(MESSAGES_PER_DEPTH * MAX_DEPTH + PROTECT_RECENT_MESSAGES + 2));
+        microcompact(&mut old_first);
+        let old_kept = match &old_first[0].parts[0] {
+            MessagePart::Tool(tc) => match &tc.output {
+                ToolOutput::Text(s) => s.chars().count(),
+                _ => panic!("text"),
+            },
+            _ => panic!("tool"),
+        };
+
+        // Same big result placed just before the protect window → depth 0.
+        let mut recent = padding(2);
+        recent.push(tool_msg(ToolOutput::Text("Z".repeat(8_000))));
+        recent.extend(padding(PROTECT_RECENT_MESSAGES + 1));
+        microcompact(&mut recent);
+        let recent_kept = match &recent[2].parts[0] {
+            MessagePart::Tool(tc) => match &tc.output {
+                ToolOutput::Text(s) => s.chars().count(),
+                _ => panic!("text"),
+            },
+            _ => panic!("tool"),
+        };
+
+        assert!(
+            old_kept < recent_kept,
+            "older result ({old_kept}) must keep less than a recent one ({recent_kept})"
+        );
     }
 }
