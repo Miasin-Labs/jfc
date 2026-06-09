@@ -35,7 +35,9 @@ const HAIKU: ModelPricing = ModelPricing {
 /// Look up rates for a model id by case-insensitive substring match.
 pub fn pricing_for(model_id: &str) -> Option<ModelPricing> {
     let id = model_id.to_ascii_lowercase();
-    if id.contains("opus") {
+    // fable-5 / mythos-5 (Claude Code 2.1.170) bill at Opus rates — they share
+    // Opus 4.8's pricing group in the cli.
+    if id.contains("opus") || id.contains("fable") || id.contains("mythos") {
         Some(OPUS)
     } else if id.contains("sonnet") {
         Some(SONNET)
@@ -83,6 +85,14 @@ mod tests {
         };
         let dollars = cost_for("claude-opus-4-7", &usage);
         assert!((dollars - 23.25).abs() < 0.01);
+    }
+
+    // CC 2.1.170: fable-5 / mythos-5 bill at Opus rates (same pricing group).
+    #[test]
+    fn fable_and_mythos_price_at_opus_rates_normal() {
+        assert_eq!(pricing_for("claude-fable-5"), Some(OPUS));
+        assert_eq!(pricing_for("claude-mythos-5"), Some(OPUS));
+        assert_eq!(pricing_for("anthropic/claude-fable-5[1m]"), Some(OPUS));
     }
 
     #[test]

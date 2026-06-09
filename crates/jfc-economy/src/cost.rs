@@ -55,7 +55,10 @@ const HAIKU: ModelPricing = ModelPricing {
 /// $0 rather than guess.
 pub fn pricing_for(model_id: &str) -> Option<ModelPricing> {
     let id = model_id.to_ascii_lowercase();
-    let result = if id.contains("opus") {
+    // Claude Code 2.1.170 groups fable-5 / mythos-5 with Opus 4.8 for billing
+    // (`claude-opus-4-8"||$==="claude-fable-5"||$==="claude-mythos-5"`), so they
+    // bill at Opus rates ($15 in / $75 out per M).
+    let result = if id.contains("opus") || id.contains("fable") || id.contains("mythos") {
         Some(OPUS)
     } else if id.contains("sonnet") {
         Some(SONNET)
@@ -148,6 +151,14 @@ mod tests {
             prefixed, OPUS,
             "substring match must work across provider prefixes and [1m] suffix"
         );
+    }
+
+    // CC 2.1.170: fable-5 / mythos-5 share Opus 4.8's billing group → Opus rates.
+    #[test]
+    fn pricing_for_fable_and_mythos_normal() {
+        assert_eq!(pricing_for("claude-fable-5"), Some(OPUS));
+        assert_eq!(pricing_for("claude-mythos-5"), Some(OPUS));
+        assert_eq!(pricing_for("anthropic/claude-mythos-5[1m]"), Some(OPUS));
     }
 
     #[test]

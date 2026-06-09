@@ -51,11 +51,14 @@ pub fn thinking_mode_for(model: &str) -> ThinkingMode {
 /// reference).
 pub fn max_output_tokens_for(model: &str) -> u32 {
     let m = model.to_lowercase();
-    // Opus/Sonnet 4.x family -- extended-output 128k support.
+    // Opus/Sonnet 4.x family + the 2.1.170 fable-5/mythos-5 family --
+    // extended-output 128k support.
     let extended_4x = m.contains("opus-4")
         || m.contains("sonnet-4")
         || m.contains("opus-5")
-        || m.contains("sonnet-5");
+        || m.contains("sonnet-5")
+        || m.contains("fable")
+        || m.contains("mythos");
     if extended_4x {
         return 128_000;
     }
@@ -110,6 +113,10 @@ fn model_supports_adaptive_thinking(model: &str) -> bool {
         || m.contains("sonnet-4-8")
         || m.contains("sonnet-4-9")
         || m.contains("sonnet-5")
+        // Claude Code 2.1.170 fable-5/mythos-5: adaptive thinking required
+        // (grouped with opus-4-6/7/8 + sonnet-4-6 in the cli's adaptive set).
+        || m.contains("fable")
+        || m.contains("mythos")
 }
 
 /// Returns true if the model supports thinking at all. Haiku 4.5 does NOT
@@ -148,7 +155,10 @@ fn model_supports_thinking(model: &str) -> bool {
         || m.contains("sonnet-4-7")
         || m.contains("sonnet-4-8")
         || m.contains("sonnet-4-9")
-        || m.contains("sonnet-5");
+        || m.contains("sonnet-5")
+        // Claude Code 2.1.170 fable-5/mythos-5 are thinking-capable.
+        || m.contains("fable")
+        || m.contains("mythos");
     tracing::debug!(
         target: "jfc::stream",
         model, supports,
@@ -261,6 +271,19 @@ mod tests {
         // Future-proofing: 5.x lands in the same bucket.
         assert_eq!(max_output_tokens_for("claude-opus-5-0"), 128_000);
         assert_eq!(max_output_tokens_for("claude-sonnet-5-0"), 128_000);
+    }
+
+    // Normal (CC 2.1.170): fable-5 / mythos-5 get the 128k extended-output
+    // bucket and full thinking support (adaptive required, not legacy).
+    #[test]
+    fn fable_and_mythos_5_policy_normal() {
+        for id in ["claude-fable-5", "claude-mythos-5"] {
+            assert_eq!(max_output_tokens_for(id), 128_000, "{id} max output");
+            assert!(model_supports_thinking(id), "{id} thinking");
+            assert!(model_supports_adaptive_thinking(id), "{id} adaptive");
+        }
+        // Proxy-routed deployments still skip the native thinking field.
+        assert!(!model_supports_adaptive_thinking("bedrock-claude-fable-5"));
     }
 
     // Normal: Haiku 4.5 caps at 16k -- distinct from Opus/Sonnet 4.x even

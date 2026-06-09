@@ -13,12 +13,15 @@ use jfc_provider::ModelInfo;
 
 fn limits_for_anthropic_model(id: &str) -> (usize, Option<usize>) {
     let id = id.to_ascii_lowercase();
-    if id.contains("mythos")
+    if id.contains("fable")
+        || id.contains("mythos")
         || id.contains("opus-4-8")
         || id.contains("opus-4-7")
         || id.contains("opus-4-6")
         || id.contains("sonnet-4-6")
     {
+        // CC 2.1.170: fable-5/mythos-5 share the opus-4-8 bucket
+        // (`fable-5"||mythos-5")$=64000,q=128000` with 1M context).
         (1_000_000, Some(128_000))
     } else if id.contains("opus-4-5") {
         (1_000_000, Some(64_000))
@@ -46,6 +49,11 @@ pub const ALIAS_HAIKU: &str = "claude-haiku-4-5-20251001";
 /// Tracks Claude Code 2.1.154's first-party default
 /// (`he()` returns `Yz().opus48` for firstParty backends).
 pub const ALIAS_OPUS: &str = "claude-opus-4-8";
+/// Claude Code 2.1.170 shipped Fable 5 — `{fable, opus, sonnet, haiku}` default
+/// map adds a `fable` slot whose firstParty id is `claude-fable-5` ("our newest
+/// model for complex, long-running work", training cutoff January 2026). It is
+/// NOT the default flagship (Opus 4.8 still is) — it's a sibling row.
+pub const ALIAS_FABLE: &str = "claude-fable-5";
 
 /// Build the canonical first-party Anthropic model list.
 ///
@@ -61,6 +69,11 @@ pub fn anthropic_first_party_models(provider_tag: &str) -> Vec<ModelInfo> {
         (ALIAS_OPUS, "↗ Opus (latest)"),
         (ALIAS_SONNET, "↗ Sonnet (latest)"),
         (ALIAS_HAIKU, "↗ Haiku (latest)"),
+        // Fable / Mythos — Claude Code 2.1.170's newest family (training cutoff
+        // January 2026; 1M context; adaptive thinking + effort-capable). Fable 5
+        // is the flagship-tier long-horizon model; Mythos 5 is its sibling.
+        ("claude-fable-5", "Claude Fable 5"),
+        ("claude-mythos-5", "Claude Mythos 5"),
         // Preview / experimental
         ("claude-mythos-preview", "Claude Mythos (preview)"),
         // Opus — flagship, dated/specific
@@ -256,11 +269,12 @@ pub fn merge_live_into_canonical(
 #[allow(dead_code)]
 pub fn supports_adaptive_thinking(model_id: &str) -> bool {
     let id = model_id.to_lowercase();
-    // Opus 4.6+ and Sonnet 4.6+ support adaptive
+    // Opus 4.6+, Sonnet 4.6+, and the 2.1.170 fable-5/mythos-5 family support adaptive.
     id.contains("opus-4-6")
         || id.contains("opus-4-7")
         || id.contains("opus-4-8")
         || id.contains("sonnet-4-6")
+        || id.contains("fable")
         || id.contains("mythos")
 }
 
@@ -301,12 +315,14 @@ pub fn model_supports_effort(model_id: &str) -> bool {
     {
         return false;
     }
-    // Explicit allow — effort-capable families.
+    // Explicit allow — effort-capable families (2.1.170 adds fable-5/mythos-5,
+    // both in the cli effort allowlist: `$.includes("fable-5")||h8H(H)`).
     id.contains("opus-4-5")
         || id.contains("opus-4-6")
         || id.contains("opus-4-7")
         || id.contains("opus-4-8")
         || id.contains("sonnet-4-6")
+        || id.contains("fable")
         || id.contains("mythos")
 }
 
@@ -317,10 +333,13 @@ pub fn model_supports_effort(model_id: &str) -> bool {
 /// doc: "`max` is Opus-tier only … will error on Sonnet/Haiku".
 pub fn model_supports_high_effort_tier(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
+    // Opus-tier max/xhigh. CC 2.1.170 groups fable-5/mythos-5 with opus-4-7/4-8
+    // in the high-tier set, so they accept max/xhigh too.
     id.contains("opus-4-5")
         || id.contains("opus-4-6")
         || id.contains("opus-4-7")
         || id.contains("opus-4-8")
+        || id.contains("fable")
         || id.contains("mythos")
 }
 
@@ -593,6 +612,37 @@ mod tests {
             models.iter().any(|m| m.id == "claude-mythos-preview"),
             "claude-mythos-preview should be in the catalog"
         );
+    }
+
+    // [MODEL LAUNCH] Claude Code 2.1.170: Fable 5 + Mythos 5 are in the catalog
+    // with the 1M-context / 128k-output bucket.
+    #[test]
+    fn fable_and_mythos_5_in_catalog_normal() {
+        let models = anthropic_first_party_models("anthropic-oauth");
+        for (id, display) in [
+            ("claude-fable-5", "Claude Fable 5"),
+            ("claude-mythos-5", "Claude Mythos 5"),
+        ] {
+            let row = models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from catalog"));
+            assert_eq!(row.display_name, display);
+            assert_eq!(row.context_window_tokens, Some(1_000_000), "{id} context");
+            assert_eq!(row.max_output_tokens, Some(128_000), "{id} max output");
+        }
+    }
+
+    // Robust: Fable 5 / Mythos 5 are effort + adaptive-thinking capable, and
+    // accept the Opus-tier max/xhigh effort (grouped with opus-4-7/4-8 in CC).
+    #[test]
+    fn fable_and_mythos_5_capabilities_robust() {
+        for id in ["claude-fable-5", "claude-mythos-5"] {
+            assert!(model_supports_effort(id), "{id} effort");
+            assert!(supports_adaptive_thinking(id), "{id} adaptive thinking");
+            assert!(model_supports_high_effort_tier(id), "{id} high-effort tier");
+            assert_eq!(effort_for_model(id, "max"), Some("max"), "{id} keeps max");
+        }
     }
 
     // ── merge_live_into_canonical (models.dev union) ────────────────────────
