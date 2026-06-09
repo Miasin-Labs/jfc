@@ -705,8 +705,11 @@ pub async fn handle_stream_done(
             );
             let msg = match &stop_reason {
                 jfc_provider::StopReason::MaxTokens => {
-                    "Response truncated — max output tokens reached. \
-                     The model's reply may be incomplete."
+                    // We auto-resume from here (see maybe_self_continue's
+                    // output_truncated path), so frame it as a continuation, not
+                    // a dead end. If auto-continue is off or the cap is hit, the
+                    // user can still nudge manually.
+                    "Reply hit the max output-token limit — continuing it automatically."
                         .to_string()
                 }
                 jfc_provider::StopReason::Refusal => "The model refused this request.".to_string(),
@@ -750,7 +753,8 @@ pub async fn handle_stream_done(
                 }
             }
         }
-        maybe_self_continue(state, tx).await;
+        let truncated = matches!(stop_reason, jfc_provider::StopReason::MaxTokens);
+        maybe_self_continue(state, tx, truncated).await;
     }
     if needs_dynamic_loop_keepalive && !state.is_streaming {
         schedule_dynamic_loop_keepalive();
@@ -1155,7 +1159,7 @@ mod stream_done_lifecycle_tests {
 /// queued, instead of forcing a manual "continue". Gated on `auto_continue`
 /// (env/config/factory), disabled in plan mode, and capped by
 /// `max_self_continuations` to prevent runaway loops.
-async fn maybe_self_continue(state: &mut EngineState, tx: &EventSender) {
+async fn maybe_self_continue(state: &mut EngineState, tx: &EventSender, output_truncated: bool) {
     // Only fire when the turn is fully settled and idle. The
     // `in_flight_*` guards are load-bearing: when StreamDone arrives
     // with `stop_reason=ToolUse` and pending tools, the `has_pending_tools`
@@ -1188,12 +1192,19 @@ async fn maybe_self_continue(state: &mut EngineState, tx: &EventSender) {
         return;
     }
 
-    // Is there a reason to continue? Either unfinished queued tasks, or the
-    // model ended on a permission-asking stall.
+    // Is there a reason to continue? Either unfinished queued tasks, the model
+    // ended on a permission-asking stall, OR the response was truncated by the
+    // output-token cap (stop_reason=max_tokens). The last case is the "I hit
+    // 128k mid-answer and you had to type continue" bug: output-budget
+    // truncation unambiguously means "more to write," so we resume from where
+    // the reply was cut off rather than waiting for a manual nudge. (Claude Code
+    // surfaces max_tokens as a hard error and stops; jfc has a bounded
+    // self-continuation loop, so it can safely auto-resume — the same
+    // self_continuation_count cap below still bounds it.)
     let counts = state.task_store.counts();
     let tasks_remain = counts.pending > 0 || counts.in_progress > 0;
     let stalled = stream::assistant_text_stalls(&state.messages);
-    if !tasks_remain && !stalled {
+    if !tasks_remain && !stalled && !output_truncated {
         return;
     }
 
@@ -1215,6 +1226,7 @@ async fn maybe_self_continue(state: &mut EngineState, tx: &EventSender) {
         count = state.self_continuation_count,
         tasks_remain,
         stalled,
+        output_truncated,
         pending_tasks = counts.pending,
         in_progress = counts.in_progress,
         "self-continuing without user nudge"
@@ -1223,7 +1235,15 @@ async fn maybe_self_continue(state: &mut EngineState, tx: &EventSender) {
     // Inject a system-reminder nudge as a fresh user turn. Phrased to match
     // the operating rule: finish the scope, don't ask permission for the next
     // in-scope step.
-    let reason = if tasks_remain {
+    let reason = if output_truncated {
+        // The previous reply was cut off at the output-token cap. Resume it
+        // seamlessly — the truncated text is already in the transcript, so the
+        // model should continue from exactly where it stopped, not restart.
+        "Your previous response was cut off because it reached the maximum output \
+         length. Continue it from exactly where it stopped — do not repeat what you \
+         already wrote, and do not restart. Pick up mid-sentence if needed."
+            .to_string()
+    } else if tasks_remain {
         format!(
             "Continue the remaining work. There are {} pending and {} in-progress task(s) — \
              work through them. Do NOT stop to ask permission for the next in-scope step; \
@@ -1323,6 +1343,17 @@ mod self_continue_idleness_tests {
         assert!(!should_self_continue_after_stop_reason(
             &jfc_provider::StopReason::Other("content_filter".to_string())
         ));
+    }
+
+    // Normal — REGRESSION (the "hit 128k mid-answer, had to type continue" bug):
+    // MaxTokens must be eligible for self-continuation so a truncated reply
+    // auto-resumes instead of stalling for a manual nudge.
+    #[test]
+    fn max_tokens_stop_reason_self_continues_normal() {
+        assert!(
+            should_self_continue_after_stop_reason(&jfc_provider::StopReason::MaxTokens),
+            "an output-truncated turn must be eligible to auto-resume"
+        );
     }
 
     // Normal — REGRESSION: this is the exact state stream_done leaves
