@@ -11,6 +11,7 @@ jfc-config = { path = "../jfc-config" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { package = "serde_norway", version = "0.9" }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = "5"
 

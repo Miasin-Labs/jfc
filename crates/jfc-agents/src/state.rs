@@ -79,6 +79,23 @@ pub struct Skill {
     /// `disable-model-invocation` frontmatter — when true the model may NOT
     /// auto-invoke this skill via the Skill tool; only the user can run it.
     pub disable_model_invocation: bool,
+    /// `created-by` frontmatter — `"agent"` for skills the agent authored from
+    /// experience (curation-eligible), `"user"` (default) otherwise. Lets the
+    /// skill curator know which skills it owns and may auto-archive.
+    #[serde(default)]
+    pub created_by: SkillOrigin,
+}
+
+/// Provenance of a skill — who authored it. Only [`SkillOrigin::Agent`] skills
+/// are eligible for automatic curation (stale/archive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillOrigin {
+    /// Authored by the user / shipped with the project. Never auto-curated.
+    #[default]
+    User,
+    /// Written by the agent from a successful trajectory. Curation-eligible.
+    Agent,
 }
 
 impl Skill {
@@ -105,6 +122,7 @@ impl Skill {
             model: None,
             effort: None,
             disable_model_invocation: false,
+            created_by: SkillOrigin::User,
         }
     }
 
@@ -243,6 +261,7 @@ pub fn parse_skill(path: &Path, raw: &str) -> Option<Skill> {
     let mut model = None;
     let mut effort = None;
     let mut disable_model_invocation = false;
+    let mut created_by = SkillOrigin::User;
     if let Some(yaml) = front
         && let Ok(parsed) = serde_yaml::from_str::<SkillFront>(yaml)
     {
@@ -263,6 +282,9 @@ pub fn parse_skill(path: &Path, raw: &str) -> Option<Skill> {
         model = parsed.model;
         effort = parsed.effort;
         disable_model_invocation = parsed.disable_model_invocation.unwrap_or(false);
+        if matches!(parsed.created_by.as_deref(), Some("agent")) {
+            created_by = SkillOrigin::Agent;
+        }
     }
     let mut skill = Skill::new(
         name,
@@ -281,6 +303,7 @@ pub fn parse_skill(path: &Path, raw: &str) -> Option<Skill> {
     skill.model = model;
     skill.effort = effort;
     skill.disable_model_invocation = disable_model_invocation;
+    skill.created_by = created_by;
     Some(skill)
 }
 
@@ -361,6 +384,8 @@ struct SkillFront {
         alias = "disableModelInvocation"
     )]
     pub disable_model_invocation: Option<bool>,
+    #[serde(default, rename = "created-by", alias = "createdBy")]
+    pub created_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -129,6 +129,64 @@ pub fn built_in_skills() -> Vec<Skill> {
     builtins::built_in_skills()
 }
 
+/// Error from [`write_agent_skill`].
+#[derive(Debug, thiserror::Error)]
+pub enum SkillWriteError {
+    #[error("invalid skill name `{0}` — use lowercase letters, digits, and hyphens (kebab-case)")]
+    InvalidName(String),
+    #[error("skill `{0}` already exists at {1}")]
+    AlreadyExists(String, PathBuf),
+    #[error("io error writing skill: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Validate a skill name: kebab-case, 1..=64 chars, no path separators. Keeps
+/// the agent from writing outside the skills dir or shadowing namespaced names.
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+/// Write a new **agent-created** skill to `<project_root>/.claude/skills/<name>/
+/// SKILL.md` with `created-by: agent` provenance (so the curator owns it).
+///
+/// Refuses to overwrite an existing skill (the agent must pick a fresh name) and
+/// validates the name to a safe kebab-case slug. Returns the path written.
+/// This is the write half of the skill-from-experience loop: the agent distills
+/// a reusable procedure from a successful task and persists it as a skill.
+pub fn write_agent_skill(
+    project_root: &Path,
+    name: &str,
+    description: &str,
+    body: &str,
+) -> Result<PathBuf, SkillWriteError> {
+    if !valid_skill_name(name) {
+        return Err(SkillWriteError::InvalidName(name.to_owned()));
+    }
+    let dir = project_root.join(".claude").join("skills").join(name);
+    let md_path = dir.join("SKILL.md");
+    if md_path.exists() {
+        return Err(SkillWriteError::AlreadyExists(name.to_owned(), md_path));
+    }
+    std::fs::create_dir_all(&dir)?;
+
+    // YAML-escape the description (it's a single quoted scalar). Single-quote
+    // style only needs `'` doubled, which keeps colons/brackets literal.
+    let desc_escaped = description.replace('\'', "''");
+    let contents = format!(
+        "---\nname: {name}\ndescription: '{desc_escaped}'\ncreated-by: agent\n---\n{}\n",
+        body.trim()
+    );
+    std::fs::write(&md_path, contents)?;
+    tracing::info!(target: "jfc::agents", skill = name, path = %md_path.display(), "wrote agent-created skill");
+    Ok(md_path)
+}
+
 #[derive(Debug)]
 struct SkillRoot {
     path: PathBuf,
@@ -963,5 +1021,64 @@ mod tests {
         assert!(out.starts_with("Base prompt."));
         assert!(out.contains("## Skill: one"));
         assert!(out.contains("## Skill: two"));
+    }
+
+    // ─── write_agent_skill (skill-from-experience write path) ───────────────
+
+    // Normal: a written skill lands at .claude/skills/<name>/SKILL.md, parses
+    // back with agent provenance, and is then discoverable via load_skills.
+    #[test]
+    fn write_agent_skill_roundtrips_normal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_agent_skill(
+            tmp.path(),
+            "deploy-helper",
+            "Deploy the service safely with a dry-run first.",
+            "1. Run the dry-run.\n2. If clean, deploy.",
+        )
+        .expect("write should succeed");
+        assert!(path.ends_with(".claude/skills/deploy-helper/SKILL.md"));
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed = parse_skill(&path, &raw).expect("written skill must parse");
+        assert_eq!(parsed.name, "deploy-helper");
+        assert_eq!(parsed.created_by, crate::state::SkillOrigin::Agent);
+        assert!(parsed.description.unwrap().contains("dry-run"));
+
+        let loaded = load_skills(tmp.path());
+        assert!(loaded.iter().any(|s| s.name == "deploy-helper"));
+    }
+
+    // Robust: invalid names and duplicate writes are rejected (no overwrite, no
+    // path traversal).
+    #[test]
+    fn write_agent_skill_rejects_bad_name_and_overwrite_robust() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["../escape", "Has Space", "UPPER", "ends-", "-starts"] {
+            assert!(
+                matches!(
+                    write_agent_skill(tmp.path(), bad, "d", "b"),
+                    Err(SkillWriteError::InvalidName(_))
+                ),
+                "name `{bad}` should be rejected"
+            );
+        }
+        write_agent_skill(tmp.path(), "once", "d", "b").unwrap();
+        assert!(matches!(
+            write_agent_skill(tmp.path(), "once", "d", "b"),
+            Err(SkillWriteError::AlreadyExists(_, _))
+        ));
+    }
+
+    // Robust: a single-quote in the description is YAML-escaped so the file
+    // still parses.
+    #[test]
+    fn write_agent_skill_escapes_description_robust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path =
+            write_agent_skill(tmp.path(), "quoter", "It's a test: don't break", "body").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed = parse_skill(&path, &raw).expect("escaped description must parse");
+        assert_eq!(parsed.description.unwrap(), "It's a test: don't break");
     }
 }

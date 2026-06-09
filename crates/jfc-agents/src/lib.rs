@@ -16,10 +16,11 @@ pub use lifecycle::{
     render_skills_section,
 };
 pub use registry::{
-    built_in_agents, built_in_skills, find_skill_by_name, load_agents, load_skills,
+    SkillWriteError, built_in_agents, built_in_skills, find_skill_by_name, load_agents,
+    load_skills, write_agent_skill,
 };
 pub use state::{
-    Skill, SkillContext, SkillFile, SkillRenderContext, parse_agent, parse_skill,
+    Skill, SkillContext, SkillFile, SkillOrigin, SkillRenderContext, parse_agent, parse_skill,
     render_skill_invocation, split_frontmatter,
 };
 
