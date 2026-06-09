@@ -10,6 +10,7 @@ use jfc_core::SessionId;
 use tracing::debug;
 
 mod catalog;
+mod git_commits;
 mod search;
 mod task_history;
 mod task_store;
@@ -20,6 +21,7 @@ pub use catalog::{
     load_session_metadata, most_recent_session, most_recent_session_for_cwd, relative_time,
     shorten_cwd,
 };
+pub use git_commits::{CommitHit, search as search_commits};
 pub use search::{
     SessionBrief, SessionHit, SessionMessage, browse as browse_sessions,
     discover as search_sessions, scroll as scroll_session,
