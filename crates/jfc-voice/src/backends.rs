@@ -105,30 +105,52 @@ pub async fn transcribe(pcm: &[u8], cfg: &VoiceConfig) -> anyhow::Result<Option<
     }
 }
 
-// ── Anthropic batch transcription ────────────────────────────────────────────
+// ── Anthropic batch transcription (opt-in gateway only) ──────────────────────
 //
-// CC uses a real-time WebSocket for live transcription. For simplicity, JFC
-// uses the same endpoint but sends the whole WAV after recording stops —
-// getting a single transcript response. The streaming WebSocket path is
-// implemented separately in `anthropic_streaming.rs` for future use.
+// Claude Code transcribes over an undocumented WebSocket protocol
+// (`/api/ws/speech_to_text/voice_stream`) backed by a native module — not a
+// batch REST endpoint. jfc deliberately does NOT reverse-engineer that unstable
+// protocol. This function therefore only runs when the user explicitly
+// configures `voice.anthropic_voice_url` to a Whisper-compatible gateway that
+// implements `/v1/audio/transcriptions`; otherwise it fails fast (no doomed
+// upload to api.anthropic.com) and the chain falls through to OpenAI Whisper.
 
 async fn try_anthropic_batch(wav: &[u8], cfg: &VoiceConfig) -> anyhow::Result<Option<String>> {
+    // IMPORTANT — Anthropic has no public batch REST transcription endpoint.
+    //
+    // Claude Code does speech-to-text over a *WebSocket* stream
+    // (`/api/ws/speech_to_text/voice_stream`), pushing PCM frames and receiving
+    // partial/final transcripts. The wire protocol (frame framing, message
+    // tags) is not publicly documented and is delivered through a compiled
+    // native `audio-capture.node` module in the CC binary — it can't be
+    // reliably reproduced here without reverse-engineering an undocumented,
+    // unstable protocol. So jfc does NOT speculatively implement it.
+    //
+    // Consequently, the default `api.anthropic.com` has no compatible batch
+    // endpoint: a POST there 404s after uploading the whole WAV (wasted
+    // bandwidth + latency on every utterance) and then falls through to OpenAI.
+    // To avoid that doomed round-trip we only attempt an Anthropic-compatible
+    // batch transcription when the user has explicitly pointed
+    // `anthropic_voice_url` at an OpenAI-/Whisper-compatible gateway that they
+    // know implements `/v1/audio/transcriptions`. Otherwise we fail fast and
+    // let the chain fall through to OpenAI Whisper (the working path).
+    let Some(base_url) = cfg.anthropic_voice_url.as_deref().filter(|u| !u.is_empty()) else {
+        return Err(anyhow::anyhow!(
+            "Anthropic batch STT is not available (CC uses an undocumented WebSocket \
+             protocol jfc does not implement). Set voice.anthropic_voice_url to a \
+             Whisper-compatible /v1/audio/transcriptions gateway to use it, or rely on \
+             the OpenAI Whisper fallback."
+        ));
+    };
+
     // Read OAuth token from environment (set by the auth subsystem).
     let token = std::env::var("CLAUDE_ACCESS_TOKEN")
         .or_else(|_| std::env::var("ANTHROPIC_ACCESS_TOKEN"))
         .or_else(|_| std::env::var("JFC_ANTHROPIC_ACCESS_TOKEN"))
         .context("no Anthropic OAuth token available for voice STT")?;
 
-    let base_url = cfg
-        .anthropic_voice_url
-        .as_deref()
-        .unwrap_or("https://api.anthropic.com");
-
-    // Use the REST transcription endpoint (simpler than WebSocket for batch).
-    // CC uses /api/ws/speech_to_text/voice_stream (WebSocket) for streaming;
-    // we use /v1/audio/transcriptions-compatible or fall back to the WS endpoint.
-    // Use a multipart POST to the Anthropic transcription endpoint.
-    // Returns Err if the endpoint returns 404 (not available), which triggers fallthrough.
+    // The configured gateway must expose an OpenAI-compatible transcription
+    // route. (We do not append to api.anthropic.com — that endpoint 404s.)
     let url = format!("{base_url}/v1/audio/transcriptions");
 
     let client = reqwest::Client::new();
@@ -157,7 +179,9 @@ async fn try_anthropic_batch(wav: &[u8], cfg: &VoiceConfig) -> anyhow::Result<Op
         .context("Anthropic STT HTTP request failed")?;
 
     if resp.status() == 404 {
-        return Err(anyhow::anyhow!("Anthropic REST transcription endpoint not found"));
+        return Err(anyhow::anyhow!(
+            "Anthropic REST transcription endpoint not found"
+        ));
     }
 
     if !resp.status().is_success() {
@@ -534,8 +558,7 @@ pub mod anthropic_streaming {
             "Authorization",
             format!("Bearer {oauth_token}").parse().unwrap(),
         );
-        req.headers_mut()
-            .insert("x-app", "cli".parse().unwrap());
+        req.headers_mut().insert("x-app", "cli".parse().unwrap());
         let (ws, _) = connect_async_tls_with_config(req, None, false, None)
             .await
             .context("WebSocket connection failed")?;
@@ -581,9 +604,7 @@ pub mod anthropic_streaming {
     }
 
     async fn run_reader_loop<S>(
-        read: &mut futures_util::stream::SplitStream<
-            tokio_tungstenite::WebSocketStream<S>,
-        >,
+        read: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
         event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -690,7 +711,10 @@ mod tests {
         let input = "How are you? I am fine. How are you?";
         // Only collapses *adjacent* duplicates, so the second "How are you?"
         // (after "I am fine.") is kept.
-        assert_eq!(collapse_repeats(input), "How are you? I am fine. How are you?");
+        assert_eq!(
+            collapse_repeats(input),
+            "How are you? I am fine. How are you?"
+        );
     }
 
     #[test]
@@ -717,6 +741,43 @@ mod tests {
 }
 
 #[cfg(test)]
+mod anthropic_backend_tests {
+    use super::*;
+    use crate::config::VoiceConfig;
+
+    // Anthropic batch STT must fail fast (not upload + 404) when no compatible
+    // gateway is configured, so the chain falls through to OpenAI Whisper. CC's
+    // real STT is an undocumented WebSocket protocol jfc does not implement.
+    #[tokio::test]
+    async fn anthropic_batch_fails_fast_without_gateway_robust() {
+        let cfg = VoiceConfig {
+            anthropic_voice_url: None,
+            ..Default::default()
+        };
+        let wav = vec![0u8; 64];
+        let err = try_anthropic_batch(&wav, &cfg)
+            .await
+            .expect_err("must error without a configured gateway");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not available") && msg.contains("WebSocket"),
+            "error should explain the WS-only reality, got: {msg}"
+        );
+    }
+
+    // An empty gateway URL is treated the same as None (no doomed upload).
+    #[tokio::test]
+    async fn anthropic_batch_empty_url_is_unavailable_robust() {
+        let cfg = VoiceConfig {
+            anthropic_voice_url: Some(String::new()),
+            ..Default::default()
+        };
+        let err = try_anthropic_batch(&[0u8; 64], &cfg).await.unwrap_err();
+        assert!(err.to_string().contains("not available"));
+    }
+}
+
+#[cfg(test)]
 mod hallucination_tests {
     use super::{collapse_repeats, is_whisper_hallucination};
 
@@ -739,7 +800,9 @@ mod hallucination_tests {
         assert!(is_whisper_hallucination(
             "Go to Beadaholique.com for all of your beading supply needs!"
         ));
-        assert!(is_whisper_hallucination("Subtitles by the Amara.org community"));
+        assert!(is_whisper_hallucination(
+            "Subtitles by the Amara.org community"
+        ));
     }
 
     #[test]
