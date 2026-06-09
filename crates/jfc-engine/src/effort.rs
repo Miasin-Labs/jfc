@@ -246,6 +246,7 @@ impl Default for EffortState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn parse_effort_levels() {
@@ -276,7 +277,10 @@ mod tests {
         assert_eq!(ReasoningEffort::from_str_loose("invalid"), None);
     }
 
+    // Serialized: EffortState reads/writes the process-global ACTIVE_EFFORT
+    // slot, so the effort tests can't run concurrently without racing.
     #[test]
+    #[serial]
     fn effort_state_lifecycle() {
         let mut state = EffortState::new();
         assert_eq!(state.api_param(), None);
@@ -292,6 +296,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn ultracode_mode_sets_xhigh_and_flag_normal() {
         let mut state = EffortState::new();
         assert!(!state.is_ultracode());
@@ -306,6 +311,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn explicit_effort_clears_ultracode_normal() {
         let mut state = EffortState::new();
         state.set_ultracode();
@@ -318,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn clear_exits_ultracode_robust() {
         let mut state = EffortState::new();
         state.set_ultracode();
@@ -327,7 +334,11 @@ mod tests {
         assert_eq!(state.badge(), None);
     }
 
+    // Serialized: this mutates the process-global TURN_EFFORT / ACTIVE_EFFORT
+    // statics, so it can't run concurrently with the other turn-effort test
+    // (they raced and intermittently failed under parallel execution).
     #[test]
+    #[serial]
     fn turn_effort_overrides_session_and_is_consumed_normal() {
         // Session pin = low; per-turn override = max. The override wins for one
         // request, then is consumed so the next request reverts to the pin.
@@ -348,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn turn_effort_without_session_pin_then_reverts_robust() {
         // No session pin; a per-turn override applies once then leaves None.
         set_turn_effort(None);
