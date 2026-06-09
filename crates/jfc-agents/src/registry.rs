@@ -512,6 +512,12 @@ pub fn built_in_agents() -> Vec<AgentDef> {
         "Glob",
         "Grep",
         "Bash",
+        // Web access is read-only and routinely needed by research/exploration
+        // agents (e.g. "how does library X work", "find the upstream issue").
+        // Omitting these silently dropped them from the subagent's advertised
+        // catalogue, so Explore/Plan/researcher couldn't search the web at all.
+        "WebSearch",
+        "WebFetch",
         "code_index",
         "graph_query",
         "graph_context",
@@ -596,6 +602,8 @@ pub fn built_in_agents() -> Vec<AgentDef> {
                 "Glob",
                 "Grep",
                 "Bash",
+                "WebSearch",
+                "WebFetch",
                 "code_index",
                 "graph_query",
                 "graph_context",
@@ -638,6 +646,8 @@ pub fn built_in_agents() -> Vec<AgentDef> {
                 "Glob",
                 "Grep",
                 "Bash",
+                "WebSearch",
+                "WebFetch",
                 "code_index",
                 "graph_query",
                 "graph_context",
@@ -927,6 +937,30 @@ mod tests {
         assert!(explore.allowed_tools.iter().any(|t| t == "Read"));
         assert!(explore.disallowed_tools.iter().any(|t| t == "Edit"));
         assert!(!explore.system_prompt.is_empty());
+    }
+
+    // Read-only research agents must be able to search/fetch the web — these are
+    // read-only tools and routinely needed by exploration/research/verification.
+    #[test]
+    fn read_only_agents_can_access_web_normal() {
+        let agents = built_in_agents();
+        for name in ["Explore", "Plan", "verification", "orchestrator"] {
+            let a = agents
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap_or_else(|| panic!("{name} agent missing"));
+            assert!(
+                a.allowed_tools.iter().any(|t| t == "WebSearch"),
+                "{name} must allow WebSearch (allowlist: {:?})",
+                a.allowed_tools
+            );
+            assert!(
+                a.allowed_tools.iter().any(|t| t == "WebFetch"),
+                "{name} must allow WebFetch"
+            );
+            // Web tools must not be accidentally disallowed.
+            assert!(!a.disallowed_tools.iter().any(|t| t == "WebSearch"));
+        }
     }
 
     #[test]

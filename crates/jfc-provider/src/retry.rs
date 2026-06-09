@@ -147,6 +147,19 @@ fn is_transient_stream_message(message: &str) -> bool {
         || lower.contains("too many requests")
         || lower.contains("temporarily overloaded")
         || lower.contains("server overloaded")
+        // Mid-stream connection drops: the socket closed before `message_stop`.
+        // These are transient (a proxy/LB recycled the connection, a brief
+        // network blip) and should auto-retry with backoff — the same as a 529 —
+        // instead of dead-stopping on a "Press Ctrl+R" banner. This is the
+        // "stream cancels mid-flight for no reason" symptom.
+        || lower.contains("ended before `message_stop`")
+        || lower.contains("ended before message_stop")
+        || lower.contains("ended before streamevent::done")
+        || lower.contains("stream ended unexpectedly")
+        || lower.contains("connection reset")
+        || lower.contains("connection closed")
+        || lower.contains("upstream closed the connection")
+        || lower.contains("incomplete message")
         || has_status_context
             && retryable_status_code_in_text(&lower)
                 .is_some_and(|code| should_retry_status(code, None))
@@ -418,5 +431,28 @@ mod tests {
         assert!(retryable_stream_error("HTTP 401 unauthorized").is_none());
         assert!(retryable_stream_error("invalid_request_error: bad tool").is_none());
         assert!(retryable_stream_error("prompt is too long: 500 tokens").is_none());
+    }
+
+    // Mid-stream connection drops (socket closed before message_stop) are
+    // transient and must auto-retry, not dead-stop on a Ctrl+R banner — the
+    // "stream cancels mid-flight for no reason" symptom.
+    #[test]
+    fn retryable_stream_error_recognizes_connection_drops_normal() {
+        assert!(
+            retryable_stream_error(
+                "Provider stream ended before `message_stop`; the response may be incomplete."
+            )
+            .is_some()
+        );
+        assert!(
+            retryable_stream_error(
+                "response body stream ended unexpectedly — upstream closed the connection"
+            )
+            .is_some()
+        );
+        assert!(retryable_stream_error("connection reset by peer").is_some());
+        // But a genuine client/semantic error still does NOT auto-retry.
+        assert!(retryable_stream_error("invalid_request_error: bad tool").is_none());
+        assert!(retryable_stream_error("401 unauthorized").is_none());
     }
 }

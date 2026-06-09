@@ -1098,6 +1098,18 @@ async fn handle_enter_submit(
                 "enter_submit: textarea content captured"
             );
             reset_input(app);
+            // Slash commands are view/config actions (`/voice off`, `/model`,
+            // `/status`, …), not new conversation turns — they must NOT cancel
+            // or queue behind an in-flight stream. Routing `/voice off` through
+            // the interrupt-on-submit path below aborted the model's response
+            // mid-stream (the reported bug). Handle them directly, leaving any
+            // active stream untouched.
+            if text.starts_with('/') {
+                if let Err(e) = handle_submit(app, text, tx).await {
+                    return Some(Err(e));
+                }
+                return Some(Ok(false));
+            }
             // v126 input queueing: when the model is mid-stream OR the
             // approval pipeline is non-empty, queue the prompt instead of
             // blocking on it. The approval gate matters: from the v126 log
