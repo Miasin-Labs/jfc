@@ -9,18 +9,18 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "lucide-react": "latest",
+    "lucide-react": "^1.17.0",
     "playwright": "^1.60.0",
     "pptxgenjs": "^4.0.1",
-    "react": "latest",
-    "react-dom": "latest"
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "@vitejs/plugin-react": "latest",
-    "typescript": "latest",
-    "vite": "latest"
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
   }
 }
