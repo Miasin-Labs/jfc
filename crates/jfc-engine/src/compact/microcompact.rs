@@ -59,6 +59,15 @@ fn keep_window(depth: usize) -> (usize, usize) {
 /// Truncate one large tool-output string to a head + marker + tail window,
 /// where the window size shrinks with age `depth` (0 = newest-eligible). Returns
 /// `None` when the text is already at or below the kept window for that depth.
+///
+/// Within that same age-tiered budget, this routes through
+/// [`jfc_compress::compress_tool_output`]: build/test logs, grep/search
+/// output, and unified diffs keep their *important* lines (errors, fails,
+/// summaries, changed hunks) instead of a blind positional head/tail cut
+/// that can elide a fatal error sitting in the middle of a 10k-line log.
+/// Content with no specialized compressor (prose/source/JSON/HTML) — and
+/// any case where content-aware compression wouldn't beat the window —
+/// falls back to the original head/tail behavior, so this is never worse.
 fn truncate_middle_at_depth(text: &str, depth: usize) -> Option<String> {
     let len = text.chars().count();
     if len <= MICROCOMPACT_MIN_CHARS {
@@ -69,12 +78,14 @@ fn truncate_middle_at_depth(text: &str, depth: usize) -> Option<String> {
     if len <= keep_head + keep_tail {
         return None;
     }
-    let head: String = text.chars().take(keep_head).collect();
-    let tail: String = text.chars().skip(len.saturating_sub(keep_tail)).collect();
-    let dropped = len - keep_head - keep_tail;
-    Some(format!(
-        "{head}\n\n[… {dropped} chars elided by microcompaction …]\n\n{tail}"
-    ))
+    let out = jfc_compress::compress_tool_output(text, keep_head, keep_tail, "");
+    // `compress_tool_output` returns the input verbatim when it's already
+    // under budget; we've established it isn't, so any verbatim return means
+    // nothing was reclaimed — treat as "no change".
+    if out.compressed_chars >= len {
+        return None;
+    }
+    Some(out.text)
 }
 
 /// Age depth for a message at index `idx` given the compaction `cutoff` (the
@@ -287,6 +298,55 @@ mod tests {
         }
     }
 
+    // Content-aware: a build error in the MIDDLE of a long log survives
+    // microcompaction, where the old blind head/tail cut would have elided
+    // it. This is the headline win of the jfc-compress port.
+    #[test]
+    fn microcompact_keeps_mid_log_error_robust() {
+        // Realistic cargo/pytest-style run: status/warn lines throughout so
+        // the content detector recognizes it as build output, with one fatal
+        // error in the middle.
+        let mut lines = Vec::with_capacity(400);
+        for i in 0..400 {
+            if i == 200 {
+                lines.push("error[E0599]: no method named `frobnicate` for `Widget`".to_owned());
+            } else if i % 5 == 0 {
+                lines.push(format!("[INFO] test_case_{i} ... ok"));
+            } else if i % 7 == 0 {
+                lines.push(format!("WARNING: deprecated API in module_{i}"));
+            } else {
+                lines.push(format!("   Compiling crate_{i} v0.1.0"));
+            }
+        }
+        let log = lines.join("\n");
+
+        // Precondition: a depth-0 blind head/tail cut drops the mid-log error.
+        let (keep_head, keep_tail) = keep_window(0);
+        let head: String = log.chars().take(keep_head).collect();
+        let tail: String = log.chars().skip(log.chars().count() - keep_tail).collect();
+        assert!(
+            !head.contains("E0599") && !tail.contains("E0599"),
+            "precondition: blind head/tail must drop the mid-log error"
+        );
+
+        let mut messages = vec![tool_msg(ToolOutput::Text(log.clone()))];
+        messages.extend(padding(PROTECT_RECENT_MESSAGES + 1));
+        let saved = microcompact(&mut messages);
+        assert!(saved > 0, "should reclaim chars");
+
+        let MessagePart::Tool(tc) = &messages[0].parts[0] else {
+            panic!("expected Tool part");
+        };
+        let ToolOutput::Text(s) = &tc.output else {
+            panic!("expected Text output");
+        };
+        assert!(
+            s.contains("E0599"),
+            "content-aware microcompaction must keep the mid-log error"
+        );
+        assert!(s.chars().count() < log.chars().count(), "must compress");
+    }
+
     #[test]
     fn microcompact_protects_recent_messages_robust() {
         // A big tool result within the protected recent window is NOT trimmed.
@@ -313,7 +373,10 @@ mod tests {
         let (hmax, tmax) = keep_window(MAX_DEPTH);
         assert_eq!((h0, t0), (KEEP_HEAD_CHARS, KEEP_TAIL_CHARS));
         assert!(h1 < h0 && t1 < t0, "depth 1 keeps less than depth 0");
-        assert!(hmax >= MIN_HEAD_CHARS && tmax >= MIN_TAIL_CHARS, "never below the floor");
+        assert!(
+            hmax >= MIN_HEAD_CHARS && tmax >= MIN_TAIL_CHARS,
+            "never below the floor"
+        );
         // Beyond MAX_DEPTH is clamped (no further shrink / no panic).
         assert_eq!(keep_window(MAX_DEPTH + 5), keep_window(MAX_DEPTH));
     }
@@ -336,7 +399,9 @@ mod tests {
         // Oldest message is the big one; fill many messages between it and the
         // protect window so it lands in a high depth tier.
         let mut old_first = vec![tool_msg(ToolOutput::Text("Z".repeat(8_000)))];
-        old_first.extend(padding(MESSAGES_PER_DEPTH * MAX_DEPTH + PROTECT_RECENT_MESSAGES + 2));
+        old_first.extend(padding(
+            MESSAGES_PER_DEPTH * MAX_DEPTH + PROTECT_RECENT_MESSAGES + 2,
+        ));
         microcompact(&mut old_first);
         let old_kept = match &old_first[0].parts[0] {
             MessagePart::Tool(tc) => match &tc.output {

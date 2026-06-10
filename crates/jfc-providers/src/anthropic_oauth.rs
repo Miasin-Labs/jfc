@@ -1494,6 +1494,7 @@ impl Provider for AnthropicOAuthProvider {
         let billing_header_text = build_billing_header_text(&version, &billing_hash);
         let user_agent = build_user_agent(&version);
         let body_value = build_body(messages, options, &billing_header_text);
+        crate::anthropic::maybe_warn_volatile_cache_content(&body_value);
         let body_str = serde_json::to_string(&body_value)?;
         let attested_body = {
             #[cfg(feature = "anthropic-oauth-sensitive")]

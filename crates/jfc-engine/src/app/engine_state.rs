@@ -458,7 +458,10 @@ pub struct EngineState {
     /// would race a second concurrent stream task writing the same conversation
     /// buffer. This MUST point at the inner task, not the outer supervisor:
     /// aborting the supervisor only drops its `JoinHandle` to the inner task,
-    /// which *detaches* (keeps running) rather than cancelling it.
+    /// which *detaches* (keeps running) rather than cancelling it. After the
+    /// forceful abort the watchdog auto-retries the turn in place (bounded by
+    /// `MAX_NETWORK_RECOVERY_ATTEMPTS`) rather than killing it outright — a
+    /// byte-silent stall is a transient, not a logical error.
     pub active_stream_handle: Option<tokio::task::AbortHandle>,
     pub always_approved: Vec<String>,
     pub session_approved: Vec<String>,
@@ -1282,7 +1285,7 @@ impl EngineState {
         });
     }
 
-    pub fn check_stream_watchdog(&mut self) {
+    pub fn check_stream_watchdog(&mut self, tx: &crate::runtime::EventSender) {
         if !self.is_streaming {
             return;
         }
@@ -1293,74 +1296,143 @@ impl EngineState {
             .last_stream_event_at
             .map(|t| t.elapsed().as_secs() >= timeout_secs)
             .unwrap_or(false);
-        if timed_out {
-            let streaming_assistant_idx = self.streaming_assistant_idx;
+        if !timed_out {
+            return;
+        }
+
+        let streaming_assistant_idx = self.streaming_assistant_idx;
+        let elapsed_secs = self
+            .last_stream_event_at
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+
+        // A watchdog timeout means the provider went *byte-silent* for
+        // `timeout_secs` — not that the model is slow (every chunk/thinking/
+        // usage event resets `last_stream_event_at`, so a stream that emits
+        // anything never trips this). Byte-silence is a transient: a dead TCP
+        // socket through NAT/LB, a proxy buffering indefinitely, a half-open
+        // connection. Auto-retrying it in place (re-driving the same turn) is
+        // strictly better than killing the turn and making the user press
+        // Ctrl+R, and it composes with the supersession guard in
+        // `handle_stream_error`: once `restart_stream_in_place` mints a fresh
+        // token + sets `is_streaming = true`, the *old* task's late error
+        // ("Stream timed out" / "stream task cancelled") lands on a live fresh
+        // stream and is dropped as stale rather than surfacing.
+        let can_retry = watchdog_retry_enabled()
+            && streaming_assistant_idx.is_some()
+            && self.network_recovery_attempts < crate::app::MAX_NETWORK_RECOVERY_ATTEMPTS;
+
+        // Common teardown of the dead task. Cancel cooperatively (the drain
+        // loop polls `cancel_token`) AND abort forcefully (a task wedged in a
+        // blocking syscall never reaches a `.cancelled()` check). The abort
+        // handle must be taken before `restart_stream_in_place` overwrites it
+        // with the new inner task's handle. We do NOT mint a fresh token here:
+        // the retry path lets `restart_stream_in_place` mint it (after reading
+        // the old token's clones are already cancelled), and the give-up path
+        // mints its own below.
+        self.cancel_token.cancel();
+        if let Some(handle) = self.active_stream_handle.take() {
+            handle.abort();
+        }
+
+        if can_retry {
+            let idx = streaming_assistant_idx.expect("can_retry checked is_some");
+            let turn_started_at = self.turn_started_at;
             tracing::warn!(
                 target: "jfc::app",
-                elapsed_secs = self.last_stream_event_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                "stream watchdog: cancelling hard-idle stream"
+                elapsed_secs,
+                attempt = self.network_recovery_attempts + 1,
+                max = crate::app::MAX_NETWORK_RECOVERY_ATTEMPTS,
+                "stream watchdog: idle stream — auto-retrying in place"
             );
-            // Cancel the stream task so it actually stops sending events.
-            // Without this the stream task continues running in the
-            // background, can still modify messages, and can dispatch
-            // tools into a stale context — the "half-dead state" bug.
-            self.cancel_token.cancel();
-            // Belt-and-suspenders: forcefully abort the spawned driver
-            // task too. The cooperative cancel above only stops the
-            // task if it polls `cancel_token`. A task wedged inside a
-            // blocking syscall (sync DNS lookup, sync audit-log write)
-            // never reaches a `.cancelled()` check, so the next user
-            // submission would race a second concurrent stream task
-            // writing the same conversation buffer — interleaved
-            // assistant prose. `JoinHandle::abort` schedules a forced
-            // unwind at the next await point.
-            if let Some(handle) = self.active_stream_handle.take() {
-                handle.abort();
-            }
-            // CRITICAL: replace the token after cancelling so the NEXT
-            // user submission gets a fresh, uncancelled token. Without
-            // this, every subsequent stream would immediately see
-            // `is_cancelled() == true` and emit "Interrupted by user"
-            // — that was the spurious-interrupt bug. The previous user
-            // submission's cancel flowed forward forever because the
-            // token is a single shared instance, not per-turn.
-            self.cancel_token = tokio_util::sync::CancellationToken::new();
-            self.is_streaming = false;
-            self.streaming_started_at = None;
-            self.last_stream_event_at = None;
-            self.streaming_last_token_at = None;
-            self.token_rate_samples.clear();
-            self.thinking_started_at = None;
-            self.thinking_ended_at = None;
-            self.streaming_text.clear();
-            self.streaming_reasoning.clear();
-            self.streaming_response_bytes = 0;
-            self.streaming_assistant_idx = None;
-            self.current_stream_request = None;
-            self.stream_lifecycle = None;
-            self.turn_started_at = None;
-            // Clear any pending tool calls that accumulated during the
-            // dead stream — they're stale and would dispatch into wrong
-            // context if processed later.
+            // Clear stale tool bookkeeping that may have accrued before the
+            // stall (mirrors the network-error auto-retry path in
+            // `handle_stream_error`). `restart_stream_in_place` re-establishes
+            // the streaming fields, mints a fresh cancel token, and re-sets
+            // `is_streaming = true` / `last_stream_event_at = now`.
             self.pending_tool_calls.clear();
             self.pre_dispatched_tool_ids.clear();
             self.deferred_tool_uses.clear();
             self.in_progress_tool_use_ids.clear();
             self.in_flight_eager_dispatches = 0;
             self.in_flight_tool_batches = 0;
-            if let Some(idx) = streaming_assistant_idx
-                && idx < self.messages.len()
-            {
-                let msg = &self.messages[idx];
-                let empty_stream_placeholder = msg.role == Role::Assistant
-                    && msg.parts.iter().all(
-                        |part| matches!(part, MessagePart::Text(text) if text.trim().is_empty()),
-                    );
-                if empty_stream_placeholder {
-                    self.messages.remove(idx);
-                }
+            // Drive the recovery banner + attempt counter through the same
+            // machinery as a 529/transient so the spinner shows "reconnecting"
+            // and the bound is shared with network retries.
+            crate::runtime::record_network_recovery(
+                self,
+                NetworkRecoveryProvider::Provider,
+                "Stream timed out (watchdog) — reconnecting",
+            );
+            self.exploration_state
+                .bump_for_signal(crate::exploration::ExplorationSignal::StreamRetry);
+            crate::runtime::restart_stream_in_place(self, tx, idx, turn_started_at);
+            return;
+        }
+
+        // Give-up path: retry disabled or attempts exhausted. Tear the turn
+        // down and surface a hard error so the user can Ctrl+R, rather than
+        // leaving a frozen spinner.
+        tracing::warn!(
+            target: "jfc::app",
+            elapsed_secs,
+            attempts = self.network_recovery_attempts,
+            "stream watchdog: idle stream — giving up (retry disabled or exhausted)"
+        );
+        self.cancel_token = tokio_util::sync::CancellationToken::new();
+        self.is_streaming = false;
+        self.streaming_started_at = None;
+        self.last_stream_event_at = None;
+        self.streaming_last_token_at = None;
+        self.token_rate_samples.clear();
+        self.thinking_started_at = None;
+        self.thinking_ended_at = None;
+        self.streaming_text.clear();
+        self.streaming_reasoning.clear();
+        self.streaming_response_bytes = 0;
+        self.streaming_assistant_idx = None;
+        self.current_stream_request = None;
+        self.stream_lifecycle = None;
+        self.turn_started_at = None;
+        self.network_recovery_status = None;
+        self.network_recovery_attempts = 0;
+        // Clear any pending tool calls that accumulated during the
+        // dead stream — they're stale and would dispatch into wrong
+        // context if processed later.
+        self.pending_tool_calls.clear();
+        self.pre_dispatched_tool_ids.clear();
+        self.deferred_tool_uses.clear();
+        self.in_progress_tool_use_ids.clear();
+        self.in_flight_eager_dispatches = 0;
+        self.in_flight_tool_batches = 0;
+        let mut removed_placeholder = false;
+        if let Some(idx) = streaming_assistant_idx
+            && idx < self.messages.len()
+        {
+            let msg = &self.messages[idx];
+            let empty_stream_placeholder = msg.role == Role::Assistant
+                && msg
+                    .parts
+                    .iter()
+                    .all(|part| matches!(part, MessagePart::Text(text) if text.trim().is_empty()));
+            if empty_stream_placeholder {
+                self.messages.remove(idx);
+                removed_placeholder = true;
             }
         }
+        // Only append a hard-error message when there's a turn to attach it to.
+        // If the placeholder was the whole turn (no content streamed) we still
+        // surface a toast so the stopped spinner is explained.
+        let error_text = "Stream timed out — the model stopped sending data and the watchdog \
+                          gave up. Press Ctrl+R to retry.";
+        if !removed_placeholder {
+            self.messages
+                .push(ChatMessage::assistant(format!("**Error:** {error_text}")));
+        }
+        crate::toast::push_with_cap(
+            &mut self.toasts,
+            crate::toast::Toast::new(crate::toast::ToastKind::Error, error_text),
+        );
     }
 
     /// Resolve the git repository root by walking up from `cwd`.
@@ -1618,5 +1690,176 @@ fn stream_watchdog_timeout_secs() -> Option<u64> {
     match std::env::var("JFC_STREAM_WATCHDOG_TIMEOUT_SECS") {
         Ok(raw) => raw.trim().parse::<u64>().ok().filter(|&secs| secs != 0),
         Err(_) => Some(STREAM_WATCHDOG_TIMEOUT_SECS),
+    }
+}
+
+/// Whether the watchdog should re-drive a hard-idle stream in place instead of
+/// tearing the turn down. On by default (a stall is a transient, not a logical
+/// error); set `JFC_DISABLE_STREAM_WATCHDOG_RETRY` to fall back to the old
+/// kill-the-turn behavior.
+fn watchdog_retry_enabled() -> bool {
+    !std::env::var("JFC_DISABLE_STREAM_WATCHDOG_RETRY")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn available_models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        async fn stream(
+            &self,
+            _messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+    impl jfc_provider::seal::Sealed for TestProvider {}
+
+    /// A streaming state whose last event was `idle_secs` ago — i.e. the
+    /// watchdog (90s default) considers it hard-idle.
+    fn idle_streaming_state(idle_secs: u64) -> EngineState {
+        let mut state = EngineState::new(Arc::new(TestProvider), "test-model");
+        state.task_store = jfc_session::TaskStore::in_memory();
+        state.messages.push(ChatMessage::user("prompt".into()));
+        state.messages.push(ChatMessage::assistant(String::new()));
+        state.streaming_assistant_idx = Some(1);
+        state.is_streaming = true;
+        let stale = Instant::now() - Duration::from_secs(idle_secs);
+        state.last_stream_event_at = Some(stale);
+        state.streaming_started_at = Some(stale);
+        state.turn_started_at = Some(stale);
+        state
+    }
+
+    // A live-but-slow stream (last event recent) must NOT trip the watchdog —
+    // the 90s clock is silence-since-last-event, so a stream emitting anything
+    // keeps itself alive.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn watchdog_leaves_recently_active_stream_alone_normal() {
+        let mut state = idle_streaming_state(2);
+        let (tx, _rx) = mpsc::channel(8);
+        state.check_stream_watchdog(&tx);
+        assert!(state.is_streaming, "recent activity must keep streaming");
+        assert_eq!(state.network_recovery_attempts, 0, "no retry recorded");
+    }
+
+    // The core ask: a hard-idle stream auto-retries in place instead of dying.
+    // After the watchdog fires, the turn is still streaming (a fresh stream was
+    // re-driven), the recovery counter incremented, and the cancel token is
+    // fresh (not cancelled) so the new stream isn't poisoned.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn watchdog_auto_retries_idle_stream_in_place_robust() {
+        unsafe {
+            std::env::remove_var("JFC_DISABLE_STREAM_WATCHDOG_RETRY");
+            std::env::remove_var("JFC_DISABLE_STREAM_WATCHDOG");
+            std::env::remove_var("JFC_STREAM_WATCHDOG_TIMEOUT_SECS");
+        }
+        let mut state = idle_streaming_state(120);
+        let (tx, _rx) = mpsc::channel(8);
+
+        state.check_stream_watchdog(&tx);
+
+        assert!(state.is_streaming, "turn re-driven, still streaming");
+        assert_eq!(state.streaming_assistant_idx, Some(1));
+        assert_eq!(
+            state.network_recovery_attempts, 1,
+            "one recovery attempt recorded"
+        );
+        assert!(
+            state.network_recovery_status.is_some(),
+            "recovery banner armed"
+        );
+        assert!(
+            !state.cancel_token.is_cancelled(),
+            "fresh token for the re-driven stream"
+        );
+        assert_eq!(state.messages.len(), 2, "no hard-error message appended");
+    }
+
+    // Bound: once `network_recovery_attempts` reaches the cap, the watchdog
+    // gives up — tears the turn down and surfaces a hard error so the user can
+    // Ctrl+R rather than watching a frozen spinner forever.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn watchdog_gives_up_after_max_attempts_robust() {
+        unsafe {
+            std::env::remove_var("JFC_DISABLE_STREAM_WATCHDOG_RETRY");
+            std::env::remove_var("JFC_DISABLE_STREAM_WATCHDOG");
+            std::env::remove_var("JFC_STREAM_WATCHDOG_TIMEOUT_SECS");
+        }
+        let mut state = idle_streaming_state(120);
+        state.messages[1] = ChatMessage::assistant("partial output".into());
+        state.network_recovery_attempts = crate::app::MAX_NETWORK_RECOVERY_ATTEMPTS;
+        let (tx, _rx) = mpsc::channel(8);
+
+        state.check_stream_watchdog(&tx);
+
+        assert!(!state.is_streaming, "exhausted: turn torn down");
+        assert_eq!(state.network_recovery_attempts, 0, "counter reset on give-up");
+        assert!(
+            !state.cancel_token.is_cancelled(),
+            "fresh token for the next turn"
+        );
+        let last = state.messages.last().expect("error message appended");
+        let text: String = last
+            .parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Text(t) => t.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(text.contains("**Error:**"), "hard error surfaced: {text}");
+        assert!(!state.toasts.is_empty(), "error toast surfaced");
+    }
+
+    // Opt-out: with the retry disabled, a hard-idle stream tears down on the
+    // first timeout (the original behavior), surfacing a hard error.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn watchdog_retry_opt_out_tears_down_robust() {
+        unsafe {
+            std::env::set_var("JFC_DISABLE_STREAM_WATCHDOG_RETRY", "1");
+            std::env::remove_var("JFC_DISABLE_STREAM_WATCHDOG");
+            std::env::remove_var("JFC_STREAM_WATCHDOG_TIMEOUT_SECS");
+        }
+        let mut state = idle_streaming_state(120);
+        state.messages[1] = ChatMessage::assistant("partial output".into());
+        let (tx, _rx) = mpsc::channel(8);
+
+        state.check_stream_watchdog(&tx);
+
+        unsafe {
+            std::env::remove_var("JFC_DISABLE_STREAM_WATCHDOG_RETRY");
+        }
+        assert!(!state.is_streaming, "opt-out: turn torn down on first timeout");
+        assert_eq!(state.network_recovery_attempts, 0, "no retry recorded");
+        let last = state.messages.last().expect("error message appended");
+        let text: String = last
+            .parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Text(t) => t.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(text.contains("**Error:**"), "hard error surfaced: {text}");
     }
 }

@@ -16,6 +16,27 @@ const NARRATION_SUMMARIES_BETA: &str = jfc_anthropic_sdk::beta::NARRATION_SUMMAR
 
 pub const AUTO_RETRY_SENTINEL: &str = jfc_provider::retry::ANTHROPIC_AUTO_RETRY_SENTINEL;
 
+/// Opt-in prompt-cache hygiene scan. When `JFC_CACHE_VOLATILITY_WARN` is set,
+/// scan the outbound request body for volatile content (per-request
+/// timestamps / UUIDs / id-named fields) sitting inside the cacheable prefix
+/// — those silently bust Anthropic prompt-cache hits. Off by default
+/// (progressive disclosure): zero cost unless explicitly enabled. The scan is
+/// strictly read-only — it never mutates the body — and emits one
+/// structured `tracing::warn!` per finding.
+pub(crate) fn maybe_warn_volatile_cache_content(body: &serde_json::Value) {
+    let enabled = std::env::var("JFC_CACHE_VOLATILITY_WARN")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let findings =
+        jfc_compress::volatile::detect_volatile_content(body, jfc_compress::volatile::ApiKind::Anthropic);
+    if !findings.is_empty() {
+        jfc_compress::volatile::emit_volatile_warnings(&findings, "anthropic.messages");
+    }
+}
+
 pub struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
@@ -255,6 +276,7 @@ impl Provider for AnthropicProvider {
         options: &StreamOptions,
     ) -> anyhow::Result<EventStream> {
         let body = build_body(messages, options);
+        maybe_warn_volatile_cache_content(&body);
 
         let beta_header = build_beta_header(options);
 
@@ -583,6 +605,32 @@ mod tests {
             "## Current diagnostics\n\nvolatile"
         );
         assert!(body["system"][1].get("cache_control").is_none());
+    }
+
+    // The volatile-cache scan runs over the real built body shape and flags a
+    // per-request UUID embedded in the (cacheable) system prompt — the exact
+    // content that silently busts prompt-cache hits. Confirms the detector is
+    // wired to the Anthropic body shape, not just unit-tested in isolation.
+    #[test]
+    fn volatile_scan_flags_uuid_in_built_system_prompt_robust() {
+        let body = build_body(
+            vec![make_user_msg("hi")],
+            &opts("m").system("session 550e8400-e29b-41d4-a716-446655440000 active"),
+        );
+        let findings = jfc_compress::volatile::detect_volatile_content(
+            &body,
+            jfc_compress::volatile::ApiKind::Anthropic,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == jfc_compress::volatile::VolatileKind::Uuid),
+            "built body's system prompt UUID must be flagged: {findings:?}"
+        );
+        // And the scan must not mutate the body it inspects.
+        let before = serde_json::to_vec(&body).unwrap();
+        maybe_warn_volatile_cache_content(&body);
+        assert_eq!(before, serde_json::to_vec(&body).unwrap());
     }
 
     // Robust: when no system prompt is set, the field must be absent (sending

@@ -78,6 +78,31 @@ pub async fn handle_stream_error(state: &mut EngineState, tx: &EventSender, e: S
         return;
     }
 
+    // A "stream task cancelled" JoinError is the supervisor reporting that
+    // the inner stream task was forcefully aborted. Every deliberate abort
+    // path (interrupt(), the watchdog, the first error event's own cleanup)
+    // resets stream state *before* this JoinError lands — fresh cancel
+    // token, cleared interrupt flag, is_streaming=false — so neither the
+    // supersession guard above (needs is_streaming=true) nor the
+    // interrupted_by_user check below (needs a cancelled token / set flag)
+    // recognizes it, and it used to surface as a hard
+    // "Stream error: stream task cancelled: task N was cancelled" toast on
+    // a turn that was already fully cleaned up. If no stream is live
+    // anymore (no streaming slot, no active handle), there is nothing left
+    // to report on: drop it.
+    if e.starts_with("stream task cancelled")
+        && !state.is_streaming
+        && state.streaming_assistant_idx.is_none()
+        && state.active_stream_handle.is_none()
+    {
+        tracing::info!(
+            target: "jfc::stream",
+            error = %e,
+            "dropping late join error from an already-cleaned-up aborted stream"
+        );
+        return;
+    }
+
     let interrupted_by_user = e.contains("Interrupted by user")
         || (e.starts_with("stream task cancelled")
             && (state.cancel_token.is_cancelled()
@@ -623,6 +648,31 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             "interrupt flag should be cleared after cleanup"
         );
+    }
+
+    // Robust: a late JoinError from an aborted stream task landing AFTER the
+    // turn was already fully cleaned up (watchdog or interrupt path reset
+    // everything, minted a fresh token, cleared the flag) must be dropped —
+    // not surfaced as a hard "Stream error: stream task cancelled" toast.
+    #[tokio::test]
+    async fn late_join_error_after_cleanup_is_dropped_robust() {
+        let mut state = test_app();
+        state.messages.push(ChatMessage::user("prompt".into()));
+        // Already cleaned up: nothing streaming, no slot, no handle.
+        state.is_streaming = false;
+        state.streaming_assistant_idx = None;
+        state.active_stream_handle = None;
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_stream_error(
+            &mut state,
+            &tx,
+            "stream task cancelled: task 919 was cancelled".to_owned(),
+        )
+        .await;
+
+        assert_eq!(state.messages.len(), 1, "no hard error appended");
+        assert!(state.toasts.is_empty(), "no error toast pushed");
     }
 
     #[tokio::test]

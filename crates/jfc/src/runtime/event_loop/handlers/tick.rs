@@ -26,7 +26,7 @@ pub(crate) async fn handle_tick(
     let mut needs_draw = false;
 
     app.spinner_frame = (app.spinner_frame + 1) % crate::app::SPINNER.len();
-    app.engine.check_stream_watchdog();
+    app.engine.check_stream_watchdog(tx);
 
     // Advance the spinner phase machine here, on the throttled tick, so the
     // status label can only change as fast as the dwell allows (anti-flicker).
