@@ -1592,6 +1592,31 @@ async fn execute_edit_whitespace_tolerant_on_indent_drift_normal() {
     assert!(content.contains("let b = 200;"), "{content}");
 }
 
+#[test]
+fn apply_one_edit_exact_and_ws_tolerant_normal() {
+    use super::filesystem::apply_one_edit;
+    // Exact match.
+    let out = apply_one_edit("let a = 1;\n", "a = 1", "a = 2", false, "e1").unwrap();
+    assert_eq!(out, "let a = 2;\n");
+    // Whitespace-tolerant: file has 8-space indent, edit supplies 4-space.
+    let file = "fn f() {\n        a();\n        b();\n}\n";
+    let out = apply_one_edit(file, "    a();\n    b();", "    c();", false, "e2").unwrap();
+    assert!(out.contains("    c();") || out.contains("        c();") == false);
+    assert!(out.contains("c();"));
+}
+
+#[test]
+fn apply_one_edit_ambiguous_and_missing_fail_robust() {
+    use super::filesystem::apply_one_edit;
+    // No match → error mentioning the label.
+    let err = apply_one_edit("hello\n", "xyz", "q", false, "e9").unwrap_err();
+    assert!(err.contains("e9"), "{err}");
+    assert!(err.to_lowercase().contains("not found"), "{err}");
+    // Multiple exact matches without replace_all → error.
+    let err = apply_one_edit("x x x", "x", "y", false, "e3").unwrap_err();
+    assert!(err.contains("matched"), "{err}");
+}
+
 #[tokio::test]
 async fn execute_edit_tolerates_unicode_punct_drift_normal() {
     // File uses an em-dash and curly quotes; the model emits ASCII hyphen and

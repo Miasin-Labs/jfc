@@ -563,38 +563,35 @@ pub async fn execute_tool(
                     .get("replace_all")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                if old.is_empty() {
-                    return ExecutionResult::failure(format!(
-                        "MultiEdit: edit {} has empty old_string",
-                        i + 1
-                    ));
+                // Use the shared tiered matcher (exact → whitespace/unicode-
+                // tolerant) so MultiEdit's per-edit matching is as robust as
+                // Edit's — the prior raw `content.contains(old)` was the source
+                // of most MultiEdit "old_string not found" failures.
+                let label = format!(
+                    "MultiEdit: edit {} of {} (earlier applied: {applied})",
+                    i + 1,
+                    edit_array.len()
+                );
+                match crate::tools::filesystem::apply_one_edit(
+                    &content,
+                    old,
+                    new_s,
+                    replace_all,
+                    &label,
+                ) {
+                    Ok(updated) => content = updated,
+                    Err(e) => return ExecutionResult::failure(e),
                 }
-                if !content.contains(old) {
-                    return ExecutionResult::failure(format!(
-                        "MultiEdit: edit {} of {} — old_string not found. \
-                         Earlier edits applied: {applied}. \
-                         Read the file and retry with the current contents.",
-                        i + 1,
-                        edit_array.len()
-                    ));
-                }
-                content = if replace_all {
-                    content.replace(old, new_s)
-                } else {
-                    let occurrences = content.matches(old).count();
-                    if occurrences > 1 {
-                        return ExecutionResult::failure(format!(
-                            "MultiEdit: edit {} matched {occurrences} times — \
-                             pass `replace_all: true` or include more context to disambiguate.",
-                            i + 1
-                        ));
-                    }
-                    content.replacen(old, new_s, 1)
-                };
                 applied += 1;
             }
             if let Err(e) = tokio::fs::write(&path, &content).await {
                 return ExecutionResult::failure(format!("MultiEdit: write {file_path}: {e}"));
+            }
+            // Invalidate the read-dedup cache so a subsequent full re-read of
+            // this file returns the post-MultiEdit content, not a stale cache
+            // hit (Edit/Write already do this; MultiEdit previously did not).
+            if let Some(cache) = &dedup {
+                cache.lock().await.invalidate(Path::new(&file_path));
             }
             tracing::info!(
                 target: "jfc::tools::multi_edit",

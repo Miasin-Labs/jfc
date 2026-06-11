@@ -368,6 +368,52 @@ fn locate_whitespace_insensitive(haystack: &str, needle: &str) -> WsMatch {
     }
 }
 
+/// Apply a single old→new replacement to in-memory `content` using the same
+/// tiered matcher as [`execute_edit`] (exact → whitespace/unicode-tolerant),
+/// returning the new content or a descriptive error. Shared by MultiEdit so its
+/// per-edit matching has the same robustness as Edit. `edit_label` is used in
+/// error messages (e.g. "edit 2 of 5").
+pub fn apply_one_edit(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    edit_label: &str,
+) -> Result<String, String> {
+    if old_string.is_empty() {
+        return Err(format!("{edit_label}: old_string is empty"));
+    }
+    let count = content.matches(old_string).count();
+    if count == 1 || (count > 1 && replace_all) {
+        return Ok(if replace_all {
+            content.replace(old_string, new_string)
+        } else {
+            content.replacen(old_string, new_string, 1)
+        });
+    }
+    if count > 1 && !replace_all {
+        return Err(format!(
+            "{edit_label} matched {count} times — pass `replace_all: true` or include more context to disambiguate."
+        ));
+    }
+    // Tier 2: whitespace/unicode-tolerant fallback.
+    match locate_whitespace_insensitive(content, old_string) {
+        WsMatch::Unique(range) => {
+            let mut s = String::with_capacity(content.len());
+            s.push_str(&content[..range.start]);
+            s.push_str(new_string);
+            s.push_str(&content[range.end..]);
+            Ok(s)
+        }
+        WsMatch::Ambiguous(n) => Err(format!(
+            "{edit_label}: old_string not found exactly and the whitespace-insensitive match is ambiguous ({n} candidates). Include surrounding lines to disambiguate."
+        )),
+        WsMatch::None => Err(format!(
+            "{edit_label}: old_string not found. Read the file and retry with the current contents."
+        )),
+    }
+}
+
 pub async fn execute_edit(
     file_path: &str,
     old_string: &str,
