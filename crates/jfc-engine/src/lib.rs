@@ -15,6 +15,7 @@
 //! the names.
 
 pub mod advisor;
+pub mod agentic_vocabulary;
 pub mod agents;
 pub mod app;
 pub mod atomic_write;
