@@ -127,6 +127,9 @@ pub struct ResearchRequest {
     pub max_steps: usize,
     /// Results requested per sub-query search.
     pub results_per_step: usize,
+    /// Rewrite each sub-query for retrieval before searching (mirrors
+    /// Perplexity's `/rest/autosuggest/reformulate-query`). On by default.
+    pub reformulate: bool,
 }
 
 impl ResearchRequest {
@@ -136,6 +139,7 @@ impl ResearchRequest {
             clarifications: Vec::new(),
             max_steps: 4,
             results_per_step: 5,
+            reformulate: true,
         }
     }
 
@@ -148,16 +152,35 @@ impl ResearchRequest {
         self.max_steps = n.max(1);
         self
     }
+
+    pub fn with_reformulation(mut self, on: bool) -> Self {
+        self.reformulate = on;
+        self
+    }
 }
 
-/// The full research deliverable: the plan, the per-step evidence, and the
-/// synthesised final answer.
+/// The full research deliverable: the plan, the per-step evidence, the
+/// synthesised final answer, generated follow-up questions, and the numbered
+/// citation list tying claims back to the steps that produced them.
 #[derive(Debug, Clone)]
 pub struct ResearchReport {
     pub question: String,
     pub plan: Vec<String>,
     pub steps: Vec<ResearchStep>,
     pub synthesis: String,
+    /// Suggested next questions (mirrors Perplexity's `pending_followups_block`).
+    pub followups: Vec<String>,
+}
+
+/// One numbered citation: `[n]` → the successful research step (sub-query) whose
+/// evidence backs it. Mirrors Perplexity's `citation_block` / inline-claim
+/// source anchoring, scoped to a coding assistant (step-level, not span-level).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Citation {
+    /// 1-based citation number as it appears in the rendered report.
+    pub number: usize,
+    /// The sub-query (source label) this citation points at.
+    pub source: String,
 }
 
 /// A research artifact exported to disk: the report rendered as markdown plus a
@@ -174,6 +197,22 @@ impl ResearchReport {
         self.steps.iter().filter(|s| s.succeeded()).count()
     }
 
+    /// The numbered citation list: one `[n]` per successful step, in order.
+    /// Mirrors Perplexity's `citation_block`. The same numbering is appended to
+    /// each step bullet in [`Self::to_markdown`] so a reader can trace a claim
+    /// (a step's evidence) to its source.
+    pub fn citations(&self) -> Vec<Citation> {
+        self.steps
+            .iter()
+            .filter(|s| s.succeeded())
+            .enumerate()
+            .map(|(i, s)| Citation {
+                number: i + 1,
+                source: s.sub_query.clone(),
+            })
+            .collect()
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut out = String::from("## Research\n\n");
         out.push_str(&self.synthesis);
@@ -183,12 +222,23 @@ impl ResearchReport {
             self.plan.len(),
             self.successful_steps()
         ));
+        // Number successful steps so they double as citation anchors.
+        let mut n = 0;
         for step in &self.steps {
             match &step.outcome {
-                StepOutcome::Found(_) => out.push_str(&format!("- ✅ {}\n", step.sub_query)),
+                StepOutcome::Found(_) => {
+                    n += 1;
+                    out.push_str(&format!("- [{n}] ✅ {}\n", step.sub_query));
+                }
                 StepOutcome::Failed(reason) => {
                     out.push_str(&format!("- ⚠️ {} — {}\n", step.sub_query, reason))
                 }
+            }
+        }
+        if !self.followups.is_empty() {
+            out.push_str("\n**Follow-up questions:**\n");
+            for f in &self.followups {
+                out.push_str(&format!("- {f}\n"));
             }
         }
         out
@@ -200,6 +250,10 @@ impl ResearchReport {
             "question": self.question,
             "plan": self.plan,
             "synthesis": self.synthesis,
+            "followups": self.followups,
+            "citations": self.citations().iter().map(|c| {
+                serde_json::json!({ "number": c.number, "source": c.source })
+            }).collect::<Vec<_>>(),
             "steps": self.steps.iter().map(|s| {
                 serde_json::json!({
                     "sub_query": s.sub_query,
@@ -315,6 +369,100 @@ pub fn plan_subqueries(request: &ResearchRequest) -> Vec<String> {
     plan
 }
 
+/// Rewrite a sub-query into a retrieval-friendly search query before it hits the
+/// search backend. Mirrors Perplexity's `/rest/autosuggest/reformulate-query`
+/// (which uses a model); this is a deterministic, dependency-light version:
+/// strip conversational scaffolding ("can you", "please tell me about", a
+/// trailing question mark), collapse whitespace, and keep the salient terms.
+/// The result is never empty — it falls back to the trimmed input.
+pub fn reformulate_query(query: &str) -> String {
+    let lower_trimmed = query.trim();
+    if lower_trimmed.is_empty() {
+        return String::new();
+    }
+
+    // Leading conversational lead-ins that add no retrieval signal.
+    const LEAD_INS: &[&str] = &[
+        "can you tell me about",
+        "can you tell me",
+        "could you tell me about",
+        "please tell me about",
+        "tell me about",
+        "i want to know about",
+        "i want to know",
+        "i'd like to know about",
+        "please explain",
+        "can you explain",
+        "explain to me",
+        "what can you tell me about",
+        "give me information about",
+        "i need information on",
+        "help me understand",
+        "please find",
+        "can you find",
+        "find me",
+    ];
+
+    let mut working = lower_trimmed.to_owned();
+    let lower = working.to_ascii_lowercase();
+    for lead in LEAD_INS {
+        if let Some(rest) = lower.strip_prefix(lead) {
+            // Preserve the original casing of the remainder.
+            let cut = working.len() - rest.len();
+            working = working[cut..].trim_start().to_owned();
+            break;
+        }
+    }
+
+    // Drop a single trailing question mark and collapse internal whitespace.
+    let working = working.trim_end_matches(['?', '.', '!', ' ']);
+    let reformulated = working.split_whitespace().collect::<Vec<_>>().join(" ");
+    if reformulated.is_empty() {
+        lower_trimmed.to_owned()
+    } else {
+        reformulated
+    }
+}
+
+/// Generate follow-up questions from a completed report. Mirrors Perplexity's
+/// `pending_followups_block`. Deterministic: derive next-angle questions from
+/// the original question, capped at three, skipping angles already covered by
+/// the plan.
+pub fn generate_followups(question: &str, plan: &[String]) -> Vec<String> {
+    let base = question.trim().trim_end_matches(['?', '.', '!']);
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let covered = |needle: &str| plan.iter().any(|p| p.to_ascii_lowercase().contains(needle));
+    let mut out = Vec::new();
+    let push = |q: String, out: &mut Vec<String>| {
+        if out.len() < 3 && !out.contains(&q) {
+            out.push(q);
+        }
+    };
+    if !covered("limitation") && !covered("criticism") {
+        push(
+            format!("What are the limitations or criticisms of {base}?"),
+            &mut out,
+        );
+    }
+    if !covered("alternativ") && !covered("compare") {
+        push(
+            format!("What are the main alternatives to {base}?"),
+            &mut out,
+        );
+    }
+    if !covered("latest") && !covered("recent") {
+        push(
+            format!("What are the latest developments in {base}?"),
+            &mut out,
+        );
+    }
+    push(format!("How does {base} work in practice?"), &mut out);
+    out.truncate(3);
+    out
+}
+
 /// Run the full deep-research loop: plan sub-queries, search each in sequence,
 /// collect evidence, and synthesise. A clarification gate is the caller's
 /// responsibility (call [`clarifying_questions`] first and re-enter with
@@ -334,7 +482,13 @@ pub async fn run_research(
     }
 
     let plan = plan_subqueries(&request);
-    let steps = execute_plan(&plan, request.results_per_step, searcher).await;
+    let steps = execute_plan(
+        &plan,
+        request.results_per_step,
+        request.reformulate,
+        searcher,
+    )
+    .await;
 
     let answered = steps.iter().filter(|s| s.succeeded()).count();
     if answered == 0 {
@@ -349,24 +503,36 @@ pub async fn run_research(
             local_synthesis(&question, &steps)
         });
 
+    let followups = generate_followups(&question, &plan);
+
     Ok(ResearchReport {
         question,
         plan,
         steps,
         synthesis,
+        followups,
     })
 }
 
 /// Execute each planned sub-query in sequence, capturing success/failure per
-/// step (one failure never aborts the run).
+/// step (one failure never aborts the run). When `reformulate` is set, each
+/// sub-query is rewritten for retrieval via [`reformulate_query`] before it
+/// hits the search backend; the step records the original sub-query so the plan
+/// stays human-readable.
 async fn execute_plan(
     plan: &[String],
     results_per_step: usize,
+    reformulate: bool,
     searcher: &dyn Searcher,
 ) -> Vec<ResearchStep> {
     let mut steps = Vec::with_capacity(plan.len());
     for sub_query in plan {
-        let outcome = match searcher.search(sub_query, results_per_step).await {
+        let search_query = if reformulate {
+            reformulate_query(sub_query)
+        } else {
+            sub_query.clone()
+        };
+        let outcome = match searcher.search(&search_query, results_per_step).await {
             Ok(text) => StepOutcome::Found(text),
             Err(e) => StepOutcome::Failed(e),
         };
@@ -657,5 +823,148 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-')
         );
+    }
+
+    // ── Query reformulation ────────────────────────────────────────────────────
+
+    #[test]
+    fn reformulate_strips_conversational_leadins_normal() {
+        assert_eq!(
+            reformulate_query("can you tell me about rust async runtimes?"),
+            "rust async runtimes"
+        );
+        assert_eq!(
+            reformulate_query("Please explain how tokio schedules tasks"),
+            "how tokio schedules tasks"
+        );
+        assert_eq!(
+            reformulate_query("find me the fastest sort"),
+            "the fastest sort"
+        );
+    }
+
+    #[test]
+    fn reformulate_preserves_plain_query_and_collapses_ws_normal() {
+        assert_eq!(
+            reformulate_query("rust   async    runtimes"),
+            "rust async runtimes"
+        );
+        assert_eq!(reformulate_query("borrow checker"), "borrow checker");
+    }
+
+    #[test]
+    fn reformulate_never_empty_robust() {
+        assert_eq!(reformulate_query(""), "");
+        // A query that is *only* a lead-in falls back to the trimmed input.
+        assert_eq!(reformulate_query("tell me about"), "tell me about");
+        assert_eq!(reformulate_query("   ?  "), "?");
+    }
+
+    #[tokio::test]
+    async fn run_research_reformulates_before_search_normal() {
+        // A searcher that records the exact query string it received.
+        struct RecordingSearcher {
+            seen: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl Searcher for RecordingSearcher {
+            async fn search(&self, query: &str, _max: usize) -> Result<String, String> {
+                self.seen.lock().unwrap().push(query.to_owned());
+                Ok(format!("results for [{query}]"))
+            }
+        }
+        let searcher = RecordingSearcher {
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let req = ResearchRequest::new("can you tell me about rust async").with_max_steps(1);
+        let _ = run_research(req, &searcher, &CountingSynth).await.unwrap();
+        // The base sub-query "can you tell me about rust async" was reformulated.
+        let seen = searcher.seen.lock().unwrap();
+        assert!(seen.iter().any(|q| q == "rust async"), "saw: {seen:?}");
+    }
+
+    #[tokio::test]
+    async fn run_research_reformulation_off_searches_raw_robust() {
+        struct RecordingSearcher {
+            seen: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl Searcher for RecordingSearcher {
+            async fn search(&self, query: &str, _max: usize) -> Result<String, String> {
+                self.seen.lock().unwrap().push(query.to_owned());
+                Ok("x".to_owned())
+            }
+        }
+        let searcher = RecordingSearcher {
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let req = ResearchRequest::new("tell me about rust")
+            .with_max_steps(1)
+            .with_reformulation(false);
+        let _ = run_research(req, &searcher, &CountingSynth).await.unwrap();
+        let seen = searcher.seen.lock().unwrap();
+        assert!(
+            seen.iter().any(|q| q == "tell me about rust"),
+            "saw: {seen:?}"
+        );
+    }
+
+    // ── Follow-up generation ───────────────────────────────────────────────────
+
+    #[test]
+    fn generate_followups_produces_distinct_questions_normal() {
+        let fups = generate_followups("rust ownership", &["rust ownership".to_owned()]);
+        assert!(!fups.is_empty() && fups.len() <= 3);
+        assert!(fups.iter().all(|f| f.contains("rust ownership")));
+        // No duplicates.
+        let mut sorted = fups.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), fups.len());
+    }
+
+    #[test]
+    fn generate_followups_skips_covered_angles_robust() {
+        // Plan already covers limitations + latest → those follow-ups suppressed.
+        let plan = vec![
+            "x limitations criticism".to_owned(),
+            "x latest developments".to_owned(),
+        ];
+        let fups = generate_followups("x", &plan);
+        assert!(!fups.iter().any(|f| f.contains("limitations")));
+        assert!(!fups.iter().any(|f| f.contains("latest developments")));
+    }
+
+    #[test]
+    fn generate_followups_empty_question_is_empty_robust() {
+        assert!(generate_followups("  ", &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_research_report_includes_followups_normal() {
+        let searcher = MockSearcher::new();
+        let req = ResearchRequest::new("rust async runtimes").with_max_steps(2);
+        let report = run_research(req, &searcher, &CountingSynth).await.unwrap();
+        assert!(!report.followups.is_empty());
+        assert!(report.to_markdown().contains("Follow-up questions"));
+    }
+
+    // ── Citation anchoring ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn report_citations_number_successful_steps_normal() {
+        let searcher = MockSearcher::failing("limitations");
+        let req = ResearchRequest::new("rust async runtimes").with_max_steps(4);
+        let report = run_research(req, &searcher, &CountingSynth).await.unwrap();
+
+        let cites = report.citations();
+        // One citation per successful step, numbered from 1.
+        assert_eq!(cites.len(), report.successful_steps());
+        assert_eq!(cites.first().unwrap().number, 1);
+        // Markdown anchors successful steps as [n]; JSON carries the citation list.
+        let md = report.to_markdown();
+        assert!(md.contains("- [1] ✅"));
+        let json = report.to_json();
+        assert!(json["citations"].as_array().unwrap().len() == cites.len());
     }
 }
