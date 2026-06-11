@@ -204,7 +204,7 @@ pub fn build_digest(memories: &[MemoryRecord], settings: &DigestSettings, now: u
         .filter(|m| m.last_seen_at.map(|t| t >= cutoff).unwrap_or(false))
         .collect();
     // Newest first; records without a timestamp already filtered out above.
-    fresh.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+    fresh.sort_by_key(|m| std::cmp::Reverse(m.last_seen_at));
 
     let considered = fresh.len();
     let items = fresh
