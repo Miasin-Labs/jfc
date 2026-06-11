@@ -673,8 +673,14 @@ pub(super) fn is_invisible_in_transcript(kind: &ToolKind) -> bool {
     }
     matches!(
         kind,
-        // Task management — CC hides all of these
-        ToolKind::TaskCreate
+        // Subagent spawn — every Task spawn also emits a TaskEvent that adds a
+        // dedicated `MessagePart::TaskStatus` (the green ●/spinner row). Rendering
+        // the Task tool block too produces TWO icons for one task (the rose Task
+        // tool glyph next to the TaskStatus dot). The TaskStatus row is the
+        // canonical render, so the raw Task tool block is hidden here.
+        ToolKind::Task
+            // Task management — CC hides all of these
+            | ToolKind::TaskCreate
             | ToolKind::TaskUpdate
             | ToolKind::TaskList
             | ToolKind::TaskGet
@@ -1081,6 +1087,26 @@ pub(crate) fn build_message_items<'a>(
         // narrow gap.
         items.push(RenderItem::MessageEnd);
         items.push(RenderItem::Blank);
+    }
+}
+
+#[cfg(test)]
+mod invisible_tool_tests {
+    use super::is_invisible_in_transcript;
+    use jfc_core::ToolKind;
+
+    #[test]
+    fn task_tool_is_hidden_so_only_taskstatus_renders_normal() {
+        // BUG B: a Task spawn emits both a Tool(Task) block and a TaskStatus
+        // part. The Task tool block must be hidden so the task shows exactly one
+        // status icon (the green ● from TaskStatus), not two.
+        assert!(is_invisible_in_transcript(&ToolKind::Task));
+    }
+
+    #[test]
+    fn bash_stays_visible_robust() {
+        // Bash output is the user's primary signal — it must render.
+        assert!(!is_invisible_in_transcript(&ToolKind::Bash));
     }
 }
 
