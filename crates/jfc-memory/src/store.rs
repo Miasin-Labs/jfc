@@ -483,7 +483,77 @@ pub fn create_memory(
         scope = %scope,
         "created memory"
     );
+    // Keep the project MEMORY.md index fresh automatically. Previously this was
+    // prompt-guidance only ("after writing, add a one-line pointer to
+    // MEMORY.md") with no code path, so the index went stale whenever the model
+    // forgot. User-level memories have no project index, so they're skipped.
+    if !matches!(level, MemoryLevel::User) {
+        if let Err(e) = append_memory_index_pointer(project_root, &path, body) {
+            // Index maintenance is best-effort: a failed append must never lose
+            // the just-written memory file.
+            tracing::warn!(target: "jfc::memory", error = %e, "failed to update MEMORY.md index");
+        }
+    }
     Ok(path)
+}
+
+/// Append a one-line pointer for a freshly-created memory to `<root>/MEMORY.md`,
+/// matching the documented format `- [Title](path) — hook`. Creates the index
+/// (with a heading) if absent, and is idempotent: a pointer to the same file is
+/// never duplicated.
+fn append_memory_index_pointer(
+    project_root: &Path,
+    memory_path: &Path,
+    body: &str,
+) -> std::io::Result<()> {
+    let index = project_root.join("MEMORY.md");
+
+    // Relative path from the project root for a portable link.
+    let rel = memory_path
+        .strip_prefix(project_root)
+        .unwrap_or(memory_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    // Title + hook from the memory body's first non-empty line.
+    let first_line = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("memory");
+    let title = truncate_chars(first_line, 60);
+    let hook = truncate_chars(first_line, 100);
+    let pointer = format!("- [{title}]({rel}) — {hook}");
+
+    let existing = std::fs::read_to_string(&index).unwrap_or_default();
+    // Idempotent: don't append if this file is already linked.
+    if existing.contains(&format!("({rel})")) {
+        return Ok(());
+    }
+
+    let mut out = if existing.trim().is_empty() {
+        String::from("# Project Memory Index\n\n")
+    } else {
+        let mut s = existing;
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s
+    };
+    out.push_str(&pointer);
+    out.push('\n');
+    write_atomic_sync(&index, out.as_bytes())
+}
+
+/// Truncate `s` to at most `max` chars on a char boundary, adding an ellipsis
+/// when cut.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
 }
 
 /// Resolve the memory directory for a given level.
@@ -1006,6 +1076,66 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn create_project_memory_auto_appends_index_pointer_normal() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let path = create_memory(
+            MemoryLevel::Project,
+            MemoryType::Context,
+            MemoryScope::Team,
+            "Build runs from the workspace root via cargo build.",
+            root,
+        )
+        .unwrap();
+
+        let index = fs::read_to_string(root.join("MEMORY.md")).expect("MEMORY.md created");
+        assert!(index.contains("# Project Memory Index"), "{index}");
+        // The pointer links the relative path and carries the title/hook.
+        let rel = path.strip_prefix(root).unwrap().to_string_lossy();
+        assert!(index.contains(&format!("({rel})")), "index links file: {index}");
+        assert!(index.contains("Build runs from the workspace root"), "{index}");
+    }
+
+    #[test]
+    fn create_memory_index_append_is_idempotent_robust() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let p = create_memory(
+            MemoryLevel::Project,
+            MemoryType::Context,
+            MemoryScope::Team,
+            "Same note body.",
+            root,
+        )
+        .unwrap();
+        // Manually append the SAME file's pointer again — must not duplicate.
+        append_memory_index_pointer(root, &p, "Same note body.").unwrap();
+        let index = fs::read_to_string(root.join("MEMORY.md")).unwrap();
+        let rel = p.strip_prefix(root).unwrap().to_string_lossy();
+        let occurrences = index.matches(&format!("({rel})")).count();
+        assert_eq!(occurrences, 1, "pointer must appear exactly once: {index}");
+    }
+
+    #[test]
+    fn create_user_memory_does_not_write_project_index_robust() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // User memories live in the global config dir and have no project index.
+        let _ = create_memory(
+            MemoryLevel::User,
+            MemoryType::Context,
+            MemoryScope::Private,
+            "A user-scoped preference.",
+            root,
+        )
+        .unwrap();
+        assert!(
+            !root.join("MEMORY.md").exists(),
+            "user memory must not create a project MEMORY.md"
+        );
+    }
 
     #[test]
     fn parse_frontmatter_valid() {
