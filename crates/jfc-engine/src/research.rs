@@ -583,6 +583,459 @@ impl Synthesizer for LocalSynthesizer {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Agentic, LLM-driven research loop
+//
+// The deterministic path above (plan_subqueries → execute_plan → local merge)
+// stays as a fallback and for tests. The agentic path below mirrors how
+// claude.ai web research and Perplexity pro-search actually work: a model
+// REFORMULATES the next sub-query from the evidence gathered so far, and a real
+// model SYNTHESISES the collected evidence into cited prose. Both reuse the
+// council's provider-completion helpers (`Provider::complete()` with a
+// stream-to-completion fallback) so research never shares the main agent's
+// stream channel or token accounting.
+// ════════════════════════════════════════════════════════════════════════════
+
+use std::sync::Arc;
+
+use jfc_provider::{
+    CompletionResponse, ModelId, Provider, ProviderContent, ProviderMessage, ProviderRole,
+    StreamEvent, StreamOptions, TokenUsage,
+};
+
+/// Default number of agentic search steps (model-decided queries) for one
+/// research run. The loop stops earlier if the planner signals `DONE`.
+pub const DEFAULT_AGENTIC_STEPS: usize = 6;
+/// Max output tokens for one planner (next-query) completion. Small — it only
+/// emits a single search query.
+const PLANNER_MAX_TOKENS: u32 = 256;
+/// Max output tokens for the final synthesis completion.
+const SYNTH_MAX_TOKENS: u32 = 3072;
+
+const PLANNER_SYSTEM_PROMPT: &str = "\
+You are the planning step of a deep-research loop. Given the user's research \
+question and the evidence gathered by prior searches, decide the single most \
+useful NEXT search query to close the biggest remaining gap. Reply with ONLY \
+that query — no preamble, no quotes, no explanation. The query must be a \
+concise, retrieval-friendly set of keywords (not a sentence). If the evidence \
+already answers the question well enough, reply with exactly DONE.";
+
+const SYNTH_SYSTEM_PROMPT: &str = "\
+You are the synthesis step of a deep-research loop. You are given the original \
+question and numbered evidence blocks gathered from searches (each block is a \
+source: [1], [2], …). Write a direct, well-structured answer to the question \
+grounded in that evidence. Cite sources inline as [n] matching the evidence \
+block numbers whenever you state a fact drawn from them. Lead with the answer, \
+be concrete, and flag where the evidence is thin or conflicting. Do not invent \
+sources or citation numbers that aren't in the evidence.";
+
+/// Run a single tool-less completion, with the advisor/council
+/// stream-to-completion fallback for providers that don't implement
+/// `complete()`.
+async fn research_complete(
+    provider: &dyn Provider,
+    messages: Vec<ProviderMessage>,
+    opts: &StreamOptions,
+) -> Result<CompletionResponse, String> {
+    match provider.complete(messages.clone(), opts).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            let lower = e.to_string().to_lowercase();
+            if lower.contains("not support") || lower.contains("unsupported") {
+                research_stream_to_completion(provider, messages, opts).await
+            } else {
+                Err(e.to_string())
+            }
+        }
+    }
+}
+
+async fn research_stream_to_completion(
+    provider: &dyn Provider,
+    messages: Vec<ProviderMessage>,
+    opts: &StreamOptions,
+) -> Result<CompletionResponse, String> {
+    use futures::StreamExt;
+    let mut stream = provider.stream(messages, opts).await.map_err(|e| e.to_string())?;
+    let mut collected = String::new();
+    let mut usage = TokenUsage::default();
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(StreamEvent::TextDelta { delta, .. }) => collected.push_str(&delta),
+            Ok(StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            }) => {
+                usage.input_tokens = input_tokens as usize;
+                usage.output_tokens = output_tokens as usize;
+                usage.cache_read_tokens = cache_read_tokens as usize;
+                usage.cache_creation_tokens = cache_write_tokens as usize;
+            }
+            Ok(StreamEvent::Done { .. }) => break,
+            Ok(StreamEvent::Error { message }) => return Err(message),
+            Ok(_) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(CompletionResponse {
+        content: collected,
+        usage,
+    })
+}
+
+/// Build the labelled, numbered evidence block handed to the planner/synthesizer
+/// so citation numbers `[n]` line up with successful steps in order.
+fn numbered_evidence(steps: &[ResearchStep]) -> String {
+    let mut block = String::new();
+    let mut n = 0;
+    for step in steps.iter().filter(|s| s.succeeded()) {
+        n += 1;
+        block.push_str(&format!(
+            "\n[{n}] (query: {})\n{}\n",
+            step.sub_query,
+            step.evidence().unwrap_or_default()
+        ));
+    }
+    block
+}
+
+/// An LLM synthesizer: produces real cited prose from the gathered evidence.
+/// Falls back to the deterministic [`local_synthesis`] only if the model errors.
+pub struct LlmSynthesizer {
+    pub provider: Arc<dyn Provider>,
+    pub model: ModelId,
+}
+
+impl LlmSynthesizer {
+    pub fn new(provider: Arc<dyn Provider>, model: impl Into<ModelId>) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Synthesizer for LlmSynthesizer {
+    async fn synthesize(
+        &self,
+        question: &str,
+        evidence: &[ResearchStep],
+    ) -> Result<String, String> {
+        if evidence.iter().filter(|s| s.succeeded()).count() == 0 {
+            return Err("no successful evidence to synthesise".to_owned());
+        }
+        let block = format!(
+            "Original question:\n{question}\n\nEvidence:\n{}\n\nWrite the cited answer now.",
+            numbered_evidence(evidence)
+        );
+        let messages = vec![ProviderMessage {
+            role: ProviderRole::User,
+            content: vec![ProviderContent::Text(block)],
+        }];
+        let opts = StreamOptions::new(self.model.clone())
+            .system(SYNTH_SYSTEM_PROMPT)
+            .max_tokens(SYNTH_MAX_TOKENS);
+        let resp = research_complete(self.provider.as_ref(), messages, &opts).await?;
+        let answer = resp.content.trim().to_owned();
+        if answer.is_empty() {
+            Err("synthesizer returned empty content".to_owned())
+        } else {
+            Ok(answer)
+        }
+    }
+}
+
+/// Proposes the next sub-query from the evidence gathered so far. This is the
+/// agentic core: the model reads prior results and decides where to look next
+/// (or signals completion).
+#[async_trait]
+pub trait Planner: Send + Sync {
+    /// Returns `Some(query)` for the next search, or `None` to stop (the model
+    /// judged the evidence sufficient, or there is no useful next step).
+    async fn next_query(&self, question: &str, steps: &[ResearchStep]) -> Option<String>;
+}
+
+/// An LLM planner: asks the model for the single most useful next query given
+/// the evidence so far. A reply of `DONE` (or empty) stops the loop.
+pub struct LlmPlanner {
+    pub provider: Arc<dyn Provider>,
+    pub model: ModelId,
+}
+
+impl LlmPlanner {
+    pub fn new(provider: Arc<dyn Provider>, model: impl Into<ModelId>) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Planner for LlmPlanner {
+    async fn next_query(&self, question: &str, steps: &[ResearchStep]) -> Option<String> {
+        let evidence = numbered_evidence(steps);
+        let block = if evidence.trim().is_empty() {
+            format!("Research question:\n{question}\n\nNo evidence gathered yet. Give the first search query.")
+        } else {
+            format!(
+                "Research question:\n{question}\n\nEvidence gathered so far:\n{evidence}\n\nGive the next search query, or DONE."
+            )
+        };
+        let messages = vec![ProviderMessage {
+            role: ProviderRole::User,
+            content: vec![ProviderContent::Text(block)],
+        }];
+        let opts = StreamOptions::new(self.model.clone())
+            .system(PLANNER_SYSTEM_PROMPT)
+            .max_tokens(PLANNER_MAX_TOKENS);
+        let resp = research_complete(self.provider.as_ref(), messages, &opts)
+            .await
+            .ok()?;
+        let q = resp.content.trim().trim_matches('"').trim().to_owned();
+        if q.is_empty() || q.eq_ignore_ascii_case("done") {
+            None
+        } else {
+            Some(q)
+        }
+    }
+}
+
+/// Run the agentic research loop: the planner proposes the first query from the
+/// question, each search result feeds back into the planner to choose the next
+/// query, and a real synthesizer writes the cited answer. Stops when the planner
+/// signals completion or `max_steps` is reached.
+///
+/// Returns `Err` only when the question is empty or **every** search failed.
+#[tracing::instrument(target = "jfc::research", skip(request, planner, searcher, synthesizer))]
+pub async fn run_research_agentic(
+    request: ResearchRequest,
+    planner: &dyn Planner,
+    searcher: &dyn Searcher,
+    synthesizer: &dyn Synthesizer,
+) -> Result<ResearchReport, String> {
+    let question = request.question.trim().to_owned();
+    if question.is_empty() {
+        return Err("research question is empty".to_owned());
+    }
+
+    let mut steps: Vec<ResearchStep> = Vec::new();
+    let mut plan: Vec<String> = Vec::new();
+    for _ in 0..request.max_steps {
+        let Some(sub_query) = planner.next_query(&question, &steps).await else {
+            break;
+        };
+        // Stop if the planner repeats a query (no forward progress).
+        if plan.iter().any(|p| p.eq_ignore_ascii_case(&sub_query)) {
+            break;
+        }
+        plan.push(sub_query.clone());
+        let search_query = if request.reformulate {
+            reformulate_query(&sub_query)
+        } else {
+            sub_query.clone()
+        };
+        let outcome = match searcher.search(&search_query, request.results_per_step).await {
+            Ok(text) => StepOutcome::Found(text),
+            Err(e) => StepOutcome::Failed(e),
+        };
+        steps.push(ResearchStep {
+            sub_query,
+            outcome,
+        });
+    }
+
+    // If the planner never produced a usable query (e.g. model unavailable),
+    // fall back to the deterministic plan so research still returns something.
+    if steps.is_empty() {
+        let fallback_plan = plan_subqueries(&request);
+        steps = execute_plan(
+            &fallback_plan,
+            request.results_per_step,
+            request.reformulate,
+            searcher,
+        )
+        .await;
+        plan = fallback_plan;
+    }
+
+    let answered = steps.iter().filter(|s| s.succeeded()).count();
+    if answered == 0 {
+        return Err(format!("all {} research steps failed", steps.len()));
+    }
+
+    let synthesis = synthesizer
+        .synthesize(&question, &steps)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(target: "jfc::research", error = %e, "synthesis failed; local merge");
+            local_synthesis(&question, &steps)
+        });
+
+    let followups = generate_followups(&question, &plan);
+
+    Ok(ResearchReport {
+        question,
+        plan,
+        steps,
+        synthesis,
+        followups,
+    })
+}
+
+/// Production adapter: searches the local codebase via ripgrep rooted at `root`.
+/// Returns formatted match text (path:line + matched line) or an error string.
+/// Lets research investigate the repo, not just the web.
+pub struct LocalSearcher {
+    pub root: std::path::PathBuf,
+}
+
+impl LocalSearcher {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+#[async_trait]
+impl Searcher for LocalSearcher {
+    async fn search(&self, query: &str, max_results: usize) -> Result<String, String> {
+        local_codebase_search(&self.root, query, max_results).await
+    }
+}
+
+/// Run a ripgrep search over `root` for the salient terms in `query`. Uses
+/// `rg --json` when available; the query is reduced to keywords and OR-joined so
+/// a natural-language sub-query still matches. Returns up to `max_results`
+/// formatted hits.
+async fn local_codebase_search(
+    root: &std::path::Path,
+    query: &str,
+    max_results: usize,
+) -> Result<String, String> {
+    // Reduce the sub-query to salient keywords (drop short/stop words) and build
+    // a case-insensitive alternation pattern for ripgrep.
+    const STOP: &[&str] = &[
+        "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "how", "what",
+        "does", "do", "with", "this", "that", "it", "be", "by", "as", "at",
+    ];
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| w.len() >= 3 && !STOP.contains(&w.to_ascii_lowercase().as_str()))
+        .take(8)
+        .map(|w| regex_escape(w))
+        .collect();
+    if terms.is_empty() {
+        return Err(format!("no searchable terms in query: {query}"));
+    }
+    let pattern = terms.join("|");
+
+    let output = tokio::process::Command::new("rg")
+        .arg("--no-heading")
+        .arg("--line-number")
+        .arg("--ignore-case")
+        .arg("--max-count")
+        .arg("3")
+        .arg("--max-columns")
+        .arg("200")
+        .arg("-e")
+        .arg(&pattern)
+        .arg(root)
+        .output()
+        .await
+        .map_err(|e| format!("ripgrep unavailable: {e}"))?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let root_str = root.to_string_lossy();
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines().take(max_results.saturating_mul(3)) {
+        // Trim the root prefix for readable, relative paths.
+        let shown = line
+            .strip_prefix(root_str.as_ref())
+            .map(|s| s.trim_start_matches('/'))
+            .unwrap_or(line);
+        lines.push(shown.to_owned());
+        if lines.len() >= max_results {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        Ok(format!(
+            "Local codebase search for \"{pattern}\" — 0 matches in {root_str}"
+        ))
+    } else {
+        Ok(format!(
+            "Local codebase matches for \"{pattern}\" ({} shown):\n{}",
+            lines.len(),
+            lines.join("\n")
+        ))
+    }
+}
+
+/// Minimal regex metacharacter escaping for ripgrep alternation terms.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if "\\.+*?()|[]{}^$".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// A searcher that queries the web and the local codebase, merging both result
+/// sets so a single research step draws on external and repo evidence.
+pub struct CombinedSearcher {
+    pub web: WebSearcher,
+    pub local: LocalSearcher,
+}
+
+impl CombinedSearcher {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            web: WebSearcher,
+            local: LocalSearcher::new(root),
+        }
+    }
+}
+
+#[async_trait]
+impl Searcher for CombinedSearcher {
+    async fn search(&self, query: &str, max_results: usize) -> Result<String, String> {
+        let (web, local) = tokio::join!(
+            self.web.search(query, max_results),
+            self.local.search(query, max_results),
+        );
+        let mut out = String::new();
+        if let Ok(w) = &web {
+            out.push_str("## Web\n");
+            out.push_str(w);
+            out.push('\n');
+        }
+        if let Ok(l) = &local
+            && !l.contains("0 matches")
+        {
+            out.push_str("\n## Local codebase\n");
+            out.push_str(l);
+            out.push('\n');
+        }
+        if out.trim().is_empty() {
+            // Surface whichever error we have so the step records a reason.
+            match (web, local) {
+                (Err(e), _) => Err(e),
+                (_, Err(e)) => Err(e),
+                _ => Err("no results from web or local search".to_owned()),
+            }
+        } else {
+            Ok(out)
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +1098,91 @@ mod tests {
             let ok = evidence.iter().filter(|s| s.succeeded()).count();
             Ok(format!("SYNTHESIS({question}): {ok} sources"))
         }
+    }
+
+    /// Planner that emits a scripted list of queries (popped in order), then
+    /// stops. Records how many times it was consulted and the evidence size it
+    /// saw on each call, so tests can assert the feedback loop ran.
+    struct ScriptedPlanner {
+        queries: Mutex<Vec<String>>,
+        evidence_seen: Mutex<Vec<usize>>,
+    }
+
+    impl ScriptedPlanner {
+        fn new(queries: Vec<&str>) -> Self {
+            Self {
+                queries: Mutex::new(queries.into_iter().rev().map(String::from).collect()),
+                evidence_seen: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Planner for ScriptedPlanner {
+        async fn next_query(&self, _question: &str, steps: &[ResearchStep]) -> Option<String> {
+            self.evidence_seen.lock().unwrap().push(steps.len());
+            self.queries.lock().unwrap().pop()
+        }
+    }
+
+    // ── Agentic loop ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn agentic_loop_feeds_evidence_back_to_planner_normal() {
+        let planner = ScriptedPlanner::new(vec!["first query", "second query", "third query"]);
+        let searcher = MockSearcher::new();
+        let synth = CountingSynth;
+        let req = ResearchRequest::new("how does X work").with_max_steps(6);
+        let report = run_research_agentic(req, &planner, &searcher, &synth)
+            .await
+            .expect("ok");
+        // All three scripted queries ran, in order.
+        assert_eq!(report.plan, vec!["first query", "second query", "third query"]);
+        assert_eq!(report.steps.len(), 3);
+        // The planner saw growing evidence each call: 0, 1, 2, then a 4th call
+        // that returned None (3 steps visible) to stop.
+        let seen = planner.evidence_seen.lock().unwrap().clone();
+        assert_eq!(seen, vec![0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn agentic_loop_respects_max_steps_robust() {
+        let planner = ScriptedPlanner::new(vec!["q1", "q2", "q3", "q4", "q5"]);
+        let searcher = MockSearcher::new();
+        let synth = CountingSynth;
+        let req = ResearchRequest::new("topic").with_max_steps(2);
+        let report = run_research_agentic(req, &planner, &searcher, &synth)
+            .await
+            .expect("ok");
+        assert_eq!(report.steps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn agentic_loop_stops_on_repeated_query_robust() {
+        let planner = ScriptedPlanner::new(vec!["dup", "dup", "dup"]);
+        let searcher = MockSearcher::new();
+        let synth = CountingSynth;
+        let req = ResearchRequest::new("topic").with_max_steps(6);
+        let report = run_research_agentic(req, &planner, &searcher, &synth)
+            .await
+            .expect("ok");
+        // Only the first "dup" runs; the repeat breaks the loop.
+        assert_eq!(report.plan, vec!["dup"]);
+    }
+
+    #[tokio::test]
+    async fn agentic_loop_falls_back_when_planner_silent_normal() {
+        // Planner immediately returns None → deterministic plan kicks in.
+        let planner = ScriptedPlanner::new(vec![]);
+        let searcher = MockSearcher::new();
+        let synth = CountingSynth;
+        let req = ResearchRequest::new("rust async runtimes").with_max_steps(3);
+        let report = run_research_agentic(req, &planner, &searcher, &synth)
+            .await
+            .expect("ok");
+        // Fell back to plan_subqueries (base + angles).
+        assert!(report.steps.len() >= 1);
+        assert_eq!(report.plan[0], "rust async runtimes");
     }
 
     // ── Intent gate ──────────────────────────────────────────────────────────

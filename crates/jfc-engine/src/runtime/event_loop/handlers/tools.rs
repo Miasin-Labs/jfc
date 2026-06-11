@@ -9,7 +9,34 @@ use crate::runtime::{
     drain_queued_prompts, maybe_continue_task_factory,
 };
 use crate::types::*;
-use crate::{session, stream, types};
+use crate::{stream, types};
+
+/// Hard byte cap on the *live* streaming tool-output preview built up by
+/// `handle_output_chunk`. The full output already lands on disk (bash task
+/// log file) and the model-facing result is separately capped by the bash
+/// tool's `inline_output_bytes`; this preview exists only so the renderer
+/// can show a tail while a command runs. Without a cap, a chatty
+/// long-running command (e.g. a sync job printing TSV rows for hours) grows
+/// the in-memory transcript without bound — observed live as hundreds of MB
+/// of retained tool output in a long session's heap.
+pub(crate) const LIVE_OUTPUT_PREVIEW_CAP_BYTES: usize = 64 * 1024;
+
+/// Drop oldest content (front) so `s` stays under `cap` bytes, cutting on a
+/// char boundary at a line break where possible so the preview tail starts
+/// on a whole line.
+fn trim_front_to_cap(s: &mut String, cap: usize) {
+    if s.len() <= cap {
+        return;
+    }
+    let excess = s.len() - cap;
+    let mut split = s.ceil_char_boundary(excess);
+    // Prefer cutting just past the next newline so the kept tail starts
+    // at a line boundary (cheap scan over at most one line).
+    if let Some(nl) = s[split..].find('\n') {
+        split += nl + 1;
+    }
+    s.drain(..split);
+}
 
 /// Handle `ToolEvent::OutputChunk { tool_id, chunk }`.
 pub fn handle_output_chunk(state: &mut EngineState, tool_id: crate::ids::ToolId, chunk: String) {
@@ -26,6 +53,7 @@ pub fn handle_output_chunk(state: &mut EngineState, tool_id: crate::ids::ToolId,
                     ToolOutput::Text(s) => {
                         s.push_str(&chunk);
                         s.push('\n');
+                        trim_front_to_cap(s, LIVE_OUTPUT_PREVIEW_CAP_BYTES);
                     }
                     _ => {
                         tc.output = ToolOutput::Text(format!("{chunk}\n"));
@@ -421,17 +449,11 @@ pub async fn handle_all_complete(state: &mut EngineState, tx: &EventSender) {
             preceding_tool_use_ids,
         }));
     }
-    // Save session once per completed tool batch (not per tool).
-    if let Some(ref session_id) = state.current_session_id {
-        let sid = session_id.clone();
-        let msgs = state.messages.clone();
-        let cwd = state.cwd.clone();
-        let model = state.model.clone();
-        tokio::spawn(async move {
-            session::save_session(&sid, &msgs, Some(cwd.as_str()), Some(model.as_str())).await;
-        });
-        state.last_session_save_at = Some(std::time::Instant::now());
-    }
+    // Save session once per completed tool batch (not per tool) —
+    // debounced: in agentic bursts (many quick tool batches) this was a
+    // full-transcript deep clone per batch; the trailing save still
+    // lands the newest state within MIN_SAVE_INTERVAL.
+    crate::runtime::session_save::request_save(state);
 
     // Slop Guard aggregation: scan the last assistant
     // message's tool results for slop_guard findings.
@@ -1010,5 +1032,42 @@ mod tests {
             completed_tool_batch_summary(&state).expect("completed tool should summarize");
         assert!(summary.starts_with("Ran"), "{summary}");
         assert_eq!(ids, vec!["tool-1"]);
+    }
+
+    #[test]
+    fn output_chunk_preview_is_capped_robust() {
+        let (mut state, tool_id) = test_app_with_tool(ToolStatus::Running);
+        // Push far more than the cap: 4096 chunks × ~100 bytes ≈ 400 KB.
+        let chunk = "x".repeat(99);
+        for _ in 0..4096 {
+            handle_output_chunk(&mut state, tool_id.clone(), chunk.clone());
+        }
+        let MessagePart::Tool(tool) = &state.messages[1].parts[0] else {
+            panic!("expected tool part");
+        };
+        let ToolOutput::Text(s) = &tool.output else {
+            panic!("expected text output");
+        };
+        assert!(
+            s.len() <= LIVE_OUTPUT_PREVIEW_CAP_BYTES,
+            "live preview must stay capped: {} > {}",
+            s.len(),
+            LIVE_OUTPUT_PREVIEW_CAP_BYTES
+        );
+        // Tail (newest output) is what's kept.
+        assert!(s.ends_with("x\n"));
+    }
+
+    #[test]
+    fn trim_front_to_cap_respects_char_boundaries_robust() {
+        // Multi-byte chars at the cut point must not panic.
+        let mut s = "é".repeat(1000);
+        trim_front_to_cap(&mut s, 100);
+        assert!(s.len() <= 100);
+        assert!(s.chars().all(|c| c == 'é'));
+        // Under-cap input untouched.
+        let mut small = String::from("abc");
+        trim_front_to_cap(&mut small, 100);
+        assert_eq!(small, "abc");
     }
 }

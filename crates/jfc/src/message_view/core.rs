@@ -149,6 +149,24 @@ pub fn build_render_items_pub<'a>(ctx: &'a RenderCtx<'a>, inner_w: usize) -> Vec
     build_render_items_inner(ctx, inner_w)
 }
 
+/// Windowed builder for the virtualized transcript: items for messages
+/// `[first, last)` only. `prev_role` must be the threading value after
+/// message `first - 1` (see `HeightIndex::prev_role_before`) so the
+/// same-speaker label suppression matches what a full walk would produce.
+pub fn build_render_items_window<'a>(
+    ctx: &'a RenderCtx<'a>,
+    inner_w: usize,
+    first: usize,
+    last: usize,
+    mut prev_role: Option<Role>,
+) -> Vec<RenderItem<'a>> {
+    let mut items = Vec::new();
+    for (idx, msg) in ctx.messages.iter().enumerate().take(last).skip(first) {
+        build_message_items(ctx, idx, msg, &mut prev_role, inner_w, &mut items);
+    }
+    items
+}
+
 /// Total visual rows the message view will draw at this width.
 ///
 /// **One producer, one truth.** This used to be a parallel
@@ -715,7 +733,6 @@ fn is_reminder_only_user(msg: &ChatMessage) -> bool {
 }
 
 fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<RenderItem<'a>> {
-    let t = ctx.theme;
     let mut items: Vec<RenderItem<'a>> = Vec::new();
     // Tracks the previous *rendered* message's role so a run of
     // consecutive same-speaker messages doesn't repeat the label on every
@@ -725,8 +742,30 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
     // assistant continuations (the streaming placeholder keeps its
     // pulsing dot label).
     let mut prev_role: Option<Role> = None;
-
     for (idx, msg) in ctx.messages.iter().enumerate() {
+        build_message_items(ctx, idx, msg, &mut prev_role, inner_w, &mut items);
+    }
+    items
+}
+
+/// Build the render items for a SINGLE message. Extracted from the
+/// all-messages walk so the virtualized transcript path
+/// (`message_view::height_index` + `render::messages`) can build items for
+/// only the messages intersecting the visible window — per-frame work
+/// becomes O(window), not O(transcript). `prev_role` threads the
+/// consecutive-same-speaker label suppression across calls; it is only
+/// updated when the message actually renders (skipped messages leave it
+/// untouched), matching the original single-loop behavior.
+pub(crate) fn build_message_items<'a>(
+    ctx: &'a RenderCtx<'_>,
+    idx: usize,
+    msg: &'a jfc_core::ChatMessage,
+    prev_role: &mut Option<Role>,
+    inner_w: usize,
+    items: &mut Vec<RenderItem<'a>>,
+) {
+    let t = ctx.theme;
+    {
         // The streaming-placeholder assistant message gets mutated in place
         // by the StreamChunk handler — text/reasoning chunks append to its
         // parts as they arrive. We render it inline like any other message
@@ -744,7 +783,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                 _ => true,
             });
             if !has_content {
-                continue;
+                return;
             }
         }
 
@@ -757,7 +796,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
         // the user typed. Real prompts (text, with reminders appended) and
         // attachment-only turns still render.
         if msg.role == Role::User && is_reminder_only_user(msg) {
-            continue;
+            return;
         }
 
         // Role label gets a colored gutter glyph (`▎`) prefix so the
@@ -778,10 +817,10 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
             is_streaming_placeholder,
         });
         // Suppress the repeated label for a same-speaker continuation.
-        let suppress_label = prev_role == Some(msg.role)
+        let suppress_label = *prev_role == Some(msg.role)
             && matches!(msg.role, Role::Assistant)
             && !is_streaming_placeholder;
-        prev_role = Some(msg.role);
+        *prev_role = Some(msg.role);
         let label_line = match msg.role {
             // Queued user message (pending submit): dim the role label
             // and append "[queued]" so it visually reads as pending vs
@@ -964,7 +1003,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                     }
                 }
                 MessagePart::Reasoning(text) => {
-                    push_reasoning_lines(&mut items, text, reasoning_expanded, &t);
+                    push_reasoning_lines(items, text, reasoning_expanded, &t);
                 }
                 MessagePart::Tool(tool) => {
                     if !is_invisible_in_transcript(&tool.kind) {
@@ -972,7 +1011,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                     }
                 }
                 MessagePart::TaskStatus(ts) => {
-                    push_task_status_lines(&mut items, ts, &t, inner_w);
+                    push_task_status_lines(items, ts, &t, inner_w);
                 }
                 MessagePart::CompactBoundary { pre_tokens } => {
                     items.push(RenderItem::TextLine(Line::from(vec![
@@ -985,7 +1024,7 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
                     ])));
                 }
                 MessagePart::Advisor(text) => {
-                    push_advisor_lines(&mut items, text, &t);
+                    push_advisor_lines(items, text, &t);
                 }
                 MessagePart::RedactedThinking(data) => {
                     // Not a jfc choice and not recoverable: Anthropic returns
@@ -1043,18 +1082,6 @@ fn build_render_items_inner<'a>(ctx: &'a RenderCtx<'_>, inner_w: usize) -> Vec<R
         items.push(RenderItem::MessageEnd);
         items.push(RenderItem::Blank);
     }
-
-    // Pre-spinner-row architecture used to emit a duplicate "assistant"
-    // header + streaming text + spinner here, on top of also pushing those
-    // chunks into the placeholder message's parts via StreamChunk. With
-    // the dedicated `spinner_row()` widget above the input bar (see
-    // `render::spinner_row`), this block is dead weight — it produced the
-    // doubled `assistant / ∴ Thinking [streaming…]` the user reported.
-    // The placeholder now renders inline like any other message; when it
-    // has no content yet the loop above skips it so only the spinner row
-    // signals activity.
-
-    items
 }
 
 #[cfg(test)]

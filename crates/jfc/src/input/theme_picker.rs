@@ -46,6 +46,7 @@ pub(super) fn preview_theme(app: &mut App, name: &str) {
     {
         app.theme = theme;
         app.render_cache.borrow_mut().clear();
+        app.height_index.borrow_mut().clear();
         crate::markdown::clear_highlight_cache();
     }
 }
@@ -56,6 +57,7 @@ pub(super) fn apply_theme(app: &mut App, name: &str) {
     {
         app.theme = theme;
         app.render_cache.borrow_mut().clear();
+        app.height_index.borrow_mut().clear();
         crate::markdown::clear_highlight_cache();
         if let Err(err) = jfc_engine::config::save_theme(choice.name) {
             jfc_engine::toast::push_with_cap(

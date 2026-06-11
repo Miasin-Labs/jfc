@@ -93,10 +93,12 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
     let mut workflow_calls: Vec<ToolCall> = Vec::new();
     let mut advisor_calls: Vec<ToolCall> = Vec::new();
     let mut council_calls: Vec<ToolCall> = Vec::new();
+    let mut research_calls: Vec<ToolCall> = Vec::new();
     for tc in tool_calls {
         match (&tc.kind, &tc.input) {
             (ToolKind::Advisor, ToolInput::Advisor {}) => advisor_calls.push(tc),
             (ToolKind::Council, ToolInput::Council { .. }) => council_calls.push(tc),
+            (ToolKind::Research, ToolInput::Research { .. }) => research_calls.push(tc),
             (_, ToolInput::Task(_)) => task_calls.push(tc),
             (_, ToolInput::Workflow { .. }) => workflow_calls.push(tc),
             _ => regular_calls.push(tc),
@@ -107,10 +109,11 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
     let workflow_count = workflow_calls.len();
     let advisor_count = advisor_calls.len();
     let council_count = council_calls.len();
+    let research_count = research_calls.len();
     let regular_count = regular_calls.len();
     tracing::info!(
         target: "jfc::stream",
-        task_count, workflow_count, advisor_count, council_count, regular_count,
+        task_count, workflow_count, advisor_count, council_count, research_count, regular_count,
         "dispatch_tools_batched: splitting tool calls"
     );
     let pending = Arc::new(AtomicUsize::new(
@@ -118,6 +121,7 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
             + workflow_count
             + advisor_count
             + council_count
+            + research_count
             + usize::from(!regular_calls.is_empty()),
     ));
     let tx_done = tx.clone();
@@ -204,6 +208,42 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
             };
             send_critical(
                 &tx_council,
+                EngineEvent::Tool(ToolEvent::Result { tool_id, result }),
+            );
+            done();
+        });
+    }
+
+    // Research: an agentic web+codebase research loop driven by the active
+    // model (planner reformulates queries from evidence, synthesizer writes the
+    // cited answer). Runs out-of-band like the advisor/council — it gets the
+    // active provider + model from the dispatch context, not the main stream.
+    for tc in research_calls {
+        let tx_research = tx.clone();
+        let done = send_all_complete.clone();
+        let tool_id = tc.id.clone();
+        let cancel_research = cancel.clone();
+        let active_provider = provider.clone();
+        let active_model = model.clone();
+        let (question, export) = match tc.input.clone() {
+            ToolInput::Research { question, export } => (question, export),
+            _ => (String::new(), false),
+        };
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                biased;
+                _ = cancel_research.cancelled() => {
+                    crate::runtime::ExecutionResult::failure("Research cancelled by user")
+                }
+                result = crate::tools::research::execute_research_agentic(
+                    &question,
+                    export,
+                    active_provider,
+                    active_model,
+                ) => result,
+            };
+            send_critical(
+                &tx_research,
                 EngineEvent::Tool(ToolEvent::Result { tool_id, result }),
             );
             done();

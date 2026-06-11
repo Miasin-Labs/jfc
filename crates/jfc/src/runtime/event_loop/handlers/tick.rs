@@ -156,6 +156,10 @@ pub(crate) async fn handle_tick(
         .unwrap_or(true);
     if detached_sync_due {
         app.engine.last_detached_sync_at = Some(std::time::Instant::now());
+        // Trailing debounced session save: tool-batch bursts mark
+        // `session_save_pending` instead of deep-cloning the transcript
+        // per batch; this lands the newest state once the burst settles.
+        jfc_engine::runtime::session_save::flush_pending_save(&mut app.engine);
         // Detached workers (and in non-team mode, the
         // session task store) write task updates straight
         // to the JSON file from their own process. The UI's

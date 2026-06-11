@@ -4,7 +4,7 @@
 use crate::app::{self, EngineState};
 use crate::runtime::{EventSender, drain_queued_prompts};
 use crate::types::*;
-use crate::{config, session, stream, types};
+use crate::{config, stream, types};
 
 /// Handle `StreamEvent::Done(stop_reason)`.
 pub async fn handle_stream_done(
@@ -545,17 +545,10 @@ pub async fn handle_stream_done(
         state.turn_started_at = None;
     }
 
-    // Auto-save session after each assistant turn completes
-    if let Some(ref session_id) = state.current_session_id {
-        let sid = session_id.clone();
-        let msgs = state.messages.clone();
-        let cwd = state.cwd.clone();
-        let model = state.model.clone();
-        tokio::spawn(async move {
-            session::save_session(&sid, &msgs, Some(cwd.as_str()), Some(model.as_str())).await;
-        });
-        state.last_session_save_at = Some(std::time::Instant::now());
-    }
+    // Auto-save session after each assistant turn completes. Turn
+    // boundaries always persist immediately (never debounced) — crash
+    // safety for completed turns is non-negotiable.
+    crate::runtime::session_save::force_save(state);
     // v126 queued-prompt drain on plain end_turn: model finished
     // without tools to call → if anything's queued, fire it now.
     if stop_reason == jfc_provider::StopReason::EndTurn

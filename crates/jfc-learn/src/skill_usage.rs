@@ -126,10 +126,12 @@ impl SkillUsageStore {
     /// absent.
     fn entry(&mut self, name: &str) -> &mut SkillUsage {
         let now = now_iso();
-        self.skills.entry(name.to_string()).or_insert_with(|| SkillUsage {
-            created_at: Some(now),
-            ..Default::default()
-        })
+        self.skills
+            .entry(name.to_string())
+            .or_insert_with(|| SkillUsage {
+                created_at: Some(now),
+                ..Default::default()
+            })
     }
 
     /// Record one invocation of `name`. Bumps `use_count` + `last_activity_at`,
@@ -284,6 +286,10 @@ mod tests {
         s.set_state("x", SkillState::Archived);
         assert_eq!(s.get("x").unwrap().state, SkillState::Archived);
         s.record_use("x");
-        assert_eq!(s.get("x").unwrap().state, SkillState::Archived, "archived stays until revived intentionally");
+        assert_eq!(
+            s.get("x").unwrap().state,
+            SkillState::Archived,
+            "archived stays until revived intentionally"
+        );
     }
 }

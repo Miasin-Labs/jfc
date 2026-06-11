@@ -211,6 +211,7 @@ pub(crate) async fn run(
         // refactors don't introduce a regression.
         tracing::debug!(target: "jfc::render::cache", "theme switch — invalidating cache");
         app.render_cache.borrow_mut().clear();
+        app.height_index.borrow_mut().clear();
         crate::markdown::clear_highlight_cache();
     }
     if let Some(name) = startup_config.output_style.as_deref() {

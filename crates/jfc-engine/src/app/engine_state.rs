@@ -28,8 +28,8 @@ use jfc_provider::{ModelId, ModelInfo, Provider, ProviderId};
 use jfc_session::TaskId;
 
 use super::{
-    BACKGROUND_REMINDERS_CAP, DEFAULT_CONTEXT_WINDOW_TOKENS,
-    STREAM_WATCHDOG_THINKING_TIMEOUT_SECS, STREAM_WATCHDOG_TIMEOUT_SECS,
+    BACKGROUND_REMINDERS_CAP, DEFAULT_CONTEXT_WINDOW_TOKENS, STREAM_WATCHDOG_THINKING_TIMEOUT_SECS,
+    STREAM_WATCHDOG_TIMEOUT_SECS,
 };
 use super::{PendingApproval, PermissionDecision, PermissionMode, load_recent_models};
 
@@ -161,6 +161,76 @@ pub struct BackgroundTask {
     /// out from agents that are actually progressing. Set at spawn and
     /// refreshed by the same handlers that bump `last_tool`/token counts.
     pub last_activity_at: std::time::Instant,
+}
+
+impl BackgroundTask {
+    /// Upper bound on retained per-agent log entries (`messages`) and
+    /// structured transcript entries (`chat_messages`). Long agent runs
+    /// emit one entry per tool call / stream chunk batch; without a cap
+    /// both vecs grow for the agent's whole lifetime and are retained
+    /// until the session ends — a steady RSS leak with many or
+    /// long-running agents. 500 entries comfortably covers the
+    /// collapse/expand UI and task-view rendering, which only ever show
+    /// the tail.
+    pub const LOG_CAP: usize = 500;
+
+    /// Append to the raw string log, dropping oldest entries over the cap.
+    pub fn push_log(&mut self, entry: String) {
+        self.messages.push(entry);
+        if self.messages.len() > Self::LOG_CAP {
+            let excess = self.messages.len() - Self::LOG_CAP;
+            self.messages.drain(..excess);
+        }
+    }
+
+    /// Append to the structured transcript, dropping oldest entries over
+    /// the cap.
+    pub fn push_chat(&mut self, msg: crate::types::ChatMessage) {
+        self.chat_messages.push(msg);
+        if self.chat_messages.len() > Self::LOG_CAP {
+            let excess = self.chat_messages.len() - Self::LOG_CAP;
+            self.chat_messages.drain(..excess);
+        }
+    }
+
+    /// Append a streamed agent text chunk, coalescing with the previous
+    /// entry when both arrived in rapid succession AND the previous entry
+    /// doesn't end with a newline — so a single conceptual paragraph
+    /// streamed across many deltas renders as one paragraph instead of one
+    /// entry per delta. New entries go through the capped push helpers.
+    pub fn append_chunk(&mut self, text: String) {
+        let coalesce = self
+            .messages
+            .last()
+            .map(|s| !s.ends_with('\n') && !s.starts_with('['))
+            .unwrap_or(false);
+        if !coalesce {
+            self.push_log(text.clone());
+            // Start a new assistant message in the structured log.
+            self.push_chat(crate::types::ChatMessage::assistant(text));
+            return;
+        }
+        if let Some(last) = self.messages.last_mut() {
+            last.push_str(&text);
+        }
+        // Also coalesce into the structured chat_messages.
+        let chat_coalesce = self
+            .chat_messages
+            .last()
+            .map(|m| m.role == crate::types::Role::Assistant)
+            .unwrap_or(false);
+        if !chat_coalesce {
+            self.push_chat(crate::types::ChatMessage::assistant(text));
+            return;
+        }
+        if let Some(msg) = self.chat_messages.last_mut() {
+            if let Some(crate::types::MessagePart::Text(t)) = msg.parts.last_mut() {
+                t.push_str(&text);
+            } else {
+                msg.parts.push(crate::types::MessagePart::Text(text));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -440,6 +510,11 @@ pub struct EngineState {
     /// fading after `SAVED_BADGE_TTL_MS` so the indicator doesn't
     /// linger on every render.
     pub last_session_save_at: Option<std::time::Instant>,
+    /// A debounced save was requested while a recent save was still inside
+    /// `session_save::MIN_SAVE_INTERVAL`. The frontend's housekeeping tick
+    /// flushes it via `session_save::flush_pending_save` so the newest
+    /// mid-turn state still lands on disk shortly after a burst ends.
+    pub session_save_pending: bool,
     pub interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Per-turn cancellation token. Cloned into every spawned task that
     /// holds critical state (stream_response, tool dispatch, compact,
@@ -951,6 +1026,7 @@ impl EngineState {
             git_branch: None,
             git_branch_last_refresh: None,
             last_session_save_at: None,
+            session_save_pending: false,
             interrupt_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             active_stream_handle: None,
@@ -1295,8 +1371,7 @@ impl EngineState {
         // the lenient thinking tier; once it is responding (or is a non-thinking
         // model that never opens a thinking block) a silent wire is treated as a
         // dead socket and the tighter base tier applies.
-        let thinking_live =
-            self.thinking_started_at.is_some() && self.thinking_ended_at.is_none();
+        let thinking_live = self.thinking_started_at.is_some() && self.thinking_ended_at.is_none();
         let Some(timeout_secs) = stream_watchdog_timeout_secs(thinking_live) else {
             return;
         };
@@ -2018,5 +2093,66 @@ mod watchdog_tests {
             })
             .collect();
         assert!(text.contains("**Error:**"), "hard error surfaced: {text}");
+    }
+}
+
+#[cfg(test)]
+mod background_task_cap_tests {
+    use super::BackgroundTask;
+
+    fn bg() -> BackgroundTask {
+        BackgroundTask {
+            task_id: "t".into(),
+            description: "d".into(),
+            status: crate::types::TaskLifecycle::Running,
+            started_at: std::time::Instant::now(),
+            completed_at: None,
+            summary: None,
+            error: None,
+            last_tool: None,
+            messages: Vec::new(),
+            chat_messages: Vec::new(),
+            tool_use_count: 0,
+            latest_input_tokens: 0,
+            latest_cache_read_tokens: 0,
+            latest_cache_write_tokens: 0,
+            cumulative_output_tokens: 0,
+            model_used: None,
+            agent_messages: Vec::new(),
+            max_input_tokens: None,
+            budget_killed: false,
+            parent_task_id: None,
+            workflow_progress: None,
+            last_activity_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn push_log_and_chat_stay_capped_robust() {
+        let mut bt = bg();
+        for i in 0..(BackgroundTask::LOG_CAP * 3) {
+            bt.push_log(format!("entry {i}\n"));
+            bt.push_chat(crate::types::ChatMessage::assistant(format!("msg {i}")));
+        }
+        assert_eq!(bt.messages.len(), BackgroundTask::LOG_CAP);
+        assert_eq!(bt.chat_messages.len(), BackgroundTask::LOG_CAP);
+        // Newest entries are the ones retained.
+        let last = BackgroundTask::LOG_CAP * 3 - 1;
+        assert_eq!(bt.messages.last().unwrap(), &format!("entry {last}\n"));
+    }
+
+    #[test]
+    fn append_chunk_coalesces_paragraph_normal() {
+        let mut bt = bg();
+        bt.append_chunk("hello ".into());
+        bt.append_chunk("world\n".into());
+        // Coalesced: one log entry, one chat message.
+        assert_eq!(bt.messages.len(), 1);
+        assert_eq!(bt.messages[0], "hello world\n");
+        assert_eq!(bt.chat_messages.len(), 1);
+        // Newline-terminated previous entry starts a fresh one.
+        bt.append_chunk("next".into());
+        assert_eq!(bt.messages.len(), 2);
+        assert_eq!(bt.chat_messages.len(), 2);
     }
 }

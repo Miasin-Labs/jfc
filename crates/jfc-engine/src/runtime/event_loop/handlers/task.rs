@@ -18,42 +18,7 @@ pub fn handle_agent_chunk(state: &mut EngineState, task_id: crate::ids::TaskId, 
     state.last_active_agent_task = Some(task_id.as_str().to_owned());
     crate::daemon::record_background_agent_log(task_id.as_str(), &text);
     if let Some(bt) = state.background_tasks.get_mut(task_id.as_str()) {
-        // Coalesce with the previous chunk when both came in
-        // rapid succession AND the previous entry doesn't end
-        // with a newline — so a single conceptual paragraph
-        // streamed across many chunks renders as one paragraph
-        // instead of one entry per delta.
-        let coalesce = bt
-            .messages
-            .last()
-            .map(|s| !s.ends_with('\n') && !s.starts_with('['))
-            .unwrap_or(false);
-        if coalesce {
-            if let Some(last) = bt.messages.last_mut() {
-                last.push_str(&text);
-            }
-            // Also coalesce into the structured chat_messages.
-            let chat_coalesce = bt
-                .chat_messages
-                .last()
-                .map(|m| m.role == types::Role::Assistant)
-                .unwrap_or(false);
-            if chat_coalesce {
-                if let Some(msg) = bt.chat_messages.last_mut() {
-                    if let Some(types::MessagePart::Text(t)) = msg.parts.last_mut() {
-                        t.push_str(&text);
-                    } else {
-                        msg.parts.push(types::MessagePart::Text(text));
-                    }
-                }
-            } else {
-                bt.chat_messages.push(types::ChatMessage::assistant(text));
-            }
-        } else {
-            bt.messages.push(text.clone());
-            // Start a new assistant message in the structured log.
-            bt.chat_messages.push(types::ChatMessage::assistant(text));
-        }
+        bt.append_chunk(text);
     }
 }
 
@@ -187,11 +152,11 @@ pub fn handle_task_progress(
         if let Some(ref tool) = last_tool {
             let elapsed_s = elapsed_ms / 1000;
             let entry = format!("[{elapsed_s}s] {tool}");
-            bt.messages.push(entry.clone());
+            bt.push_log(entry.clone());
             // Push a muted user-role note into the structured log
             // so the MessageView renderer can show tool activity
             // inline with the assistant's text output.
-            bt.chat_messages.push(types::ChatMessage::user(entry));
+            bt.push_chat(types::ChatMessage::user(entry));
         }
         bt.last_tool = last_tool.clone();
         bt.last_activity_at = std::time::Instant::now();
@@ -281,8 +246,8 @@ pub async fn handle_task_completed(
         bt.summary = Some(summary.clone());
         let elapsed_s = elapsed_ms / 1000;
         let entry = format!("[{elapsed_s}s] ✓ done — {summary}");
-        bt.messages.push(entry.clone());
-        bt.chat_messages.push(types::ChatMessage::assistant(entry));
+        bt.push_log(entry.clone());
+        bt.push_chat(types::ChatMessage::assistant(entry));
         linked_task_id = bt.parent_task_id.clone();
     }
     // If the model linked this delegation to a queued todo
@@ -364,8 +329,8 @@ pub async fn handle_task_failed(
         bt.error = Some(error.clone());
         let prefix = if was_cancelled { "cancelled" } else { "failed" };
         let entry = format!("[{prefix}] {error}");
-        bt.messages.push(entry.clone());
-        bt.chat_messages.push(types::ChatMessage::assistant(entry));
+        bt.push_log(entry.clone());
+        bt.push_chat(types::ChatMessage::assistant(entry));
         linked_task_id = bt.parent_task_id.clone();
     }
     // Propagate the failure to the linked queued todo. A

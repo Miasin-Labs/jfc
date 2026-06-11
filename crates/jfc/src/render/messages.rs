@@ -54,8 +54,14 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
     // `tool_block_height` is now a deterministic row-count query instead of a
     // second renderer.
     let render_ctx = crate::message_view::RenderCtx::from_app(app);
-    let items = crate::message_view::build_render_items_pub(&render_ctx, inner_width);
-    let total_lines: usize = items.iter().map(|i| i.height(inner_width)).sum();
+
+    // Virtualized transcript: the persistent height index revalidates
+    // per-message fingerprints (cheap integer compares) and re-measures only
+    // changed messages — `total_lines` comes from its prefix sums instead of
+    // a full build_render_items walk. Items are then built ONLY for the
+    // messages intersecting the visible window, so per-frame work is
+    // O(window), not O(transcript).
+    let total_lines = app.height_index.borrow_mut().sync(&render_ctx, inner_width);
 
     // No top/bottom border rows — content fills the full height.
     let visible = area.height as usize;
@@ -70,6 +76,23 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.scroll_offset
     };
+
+    // Build items for the visible message window only. `window_top` is the
+    // absolute row of the first windowed message's top edge; the widget
+    // receives a window-relative scroll so its skip math lines up.
+    let (win_first, win_last, window_top) = {
+        let index = app.height_index.borrow();
+        index.window(new_scroll_offset, visible)
+    };
+    let win_prev_role = app.height_index.borrow().prev_role_before(win_first);
+    let items = crate::message_view::build_render_items_window(
+        &render_ctx,
+        inner_width,
+        win_first,
+        win_last,
+        win_prev_role,
+    );
+    let window_scroll = new_scroll_offset.saturating_sub(window_top);
     // Trace the scroll math result. Bug class this catches: when
     // `total_lines` is undercounted (width mismatch), `scroll_offset`
     // gets pinned to a value smaller than the true bottom row,
@@ -153,12 +176,15 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
             width: inner.width.saturating_sub(1),
             ..inner
         };
+        // The widget walks the items it's handed and skips `scroll` rows
+        // from the FIRST item — with windowed items that must be the
+        // window-relative offset, not the absolute transcript offset.
         MessageView {
             app,
             prebuilt: Some(crate::message_view::PrebuiltItems {
                 items,
                 total_h: total_lines,
-                scroll: new_scroll_offset,
+                scroll: window_scroll,
             }),
         }
         .render(content_inner, f.buffer_mut());

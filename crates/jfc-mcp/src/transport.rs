@@ -29,9 +29,9 @@ use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo,
     CreateElicitationRequestParams, CreateElicitationResult, ElicitationAction,
-    ElicitationResponseNotificationParam, FormElicitationCapability, Implementation,
-    ReadResourceRequestParams, ReadResourceResult, Resource, Tool, UrlElicitationCapability,
-    ElicitationCapability,
+    ElicitationCapability, ElicitationResponseNotificationParam, FormElicitationCapability,
+    Implementation, ReadResourceRequestParams, ReadResourceResult, Resource, Tool,
+    UrlElicitationCapability,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -89,8 +89,8 @@ impl ClientHandler for JfcClientHandler {
         _context: RequestContext<RoleClient>,
     ) -> Result<CreateElicitationResult, rmcp::ErrorData> {
         use jfc_core::mcp_elicitation::{
-            ElicitationEvent, ElicitationKind, ElicitationResponse, ElicitationSnapshot,
-            push, send_elicitation_event,
+            ElicitationEvent, ElicitationKind, ElicitationResponse, ElicitationSnapshot, push,
+            send_elicitation_event,
         };
 
         // 1. Build ElicitationKind from rmcp params
@@ -418,7 +418,10 @@ impl Transport {
             spawn_stderr_drain(cfg.server_name.clone(), stderr, Arc::clone(&stderr_ring));
         }
 
-        let client = match JfcClientHandler::new(cfg.server_name.clone()).serve(proc).await {
+        let client = match JfcClientHandler::new(cfg.server_name.clone())
+            .serve(proc)
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -469,7 +472,10 @@ impl Transport {
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers),
         );
-        let client = match JfcClientHandler::new(cfg.server_name.clone()).serve(transport).await {
+        let client = match JfcClientHandler::new(cfg.server_name.clone())
+            .serve(transport)
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 let rejected_auth = has_auth_header && service_error_suggests_auth_rejection(&e);

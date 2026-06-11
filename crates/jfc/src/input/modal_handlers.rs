@@ -261,6 +261,7 @@ fn handle_theme_picker_key(app: &mut App, key: event::KeyEvent) -> bool {
             if let Some(orig) = app.theme_preview_original.take() {
                 app.theme = orig;
                 app.render_cache.borrow_mut().clear();
+                app.height_index.borrow_mut().clear();
                 crate::markdown::clear_highlight_cache();
             }
             close_theme_picker(app);

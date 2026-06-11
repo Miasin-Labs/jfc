@@ -490,15 +490,19 @@ const BUILTIN_DEEP_RESEARCH: &str = r#"export const meta = {
     { title: 'Synthesize' },
   ],
 }
+// Single source of truth: each angle delegates to the Research tool, which runs
+// the agentic loop (LLM planner reformulates queries from evidence, web+codebase
+// search, LLM synthesis with citations). The workflow only fans out the angles
+// and consolidates them — it does not reimplement the research loop.
 const question = (args && args.question) || 'the main topic of this project'
 phase('Research')
 const angles = await parallel([
-  () => agent('Research the technical background of: ' + question),
-  () => agent('Research the practical tradeoffs of: ' + question),
-  () => agent('Research prior art and alternatives for: ' + question),
+  () => agent('Use the Research tool to investigate the technical background of: ' + question + '\nReturn the tool\'s cited report verbatim.'),
+  () => agent('Use the Research tool to investigate the practical tradeoffs of: ' + question + '\nReturn the tool\'s cited report verbatim.'),
+  () => agent('Use the Research tool to investigate prior art and alternatives for: ' + question + '\nReturn the tool\'s cited report verbatim.'),
 ])
 phase('Synthesize')
-const synthesis = await agent('Synthesize these research notes into a coherent answer:\n' + JSON.stringify(angles.filter(Boolean)))
+const synthesis = await agent('Synthesize these cited research reports into one coherent, well-cited answer:\n' + JSON.stringify(angles.filter(Boolean)))
 return { question, synthesis }
 "#;
 

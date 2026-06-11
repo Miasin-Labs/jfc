@@ -12,6 +12,7 @@ mod goal_loop;
 mod network;
 pub mod ops;
 mod queue;
+pub mod session_save;
 mod stream_control;
 mod task_activity;
 

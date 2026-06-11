@@ -418,6 +418,11 @@ pub struct App {
     /// frame. Uses `RefCell` because `MessageView` borrows `&App` immutably
     /// during `Widget::render` but needs mutable cache access.
     pub render_cache: RefCell<RenderCache>,
+    /// Persistent per-message height index for the virtualized transcript.
+    /// Revalidated per frame via cheap fingerprints; only changed messages
+    /// re-measure. See `message_view::height_index`. RefCell for the same
+    /// reason as `render_cache` — mutated during rendering under `&App`.
+    pub height_index: RefCell<crate::message_view::height_index::HeightIndex>,
     /// Cached result of `collect_diff_stats()`. Keyed on
     /// `(messages.len(), total_parts_count)` — invalidates when a message is
     /// appended or a tool result lands. Avoids O(N_messages × N_parts)
@@ -568,6 +573,7 @@ impl App {
             voice_interim_chars: 0,
             tool_hit_regions: RefCell::new(Vec::new()),
             render_cache: RefCell::new(RenderCache::new()),
+            height_index: RefCell::new(crate::message_view::height_index::HeightIndex::new()),
             diff_stats_cache: RefCell::new(None),
             remote_host: None,
             wants_animation_frame: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

@@ -3,8 +3,8 @@
 
 use crate::app::EngineState;
 use crate::runtime::{EngineEvent, EventSender, TaskEvent, TeamEvent};
+use crate::toast;
 use crate::types::*;
-use crate::{session, toast};
 
 /// Dispatch a single `TeamEvent` variant.
 pub async fn handle_team_event(state: &mut EngineState, tx: &EventSender, ev: TeamEvent) {
@@ -332,16 +332,9 @@ async fn handle_inbox(
         &mut state.toasts,
         toast::Toast::new(toast::ToastKind::Info, format!("{from}: {preview}")),
     );
-    // Persist so a session reload doesn't lose the message.
-    if let Some(ref session_id) = state.current_session_id {
-        let sid = session_id.clone();
-        let msgs = state.messages.clone();
-        let cwd = state.cwd.clone();
-        let model = state.model.clone();
-        tokio::spawn(async move {
-            session::save_session(&sid, &msgs, Some(cwd.as_str()), Some(model.as_str())).await;
-        });
-    }
+    // Persist so a session reload doesn't lose the message (debounced —
+    // a teammate burst shouldn't deep-clone the transcript per message).
+    crate::runtime::session_save::request_save(state);
 
     // Wake the leader so it actually processes the teammate's message instead
     // of leaving it to sit until the next manual user prompt. Only when idle:

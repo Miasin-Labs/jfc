@@ -29,7 +29,10 @@ pub struct CuratorConfig {
 
 impl Default for CuratorConfig {
     fn default() -> Self {
-        Self { stale_after_days: 14, archive_after_days: 30 }
+        Self {
+            stale_after_days: 14,
+            archive_after_days: 30,
+        }
     }
 }
 
@@ -60,7 +63,10 @@ impl CuratorPlan {
 /// with no `last_activity_at` falls back to `created_at`; if neither parses, it
 /// is treated as freshly-active (0 idle) so we never archive on a parse failure.
 fn idle_days(rec: &SkillUsage, now_ms: i64) -> u64 {
-    let anchor = rec.last_activity_at.as_deref().or(rec.created_at.as_deref());
+    let anchor = rec
+        .last_activity_at
+        .as_deref()
+        .or(rec.created_at.as_deref());
     let Some(ts) = anchor else {
         return 0;
     };
@@ -95,7 +101,11 @@ pub fn plan_transitions(store: &SkillUsageStore, cfg: &CuratorConfig, now_ms: i6
             _ => None,
         };
         if let Some(to) = next {
-            transitions.push(SkillTransition { skill: name.clone(), from: rec.state, to });
+            transitions.push(SkillTransition {
+                skill: name.clone(),
+                from: rec.state,
+                to,
+            });
         }
     }
     CuratorPlan { transitions }
@@ -159,7 +169,11 @@ mod tests {
     #[test]
     fn agent_skill_goes_stale_normal() {
         let store = store_with("s", CreatedBy::Agent, 20, false);
-        let plan = plan_transitions(&store, &CuratorConfig::default(), Utc::now().timestamp_millis());
+        let plan = plan_transitions(
+            &store,
+            &CuratorConfig::default(),
+            Utc::now().timestamp_millis(),
+        );
         assert_eq!(plan.len(), 1);
         assert_eq!(plan.transitions[0].to, SkillState::Stale);
     }
@@ -168,7 +182,11 @@ mod tests {
     #[test]
     fn agent_skill_archives_normal() {
         let store = store_with("s", CreatedBy::Agent, 45, false);
-        let plan = plan_transitions(&store, &CuratorConfig::default(), Utc::now().timestamp_millis());
+        let plan = plan_transitions(
+            &store,
+            &CuratorConfig::default(),
+            Utc::now().timestamp_millis(),
+        );
         assert_eq!(plan.len(), 1);
         assert_eq!(plan.transitions[0].to, SkillState::Archived);
     }
@@ -177,7 +195,11 @@ mod tests {
     #[test]
     fn user_skill_never_transitions_robust() {
         let store = store_with("s", CreatedBy::User, 365, false);
-        let plan = plan_transitions(&store, &CuratorConfig::default(), Utc::now().timestamp_millis());
+        let plan = plan_transitions(
+            &store,
+            &CuratorConfig::default(),
+            Utc::now().timestamp_millis(),
+        );
         assert!(plan.is_empty(), "user skills are off-limits");
     }
 
@@ -185,7 +207,11 @@ mod tests {
     #[test]
     fn pinned_skill_is_exempt_robust() {
         let store = store_with("s", CreatedBy::Agent, 365, true);
-        let plan = plan_transitions(&store, &CuratorConfig::default(), Utc::now().timestamp_millis());
+        let plan = plan_transitions(
+            &store,
+            &CuratorConfig::default(),
+            Utc::now().timestamp_millis(),
+        );
         assert!(plan.is_empty(), "pinned skills are exempt");
     }
 
@@ -193,7 +219,11 @@ mod tests {
     #[test]
     fn fresh_skill_stays_active_normal() {
         let store = store_with("s", CreatedBy::Agent, 1, false);
-        let plan = plan_transitions(&store, &CuratorConfig::default(), Utc::now().timestamp_millis());
+        let plan = plan_transitions(
+            &store,
+            &CuratorConfig::default(),
+            Utc::now().timestamp_millis(),
+        );
         assert!(plan.is_empty());
     }
 
@@ -201,7 +231,11 @@ mod tests {
     #[test]
     fn apply_plan_mutates_state_normal() {
         let mut store = store_with("s", CreatedBy::Agent, 45, false);
-        let plan = plan_transitions(&store, &CuratorConfig::default(), Utc::now().timestamp_millis());
+        let plan = plan_transitions(
+            &store,
+            &CuratorConfig::default(),
+            Utc::now().timestamp_millis(),
+        );
         let n = apply_plan(&mut store, &plan);
         assert_eq!(n, 1);
         assert_eq!(store.get("s").unwrap().state, SkillState::Archived);

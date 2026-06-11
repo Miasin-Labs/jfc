@@ -14,7 +14,7 @@ mod notebook;
 mod notifications;
 pub mod plans;
 mod registry;
-mod research;
+pub(crate) mod research;
 mod safe_tools;
 mod scratchpad;
 mod search;

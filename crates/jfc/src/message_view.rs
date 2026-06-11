@@ -16,6 +16,7 @@ mod bash;
 mod core;
 mod detection;
 mod formatters;
+pub(crate) mod height_index;
 mod output_style;
 mod outputs;
 mod syntax;
@@ -30,7 +31,7 @@ mod truncation;
 pub use assistant_parts::find_tool_at;
 pub use core::{
     MessageView, PrebuiltItems, RenderCtx, build_render_items_ctx, build_render_items_pub,
-    message_view_total_lines,
+    build_render_items_window, message_view_total_lines,
 };
 pub use task_body::{TASK_VIEW_COLLAPSE_BYTES, TASK_VIEW_COLLAPSE_LINES, task_view_body_lines};
 pub use tool_blocks::{border_color_for_status, tool_kind_color, tool_status_icon_animated};
