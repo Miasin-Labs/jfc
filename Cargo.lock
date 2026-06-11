@@ -2984,6 +2984,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "ort",
  "reqwest",
  "serde",
  "serde_json",

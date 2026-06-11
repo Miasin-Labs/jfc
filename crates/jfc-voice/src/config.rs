@@ -137,6 +137,13 @@ pub struct VoiceConfig {
     /// Optional override for the profile's calibrated acceptance threshold
     /// (`JFC_VOICE_SPEAKER_THRESHOLD`). Larger = more permissive.
     pub speaker_threshold: Option<f64>,
+    /// Path to an ECAPA-TDNN/x-vector ONNX speaker-embedding model
+    /// (`JFC_VOICE_SPEAKER_MODEL`). Only used when built with the
+    /// `speaker-neural` feature; enables the SOTA-accuracy neural gate. When
+    /// unset/unavailable the gate uses the classical MFCC-template score. The
+    /// embedder reads this env directly; the field is here for discoverability
+    /// and so the config can surface it.
+    pub speaker_model_path: Option<String>,
 }
 
 /// Which STT backend to attempt first.
@@ -171,6 +178,7 @@ impl VoiceConfig {
             speaker_threshold: std::env::var("JFC_VOICE_SPEAKER_THRESHOLD")
                 .ok()
                 .and_then(|s| s.parse().ok()),
+            speaker_model_path: std::env::var("JFC_VOICE_SPEAKER_MODEL").ok(),
             ..Default::default()
         };
 
@@ -217,6 +225,17 @@ impl VoiceConfig {
         }
         if cfg.speaker_threshold.is_none() {
             cfg.speaker_threshold = v.get("speakerThreshold").and_then(|t| t.as_f64());
+        }
+        // voice.speakerModel: ONNX embedding model path (speaker-neural). The
+        // embedder reads JFC_VOICE_SPEAKER_MODEL, so mirror a config value into
+        // the env when the env isn't already set, keeping env-wins precedence.
+        if cfg.speaker_model_path.is_none() {
+            if let Some(p) = v.get("speakerModel").and_then(|p| p.as_str()) {
+                cfg.speaker_model_path = Some(p.to_owned());
+                // SAFETY: single-threaded config load at startup; bridges the
+                // config value to the env the embedder reads.
+                unsafe { std::env::set_var("JFC_VOICE_SPEAKER_MODEL", p) };
+            }
         }
 
         cfg

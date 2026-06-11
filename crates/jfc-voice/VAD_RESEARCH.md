@@ -255,19 +255,41 @@ This is the canonical *Personal VAD* idea — "detect the voice activity of a
 arXiv:1908.04284) — but with a **classical** speaker model where Personal VAD
 uses a trained d-vector. Accuracy differs by tier:
 
-| Tier | Speaker representation | Real-world discrimination |
-| --- | --- | --- |
-| **Implemented** | MFCC mean/variance template + pitch (GMM-UBM, 1 Gaussian) | Reliably rejects acoustically *dissimilar* sources (broadband media, a much higher/lower voice). **Weak** on two *similar* human voices. |
-| **Seam (follow-on)** | Trained **ECAPA-TDNN / x-vector** ONNX embedding + cosine | SOTA verification (EER ~0.9% on VoxCeleb, Desplanques 2020). Drop-in: reuse the `ort` runtime like Silero; replace the embedding step, keep enrollment + cosine + gate. |
-| **Separation (follow-on)** | **VoiceFilter** speaker-conditioned masking net | Actually *removes* the background voice rather than dropping the segment (Wang et al. 2019). Needs training data. |
+| Tier | Speaker representation | Real-world discrimination | Status |
+| --- | --- | --- | --- |
+| Classical | MFCC mean/variance template + pitch (GMM-UBM, 1 Gaussian) | Reliably rejects acoustically *dissimilar* sources (broadband media, a much higher/lower voice). **Weak** on two *similar* human voices. | **Implemented**, always available (default) |
+| Neural embedding | Trained **ECAPA-TDNN / x-vector** ONNX embedding + cosine | SOTA verification (EER ~0.9% on VoxCeleb, Desplanques 2020) — the real two-similar-voice accuracy. | **Implemented & wired** behind the `speaker-neural` feature; needs a user-provided model (`JFC_VOICE_SPEAKER_MODEL`). Falls back to Classical when absent. |
+| Separation | **VoiceFilter** speaker-conditioned masking net | Actually *removes* the background voice rather than dropping the segment (Wang et al. 2019). Needs training data. | Follow-on (not implemented) |
+
+**How the neural tier is implemented.** `speaker.rs` defines a
+`SpeakerEmbedder` trait with two backends: `NullEmbedder` (classical path,
+always available) and `OnnxEmbedder` (feature `speaker-neural`). The ONNX
+backend reuses the **same ONNX Runtime (`ort`)** the Silero VAD links — no new
+native dependency — loads a user model from `JFC_VOICE_SPEAKER_MODEL`,
+auto-detects the input layout (`[batch, frames, mels]` vs `[batch, mels,
+frames]`) and mel-band count from the model's input shape, computes a log-mel
+filterbank feature sequence (`fbank_features`, the ECAPA/x-vector front-end),
+runs inference, and L2-normalizes the first output as the embedding.
+`SpeakerProfile` stores an optional `NeuralProfile { embedding, backend,
+threshold }`; when present the gate scores by **cosine** on the learned
+embedding, otherwise it uses the classical Mahalanobis+pitch score. Enrollment
+(`recorder::enroll_primary_speaker`) attaches the neural embedding automatically
+when a model is configured. Everything **fails open / falls back gracefully**:
+no feature, no model, or an inference error → the classical gate.
+
+To get the SOTA tier: build with `--features speaker-neural`, export an
+ECAPA-TDNN/x-vector model to ONNX (e.g. from SpeechBrain/WeSpeaker/3D-Speaker),
+and set `JFC_VOICE_SPEAKER_MODEL=/path/model.onnx` (optionally
+`JFC_VOICE_SPEAKER_NMELS`, default 80, and `JFC_VOICE_SPEAKER_COS_THRESHOLD`,
+default 0.30), then enroll.
 
 The unit tests validate the **pipeline + math** on synthetic signals
 (deterministic MFCC, enroll→accept-self, reject-noise, reject-very-different
-pitch, JSON round-trip, threshold knob, gate admit/drop). They deliberately do
-**not** claim real two-human-voice accuracy — that needs the trained-embedding
-tier, which is the recommended next step (the `ort` dependency is already linked
-behind `vad-neural`, so an ECAPA-TDNN ONNX model drops in the same way Silero
-does).
+pitch, JSON round-trip incl. the neural field + legacy classical-only profiles,
+threshold knob, the embedder seam via a stub embedding, the fbank front-end
+shape, gate admit/drop). They deliberately do **not** claim real two-human-voice
+accuracy from the *classical* tier, and they run without a real ONNX model — the
+neural tier's accuracy comes from the user-supplied trained model.
 
 ### Practical mitigations available today
 
@@ -376,12 +398,12 @@ No recorder change was required: the idle wait-loop already calls
 
 - **Semantic end-of-turn / turn-taking model** (§2) — the real cure for
   breath/pause cutoffs; needs a model + latency budget + evals.
-- **ECAPA-TDNN / x-vector ONNX embedding for the speaker gate** (§3) — the
-  trained-embedding tier that lifts the gate from "rejects dissimilar sources"
-  to SOTA two-voice discrimination. The seam exists (`speaker.rs` enrollment +
-  cosine + gate are model-agnostic; the `ort` runtime is already linked behind
-  `vad-neural`). Remaining work: ship/point at an ONNX model and swap the
-  embedding step.
+- **ECAPA-TDNN / x-vector ONNX embedding for the speaker gate** (§3) — **now
+  implemented & wired** behind the `speaker-neural` feature (`OnnxEmbedder` +
+  `SpeakerEmbedder` trait, cosine on the learned embedding). The only thing
+  *not* in-tree is a bundled model: the user points `JFC_VOICE_SPEAKER_MODEL` at
+  an exported ECAPA/x-vector ONNX file. Optional follow-on: ship a default
+  model and add an integration test that runs a real one.
 - **VoiceFilter speaker-conditioned masking** (§3) — *separating* the background
   voice out instead of *dropping* the segment; needs a trained masking net +
   data.

@@ -92,6 +92,10 @@ impl VadDetector {
 /// disabled or unenrolled — default behavior is unchanged.
 struct SpeakerGate {
     profile: Option<crate::speaker::SpeakerProfile>,
+    /// Embedding backend used for scoring. The neural ONNX backend (feature
+    /// `speaker-neural` + `JFC_VOICE_SPEAKER_MODEL`) when available, else the
+    /// null embedder (classical Mahalanobis+pitch path).
+    embedder: Box<dyn crate::speaker::SpeakerEmbedder>,
 }
 
 impl SpeakerGate {
@@ -99,8 +103,12 @@ impl SpeakerGate {
     /// gate is enabled AND a profile JSON loads successfully.
     fn from_config(cfg: &VoiceConfig) -> Self {
         if !cfg.speaker_gate {
-            return Self { profile: None };
+            return Self {
+                profile: None,
+                embedder: Box::new(crate::speaker::NullEmbedder),
+            };
         }
+        let embedder = crate::speaker::default_embedder();
         let path = Self::profile_path(cfg);
         match crate::speaker::SpeakerProfile::load(&path) {
             Ok(mut profile) => {
@@ -111,10 +119,13 @@ impl SpeakerGate {
                     target: "jfc::voice::speaker",
                     path = %path.display(),
                     threshold = profile.threshold,
+                    backend = embedder.name(),
+                    neural = profile.neural.is_some(),
                     "target-speaker gate enabled"
                 );
                 Self {
                     profile: Some(profile),
+                    embedder,
                 }
             }
             Err(err) => {
@@ -125,7 +136,10 @@ impl SpeakerGate {
                     "speaker gate enabled but no usable profile; gate disabled \
                      (enroll one to filter background voices)"
                 );
-                Self { profile: None }
+                Self {
+                    profile: None,
+                    embedder,
+                }
             }
         }
     }
@@ -147,7 +161,7 @@ impl SpeakerGate {
         let Some(profile) = &self.profile else {
             return true;
         };
-        let score = profile.score(pcm);
+        let score = profile.score_with(pcm, self.embedder.as_ref());
         if score.voiced_frames == 0 {
             // Couldn't measure — fail open so we never silently swallow speech.
             return true;
@@ -213,9 +227,13 @@ pub async fn enroll_primary_speaker(
     }
     pcm.extend_from_slice(&capture.stop().await);
 
-    let profile = crate::speaker::SpeakerProfile::enroll_from_pcm(&pcm).ok_or_else(|| {
+    let mut profile = crate::speaker::SpeakerProfile::enroll_from_pcm(&pcm).ok_or_else(|| {
         "not enough voiced speech to enroll — speak continuously for a few seconds".to_owned()
     })?;
+    // Attach a learned neural embedding when a model is configured (no-op
+    // otherwise), so the gate scores with the SOTA backend.
+    let embedder = crate::speaker::default_embedder();
+    profile = profile.with_neural_embedding(embedder.as_ref(), &pcm);
     let path = SpeakerGate::profile_path(cfg);
     profile.save(&path).map_err(|e| e.to_string())?;
     info!(
@@ -223,6 +241,8 @@ pub async fn enroll_primary_speaker(
         path = %path.display(),
         frames = profile.enrolled_frames,
         threshold = profile.threshold,
+        backend = embedder.name(),
+        neural = profile.neural.is_some(),
         "enrolled primary speaker profile"
     );
     Ok(path)
@@ -1058,6 +1078,7 @@ mod tests {
         let profile = SpeakerProfile::enroll_from_pcm(&me).expect("enroll");
         let gate = SpeakerGate {
             profile: Some(profile),
+            embedder: Box::new(crate::speaker::NullEmbedder),
         };
 
         // Same synthetic speaker → admitted.

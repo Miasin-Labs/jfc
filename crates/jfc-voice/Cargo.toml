@@ -20,11 +20,21 @@ futures-util = "0.3"
 # Silero model and downloads a prebuilt ONNX Runtime at build time.
 voice_activity_detector = { version = "0.2.1", optional = true }
 
+# Optional neural speaker-embedding backend (ECAPA-TDNN / x-vector via ONNX
+# Runtime) for the target-speaker gate. Off by default; the classical MFCC
+# template gate works without it. Pinned to the exact `ort` the Silero VAD crate
+# uses so the two share a single ONNX Runtime in the build graph.
+ort = { version = "=2.0.0-rc.10", features = ["ndarray"], optional = true }
+
 [features]
 default = []
 # Enable the neural (Silero) VAD engine, selectable at runtime via
 # JFC_VAD_ENGINE=neural (falls back to the energy VAD when unset/unavailable).
 vad-neural = ["dep:voice_activity_detector"]
+# Enable the neural speaker-embedding backend (ECAPA-TDNN/x-vector ONNX) for the
+# target-speaker gate. Requires a user-provided model via JFC_VOICE_SPEAKER_MODEL;
+# falls back to the classical MFCC-template gate when no model is configured.
+speaker-neural = ["dep:ort"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
