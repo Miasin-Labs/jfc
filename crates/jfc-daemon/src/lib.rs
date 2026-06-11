@@ -12,6 +12,7 @@ pub mod pid;
 pub mod reconcile;
 pub mod registry;
 pub mod runtime;
+pub mod scheduled_tasks;
 pub mod state;
 pub mod svcs;
 pub mod worker;
@@ -34,6 +35,7 @@ pub use registry::{
 pub use runtime::{
     Daemon, WorkerInfo, fire_cron_cli, list_string, run_daemon, status_string, stop_daemon,
 };
+pub use scheduled_tasks::{ScheduledTask, ScheduledTaskRegistry, TaskLifecycle, TaskRun};
 pub use state::{
     BackgroundAgentInfo, BackgroundAgentLaunch, BackgroundAgentStatus, DaemonPaths, DaemonState,
     ScheduledWakeup, SessionId, SessionInfo, SessionStatus, TERMINAL_AGENT_GLOBAL_CAP,
