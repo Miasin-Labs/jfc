@@ -160,9 +160,24 @@ impl ScheduledTaskRegistry {
             .collect()
     }
 
-    /// All tasks due to fire at `now` (active only).
+    /// All tasks due to fire at `now` (active only). Read-only.
     pub fn due(&self, now: SystemTime) -> Vec<&ScheduledTask> {
         self.tasks.iter().filter(|t| t.should_fire(now)).collect()
+    }
+
+    /// Fire-side of the scheduler: return clones of all due active tasks AND
+    /// advance their `last_run` (recording a run entry) so they don't re-fire
+    /// on the next tick. Mirrors the daemon's `tick_cron` mutate-then-persist
+    /// semantics. The caller persists the registry after firing.
+    pub fn due_and_advance(&mut self, now: SystemTime) -> Vec<ScheduledTask> {
+        let mut fired = Vec::new();
+        for task in &mut self.tasks {
+            if task.should_fire(now) {
+                fired.push(task.clone());
+                task.record_run(now, true, "fired");
+            }
+        }
+        fired
     }
 
     fn set_lifecycle(&mut self, id: &str, lifecycle: TaskLifecycle) -> Result<(), String> {
@@ -320,6 +335,32 @@ mod tests {
         reg.get_mut("hourly").unwrap().record_run(at(0), true, "ok");
         assert!(reg.due(at(1800)).is_empty());
         assert_eq!(reg.due(at(3600)).len(), 1);
+    }
+
+    #[test]
+    fn due_and_advance_fires_then_does_not_refire_normal() {
+        let mut reg = ScheduledTaskRegistry::new();
+        reg.create(task("hourly", every(3600), at(0))).unwrap();
+        // First tick at/after creation: never-run → fires once, advances last_run.
+        let fired = reg.due_and_advance(at(0));
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].id, "hourly");
+        // Immediately again: not due (just ran) → no re-fire.
+        assert!(reg.due_and_advance(at(1)).is_empty());
+        // After the interval: due again.
+        assert_eq!(reg.due_and_advance(at(3600)).len(), 1);
+        // Run history recorded.
+        assert_eq!(reg.get("hourly").unwrap().runs.len(), 2);
+    }
+
+    #[test]
+    fn due_and_advance_skips_paused_and_archived_robust() {
+        let mut reg = ScheduledTaskRegistry::new();
+        reg.create(task("p", every(60), at(0))).unwrap();
+        reg.create(task("z", every(60), at(0))).unwrap();
+        reg.pause("p").unwrap();
+        reg.archive("z").unwrap();
+        assert!(reg.due_and_advance(at(100)).is_empty());
     }
 
     #[test]

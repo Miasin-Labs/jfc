@@ -148,11 +148,7 @@ fn is_quiet_hours_now() -> bool {
             continue;
         };
         if let Some(qh) = val.get("quietHours").or_else(|| val.get("quiet_hours")) {
-            if qh
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
+            if qh.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
                 quiet_hours = Some(qh.clone());
             }
         }
@@ -168,7 +164,9 @@ fn is_quiet_hours_now() -> bool {
         let (h, m) = s.split_once(':')?;
         let hours: u32 = h.trim().parse().ok()?;
         let mins: u32 = m.trim().parse().ok()?;
-        if hours > 23 || mins > 59 { return None; }
+        if hours > 23 || mins > 59 {
+            return None;
+        }
         Some(hours * 60 + mins)
     }
     let (Some(start), Some(end)) = (parse_hhmm(start_str), parse_hhmm(end_str)) else {
@@ -181,7 +179,11 @@ fn is_quiet_hours_now() -> bool {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let now = ((secs % 86400) / 60) as u32;
-    if start <= end { now >= start && now < end } else { now >= start || now < end }
+    if start <= end {
+        now >= start && now < end
+    } else {
+        now >= start || now < end
+    }
 }
 
 /// What a service's tick wants the daemon loop to do next.
@@ -346,6 +348,92 @@ impl DaemonService for WakeupService {
     }
 }
 
+/// Fire due recurring agentic tasks by running each task's prompt headlessly
+/// (`jfc --print`). The registry persists separately from daemon state (under
+/// the same config dir), so this service loads it, fires + advances due tasks,
+/// and saves it back. Mirrors [`CronService`] but the unit of work is an
+/// agentic prompt, not a shell command.
+pub struct ScheduledTaskService;
+
+#[async_trait::async_trait]
+impl DaemonService for ScheduledTaskService {
+    fn name(&self) -> &str {
+        "scheduled-tasks"
+    }
+    async fn tick(&mut self, daemon: &mut Daemon, now: SystemTime) -> TickOutcome {
+        // Respect quiet hours, same as cron.
+        if is_quiet_hours_now() {
+            return TickOutcome::Continue;
+        }
+        let path =
+            crate::scheduled_tasks::ScheduledTaskRegistry::default_path(&daemon.paths.base_dir);
+        let mut registry = match crate::scheduled_tasks::ScheduledTaskRegistry::load(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(target: "jfc::daemon", error = %e, "could not load scheduled tasks");
+                return TickOutcome::Continue;
+            }
+        };
+        let fired = registry.due_and_advance(now);
+        if fired.is_empty() {
+            return TickOutcome::Continue;
+        }
+        for task in &fired {
+            tracing::info!(
+                target: "jfc::daemon",
+                task_id = %task.id,
+                title = %task.title,
+                "scheduled agentic task firing"
+            );
+            if let Err(e) = run_scheduled_task(&task.prompt).await {
+                tracing::warn!(
+                    target: "jfc::daemon",
+                    task_id = %task.id,
+                    error = %e,
+                    "scheduled task spawn failed"
+                );
+            }
+        }
+        if let Err(e) = registry.save(&path) {
+            tracing::warn!(target: "jfc::daemon", error = %e, "could not persist scheduled tasks");
+        }
+        daemon.touch_activity();
+        TickOutcome::Continue
+    }
+}
+
+/// Spawn `jfc --print "<prompt>"` as a detached headless run. Env-hardened the
+/// same way [`crate::cron::run_cron_command`] hardens shell spawns.
+async fn run_scheduled_task(prompt: &str) -> std::io::Result<()> {
+    use tokio::process::Command;
+    let exe = crate::worker::resolve_worker_exe(None)?;
+    let mut command = Command::new(exe);
+    command.arg("--print").arg(prompt);
+    for var in [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "BASH_ENV",
+        "ENV",
+        "PROMPT_COMMAND",
+        "IFS",
+        "SHELLOPTS",
+        "BASHOPTS",
+    ] {
+        command.env_remove(var);
+    }
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("SUDO_ASKPASS", "/bin/false")
+        .env("SSH_ASKPASS", "/bin/false")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Detach: spawn and don't await completion — agentic runs are long-lived.
+    let _child = command.spawn()?;
+    Ok(())
+}
+
 /// The ordered roster of real daemon services. `run_daemon` builds this once
 /// and calls [`DaemonServices::run_tick`] every interval, replacing the old
 /// inline tick body. Order matches the historical loop exactly:
@@ -372,6 +460,7 @@ impl DaemonServices {
                 Box::new(ControlService),
                 Box::new(WorkerSyncService),
                 Box::new(CronService),
+                Box::new(ScheduledTaskService),
                 Box::new(WakeupService),
             ],
         }
@@ -423,6 +512,7 @@ mod tests {
                 "control",
                 "worker_sync",
                 "cron",
+                "scheduled-tasks",
                 "wakeup",
             ]
         );
@@ -431,6 +521,17 @@ mod tests {
         // it neither restarts nor idle-exits.
         let now = SystemTime::now();
         let outcome = services.run_tick(&mut daemon, now).await;
+        assert_eq!(outcome, TickOutcome::Continue);
+    }
+
+    // The scheduled-task service is a no-op (and never panics) when no registry
+    // file exists yet — the common case until a user adds a task.
+    #[tokio::test]
+    async fn scheduled_task_service_noop_without_registry_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::new(dir.path()).expect("daemon");
+        let mut svc = ScheduledTaskService;
+        let outcome = svc.tick(&mut daemon, SystemTime::now()).await;
         assert_eq!(outcome, TickOutcome::Continue);
     }
 

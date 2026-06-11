@@ -90,7 +90,7 @@ fn build_worker_exe_from_workspace() -> std::io::Result<Option<PathBuf>> {
     }
 }
 
-pub(super) fn resolve_worker_exe(preferred: Option<&Path>) -> std::io::Result<PathBuf> {
+pub(crate) fn resolve_worker_exe(preferred: Option<&Path>) -> std::io::Result<PathBuf> {
     if let Some(path) = preferred
         && path_is_executable_file(path)
     {
