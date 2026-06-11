@@ -162,19 +162,67 @@ fn run_learn_dreamer(
         .run_cycle(&tasks, &mut records)
         .map_err(|e| e.to_string());
 
+    // After consolidation, regenerate the memory Digest brief + knowledge Wiki
+    // from the (now-consolidated) records and write them under `.jfc/`. Mirrors
+    // Perplexity Computer's once-a-day memory build. Best-effort: a write
+    // failure here must not fail the dream cycle.
+    let digest_wiki = write_digest_and_wiki(project_root, &records);
+
     // Always release the lease, even on failure.
     let _ = release_lease(lease_path, &lease.holder_id);
 
     let report = result?;
     Ok(format!(
-        "{} tasks ({} circuit-breaker)",
+        "{} tasks ({} circuit-breaker){}",
         report.tasks_run.len(),
         if report.circuit_breaker_fired {
             "tripped"
         } else {
             "ok"
-        }
+        },
+        digest_wiki
     ))
+}
+
+/// Build the memory Digest brief + knowledge Wiki from `records` and write them
+/// to `<project_root>/.jfc/{DIGEST.md,WIKI.md}`. Returns a short status suffix
+/// for the dream report (empty on a write failure — best-effort).
+fn write_digest_and_wiki(
+    project_root: &std::path::Path,
+    records: &[jfc_learn::dreamer::MemoryRecord],
+) -> String {
+    use jfc_learn::digest::{DigestSettings, build_digest, build_wiki};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Digest over a wide window so a manual /dream still produces a brief even
+    // when memories weren't touched in the last day.
+    let settings = DigestSettings {
+        lookback_secs: 30 * 24 * 3600,
+        ..DigestSettings::default()
+    };
+    let digest = build_digest(records, &settings, now);
+    let wiki = build_wiki(records);
+
+    let dir = project_root.join(".jfc");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return String::new();
+    }
+    let mut wrote = Vec::new();
+    if std::fs::write(dir.join("DIGEST.md"), digest.to_markdown()).is_ok() {
+        wrote.push(format!("digest:{}", digest.items.len()));
+    }
+    if std::fs::write(dir.join("WIKI.md"), wiki.to_markdown()).is_ok() {
+        wrote.push(format!("wiki:{}", wiki.pages.len()));
+    }
+    if wrote.is_empty() {
+        String::new()
+    } else {
+        format!(" + {}", wrote.join(" "))
+    }
 }
 
 // ─── Scheduler ───────────────────────────────────────────────────────────────
@@ -269,6 +317,57 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn write_digest_and_wiki_emits_files_normal() {
+        use jfc_learn::dreamer::MemoryRecord;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let records = vec![
+            MemoryRecord {
+                path: "/m/a.md".into(),
+                category: Some("Architecture".into()),
+                normalized_hash: Some("h1".into()),
+                content: "Prefer traits over free functions.".into(),
+                last_seen_at: Some(now - 10),
+                memory_status: Some("active".into()),
+            },
+            MemoryRecord {
+                path: "/m/b.md".into(),
+                category: Some("Testing".into()),
+                normalized_hash: Some("h2".into()),
+                content: "Use *_normal / *_robust naming.".into(),
+                last_seen_at: Some(now - 20),
+                memory_status: Some("active".into()),
+            },
+        ];
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let suffix = write_digest_and_wiki(dir.path(), &records);
+        assert!(suffix.contains("digest"), "suffix: {suffix}");
+        assert!(suffix.contains("wiki"), "suffix: {suffix}");
+
+        let digest_md = std::fs::read_to_string(dir.path().join(".jfc/DIGEST.md")).unwrap();
+        assert!(digest_md.contains("Memory Digest"));
+        assert!(digest_md.contains("Prefer traits"));
+        let wiki_md = std::fs::read_to_string(dir.path().join(".jfc/WIKI.md")).unwrap();
+        assert!(wiki_md.contains("Knowledge Wiki"));
+        assert!(wiki_md.contains("# Architecture"));
+        assert!(wiki_md.contains("# Testing"));
+    }
+
+    #[test]
+    fn write_digest_and_wiki_empty_records_robust() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // No records → digest is empty (0 items) but files still write.
+        let suffix = write_digest_and_wiki(dir.path(), &[]);
+        // wiki has 0 pages, digest 0 items → both still wrote.
+        assert!(suffix.contains("digest:0"));
+        assert!(dir.path().join(".jfc/DIGEST.md").exists());
+    }
 
     // Env-var tests must not race. Tokio runs tests on multiple threads
     // and `std::env::set_var` is process-wide; without this lock parallel
