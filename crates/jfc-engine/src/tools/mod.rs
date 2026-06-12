@@ -43,6 +43,7 @@ pub use dispatch::advance_linked_plans;
 
 // tool definitions (for advertised tool list)
 pub use catalog::progressive_tool_defs;
+pub(crate) use catalog::is_code_navigation_tool_name;
 pub use defs::all_tool_defs;
 pub use safe_tools::all_tool_defs_with_mcp;
 

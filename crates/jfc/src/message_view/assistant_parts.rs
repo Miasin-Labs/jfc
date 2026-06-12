@@ -243,16 +243,28 @@ pub fn pretty_model_badge(raw: &str) -> String {
 }
 
 pub(super) fn truncate_str(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     if max == 0 {
         return String::new();
     }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_owned()
-    } else {
-        let trunc: String = chars[..max.saturating_sub(1)].iter().collect();
-        format!("{}…", trunc)
+    // Budget is *display* columns, not codepoints: CJK/emoji are 2 cells
+    // wide, so codepoint counting overflows the cell budget and corrupts
+    // the layout of tool titles containing wide characters.
+    if UnicodeWidthStr::width(s) <= max {
+        return s.to_owned();
     }
+    let budget = max.saturating_sub(1); // reserve one cell for '…'
+    let mut width = 0usize;
+    let mut end = 0usize;
+    for (pos, ch) in s.char_indices() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        width += w;
+        end = pos + ch.len_utf8();
+    }
+    format!("{}…", &s[..end])
 }
 
 pub(super) fn sanitize_terminal_text(input: &str) -> String {

@@ -318,7 +318,14 @@ fn explicitly_requests_tool_use(trimmed: &str) -> bool {
 }
 
 fn preserve_non_action_tool(tool_name: &str) -> bool {
+    // CodeGraph (read-only MCP code navigation) stays available on
+    // informational turns: "how does X work" is exactly the question the
+    // system prompt tells the model to answer with codegraph_explore. The
+    // old behavior stripped every MCP tool here, which contradicted that
+    // guidance and trained the model to answer structure questions from
+    // memory or punt to Read/Bash on the next action turn.
     matches!(tool_name, "ToolSearch" | "ToolSuggest" | "SendUserMessage")
+        || crate::tools::is_code_navigation_tool_name(tool_name)
 }
 
 fn anthropic_tool_choice_value(_choice: StreamToolChoice) -> serde_json::Value {
@@ -1406,6 +1413,18 @@ mod tests {
         assert!(!preserve_non_action_tool("Bash"));
         assert!(!preserve_non_action_tool("Read"));
         assert!(!preserve_non_action_tool("WebFetch"));
+    }
+
+    // Regression: informational ("how does X work") turns must keep CodeGraph
+    // tools advertised — the system prompt tells the model to answer code
+    // structure questions with codegraph_explore, so stripping them here
+    // contradicted the prompt and pushed the model back to Read/Bash.
+    #[test]
+    fn preserve_non_action_keeps_codegraph_tools_regression() {
+        assert!(preserve_non_action_tool("mcp__codegraph__codegraph_explore"));
+        assert!(preserve_non_action_tool("mcp__codegraph__codegraph_search"));
+        assert!(preserve_non_action_tool("codegraph_node"));
+        assert!(!preserve_non_action_tool("mcp__github__create_issue"));
     }
 
     #[tokio::test]

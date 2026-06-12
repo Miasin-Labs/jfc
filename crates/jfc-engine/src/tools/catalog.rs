@@ -261,7 +261,7 @@ fn normalize_tool_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
-fn is_code_navigation_tool_name(name: &str) -> bool {
+pub(crate) fn is_code_navigation_tool_name(name: &str) -> bool {
     let normalized = normalize_tool_name(name);
     const DIRECT_NAMES: &[&str] = &[
         "codegraph_search",
