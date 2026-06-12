@@ -1244,6 +1244,16 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Acquire the env serialization lock, tolerating poisoning. These tests
+    /// mutate the process-global `CLAUDE_CODE_SUBAGENT_MODEL` env var, so they
+    /// must run serially. Without poison tolerance, the FIRST test to panic
+    /// (a real assertion failure) poisons the mutex and every subsequent test
+    /// fails with a *lock* panic — masking which test actually broke. Recover
+    /// the guard so only the genuine failure is reported.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn harvest_returns_full_narrative_when_final_is_preamble_normal() {
         // The agent did substantive work, then its last turn was a preamble
@@ -1334,7 +1344,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_uses_agent_model_before_parent() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let model = selected_subagent_model(
@@ -1374,7 +1384,7 @@ mod tests {
     // before selected_subagent_provider_model existed.
     #[test]
     fn selected_subagent_provider_model_switches_provider_regression() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let anthropic: std::sync::Arc<dyn jfc_provider::Provider> =
@@ -1401,7 +1411,7 @@ mod tests {
     // still errors, and the error names the missing provider.
     #[test]
     fn selected_subagent_provider_model_unknown_provider_errors_robust() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let anthropic: std::sync::Arc<dyn jfc_provider::Provider> =
@@ -1454,7 +1464,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_env_overrides_task_model() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::set_var("CLAUDE_CODE_SUBAGENT_MODEL", "haiku") };
 
         let model = selected_subagent_model(
@@ -1471,7 +1481,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_maps_builtin_tiers_for_openai() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let model = selected_subagent_model(
@@ -1487,7 +1497,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_maps_builtin_tiers_for_anthropic_oauth() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let model = selected_subagent_model(
@@ -1560,7 +1570,7 @@ mod tests {
     // complexity instead of inheriting the heavy parent model.
     #[test]
     fn selected_subagent_model_routes_by_prompt_complexity_when_no_category_normal() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let mut input = task_input(None);
@@ -1581,10 +1591,38 @@ mod tests {
         assert_eq!(model.as_str(), crate::providers::anthropic_models::ALIAS_HAIKU);
     }
 
+    // The cost-AND-quality safety net: a genuinely ambiguous category-less
+    // Task with a realistic (non-"inspect") signal-free prompt must INHERIT the
+    // parent model, not silently downgrade to haiku. This guards the t907
+    // behavior change — bare Tasks only re-route on a clear signal.
+    #[test]
+    fn selected_subagent_model_weak_signal_inherits_parent_normal() {
+        let _guard = env_lock();
+        unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
+
+        let mut input = task_input(None);
+        input.subagent_type = None;
+        input.category = None;
+        input.description = "follow-up".to_string();
+        input.prompt =
+            "Continue with the work we discussed and let me know how it goes when you can."
+                .to_string();
+
+        let parent = jfc_provider::ModelId::new("claude-opus-4-6");
+        let model =
+            selected_subagent_model(&input, None, parent.clone(), "anthropic-oauth").unwrap();
+
+        assert_eq!(
+            model.as_str(),
+            parent.as_str(),
+            "weak/ambiguous prompt must inherit the parent, not downgrade"
+        );
+    }
+
     // An explicit category still wins over the complexity heuristic.
     #[test]
     fn selected_subagent_model_category_beats_complexity_robust() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let mut input = task_input(None);
@@ -1608,7 +1646,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_rejects_cross_provider_models() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let error = selected_subagent_model(
@@ -1633,7 +1671,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_routes_explore_category_to_haiku_normal() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let model = selected_subagent_model(
@@ -1648,7 +1686,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_routes_security_category_to_opus_normal() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let model = selected_subagent_model(
@@ -1663,7 +1701,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_explicit_model_overrides_category_robust() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         // category says haiku, but an explicit Task `model` must win.
@@ -1681,7 +1719,7 @@ mod tests {
 
     #[test]
     fn selected_subagent_model_unknown_category_inherits_parent_robust() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
 
         let parent = jfc_provider::ModelId::new("claude-opus-4-6");

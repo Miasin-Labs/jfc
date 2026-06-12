@@ -599,7 +599,52 @@ fn word_span_in_row(chars: &[char], idx: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_word_char, word_span_in_row};
+    use super::{is_word_char, selection_row_span, word_span_in_row};
+
+    // Characterization tests for selection_row_span — the pure column-span
+    // computation behind drag-selection text extraction. These lock in the
+    // CURRENT absolute-screen-cell behavior so a future buffer-backed rework
+    // (logical-coord selection) has a regression net. left=1, right=40 model
+    // the padded message rect (col 0 padding, col 41 scrollbar).
+    const LEFT: u16 = 1;
+    const RIGHT: u16 = 40;
+
+    #[test]
+    fn selection_span_single_row_is_inclusive_normal() {
+        // Same-row drag from col 5 to col 9 → [5, 10) (end is inclusive, +1).
+        let span = selection_row_span(7, (5, 7), (9, 7), LEFT, RIGHT);
+        assert_eq!(span, (5, 10));
+    }
+
+    #[test]
+    fn selection_span_first_row_runs_to_right_edge_normal() {
+        // Multi-row drag: the first row selects from the anchor col to the
+        // right edge.
+        let span = selection_row_span(3, (12, 3), (8, 6), LEFT, RIGHT);
+        assert_eq!(span, (12, RIGHT));
+    }
+
+    #[test]
+    fn selection_span_last_row_runs_from_left_edge_normal() {
+        // The last row selects from the left edge to the head col (inclusive).
+        let span = selection_row_span(6, (12, 3), (8, 6), LEFT, RIGHT);
+        assert_eq!(span, (LEFT, 9));
+    }
+
+    #[test]
+    fn selection_span_middle_row_is_full_width_robust() {
+        // A fully-spanned middle row covers the whole content width.
+        let span = selection_row_span(4, (12, 3), (8, 6), LEFT, RIGHT);
+        assert_eq!(span, (LEFT, RIGHT));
+    }
+
+    #[test]
+    fn selection_span_clamps_out_of_bounds_columns_robust() {
+        // Columns past the right edge clamp into [left, right] so extraction
+        // never indexes outside the padded rect.
+        let span = selection_row_span(2, (0, 2), (99, 2), LEFT, RIGHT);
+        assert_eq!(span, (LEFT, RIGHT));
+    }
 
     #[test]
     fn word_span_selects_full_token_normal() {
