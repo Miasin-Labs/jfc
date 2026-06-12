@@ -433,8 +433,19 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
                 let empty = EMPTY.get_or_init(std::collections::HashSet::new);
                 let expanded = app.viewing_task_expanded.get(task_id).unwrap_or(empty);
                 let task_done = matches!(bt.status, jfc_core::TaskLifecycle::Completed);
-                let lines =
-                    task_view_body_lines(&bt.messages, expanded, &t, inner_width, task_done);
+                // Lead with the canonical agent-detail body (render/roster.rs)
+                // — the same Progress/last-tool/model header the Tasks detail
+                // pane shows — so drilling into a detached agent reads the
+                // same as inspecting it from the task panel.
+                let mut lines = super::roster::agent_detail_lines(bt, &t, area.width);
+                lines.push(Line::from(""));
+                lines.extend(task_view_body_lines(
+                    &bt.messages,
+                    expanded,
+                    &t,
+                    inner_width,
+                    task_done,
+                ));
                 (title, lines, false)
             }
         }

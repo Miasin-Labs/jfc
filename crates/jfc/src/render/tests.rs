@@ -1572,6 +1572,38 @@ mod render_snapshot_tests {
         assert!(panel_row.contains('●'), "panel missing glyph: {panel_row}");
     }
 
+    // t910 merge: drilling into a detached agent (the task view reached via
+    // viewing_task_id, fallback string-log path) now leads with the SAME
+    // canonical detail body the Tasks pane shows (Progress header + stats).
+    #[test]
+    fn task_view_drillin_shows_canonical_detail_body_normal() {
+        let mut app = app_with_task(TaskLifecycle::Running, "drill in agent");
+        {
+            let bt = app.engine.background_tasks.get_mut("tx").unwrap();
+            bt.tool_use_count = 2;
+            bt.messages = vec!["[worker-started] pid=1\n".into()];
+            bt.chat_messages.clear(); // force the fallback (string-log) path
+        }
+        app.viewing_task_id = Some("tx".to_string());
+
+        let backend = TestBackend::new(90, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::messages_task_view(f, &mut app, area, "tx");
+        })
+        .expect("draw");
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("Progress"),
+            "canonical detail header missing in drill-in view:\n{text}"
+        );
+        assert!(
+            text.contains("2 tools"),
+            "canonical stats missing in drill-in view:\n{text}"
+        );
+    }
+
     // t918 slice: both roster surfaces order the same BackgroundTasks the
     // same way (shared roster_sort_key) — a running agent ranks above a
     // completed one. Insert both, render the teammates panel, assert the
