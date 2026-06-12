@@ -794,6 +794,51 @@ mod helper_tests {
         }
     }
 
+    // --- exit-code badge ---------------------------------------------
+
+    #[test]
+    fn exit_code_badge_shown_for_failed_command_normal() {
+        let mut tool = dummy_tool(
+            ToolInput::Bash {
+                command: "false".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: None,
+            },
+            ToolOutput::Command {
+                stdout: String::new(),
+                stderr: "boom".into(),
+                exit_code: Some(2),
+            },
+            ToolKind::Bash,
+        );
+        tool.status = ToolStatus::Failed;
+        assert_eq!(
+            tool_blocks::format_exit_code_badge(&tool).as_deref(),
+            Some("(2)")
+        );
+    }
+
+    #[test]
+    fn exit_code_badge_absent_on_success_robust() {
+        let tool = dummy_tool(
+            ToolInput::Bash {
+                command: "true".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: None,
+            },
+            ToolOutput::Command {
+                stdout: "ok".into(),
+                stderr: String::new(),
+                exit_code: Some(0),
+            },
+            ToolKind::Bash,
+        );
+        // Completed + exit 0 → no badge (it must not compete with the elapsed badge).
+        assert_eq!(tool_blocks::format_exit_code_badge(&tool), None);
+    }
+
     // --- infer_lang_from_tool ----------------------------------------
 
     #[test]

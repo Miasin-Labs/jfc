@@ -582,11 +582,28 @@ pub(super) fn build_title_spans<'a>(
     // completed/failed tools that have a measured duration, otherwise
     // None.
     let badge = format_elapsed_badge(tool);
-    let badge_w = badge.as_ref().map(|s| s.chars().count() + 1).unwrap_or(0);
+    // Exit-code badge `(N)` for a failed command — codex parity. Lets the
+    // user see *why* a bash step failed without expanding the block.
+    let exit_badge = format_exit_code_badge(tool);
+    let badge_w = badge
+        .as_ref()
+        .map(|s| crate::render::visual::cell_width(s) + 1)
+        .unwrap_or(0)
+        + exit_badge
+            .as_ref()
+            .map(|s| crate::render::visual::cell_width(s) + 1)
+            .unwrap_or(0);
     let effective = width
         .min(tool_title_width_cap())
         .saturating_sub(4 + badge_w);
     spans.extend(build_header_inner_spans(tool, t, effective));
+    if let Some(code) = exit_badge {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            code,
+            Style::default().fg(t.error).add_modifier(Modifier::DIM),
+        ));
+    }
     if let Some(b) = badge {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
@@ -597,6 +614,22 @@ pub(super) fn build_title_spans<'a>(
         ));
     }
     spans
+}
+
+/// Exit-code badge for a failed command tool, e.g. `(1)`. Returns `None`
+/// for non-failed tools, success exit codes, or tools whose output isn't a
+/// command (so it never competes with the elapsed badge on a clean run).
+pub(super) fn format_exit_code_badge(tool: &ToolCall) -> Option<String> {
+    if !matches!(tool.status, ToolStatus::Failed) {
+        return None;
+    }
+    match &tool.output {
+        ToolOutput::Command {
+            exit_code: Some(code),
+            ..
+        } if *code != 0 => Some(format!("({code})")),
+        _ => None,
+    }
 }
 
 /// Render the elapsed duration as a compact badge for the title row.
