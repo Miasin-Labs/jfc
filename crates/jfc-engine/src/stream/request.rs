@@ -389,6 +389,19 @@ async fn mcp_server_instructions_section() -> String {
     if included == 0 { String::new() } else { out }
 }
 
+/// Render the connected MCP servers' behavior-affecting tool metadata
+/// (annotation hints + titles) into a prompt section. Delegates the rendering
+/// to the registry, which owns the metadata; this just snapshots the registry
+/// and caps total size.
+async fn mcp_tool_metadata_section() -> String {
+    const MAX_TOTAL_CHARS: usize = 8_000;
+    let Some(registry) = tools::snapshot_mcp_registry() else {
+        return String::new();
+    };
+    let section = registry.tool_metadata_prompt_section().await;
+    truncate_chars(&section, MAX_TOTAL_CHARS)
+}
+
 pub async fn prepare_stream_request(
     provider: Arc<dyn Provider>,
     messages: &[ProviderMessage],
@@ -524,6 +537,16 @@ Do not use a colon before tool calls.";
     if !mcp_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&mcp_instructions);
+    }
+
+    // Behavior-affecting MCP tool metadata (read-only/destructive/idempotent
+    // hints + titles) so the model can tell which MCP tools are safe to call
+    // freely vs. need confirmation. Only tools carrying actionable annotations
+    // appear, so this stays empty for servers that advertise none.
+    let mcp_tool_metadata = mcp_tool_metadata_section().await;
+    if !mcp_tool_metadata.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&mcp_tool_metadata);
     }
 
     // v126 CLAUDE.md hierarchy — managed → user → project → .claude/ → local

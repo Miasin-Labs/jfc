@@ -77,6 +77,76 @@ pub struct McpAdvertisedToolMetadata {
     pub meta: Option<Value>,
 }
 
+impl McpAdvertisedToolMetadata {
+    /// Human-readable behavior hints distilled from the MCP `annotations`
+    /// object (spec keys: `readOnlyHint`, `destructiveHint`, `idempotentHint`,
+    /// `openWorldHint`). These are the annotations that should actually change
+    /// how the model treats a tool — e.g. that a tool is read-only (safe to
+    /// call freely) or destructive (confirm first). Returns the hint phrases in
+    /// a stable order; empty when no actionable annotation is present.
+    pub fn behavior_hints(&self) -> Vec<&'static str> {
+        let Some(Value::Object(map)) = &self.annotations else {
+            return Vec::new();
+        };
+        let flag = |key: &str| map.get(key).and_then(Value::as_bool);
+        let mut hints = Vec::new();
+        // readOnlyHint=true → safe; an explicit false is a meaningful "writes".
+        match flag("readOnlyHint") {
+            Some(true) => hints.push("read-only (does not modify its environment)"),
+            Some(false) => hints.push("modifies its environment"),
+            None => {}
+        }
+        if flag("destructiveHint") == Some(true) {
+            hints.push("destructive (may perform irreversible updates) — confirm before use");
+        }
+        if flag("idempotentHint") == Some(true) {
+            hints.push("idempotent (repeat calls have no additional effect)");
+        }
+        if flag("openWorldHint") == Some(true) {
+            hints.push("interacts with external entities (open-world)");
+        }
+        hints
+    }
+
+    /// The most descriptive display label: the tool `title` (annotation title
+    /// or top-level title) falls back to the tool name.
+    pub fn display_label(&self) -> &str {
+        if let Some(title) = &self.title
+            && !title.is_empty()
+        {
+            return title;
+        }
+        if let Some(Value::Object(map)) = &self.annotations
+            && let Some(Value::String(title)) = map.get("title")
+            && !title.is_empty()
+        {
+            return title;
+        }
+        &self.tool_name
+    }
+
+    /// Render this tool's rich metadata as a single prompt line, e.g.
+    /// `- mcp__fs__read_file (Read File): read-only; idempotent`. Returns
+    /// `None` when there is nothing beyond the bare name worth surfacing.
+    pub fn prompt_line(&self) -> Option<String> {
+        let hints = self.behavior_hints();
+        let label = self.display_label();
+        let has_label = label != self.tool_name;
+        if hints.is_empty() && !has_label {
+            return None;
+        }
+        let mut line = format!("- `{}`", self.advertised_name);
+        if has_label {
+            line.push_str(&format!(" ({label})"));
+        }
+        if !hints.is_empty() {
+            line.push_str(": ");
+            line.push_str(&hints.join("; "));
+        }
+        Some(line)
+    }
+}
+
 /// Status of an MCP server entry. Drives the `/mcp list` display and
 /// the [`crate::types::McpServerInfo`] sidebar block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +324,46 @@ impl McpRegistry {
         let mut out = Vec::new();
         for server in active {
             out.extend(server.advertised_tool_metadata());
+        }
+        out
+    }
+
+    /// Render the behavior-affecting tool metadata (titles + annotation hints)
+    /// as a prompt section, grouped by server. Only tools with something beyond
+    /// a bare name (a title or a read-only/destructive/idempotent/open-world
+    /// hint) appear, so the section stays small and only surfaces metadata that
+    /// should actually change how the model uses a tool. Returns an empty
+    /// string when no connected tool carries actionable metadata.
+    pub async fn tool_metadata_prompt_section(&self) -> String {
+        let active = self.list_active().await;
+        let mut servers: Vec<(String, Vec<String>)> = Vec::new();
+        for server in active {
+            let lines: Vec<String> = server
+                .advertised_tool_metadata()
+                .iter()
+                .filter_map(McpAdvertisedToolMetadata::prompt_line)
+                .collect();
+            if !lines.is_empty() {
+                servers.push((server.name.clone(), lines));
+            }
+        }
+        if servers.is_empty() {
+            return String::new();
+        }
+        servers.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut out = String::from(
+            "## MCP Tool Metadata\n\n\
+             Behavior hints for connected MCP tools (from each tool's MCP \
+             annotations). Treat read-only tools as safe to call freely; \
+             confirm before using tools marked destructive.\n",
+        );
+        for (name, lines) in servers {
+            out.push_str(&format!("\n### {name}\n"));
+            for line in lines {
+                out.push_str(&line);
+                out.push('\n');
+            }
         }
         out
     }
@@ -729,6 +839,76 @@ mod tests {
                 .and_then(|value| value.get("readOnlyHint")),
             Some(&json!(false))
         );
+    }
+
+    fn metadata_with_annotations(annotations: Value) -> McpAdvertisedToolMetadata {
+        McpAdvertisedToolMetadata {
+            advertised_name: "mcp__fs__read_file".into(),
+            server_name: "fs".into(),
+            tool_name: "read_file".into(),
+            title: Some("Read File".into()),
+            output_schema: None,
+            annotations: Some(annotations),
+            execution: None,
+            icons: None,
+            meta: None,
+        }
+    }
+
+    // Normal: behavior_hints distills the spec annotation flags into ordered
+    // human-readable hints.
+    #[test]
+    fn behavior_hints_distills_annotation_flags_normal() {
+        let md = metadata_with_annotations(json!({
+            "readOnlyHint": true,
+            "idempotentHint": true,
+            "openWorldHint": true,
+        }));
+        let hints = md.behavior_hints();
+        assert_eq!(hints[0], "read-only (does not modify its environment)");
+        assert!(hints.iter().any(|h| h.contains("idempotent")));
+        assert!(hints.iter().any(|h| h.contains("open-world")));
+    }
+
+    // Robust: a destructive write tool surfaces both the "modifies" and the
+    // "destructive — confirm" hints.
+    #[test]
+    fn behavior_hints_flags_destructive_writes_robust() {
+        let md = metadata_with_annotations(json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+        }));
+        let hints = md.behavior_hints();
+        assert!(hints.iter().any(|h| h.contains("modifies its environment")));
+        assert!(hints.iter().any(|h| h.contains("destructive")));
+    }
+
+    // Robust: a tool with no annotations and a bare name yields no prompt line.
+    #[test]
+    fn prompt_line_is_none_without_metadata_robust() {
+        let md = McpAdvertisedToolMetadata {
+            advertised_name: "mcp__x__y".into(),
+            server_name: "x".into(),
+            tool_name: "y".into(),
+            title: None,
+            output_schema: None,
+            annotations: None,
+            execution: None,
+            icons: None,
+            meta: None,
+        };
+        assert!(md.prompt_line().is_none());
+        assert_eq!(md.behavior_hints(), Vec::<&str>::new());
+    }
+
+    // Normal: prompt_line composes the advertised name, title, and hints.
+    #[test]
+    fn prompt_line_composes_label_and_hints_normal() {
+        let md = metadata_with_annotations(json!({"readOnlyHint": true}));
+        let line = md.prompt_line().unwrap();
+        assert!(line.contains("mcp__fs__read_file"));
+        assert!(line.contains("Read File"));
+        assert!(line.contains("read-only"));
     }
 
     #[test]
