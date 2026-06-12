@@ -125,6 +125,21 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
         }))
         .await;
 
+    // Mirror the lifecycle into the daemon registry so the run survives a
+    // session reload. Auto-review previously reported only to the spawning
+    // session's event channel: after a restart the run showed as a stuck
+    // [Failed]/stale entry in `jfc daemon agents` because nothing ever
+    // recorded completion in the shared state file.
+    jfc_daemon::record_background_agent_started(
+        &task_id,
+        &format!(
+            "auto-review: {}",
+            args["target"].as_str().unwrap_or("edits")
+        ),
+        Some(model.as_str().to_owned()),
+        None,
+    );
+
     tokio::spawn(async move {
         let _ = tokio::fs::create_dir_all(&session_dir).await;
         let started = Instant::now();
@@ -183,6 +198,11 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
         .await;
 
         if let Some(error) = outcome.error {
+            jfc_daemon::record_background_agent_finished(
+                &task_id,
+                jfc_daemon::BackgroundAgentStatus::Failed,
+                &error,
+            );
             let _ = tx_bg
                 .send(EngineEvent::Task(TaskEvent::Failed {
                     task_id: crate::ids::TaskId::from(task_id),
@@ -198,6 +218,11 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
                     .await;
             }
             let summary = build_auto_review_notification(&task_id, &outcome, elapsed_ms);
+            jfc_daemon::record_background_agent_finished(
+                &task_id,
+                jfc_daemon::BackgroundAgentStatus::Completed,
+                &summary,
+            );
             let _ = tx_bg
                 .send(EngineEvent::Task(TaskEvent::Completed {
                     task_id: crate::ids::TaskId::from(task_id),

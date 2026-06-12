@@ -66,7 +66,29 @@ pub fn restart_stream_in_place_with_overrides(
         .messages
         .get_mut(assistant_idx)
         .expect("validated above");
-    msg.parts = vec![MessagePart::Text(String::new())];
+    // Preserve tool calls that already EXECUTED in the failed turn. Wiping
+    // them (the old behavior) erased Edits/Writes/Bash that had really run
+    // from both the transcript and the provider rebuild, so the retried
+    // model re-issued the same calls — the "duplicate write" bug: the same
+    // append landing twice, then a cleanup turn. Unexecuted (pending) tools
+    // are dropped; the retry decides whether to issue them again.
+    let executed_tools: Vec<MessagePart> = msg
+        .parts
+        .iter()
+        .filter(|p| {
+            matches!(
+                p,
+                MessagePart::Tool(tc) if matches!(
+                    tc.status,
+                    crate::types::ToolStatus::Completed | crate::types::ToolStatus::Failed
+                )
+            )
+        })
+        .cloned()
+        .collect();
+    let has_executed_tools = !executed_tools.is_empty();
+    msg.parts = executed_tools;
+    msg.parts.push(MessagePart::Text(String::new()));
     msg.model_name = None;
     msg.cost_tier = None;
     msg.elapsed = None;
@@ -102,7 +124,17 @@ pub fn restart_stream_in_place_with_overrides(
     state.push_effect(crate::app::EngineEffect::ScrollToBottom);
 
     let provider = state.provider.clone();
-    let messages = stream::build_provider_messages(&state.messages[..assistant_idx]);
+    // When the failed turn already executed tools, the retried request must
+    // include the partial assistant message: its tool_use/tool_result pairs
+    // tell the model those calls ALREADY ran. Excluding it (old behavior)
+    // made the retry re-issue the same Edits/Bash — observed as duplicate
+    // appends to files across stream retries.
+    let slice_end = if has_executed_tools {
+        assistant_idx + 1
+    } else {
+        assistant_idx
+    };
+    let messages = stream::build_provider_messages(&state.messages[..slice_end]);
     let model = state.model.clone();
     let tx_spawn = tx.clone();
     let interrupt = state.interrupt_flag.clone();

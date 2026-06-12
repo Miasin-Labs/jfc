@@ -1876,6 +1876,21 @@ fn coerce_object(
         }
     }
 
+    // 1b. Unwrap a single-key wrapper whose value is a STRINGIFIED JSON
+    //     object — e.g. `{"command": "{\"task_id\":\"bash_…\"}"}`, seen when
+    //     a model double-encodes args under whatever key it last used. Safe
+    //     for any key (including legit string fields like Bash's `command`):
+    //     coercion only runs after `from_value` already rejected the input,
+    //     and the unwrapped result must re-parse against the tool schema or
+    //     the original-shape error is surfaced instead.
+    if out.len() == 1
+        && let Some((key, Value::String(s))) = out.iter().next().map(|(k, v)| (k.clone(), v))
+        && let Ok(Value::Object(inner)) = serde_json::from_str::<Value>(s)
+    {
+        out = inner;
+        shape.push(format!("unwrap_str:{key}"));
+    }
+
     // 2. Rename aliases where the canonical key is missing.
     for (canonical, aliases) in FIELD_ALIASES {
         if out.contains_key(*canonical) {
@@ -2356,5 +2371,39 @@ mod macro_equivalence_tests {
             outcome,
             CoercionOutcome::Rejected | CoercionOutcome::CoercedStillInvalid { .. }
         ));
+    }
+
+    // Regression: a model double-encoding args as a stringified JSON object
+    // under a stray single key — observed live as BashOutput
+    // `{"command": "{\"task_id\":\"bash_…\"}"}` failing with
+    // "missing required field `task_id`". The string payload is parsed and
+    // unwrapped, then must satisfy the real schema.
+    #[test]
+    fn coerce_unwraps_stringified_json_wrapper_regression() {
+        let (parsed, outcome) = ToolInput::from_value_coerced(
+            "BashOutput",
+            json!({ "command": "{\"task_id\":\"bash_115a3e377b46\"}" }),
+        );
+        let parsed = parsed.expect("stringified wrapper should coerce");
+        assert!(matches!(
+            parsed,
+            ToolInput::BashOutput { ref task_id, .. } if task_id == "bash_115a3e377b46"
+        ));
+        assert!(outcome.shape_class().contains("unwrap_str:command"));
+    }
+
+    // Robust: a legit string field that happens to contain JSON must NOT be
+    // unwrapped when the input is already schema-valid — Bash's `command`
+    // can legitimately be `{"foo": 1}` (e.g. echoing JSON).
+    #[test]
+    fn coerce_leaves_valid_json_command_string_alone_robust() {
+        let (parsed, outcome) =
+            ToolInput::from_value_coerced("Bash", json!({ "command": "{\"foo\": 1}" }));
+        let parsed = parsed.expect("valid Bash input must parse unchanged");
+        assert!(matches!(
+            parsed,
+            ToolInput::Bash { ref command, .. } if command == "{\"foo\": 1}"
+        ));
+        assert!(matches!(outcome, CoercionOutcome::Unchanged));
     }
 }

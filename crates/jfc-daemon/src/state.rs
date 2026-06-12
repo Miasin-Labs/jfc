@@ -493,7 +493,15 @@ pub fn compact_background_agents(
 /// large) state file by comparing this against a cached value — when the
 /// mtime is unchanged the parse can be skipped entirely.
 pub fn state_file_mtime(paths: &DaemonPaths) -> Option<SystemTime> {
-    std::fs::metadata(&paths.state_file).ok()?.modified().ok()
+    let meta = std::fs::metadata(&paths.state_file).ok()?;
+    let mtime = meta.modified().ok()?;
+    // Fold the file length into the staleness token. Two writes landing
+    // within the same mtime granularity (coarse filesystem clocks, fast
+    // worker finish + reconcile) used to make the second write invisible
+    // to `load_state_if_changed` — a session could permanently miss a
+    // terminal transition. Length-perturbation makes that race practically
+    // unobservable while keeping the cheap no-parse fast path.
+    Some(mtime + std::time::Duration::from_nanos(meta.len() % 1_000))
 }
 
 /// Load daemon state only when the file's mtime is newer than `cached`.

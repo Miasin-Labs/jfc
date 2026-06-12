@@ -24,7 +24,7 @@ use super::design::{
 };
 use super::dispatch_heavy;
 use super::economy::strip_html_tags;
-use super::filesystem::{execute_edit, execute_read, execute_write};
+use super::filesystem::{execute_apply_patch, execute_edit, execute_read, execute_write};
 use super::lsp::execute_lsp;
 use super::memory::{execute_memory_create, execute_memory_delete};
 use super::notebook::{execute_notebook_edit, execute_notebook_read};
@@ -1405,6 +1405,9 @@ pub async fn execute_tool(
                  Use `gh auth login` via the Bash tool instead."
                 .to_string(),
         ),
+        (ToolKind::ApplyPatch, ToolInput::ApplyPatch { patch }) => {
+            execute_apply_patch(&patch, &cwd).await
+        }
         (kind, input) => ExecutionResult::failure(format!(
             "tool input mismatch: {kind:?} was paired with an incompatible \
              ToolInput variant ({}). This is a routing bug — the tool's \

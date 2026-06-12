@@ -213,16 +213,69 @@ pub trait DaemonService: Send {
 }
 
 /// Reconcile the persisted background-agent roster into daemon state.
-pub struct ReconcileService;
+pub struct ReconcileService {
+    last_compaction: Option<SystemTime>,
+}
+
+impl ReconcileService {
+    pub fn new() -> Self {
+        Self {
+            last_compaction: None,
+        }
+    }
+
+    /// How often the long-running daemon prunes terminal agent records.
+    /// Compaction otherwise only ran at CLI startup, so a daemon that stays
+    /// up for days accumulated an unbounded [Failed]/[Completed] roster.
+    const COMPACTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+}
+
+impl Default for ReconcileService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl DaemonService for ReconcileService {
     fn name(&self) -> &str {
         "reconcile"
     }
-    async fn tick(&mut self, daemon: &mut Daemon, _now: SystemTime) -> TickOutcome {
+    async fn tick(&mut self, daemon: &mut Daemon, now: SystemTime) -> TickOutcome {
         if let Ok(reconciled) = crate::reconcile::reconcile_background_agents(&daemon.paths) {
             daemon.state.background_agents = reconciled.background_agents;
+        }
+        let due = self
+            .last_compaction
+            .map(|at| {
+                now.duration_since(at).unwrap_or_default() >= Self::COMPACTION_INTERVAL
+            })
+            .unwrap_or(true);
+        if due {
+            self.last_compaction = Some(now);
+            let dropped = crate::state::compact_background_agents(
+                &mut daemon.state,
+                now,
+                crate::state::TERMINAL_AGENT_RETENTION,
+                crate::state::TERMINAL_AGENTS_PER_SESSION,
+                crate::state::TERMINAL_AGENT_GLOBAL_CAP,
+            );
+            if dropped > 0 {
+                if let Err(err) = crate::state::save_state(&daemon.paths, &daemon.state) {
+                    tracing::warn!(
+                        target: "jfc::daemon",
+                        error = %err,
+                        dropped,
+                        "periodic compaction: save_state failed"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "jfc::daemon",
+                        dropped,
+                        "periodic compaction pruned terminal background agents"
+                    );
+                }
+            }
         }
         TickOutcome::Continue
     }
@@ -515,7 +568,7 @@ impl DaemonServices {
     pub fn new() -> Self {
         Self {
             services: vec![
-                Box::new(ReconcileService),
+                Box::new(ReconcileService::new()),
                 Box::new(RuntimeInfoService),
                 Box::new(MemoryService),
                 Box::new(ControlService),

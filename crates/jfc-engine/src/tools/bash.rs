@@ -972,6 +972,26 @@ pub async fn execute_bash_output(
     let text = terminal_safe_text(&String::from_utf8_lossy(&bytes));
     let start_line = offset.unwrap_or(1).saturating_sub(1) as usize;
     let max_lines = limit.unwrap_or(DEFAULT_OUTPUT_LIMIT_LINES) as usize;
+    // Validate the requested window instead of silently returning nothing.
+    // Only for TERMINAL tasks: on a running task, offset == total+1 is the
+    // normal incremental-poll position ("give me whatever arrives next"),
+    // but on a finished task no more output can ever appear, so a past-EOF
+    // offset is a caller error and the valid range is the useful reply.
+    let task_is_terminal = matches!(
+        info.as_ref().map(|info| &info.status),
+        Some(BashTaskStatus::Completed { .. })
+            | Some(BashTaskStatus::TimedOut { .. })
+            | Some(BashTaskStatus::Failed { .. })
+    );
+    let total_lines_now = text.lines().count();
+    if task_is_terminal && start_line >= total_lines_now && start_line > 0 {
+        return ExecutionResult::failure(format!(
+            "offset {} is past the end of output for finished Bash task {task_id}: \
+             {total_lines_now} line(s) total (valid offsets: 1-{}).",
+            start_line + 1,
+            total_lines_now.max(1),
+        ));
+    }
     let selected = text
         .lines()
         .skip(start_line)

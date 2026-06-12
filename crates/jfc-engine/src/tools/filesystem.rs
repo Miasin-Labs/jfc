@@ -697,3 +697,56 @@ pub fn build_edit_diff_view(file_path: &str, old: &str, new: &str) -> crate::typ
         deletions,
     }
 }
+
+/// Apply a unified-diff patch to the working tree via `git apply`.
+///
+/// Why git apply: it validates the whole patch before writing (`--check`
+/// first, so a failing hunk never leaves a half-applied tree) and handles
+/// new/deleted/renamed files. The patch text is passed on stdin so nothing
+/// is interpolated through a shell.
+pub async fn execute_apply_patch(patch: &str, cwd: &std::path::Path) -> ExecutionResult {
+    use tokio::io::AsyncWriteExt;
+    if patch.trim().is_empty() {
+        return ExecutionResult::failure("ApplyPatch: empty patch");
+    }
+    let run = |check: bool| {
+        let patch = patch.to_owned();
+        let cwd = cwd.to_owned();
+        async move {
+            let mut cmd = tokio::process::Command::new("git");
+            cmd.arg("apply");
+            if check {
+                cmd.arg("--check");
+            }
+            cmd.arg("--whitespace=nowarn")
+                .current_dir(&cwd)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = cmd.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(patch.as_bytes()).await?;
+                drop(stdin);
+            }
+            child.wait_with_output().await
+        }
+    };
+    match run(true).await {
+        Ok(out) if !out.status.success() => {
+            return ExecutionResult::failure(format!(
+                "ApplyPatch: patch does not apply cleanly:\n{}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Err(e) => return ExecutionResult::failure(format!("ApplyPatch: git apply --check: {e}")),
+        Ok(_) => {}
+    }
+    match run(false).await {
+        Ok(out) if out.status.success() => ExecutionResult::success("Patch applied successfully"),
+        Ok(out) => ExecutionResult::failure(format!(
+            "ApplyPatch: apply failed after successful check:\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => ExecutionResult::failure(format!("ApplyPatch: git apply: {e}")),
+    }
+}

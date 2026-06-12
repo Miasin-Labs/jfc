@@ -8,6 +8,13 @@ use crate::workflows::{AgentProgress, AgentStatus, WorkflowTaskProgress};
 
 /// Apply a single `WorkflowProgressEvent` to the matching `BackgroundTask`.
 pub fn handle_workflow_progress(state: &mut EngineState, ev: WorkflowProgressEvent) {
+    // Every workflow progress event IS task activity. Only
+    // `TaskEvent::Progress` used to refresh `last_activity_at`, and workflows
+    // never emit it — so a live auto-review workflow froze its activity clock
+    // at Started and the agents panel showed "⚠ stalled Ns" forever.
+    if let Some(bt) = state.background_tasks.get_mut(ev.task_id().as_str()) {
+        bt.last_activity_at = std::time::Instant::now();
+    }
     match ev {
         WorkflowProgressEvent::Phase { task_id, title } => {
             apply_phase(state, task_id.as_str(), title);

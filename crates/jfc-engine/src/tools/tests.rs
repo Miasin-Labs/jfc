@@ -2500,6 +2500,26 @@ async fn execute_bash_large_output_persists_full_log_regression() {
     assert!(output.output.contains("line"), "{}", output.output);
 }
 
+// Robust: a past-EOF offset on a FINISHED task is a range error naming the
+// valid offsets, not a silent "(no output in requested range)".
+#[tokio::test]
+#[serial_test::serial]
+async fn execute_bash_output_offset_past_eof_errors_robust() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
+    let result = execute_bash("yes line | head -n 20000", Some(5_000), Path::new(".")).await;
+    assert!(!result.is_error(), "{}", result.output);
+    let task_id = parse_bash_task_id(&result.output);
+
+    let output = execute_bash_output(&task_id, Some(999_999), Some(5), Some(false), None).await;
+    assert!(output.is_error(), "{}", output.output);
+    assert!(
+        output.output.contains("past the end of output"),
+        "{}",
+        output.output
+    );
+    assert!(output.output.contains("valid offsets"), "{}", output.output);
+}
+
 #[tokio::test]
 async fn execute_tool_task_kind_rejects_with_streaming_message_robust() {
     // The Task tool can't be dispatched through the normal executor;

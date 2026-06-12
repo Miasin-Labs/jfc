@@ -601,3 +601,17 @@ pub enum WorkflowProgressEvent {
         message: String,
     },
 }
+
+impl WorkflowProgressEvent {
+    /// The background-task id this progress event belongs to.
+    pub fn task_id(&self) -> &crate::ids::TaskId {
+        match self {
+            Self::Phase { task_id, .. }
+            | Self::AgentStarted { task_id, .. }
+            | Self::AgentCacheHit { task_id, .. }
+            | Self::AgentDone { task_id, .. }
+            | Self::AgentFailed { task_id, .. }
+            | Self::Log { task_id, .. } => task_id,
+        }
+    }
+}
