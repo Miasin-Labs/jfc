@@ -138,6 +138,16 @@ pub struct TokenLedger {
     oracle: PriceOracle,
 }
 
+/// Saturating `u64 → i64` for ledger amounts. A token cost should never come
+/// near `i64::MAX` (~9.2e18) in practice, but a corrupted/attacker-influenced
+/// usage report could: a plain `as i64` would then wrap *negative*, turning a
+/// debit into a credit and silently inflating a balance. Clamping to
+/// `i64::MAX` keeps the sign correct so the worst case is an over-charge, not
+/// a free top-up.
+fn amount_as_i64(amount: u64) -> i64 {
+    i64::try_from(amount).unwrap_or(i64::MAX)
+}
+
 impl TokenLedger {
     pub fn new(total_budget: u64, daily_burn_cap: u64, spawn_fee: u64) -> Self {
         Self {
@@ -193,12 +203,13 @@ impl TokenLedger {
 
         self.total_spent += self.spawn_fee;
         self.today_spent += self.spawn_fee;
-        *self.balances.entry(agent_id.clone()).or_insert(0) -= self.spawn_fee as i64;
+        let fee = amount_as_i64(self.spawn_fee);
+        *self.balances.entry(agent_id.clone()).or_insert(0) -= fee;
 
         self.transactions.push(Transaction {
             timestamp_ms: now_ms(),
             agent_id: agent_id.clone(),
-            amount: -(self.spawn_fee as i64),
+            amount: -fee,
             purpose: TransactionPurpose::SpawnFee,
             model: None,
             input_tokens: None,
@@ -219,12 +230,13 @@ impl TokenLedger {
         let cost = self.oracle.actual_cost(model, input_tokens, output_tokens);
         self.total_spent += cost;
         self.today_spent += cost;
-        *self.balances.entry(agent_id.clone()).or_insert(0) -= cost as i64;
+        let cost_i64 = amount_as_i64(cost);
+        *self.balances.entry(agent_id.clone()).or_insert(0) -= cost_i64;
 
         self.transactions.push(Transaction {
             timestamp_ms: now_ms(),
             agent_id: agent_id.clone(),
-            amount: -(cost as i64),
+            amount: -cost_i64,
             purpose: TransactionPurpose::Execution,
             model: Some(model.to_string()),
             input_tokens: Some(input_tokens),
@@ -234,12 +246,13 @@ impl TokenLedger {
 
     /// Credit tokens to an agent (bounty reward, validation reward, refund).
     pub fn credit(&mut self, agent_id: &AgentId, amount: u64, purpose: TransactionPurpose) {
-        *self.balances.entry(agent_id.clone()).or_insert(0) += amount as i64;
+        let amount_i64 = amount_as_i64(amount);
+        *self.balances.entry(agent_id.clone()).or_insert(0) += amount_i64;
 
         self.transactions.push(Transaction {
             timestamp_ms: now_ms(),
             agent_id: agent_id.clone(),
-            amount: amount as i64,
+            amount: amount_i64,
             purpose,
             model: None,
             input_tokens: None,
@@ -293,6 +306,19 @@ mod tests {
 
     fn test_agent() -> AgentId {
         AgentId("test-agent-001".into())
+    }
+
+    // A pathological amount near u64::MAX must clamp to i64::MAX, not wrap
+    // negative — wrapping would turn a debit into a credit.
+    #[test]
+    fn amount_as_i64_clamps_instead_of_wrapping_robust() {
+        assert_eq!(amount_as_i64(0), 0);
+        assert_eq!(amount_as_i64(1_000), 1_000);
+        assert_eq!(amount_as_i64(i64::MAX as u64), i64::MAX);
+        assert_eq!(amount_as_i64(u64::MAX), i64::MAX);
+        // The whole point: the clamped value stays positive (a debit subtracts
+        // a positive number) rather than becoming a giant negative credit.
+        assert!(amount_as_i64(u64::MAX) > 0);
     }
 
     #[test]
