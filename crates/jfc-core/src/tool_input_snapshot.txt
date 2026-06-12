@@ -157,6 +157,9 @@ ScratchpadRead
 ScratchpadWrite
   to_value={"key":"k","value":"v"}
   summary=scratchpad write: k
+SlashCommand
+  to_value={"command":"research","args":"how do monads work"}
+  summary=/research how do monads work
 DesignProjectCreate
   to_value={"title":"Deck"}
   summary=design project: Deck

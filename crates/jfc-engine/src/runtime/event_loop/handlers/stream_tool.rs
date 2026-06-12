@@ -15,6 +15,59 @@ use super::super::guards::streaming_assistant_mut;
 /// is only pushed once per process lifetime.
 static SANDBOX_TOAST_SHOWN: AtomicBool = AtomicBool::new(false);
 
+/// Slash commands the AGENT may invoke autonomously via the `SlashCommand`
+/// tool. Curated to productive, non-destructive, non-identity commands — the
+/// agent can research/review/plan/commit and run workflows, but cannot wipe the
+/// session, change auth, flip permission modes, or install integrations.
+/// Destructive or footgun commands (/clear, /logout, /login, /mode, /sandbox,
+/// /undo, /rewind, /permissions, /oauth-login, /install-github-app, /remote,
+/// /batch) are intentionally excluded.
+pub(crate) const AGENT_ALLOWED_SLASH_COMMANDS: &[&str] = &[
+    "research",
+    "review",
+    "code-review",
+    "ultrareview",
+    "commit",
+    "plan",
+    "roadmap",
+    "parity",
+    "philosophy",
+    "workflow",
+    "wf",
+    "workflows",
+    "diff",
+    "turn-diff",
+    "td",
+    "status",
+    "cost",
+    "stats",
+    "recall",
+    "search-sessions",
+    "timeline",
+    "coach",
+    "factory",
+    "skills",
+    "agents",
+    "claude-md",
+    "dump-context",
+    "debug-context",
+    "memory",
+    "mem",
+    "task-list",
+    "tasks",
+    "changes",
+    "audit",
+    "doctor",
+    "stuck",
+    "market",
+];
+
+/// True when `name` (without a leading `/`) is in the agent allowlist.
+pub(crate) fn slash_command_is_agent_allowed(name: &str) -> bool {
+    let n = name.trim().trim_start_matches('/');
+    AGENT_ALLOWED_SLASH_COMMANDS.contains(&n)
+}
+
 /// Push a one-time toast informing the user that tools are being auto-approved
 /// because the process is running inside a landlock sandbox.
 fn maybe_show_sandbox_toast(state: &mut EngineState) {
@@ -216,6 +269,45 @@ pub async fn handle_stream_tool(state: &mut EngineState, tx: &EventSender, tool:
         emit_in_progress(tx, "add", vec![tool.id.as_str().to_owned()]);
         if let Some(msg) = streaming_assistant_mut(state) {
             msg.parts.push(MessagePart::tool_boxed(tool));
+        }
+    } else if matches!(tool.kind, ToolKind::SlashCommand) {
+        // SlashCommand lets the agent run a CURATED, allowlisted subset of the
+        // user-facing `/commands` itself (e.g. /research, /review, /commit,
+        // /workflow) instead of waiting for the user to type them. It runs on
+        // the main thread with `&mut EngineState` (like AskUserQuestion), not
+        // through the batched dispatcher, because `run_command` mutates engine
+        // state. Destructive/identity/mode commands are NOT allowlisted.
+        let (command, args) = match &tool.input {
+            jfc_core::ToolInput::SlashCommand { command, args } => {
+                (command.trim_start_matches('/').to_string(), args.clone())
+            }
+            _ => (String::new(), None),
+        };
+        let mut tool = tool;
+        if !slash_command_is_agent_allowed(&command) {
+            tool.status = ToolStatus::Failed;
+            tool.output = ToolOutput::Text(format!(
+                "Slash command `/{command}` is not allowed for autonomous use. \
+                 Allowed: {}.",
+                AGENT_ALLOWED_SLASH_COMMANDS.join(", ")
+            ));
+            if let Some(msg) = streaming_assistant_mut(state) {
+                msg.parts.push(MessagePart::tool_boxed(tool));
+            }
+        } else {
+            let line = match &args {
+                Some(a) if !a.trim().is_empty() => format!("/{command} {a}"),
+                _ => format!("/{command}"),
+            };
+            tracing::info!(target: "jfc::ui::tool", %line, "route=slash_command (agent-invoked)");
+            let outcome = crate::commands::run_command(state, &line, Some(tx)).await;
+            tool.status = ToolStatus::Completed;
+            tool.output = ToolOutput::Text(format!(
+                "Ran `{line}` (outcome: {outcome:?}). Its output is in the transcript above."
+            ));
+            if let Some(msg) = streaming_assistant_mut(state) {
+                msg.parts.push(MessagePart::tool_boxed(tool));
+            }
         }
     } else if matches!(tool.kind, ToolKind::AskUserQuestion) {
         // AskUserQuestion is neither dispatched nor approval-gated: it opens an
@@ -579,6 +671,29 @@ mod tests {
     use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
 
     use super::*;
+
+    #[test]
+    fn slash_command_allowlist_permits_productive_commands_normal() {
+        for c in ["research", "review", "commit", "workflow", "diff", "recall", "plan"] {
+            assert!(slash_command_is_agent_allowed(c), "{c} should be allowed");
+        }
+        // Leading slash is tolerated.
+        assert!(slash_command_is_agent_allowed("/research"));
+    }
+
+    #[test]
+    fn slash_command_allowlist_blocks_destructive_commands_robust() {
+        for c in [
+            "clear", "logout", "login", "mode", "sandbox", "undo", "rewind",
+            "permissions", "oauth-login", "install-github-app", "remote", "batch",
+        ] {
+            assert!(
+                !slash_command_is_agent_allowed(c),
+                "{c} must NOT be agent-invocable"
+            );
+        }
+        assert!(!slash_command_is_agent_allowed("definitely-not-a-command"));
+    }
 
     struct TestProvider;
 

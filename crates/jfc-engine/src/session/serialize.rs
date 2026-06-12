@@ -507,6 +507,7 @@ pub fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
         | ToolInput::DesignServe { .. }
         | ToolInput::SetGoal { .. }
         | ToolInput::Research { .. }
+        | ToolInput::SlashCommand { .. }
         | ToolInput::Council { .. } => serialize_generic_tool_input_json(input),
     }
 }

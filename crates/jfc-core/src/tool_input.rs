@@ -738,6 +738,15 @@ pub enum ToolInput {
         args: Option<serde_json::Value>,
         resume_from_run_id: Option<String>,
     },
+    /// Run a curated, allowlisted slash command on the agent's behalf, e.g.
+    /// `/research <q>`, `/review`, `/commit`, `/workflow <name>`. `command` is
+    /// the command name (with or without a leading `/`); `args` is the rest of
+    /// the command line.
+    SlashCommand {
+        command: String,
+        #[serde(default)]
+        args: Option<String>,
+    },
     SendUserMessage {
         message: String,
         #[serde(default)]
@@ -1076,6 +1085,12 @@ impl ToolInput {
                     "workflow (inline script)".into()
                 }
             }
+            Self::SlashCommand { command, args } => match args {
+                Some(a) if !a.is_empty() => {
+                    format!("/{} {a}", command.trim_start_matches('/'))
+                }
+                _ => format!("/{}", command.trim_start_matches('/')),
+            },
             Self::Generic { summary } => generic_summary_display(summary),
             Self::SendUserMessage { message, .. } => {
                 let preview = if message.len() > 60 {
@@ -1499,6 +1514,10 @@ impl ToolInput {
                 uri: opt_str_field("uri").unwrap_or_default(),
             },
             ToolKind::Advisor => Self::Advisor {},
+            ToolKind::SlashCommand => Self::SlashCommand {
+                command: req_str("command")?,
+                args: opt_str_field("args"),
+            },
             ToolKind::ConnectGitHub => Self::ConnectGitHub {},
             ToolKind::TaskUpdate => {
                 // depends_on is an alias for blocked_by
@@ -1661,6 +1680,7 @@ impl ToolInput {
             Self::ListMcpResources { server } => json!({ "server": server }),
             Self::ReadMcpResource { server, uri } => json!({ "server": server, "uri": uri }),
             Self::Advisor {} => json!({}),
+            Self::SlashCommand { command, args } => json!({ "command": command, "args": args }),
             Self::ConnectGitHub {} => json!({}),
             Self::TaskUpdate {
                 task_id,
@@ -2028,6 +2048,7 @@ mod macro_equivalence_tests {
             ),
             ("ScratchpadRead", json!({"key":"k"})),
             ("ScratchpadWrite", json!({"key":"k","value":"v"})),
+            ("SlashCommand", json!({"command":"research","args":"how do monads work"})),
             ("DesignProjectCreate", json!({"title":"Deck"})),
             ("DesignProjectList", json!({})),
             (

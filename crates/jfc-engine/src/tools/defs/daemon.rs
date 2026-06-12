@@ -14,6 +14,7 @@ pub fn daemon_tool_defs() -> Vec<ToolDef> {
         scratchpad_read_def(),
         scratchpad_write_def(),
         workflow_def(),
+        slash_command_def(),
         wait_for_mcp_servers_def(),
         list_mcp_resources_def(),
         read_mcp_resource_def(),
@@ -252,6 +253,39 @@ fn workflow_def() -> ToolDef {
                     "description": "Run ID of a prior Workflow invocation to resume from. Completed agent() calls return cached results instantly."
                 }
             }
+        }),
+    }
+}
+
+fn slash_command_def() -> ToolDef {
+    ToolDef {
+        name: "SlashCommand".into(),
+        description: "Run one of JFC's built-in slash commands yourself instead of \
+            waiting for the user to type it. Use this to drive your own workflow: \
+            `/research <question>` (agentic web+codebase research), `/review` (review \
+            current git changes), `/commit` (generate a conventional commit message for \
+            staged changes), `/plan` / `/roadmap` (draft planning docs), `/workflow \
+            <name>` (run a predefined multi-agent workflow), `/diff` / `/turn-diff` \
+            (show pending changes), `/recall <query>` (search past sessions + commits), \
+            `/cost`, `/status`, `/timeline`, `/skills`, `/agents`, `/memory`, \
+            `/task-list`, `/changes`, `/audit`, `/doctor`, `/market`. \
+            Only this curated, non-destructive allowlist is permitted — commands that \
+            change auth, permission mode, or wipe state are rejected. The command's \
+            output appears in the transcript."
+            .into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The slash command name (with or without a leading '/'), e.g. 'research', 'review', 'commit', 'workflow'."
+                },
+                "args": {
+                    "type": "string",
+                    "description": "The rest of the command line (the text that would follow the command name), e.g. the research question or workflow name. Optional."
+                }
+            },
+            "required": ["command"]
         }),
     }
 }
