@@ -158,7 +158,7 @@ mod tests {
         upsert_scheduled_task(root, make_task("b")).unwrap();
         let mut updated = make_task("a");
         updated.prompt = "updated".to_owned();
-        upsert_scheduled_task(root, updated.clone()).unwrap();
+        upsert_scheduled_task(root, updated).unwrap();
         let loaded = load_scheduled_tasks(root);
         assert_eq!(loaded.len(), 2);
         assert_eq!(

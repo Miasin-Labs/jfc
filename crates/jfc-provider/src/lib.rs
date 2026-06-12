@@ -1574,7 +1574,7 @@ mod tests {
         );
         assert_ne!(key_a.stable_string(), key_b.stable_string());
 
-        let mut changed_tools = tools.clone();
+        let mut changed_tools = tools;
         changed_tools[0].input_schema = serde_json::json!({"type": "object"});
         let key_c = PromptCacheKey::new(
             "system-v1",

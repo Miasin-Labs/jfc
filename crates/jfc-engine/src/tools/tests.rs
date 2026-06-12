@@ -1608,7 +1608,7 @@ fn apply_one_edit_exact_and_ws_tolerant_normal() {
     // Whitespace-tolerant: file has 8-space indent, edit supplies 4-space.
     let file = "fn f() {\n        a();\n        b();\n}\n";
     let out = apply_one_edit(file, "    a();\n    b();", "    c();", false, "e2").unwrap();
-    assert!(out.contains("    c();") || out.contains("        c();") == false);
+    assert!(out.contains("    c();") || !out.contains("        c();"));
     assert!(out.contains("c();"));
 }
 
