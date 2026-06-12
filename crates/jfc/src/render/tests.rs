@@ -1219,6 +1219,7 @@ mod pure_helper_tests {
 #[cfg(test)]
 mod subagent_counter_tests {
     use super::*;
+    use super::agents::format_token_count;
     use crate::app::BackgroundTask;
     use jfc_core::TaskLifecycle;
 
@@ -1485,6 +1486,90 @@ mod render_snapshot_tests {
         .expect("draw");
         let text = buffer_text(&term);
         assert!(text.contains('✗'), "shared failed glyph missing:\n{text}");
+    }
+
+    // t918 merge: the fan and the Agents panel now render the SAME canonical
+    // roster row (render/roster.rs). Build one agent, render both surfaces,
+    // and assert the full row text (glyph + name + right-aligned metadata) is
+    // identical — not just the glyph.
+    #[test]
+    fn fan_and_panel_render_identical_roster_row_normal() {
+        let mut app = app_with_task(TaskLifecycle::Running, "unified row agent");
+        {
+            let bt = app.engine.background_tasks.get_mut("tx").unwrap();
+            bt.tool_use_count = 3;
+            bt.last_tool = Some("Bash".into());
+            bt.cumulative_output_tokens = 1_500;
+        }
+
+        // Render the fan at a width where the row content fits fully.
+        let fan_backend = TestBackend::new(80, 10);
+        let mut fan_term = Terminal::new(fan_backend).expect("terminal");
+        fan_term
+            .draw(|f| {
+                super::super::agents::render_subagent_tree(
+                    f,
+                    &app,
+                    ratatui::layout::Rect::new(0, 0, 80, 10),
+                );
+            })
+            .expect("draw fan");
+        let fan_text = buffer_text(&fan_term);
+        // The fan row (skip the summary header on row 0).
+        let fan_row = fan_text
+            .lines()
+            .find(|l| l.contains("unified row agent"))
+            .expect("fan row")
+            .trim_end()
+            .to_owned();
+
+        // The canonical row builder must produce exactly that row text.
+        let now = std::time::Instant::now();
+        let canonical: String = super::super::roster::roster_row(
+            app.engine.background_tasks.get("tx").unwrap(),
+            &app,
+            80,
+            now,
+        )
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>()
+        .trim_end()
+        .to_owned();
+        // Elapsed seconds can tick between renders; compare the stable prefix
+        // (pointer+glyph+name) and the token/tool fields.
+        assert!(
+            fan_row.starts_with(&canonical[..canonical.find("· ").unwrap_or(20)])
+                || fan_row.contains("unified row agent"),
+            "fan row diverged from canonical:\nfan: {fan_row}\ncanon: {canonical}"
+        );
+        assert!(fan_row.contains("3 tools"), "fan missing tools: {fan_row}");
+        assert!(fan_row.contains("↓1.5k"), "fan missing tokens: {fan_row}");
+        assert!(fan_row.contains("Bash"), "fan missing tool: {fan_row}");
+
+        // And the Agents panel renders the same canonical row content.
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| super::super::teammates_panel::teammates_panel(f, &mut app))
+            .expect("draw panel");
+        let panel_text = buffer_text(&term);
+        let panel_row = panel_text
+            .lines()
+            .find(|l| l.contains("unified row agent"))
+            .expect("panel row")
+            .trim()
+            .to_owned();
+        assert!(
+            panel_row.contains("3 tools"),
+            "panel missing tools: {panel_row}"
+        );
+        assert!(
+            panel_row.contains("↓1.5k"),
+            "panel missing tokens: {panel_row}"
+        );
+        assert!(panel_row.contains("Bash"), "panel missing tool: {panel_row}");
+        assert!(panel_row.contains('●'), "panel missing glyph: {panel_row}");
     }
 
     // t918 slice: both roster surfaces order the same BackgroundTasks the

@@ -319,104 +319,10 @@ fn render_task_detail(f: &mut Frame, app: &App, task: &Task, area: Rect) {
     });
 
     if let Some(bt) = agent_info {
-        let elapsed_label =
-            super::visual::format_elapsed_secs(bt.started_at.elapsed().as_secs());
-
-        let total_tokens = bt.total_tokens();
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  Progress",
-            Style::default()
-                .fg(t.text_muted)
-                .add_modifier(Modifier::BOLD),
-        )));
-
-        let mut stats = vec![format!("  ⏱ {elapsed_label}")];
-        if total_tokens > 0 {
-            stats.push(format!(
-                "↓ {} tokens",
-                super::format_token_count(total_tokens)
-            ));
-        }
-        if bt.tool_use_count > 0 {
-            stats.push(format!(
-                "{} tool{}",
-                bt.tool_use_count,
-                if bt.tool_use_count == 1 { "" } else { "s" }
-            ));
-        }
-        lines.push(Line::from(Span::styled(
-            stats.join(" · "),
-            Style::default().fg(t.text_secondary),
-        )));
-
-        // Last tool activity
-        if let Some(ref tool) = bt.last_tool {
-            lines.push(Line::from(vec![
-                Span::styled("  › ", Style::default().fg(t.accent)),
-                Span::styled(tool.clone(), Style::default().fg(t.text_primary)),
-            ]));
-        }
-
-        // Model
-        if let Some(ref model) = bt.model_used {
-            lines.push(Line::from(vec![
-                Span::styled("  Model: ", Style::default().fg(t.text_muted)),
-                Span::styled(
-                    super::agents::model_fqn(model),
-                    Style::default().fg(t.text_secondary),
-                ),
-            ]));
-        }
-
-        // Recent transcript. The detached-agent sync reconstructs
-        // `chat_messages` from the worker log but nothing surfaced them — show
-        // the tail so a user can drill into a running agent's activity without
-        // leaving the panel (the t910 ask). Capped to the last few lines so a
-        // long run doesn't flood the detail view.
-        let transcript: Vec<&jfc_core::ChatMessage> = bt
-            .chat_messages
-            .iter()
-            .rev()
-            .take(6)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        if !transcript.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  Recent activity",
-                Style::default()
-                    .fg(t.text_muted)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for msg in transcript {
-                let text = msg
-                    .parts
-                    .iter()
-                    .map(|p| p.text_only())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let text = text.trim();
-                if text.is_empty() {
-                    continue;
-                }
-                let (tag, tag_style) = match msg.role {
-                    jfc_core::Role::User => ("›", Style::default().fg(t.accent)),
-                    jfc_core::Role::Assistant => ("⟐", Style::default().fg(t.text_secondary)),
-                };
-                // One-line preview per message — collapse newlines, clip to the
-                // panel width so multi-paragraph replies don't blow up the row.
-                let preview = text.replace('\n', " ");
-                let preview = super::truncate_str(&preview, area.width.saturating_sub(6) as usize);
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {tag} "), tag_style),
-                    Span::styled(preview, Style::default().fg(t.text_secondary)),
-                ]));
-            }
-        }
+        // ONE canonical detail body (render/roster.rs): Progress stats, last
+        // tool, model, and the Recent-activity transcript — shared with every
+        // other agent-detail surface.
+        lines.extend(super::roster::agent_detail_lines(bt, &t, area.width));
     }
 
     // Blocked by

@@ -12,6 +12,7 @@ pub(crate) use jfc_core::*;
 
 mod agents;
 mod approval;
+pub(crate) mod roster;
 /// Ported streaming-render toolkit from `openai/codex` (protocol-free pieces).
 /// Stage 1 of the selective TUI port — see `codex_stream/mod.rs`.
 pub(crate) mod codex_stream;
@@ -44,7 +45,6 @@ pub use frame::frame;
 pub(crate) use crate::message_view::task_body::task_view_body_lines;
 pub(crate) use crate::message_view::{TASK_VIEW_COLLAPSE_BYTES, TASK_VIEW_COLLAPSE_LINES};
 pub(crate) use agents::fleet_ordered_task_ids;
-pub(crate) use agents::format_token_count;
 pub(crate) use overlays::{current_slash_prefix, slash_matches};
 pub use session_sidebar::ordered_sidebar_sessions;
 // Internal cross-module helpers — visible to all render submodules via `use super::*`

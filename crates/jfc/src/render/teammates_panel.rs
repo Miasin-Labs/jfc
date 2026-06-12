@@ -88,76 +88,13 @@ pub(super) fn teammates_panel(f: &mut Frame, app: &mut App) {
     // done → cancelled → stale-fail, started_at tie-break — so this modal and
     // the inline agents fan list the same roster in the same order.
     let mut all_tasks: Vec<_> = app.engine.background_tasks.values().collect();
-    all_tasks.sort_by_key(|bt| super::agents::roster_sort_key(bt, app, now));
+    all_tasks.sort_by_key(|bt| super::roster::roster_sort_key(bt, app, now));
 
     for bt in &all_tasks {
-        let elapsed_label =
-            super::visual::format_elapsed_secs(now.duration_since(bt.started_at).as_secs());
-
-        let total_tokens = bt.total_tokens();
-        let token_label = if total_tokens > 0 {
-            format!(" · ↓ {} tok", super::format_token_count(total_tokens))
-        } else {
-            String::new()
-        };
-
-        let tools_label = if bt.tool_use_count > 0 {
-            format!(
-                " · {} tool{}",
-                bt.tool_use_count,
-                if bt.tool_use_count == 1 { "" } else { "s" }
-            )
-        } else {
-            String::new()
-        };
-
-        // Shared roster glyph SSOT (visual.rs) — same mapping the agents fan
-        // uses, resolved against this panel's theme. `Running` reads bold
-        // accent here, matching the panel's prior emphasis.
-        let (icon, role) = super::visual::roster_status_glyph(bt.status, bt.status.is_alive());
-        let icon_style = match role {
-            super::visual::RosterColor::Active => {
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-            }
-            super::visual::RosterColor::Idle => Style::default().fg(t.text_muted),
-            super::visual::RosterColor::Success => Style::default().fg(t.success),
-            super::visual::RosterColor::Error => Style::default().fg(t.error),
-            super::visual::RosterColor::Muted => Style::default().fg(t.text_muted),
-        };
-
-        let status_str = bt.status.label();
-
-        let right_side = format!("{status_str} · {elapsed_label}{token_label}{tools_label}");
-        // Cell width, not codepoint count — `cell_width` is the mandated layout
-        // metric (visual.rs); the agents fan renders the same BackgroundTasks
-        // with it, so chars().count() here drifted one cell per wide glyph.
-        let right_len = super::visual::cell_width(&right_side);
-        let selected = app
-            .viewing_task_id
-            .as_deref()
-            .map(|id| id == bt.task_id.as_str())
-            .unwrap_or(false);
-        let pointer = if selected { "▶ " } else { "  " };
-        let desc_budget = render_width.saturating_sub(5 + right_len + 2);
-        let desc = super::truncate_str(&bt.description, desc_budget);
-        let pad_len = render_width.saturating_sub(5 + super::visual::cell_width(&desc) + right_len);
-        let padding = " ".repeat(pad_len);
-
-        let name_style = if bt.status.is_alive() {
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(t.text_muted)
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(pointer, Style::default().fg(t.accent)),
-            Span::styled(icon, icon_style),
-            Span::styled(desc, name_style),
-            Span::styled(padding, Style::default()),
-            Span::styled(right_side, Style::default().fg(t.text_muted)),
-        ]));
+        // ONE canonical roster row (render/roster.rs) — the same row format
+        // the inline agents fan renders, so an agent reads identically in
+        // both surfaces.
+        lines.push(super::roster::roster_row(bt, app, render_width, now));
 
         // Show last tool activity as a sub-line
         if let Some(ref tool) = bt.last_tool
