@@ -170,6 +170,7 @@ pub mod plan_dreamer;
 pub mod plan_recall;
 pub mod prompt_context_cache;
 pub mod prompt_executor;
+pub mod proof_oracles;
 pub mod providers;
 pub mod push_notifications;
 pub mod remote_host;

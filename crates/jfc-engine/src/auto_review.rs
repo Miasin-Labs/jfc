@@ -128,6 +128,32 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
     tokio::spawn(async move {
         let _ = tokio::fs::create_dir_all(&session_dir).await;
         let started = Instant::now();
+
+        // Deterministic proof routing: run cheap, deterministic oracles
+        // (cargo test/clippy) BEFORE the LLM review and attach their observed
+        // findings to the workflow args, so the review runs with real
+        // compiler/test evidence rather than guessing whether the code builds.
+        // Only for cargo projects, and only when enabled (default on).
+        let mut args = args;
+        if auto_review_proof_oracles_enabled()
+            && crate::proof_oracles::is_cargo_project(&cwd)
+        {
+            let findings = crate::proof_oracles::run_all(&cwd).await;
+            let block = crate::proof_oracles::render_findings_block(&findings);
+            if let serde_json::Value::Object(map) = &mut args {
+                map.insert(
+                    "proof_findings".to_owned(),
+                    serde_json::to_value(&findings).unwrap_or(serde_json::Value::Null),
+                );
+                if !block.is_empty() {
+                    map.insert(
+                        "proof_findings_text".to_owned(),
+                        serde_json::Value::String(block),
+                    );
+                }
+            }
+        }
+
         let outcome = crate::workflows::run_workflow(crate::workflows::WorkflowRunConfig {
             run_id: run_id.clone(),
             script_body: body,
@@ -219,6 +245,20 @@ fn auto_review_mode() -> AutoReviewMode {
             }
         },
         Err(_) => AutoReviewMode::Smart,
+    }
+}
+
+/// Whether to run deterministic proof oracles (cargo test/clippy) before the
+/// LLM review and attach their findings. Default on; set
+/// `JFC_AUTO_REVIEW_PROOF_ORACLES=0/false/off/no` to disable (e.g. to avoid
+/// contending on the build lock in a tight edit loop).
+fn auto_review_proof_oracles_enabled() -> bool {
+    match std::env::var("JFC_AUTO_REVIEW_PROOF_ORACLES") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
     }
 }
 

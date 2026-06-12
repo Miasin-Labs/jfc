@@ -259,6 +259,10 @@ function dedup(candidates) {
 }
 
 const parsed = parseArgs()
+// Deterministic proof-oracle findings attached by auto-review (cargo
+// test/clippy results). Injected into the finder prompts so the LLM reviews
+// with real compiler/test evidence in hand.
+const proofFindings = String(argValue('proof_findings_text', '') || '')
 const effort = {
   low: { maxVerify: 4, sweepMax: 0, angles: ['bugs'] },
   medium: { maxVerify: 8, sweepMax: 0, angles: ['bugs', 'tests'] },
@@ -333,10 +337,11 @@ const finderGroups = await pipeline(effort.angles, async function(angle) {
   const prompt = [
     'Review target: ' + parsed.target,
     'Scope notes: ' + scope,
+    proofFindings ? proofFindings : null,
     ANGLE_PROMPTS[angle] || angle,
     'Return candidates only when they name a specific file, line, evidence, and failure mode.',
     'If there are no credible candidates, return an empty candidates array.',
-  ].join('\n\n')
+  ].filter(Boolean).join('\n\n')
   const raw = await agent(prompt, {
     label: 'find:' + angle,
     phase: 'Find',
