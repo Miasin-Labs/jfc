@@ -676,6 +676,14 @@ pub fn check_test_quality(file_content: &str) -> Vec<SlopFinding> {
         return findings;
     };
 
+    // Mask string/char/comment content for the brace-depth walk below: a `}`
+    // inside a string (`r#"...}..."#`) or char literal (`'}'`) in a test body
+    // would otherwise decrement depth to 0 early, ending the function scan
+    // before its `assert!` line and producing a spurious "no assertions"
+    // finding. `assert`/`fn`/`#[test]` are code, so they survive masking and
+    // the substring checks still match. Lines map 1:1, so line numbers align.
+    let masked_section = crate::rust_lex::mask_source(test_section);
+
     // Check: assertions on very long string literals (fragile snapshot tests).
     for (i, line) in test_section.lines().enumerate() {
         let t = line.trim();
@@ -692,7 +700,9 @@ pub fn check_test_quality(file_content: &str) -> Vec<SlopFinding> {
         }
     }
 
-    // Check: test functions with no assertions.
+    // Check: test functions with no assertions. Walk the *masked* section so
+    // braces/`assert` tokens inside string or char literals don't perturb the
+    // depth counter (masking maps every char 1:1, so line numbers still align).
     let fn_re = regex::Regex::new(r"fn\s+(\w+)\s*\(").unwrap();
     let mut in_test_fn = false;
     let mut fn_name = String::new();
@@ -700,7 +710,7 @@ pub fn check_test_quality(file_content: &str) -> Vec<SlopFinding> {
     let mut has_assert = false;
     let mut depth: i32 = 0;
 
-    for (i, line) in test_section.lines().enumerate() {
+    for (i, line) in masked_section.lines().enumerate() {
         if line.contains("#[test]") || line.contains("#[tokio::test]") {
             in_test_fn = true;
             has_assert = false;
@@ -2053,6 +2063,21 @@ mod tests {
             findings
                 .iter()
                 .all(|f| !f.message.contains("no assertions"))
+        );
+    }
+
+    // Regression: a test whose body has a `}` inside a string/char literal must
+    // NOT be falsely flagged as having no assertions. Before masking, the
+    // literal brace closed the function scan early, hiding the real assert.
+    #[test]
+    fn test_quality_not_fooled_by_brace_in_literal_robust() {
+        let code = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn has_assert_after_brace_literal() {\n        let s = \"}\";\n        assert_eq!(s, \"}\");\n    }\n}";
+        let findings = check_test_quality(code);
+        assert!(
+            findings
+                .iter()
+                .all(|f| !f.message.contains("no assertions")),
+            "brace-in-string literal caused a false no-assertions finding: {findings:?}"
         );
     }
 
