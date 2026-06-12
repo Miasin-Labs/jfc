@@ -1331,3 +1331,124 @@ mod subagent_counter_tests {
         assert!(s.contains("89.7k tok"));
     }
 }
+
+/// Render-snapshot harness: drives a real panel through a ratatui
+/// `TestBackend` and asserts on the rendered cell grid. This is the
+/// end-to-end render verification the codebase previously lacked — it
+/// exercises layout + glyph + theme together, not just a helper in
+/// isolation, so structural panel changes (t918) can be regression-tested
+/// without a live terminal.
+#[cfg(test)]
+mod render_snapshot_tests {
+    use crate::app::{App, BackgroundTask};
+    use jfc_core::TaskLifecycle;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::sync::Arc;
+
+    use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
+
+    struct TestProvider;
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn available_models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        async fn stream(
+            &self,
+            _messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+    impl jfc_provider::seal::Sealed for TestProvider {}
+
+    fn app_with_task(status: TaskLifecycle, desc: &str) -> App {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        let bt = BackgroundTask {
+            task_id: "tx".into(),
+            description: desc.into(),
+            status,
+            started_at: std::time::Instant::now(),
+            completed_at: None,
+            summary: None,
+            error: None,
+            last_tool: None,
+            messages: Vec::new(),
+            chat_messages: Vec::new(),
+            tool_use_count: 0,
+            latest_input_tokens: 0,
+            latest_cache_read_tokens: 0,
+            latest_cache_write_tokens: 0,
+            cumulative_output_tokens: 0,
+            model_used: None,
+            agent_messages: Vec::new(),
+            max_input_tokens: None,
+            budget_killed: false,
+            parent_task_id: None,
+            workflow_progress: None,
+            last_activity_at: std::time::Instant::now(),
+        };
+        app.engine
+            .background_tasks
+            .insert("tx".to_string(), bt);
+        app
+    }
+
+    /// Flatten a TestBackend buffer to one string of cell symbols.
+    fn buffer_text(term: &Terminal<TestBackend>) -> String {
+        let buf = term.backend().buffer();
+        let area = buf.area();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    // The teammates panel renders the agent's description and the shared
+    // status glyph into the actual cell grid — proving the SSOT glyph
+    // reaches the screen, not just the helper return value.
+    #[test]
+    fn teammates_panel_renders_running_glyph_and_desc_normal() {
+        let mut app = app_with_task(TaskLifecycle::Running, "research the bug");
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| super::super::teammates_panel::teammates_panel(f, &mut app))
+            .expect("draw");
+        let text = buffer_text(&term);
+        assert!(text.contains("research the bug"), "desc missing:\n{text}");
+        assert!(text.contains('●'), "running glyph missing:\n{text}");
+        assert!(text.contains("running"), "status label missing:\n{text}");
+    }
+
+    // A completed agent shows the success glyph and the "completed" label.
+    #[test]
+    fn teammates_panel_renders_completed_glyph_robust() {
+        let mut app = app_with_task(TaskLifecycle::Completed, "done task");
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| super::super::teammates_panel::teammates_panel(f, &mut app))
+            .expect("draw");
+        let text = buffer_text(&term);
+        assert!(text.contains('✓'), "completed glyph missing:\n{text}");
+        assert!(text.contains("completed"), "label missing:\n{text}");
+    }
+
+    // Rendering must not panic on a tiny viewport (layout clamps).
+    #[test]
+    fn teammates_panel_tiny_viewport_does_not_panic_robust() {
+        let mut app = app_with_task(TaskLifecycle::Failed, "x");
+        let backend = TestBackend::new(20, 6);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| super::super::teammates_panel::teammates_panel(f, &mut app))
+            .expect("draw must not panic on small area");
+    }
+}
