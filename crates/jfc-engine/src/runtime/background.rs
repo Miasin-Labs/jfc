@@ -58,7 +58,23 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
 
         let new_status = lifecycle_from_daemon_status(agent.status);
         let completed_at = background_agent_completed_at(agent, new_status);
-        let messages = crate::daemon::read_last_lines(&agent.log_path, 200);
+        // Skip the per-poll log read for an agent already settled in the same
+        // terminal state locally: its log file is frozen, so re-reading the
+        // last 200 lines every second is pure I/O waste. A burst session can
+        // hold 100+ such agents, so this is the bulk of the per-second sync
+        // cost the render-thread poll was paying. Non-terminal, transitioning,
+        // or not-yet-seen agents still read (the log may have grown).
+        let log_is_frozen = state
+            .background_tasks
+            .get(id)
+            .is_some_and(|e| {
+                new_status.is_terminal() && e.status == new_status && e.status.is_terminal()
+            });
+        let messages = if log_is_frozen {
+            None
+        } else {
+            Some(crate::daemon::read_last_lines(&agent.log_path, 200))
+        };
         let mut terminal_completion = None;
         let entry = state
             .background_tasks
@@ -145,19 +161,24 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
             entry.model_used = agent.model.clone();
             changed = true;
         }
-        if entry.messages != messages {
-            entry.messages = messages.clone();
-            entry.chat_messages = parse_agent_log_to_chat_messages(&messages);
-            changed = true;
-        }
-        // Detached/daemon-launched agents never see live `EngineEvent`s, so
-        // `chat_messages` stays empty unless we reconstruct it from the
-        // persisted log. The parser is the sole writer for detached
-        // agents (live events for attached ones are filtered out by the
-        // early `continue` above), so the two writers never race.
-        if entry.chat_messages.is_empty() && !messages.is_empty() {
-            entry.chat_messages = parse_agent_log_to_chat_messages(&messages);
-            changed = true;
+        // `messages` is `None` when the log read was skipped (frozen terminal
+        // agent) — leave the cached messages/chat_messages untouched in that
+        // case.
+        if let Some(messages) = messages.as_ref() {
+            if entry.messages != *messages {
+                entry.messages = messages.clone();
+                entry.chat_messages = parse_agent_log_to_chat_messages(messages);
+                changed = true;
+            }
+            // Detached/daemon-launched agents never see live `EngineEvent`s, so
+            // `chat_messages` stays empty unless we reconstruct it from the
+            // persisted log. The parser is the sole writer for detached
+            // agents (live events for attached ones are filtered out by the
+            // early `continue` above), so the two writers never race.
+            if entry.chat_messages.is_empty() && !messages.is_empty() {
+                entry.chat_messages = parse_agent_log_to_chat_messages(messages);
+                changed = true;
+            }
         }
 
         // Any observable change from the poll counts as activity — keeps
@@ -457,5 +478,64 @@ mod tests {
                         && ts.summary.as_deref() == Some("done")
             )
         }));
+    }
+
+    // Once an agent is settled in a terminal state locally, a later change to
+    // its (frozen) log file is NOT re-read on the next poll — the per-second
+    // sync skips the I/O for already-done agents. We prove the skip by mutating
+    // the log after completion and asserting the cached messages don't change.
+    #[test]
+    fn daemon_sync_skips_log_read_for_settled_terminal_agent_robust() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = DaemonPaths::new(dir.path());
+        let session_id = "ses_frozen";
+        let task_id = "task-frozen";
+        let mut state = app_for_session(session_id);
+
+        let agent = agent_info(&paths, task_id, session_id, BackgroundAgentStatus::Completed);
+        let log_path = agent.log_path.clone();
+        std::fs::create_dir_all(log_path.parent().expect("log parent")).expect("mkdir");
+        std::fs::write(&log_path, "first output\n").expect("write log");
+        let mut daemon_state = DaemonState::default();
+        daemon_state
+            .background_agents
+            .insert(task_id.to_owned(), agent);
+        save_state(&paths, &daemon_state).expect("save completed state");
+
+        // First poll: agent is seen as Completed and its log is read once.
+        assert!(sync_detached_background_tasks_from_daemon_with_paths(
+            &mut state, &paths
+        ));
+        let before: Vec<String> = state
+            .background_tasks
+            .get(task_id)
+            .expect("task")
+            .messages
+            .clone();
+        assert!(before.iter().any(|l| l.contains("first output")));
+
+        // Mutate the (supposedly frozen) log and force a re-poll. Because the
+        // agent is already terminal locally with the same status, the log read
+        // is skipped and the cached messages stay put.
+        std::fs::write(&log_path, "first output\nLEAKED SECOND READ\n").expect("rewrite log");
+        state.last_detached_state_mtime = None;
+        // Re-save so the state mtime advances and the poll actually runs.
+        save_state(&paths, &daemon_state).expect("re-save");
+        sync_detached_background_tasks_from_daemon_with_paths(&mut state, &paths);
+
+        let after: Vec<String> = state
+            .background_tasks
+            .get(task_id)
+            .expect("task")
+            .messages
+            .clone();
+        assert_eq!(
+            before, after,
+            "frozen terminal agent must not re-read its log on a later poll"
+        );
+        assert!(
+            !after.iter().any(|l| l.contains("LEAKED SECOND READ")),
+            "skipped log read leaked new content: {after:?}"
+        );
     }
 }
