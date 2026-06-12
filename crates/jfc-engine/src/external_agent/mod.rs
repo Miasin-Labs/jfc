@@ -131,6 +131,12 @@ impl ExternalAgentProfile {
     }
 }
 
+pub mod launcher;
+pub use launcher::{
+    ExternalAgentHandle, ExternalAgentLaunchError, ExternalAgentSession, ExternalAgentSpec,
+    ExternalAgentStatus, LaunchContext,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
