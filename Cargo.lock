@@ -2902,6 +2902,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
+ "fs2",
  "futures",
  "hex",
  "hmac 0.12.1",

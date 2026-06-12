@@ -586,6 +586,101 @@ struct RefreshOutcome {
     refresh_token: String,
     expires_at: u64,
     adopted_peer_token: bool,
+    /// True when the returned tokens are already reflected on disk (either a
+    /// peer had written them, or this process CAS-wrote them under the
+    /// cross-process lock). Hot-path callers skip a redundant write when true.
+    persisted: bool,
+}
+
+fn existing_access_token_still_valid(tokens: Option<(Option<String>, String, Option<u64>)>) -> bool {
+    tokens
+        .and_then(|(access, _refresh, expires)| access.zip(expires))
+        .is_some_and(|(access, expires)| !access.is_empty() && now_ms() < expires)
+}
+
+fn should_disable_after_invalid_grant(
+    expected_refresh_token: &str,
+    tokens: Option<(Option<String>, String, Option<u64>)>,
+) -> bool {
+    let same_refresh_token = tokens
+        .as_ref()
+        .is_some_and(|(_, refresh, _)| refresh == expected_refresh_token);
+    same_refresh_token && !existing_access_token_still_valid(tokens)
+}
+
+async fn record_refresh_attempt_unlocked_best_effort(
+    mgr: &super::anthropic_accounts::AccountManager,
+    account_name: &str,
+    error: Option<&str>,
+) {
+    if let Err(e) = mgr
+        .record_refresh_attempt_unlocked(account_name, error)
+        .await
+    {
+        tracing::debug!(
+            target: "jfc::provider::anthropic_oauth::rotation",
+            account = %account_name,
+            error = %e,
+            "failed to record refresh attempt audit metadata"
+        );
+    }
+}
+
+async fn record_refresh_success_unlocked_best_effort(
+    mgr: &super::anthropic_accounts::AccountManager,
+    account_name: &str,
+) {
+    if let Err(e) = mgr.record_refresh_success_unlocked(account_name).await {
+        tracing::debug!(
+            target: "jfc::provider::anthropic_oauth::rotation",
+            account = %account_name,
+            error = %e,
+            "failed to record refresh success audit metadata"
+        );
+    }
+}
+
+async fn clear_refresh_token_unlocked_best_effort(
+    mgr: &super::anthropic_accounts::AccountManager,
+    account_name: &str,
+) {
+    if let Err(e) = mgr.atomic_clear_refresh_token_unlocked(account_name).await {
+        tracing::warn!(
+            target: "jfc::provider::anthropic_oauth::rotation",
+            account = %account_name,
+            error = %e,
+            "failed to clear invalid refresh token"
+        );
+    }
+}
+
+fn adopt_peer_refresh(
+    account_name: &str,
+    expected_refresh_token: &str,
+    tokens: Option<(Option<String>, String, Option<u64>)>,
+) -> Option<RefreshOutcome> {
+    let (access, refresh, expires) = tokens?;
+    let access = access?;
+    let expires = expires?;
+    if access.is_empty()
+        || refresh.is_empty()
+        || refresh == expected_refresh_token
+        || super::anthropic_accounts::expiry_is_stale(Some(expires))
+    {
+        return None;
+    }
+    tracing::info!(
+        target: "jfc::provider::anthropic_oauth::rotation",
+        account = %account_name,
+        "another process already refreshed this token — adopting it"
+    );
+    Some(RefreshOutcome {
+        access_token: access,
+        refresh_token: refresh,
+        expires_at: expires,
+        adopted_peer_token: true,
+        persisted: true,
+    })
 }
 
 /// Subset of `GET /api/oauth/profile` used by the model-access logic. Mirrors
@@ -745,7 +840,13 @@ impl AnthropicOAuthProvider {
             })
             .await?;
         // Best-effort hot-reload — failures don't block use of the cache.
-        let _ = mgr.reload_if_changed().await;
+        if let Err(e) = mgr.reload_if_changed().await {
+            tracing::debug!(
+                target: "jfc::provider::anthropic_oauth::rotation",
+                error = %e,
+                "account manager hot-reload failed"
+            );
+        }
         Ok(mgr)
     }
 
@@ -796,20 +897,20 @@ impl AnthropicOAuthProvider {
             {
                 Ok(outcome) => {
                     if outcome.adopted_peer_token {
-                        // A peer already had a fresh token on disk; it's already
-                        // persisted there, so don't rewrite it (avoids redundant
-                        // disk_lock contention) and don't count it as a refresh
-                        // this sweeper performed.
+                        // A peer already had a fresh token on disk; don't count
+                        // it as a refresh this sweeper performed.
                         continue;
                     }
-                    let _ = mgr
-                        .atomic_update_tokens(
-                            &name,
-                            outcome.access_token,
-                            outcome.expires_at,
-                            Some(outcome.refresh_token),
-                        )
-                        .await;
+                    if !outcome.persisted {
+                        let _ = mgr
+                            .atomic_update_tokens(
+                                &name,
+                                outcome.access_token,
+                                outcome.expires_at,
+                                Some(outcome.refresh_token),
+                            )
+                            .await;
+                    }
                     refreshed += 1;
                 }
                 Err(e) => {
@@ -947,10 +1048,10 @@ impl AnthropicOAuthProvider {
             return Ok(t.access_token.clone());
         }
 
-        let (access_token, new_refresh, expires_at) =
+        let (access_token, new_refresh, expires_at, already_persisted) =
             match (existing_access_token, existing_expires_at) {
                 (Some(at), Some(exp)) if now_ms() < exp => {
-                    (at.to_owned(), refresh_token.to_owned(), exp)
+                    (at.to_owned(), refresh_token.to_owned(), exp, true)
                 }
                 _ => {
                     let outcome = self
@@ -960,36 +1061,44 @@ impl AnthropicOAuthProvider {
                         outcome.access_token,
                         outcome.refresh_token,
                         outcome.expires_at,
+                        outcome.persisted,
                     )
                 }
             };
 
-        // Persist via the rotation manager (atomic disk + in-memory cache).
+        // Persist via the rotation manager only when the refresh path did not
+        // already CAS-write/adopt a token under the cross-process store lock.
         // Only fall back to the legacy unlocked writer when the manager is
-        // unavailable or its write failed: doing both means a second,
-        // un-synchronized read-modify-rename right after the locked write,
-        // which can clobber a concurrent account update. The store is shared
-        // with opencode and other jfc processes, so that race is real.
-        let persisted_via_manager = match self.account_manager().await {
-            Ok(mgr) => mgr
-                .atomic_update_tokens(
+        // unavailable or its write failed.
+        if !already_persisted {
+            let persisted_via_manager = match self.account_manager().await {
+                Ok(mgr) => mgr
+                    .atomic_update_tokens(
+                        account_name,
+                        access_token.clone(),
+                        expires_at,
+                        Some(new_refresh.clone()),
+                    )
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            };
+            if !persisted_via_manager
+                && let Err(e) = write_back_tokens(
+                    &self.store_path,
                     account_name,
-                    access_token.clone(),
+                    &access_token,
+                    &new_refresh,
                     expires_at,
-                    Some(new_refresh.clone()),
                 )
-                .await
-                .is_ok(),
-            Err(_) => false,
-        };
-        if !persisted_via_manager {
-            let _ = write_back_tokens(
-                &self.store_path,
-                account_name,
-                &access_token,
-                &new_refresh,
-                expires_at,
-            );
+            {
+                tracing::warn!(
+                    target: "jfc::provider::anthropic_oauth::rotation",
+                    account = %account_name,
+                    error = %e,
+                    "legacy token write-back failed"
+                );
+            }
         }
 
         *guard = Some(TokenState {
@@ -1005,23 +1114,16 @@ impl AnthropicOAuthProvider {
     /// Single-flight, re-read-before-refresh wrapper around
     /// [`refresh_access_token`].
     ///
-    /// Correctness invariants (the store is shared with opencode and other jfc
-    /// processes, so each of these races is real):
-    /// 1. **Single-flight**: holds the per-account refresh lock so two callers
-    ///    can't both spend the same refresh token at once.
-    /// 2. **Re-read before refresh**: re-reads the account from disk under the
-    ///    lock; if a peer already rotated the token (a different, unexpired
-    ///    access token is now on disk), returns that as success WITHOUT a
-    ///    network call — refreshing again would burn the just-rotated token and
-    ///    trigger a spurious `invalid_grant`.
-    /// 3. **Auth vs quota**: only a definite `invalid_grant` clears the refresh
-    ///    token / disables. Transient errors (network, 5xx) bubble up so the
-    ///    caller/sweeper can retry later — they are recorded as audit failures
-    ///    but never disable.
-    ///
-    /// The boolean in the success tuple is `true` when a peer's token was
-    /// adopted without a network refresh, so the caller can distinguish a real
-    /// refresh from an adoption (e.g. the sweeper only counts real refreshes).
+    /// Correctness invariants for a shared JSON store with rotating refresh
+    /// tokens:
+    /// 1. in-process single-flight serializes callers for the same account;
+    /// 2. a cross-process advisory store lock prevents sibling JFC processes
+    ///    from spending the same refresh-token generation concurrently;
+    /// 3. after taking the lock, re-read disk and adopt a peer's newer token;
+    /// 4. after a successful network refresh, CAS-write only if the on-disk
+    ///    refresh token still equals the token we spent;
+    /// 5. `invalid_grant` is destructive only after a locked re-read still shows
+    ///    the same refresh token and no usable access token remains.
     async fn refresh_with_disable_on_invalid_grant(
         &self,
         account_name: &str,
@@ -1029,7 +1131,6 @@ impl AnthropicOAuthProvider {
     ) -> anyhow::Result<RefreshOutcome> {
         let mgr = self.account_manager().await.ok();
 
-        // (1) Acquire the per-account single-flight lock (outside disk_lock).
         let _flight = match &mgr {
             Some(mgr) => Some(mgr.refresh_lock_for(account_name).await),
             None => None,
@@ -1038,74 +1139,92 @@ impl AnthropicOAuthProvider {
             Some(lock) => Some(lock.lock().await),
             None => None,
         };
+        let _store_guard = match &mgr {
+            Some(mgr) => Some(mgr.lock_store_file().await?),
+            None => None,
+        };
 
-        // (2) Re-read disk: a peer (opencode / another jfc) may have rotated the
-        // token while we waited for the lock. The reliable peer-rotation signal
-        // is an on-disk token that is BOTH genuinely fresh (beyond the refresh
-        // buffer) AND a different refresh token than the one we were about to
-        // spend — comparing against the input refresh_token works for every
-        // account, not just the one in our single-account in-memory cache.
-        if let Some(mgr) = &mgr
-            && let Some((disk_access, disk_refresh, disk_expires)) =
-                mgr.read_account_tokens_from_disk(account_name).await
-            && let Some(access) = disk_access
-            && !access.is_empty()
-            && !super::anthropic_accounts::expiry_is_stale(disk_expires)
-            && disk_refresh != refresh_token
-            && !disk_refresh.is_empty()
+        let disk_before = match &mgr {
+            Some(mgr) => mgr.read_account_tokens_from_disk_unlocked(account_name).await,
+            None => None,
+        };
+        if let Some(outcome) = adopt_peer_refresh(account_name, refresh_token, disk_before.clone())
         {
-            tracing::info!(
-                target: "jfc::provider::anthropic_oauth::rotation",
-                account = %account_name,
-                "another process already refreshed this token — adopting it"
-            );
-            // Adoption is a successful maintenance outcome: record it so the
-            // audit timestamps reflect that the account is now warm.
-            let _ = mgr.record_refresh_success(account_name).await;
-            return Ok(RefreshOutcome {
-                access_token: access,
-                refresh_token: disk_refresh,
-                expires_at: disk_expires.unwrap_or_else(now_ms),
-                adopted_peer_token: true,
-            });
+            if let Some(mgr) = &mgr {
+                record_refresh_success_unlocked_best_effort(mgr, account_name).await;
+            }
+            return Ok(outcome);
         }
 
-        // Record the attempt for audit before the network call.
         if let Some(mgr) = &mgr {
-            let _ = mgr.record_refresh_attempt(account_name, None).await;
+            record_refresh_attempt_unlocked_best_effort(mgr, account_name, None).await;
         }
 
         match refresh_access_token(&self.client, refresh_token).await {
             Ok((access_token, new_refresh, expires_at)) => {
                 if let Some(mgr) = &mgr {
-                    let _ = mgr.record_refresh_success(account_name).await;
+                    let applied = mgr
+                        .atomic_update_tokens_if_refresh_matches(
+                            account_name,
+                            refresh_token,
+                            access_token.clone(),
+                            expires_at,
+                            Some(new_refresh.clone()),
+                        )
+                        .await
+                        .unwrap_or(false);
+                    if applied {
+                        record_refresh_success_unlocked_best_effort(mgr, account_name).await;
+                    } else if let Some(outcome) = adopt_peer_refresh(
+                        account_name,
+                        refresh_token,
+                        mgr.read_account_tokens_from_disk_unlocked(account_name).await,
+                    ) {
+                        record_refresh_success_unlocked_best_effort(mgr, account_name).await;
+                        return Ok(outcome);
+                    }
                 }
                 Ok(RefreshOutcome {
                     access_token,
                     refresh_token: new_refresh,
                     expires_at,
                     adopted_peer_token: false,
+                    persisted: mgr.is_some(),
                 })
             }
             Err(e) => {
                 let msg = e.to_string().to_lowercase();
-                // (3) Auth vs quota: invalid_grant is a permanent auth failure
-                // (refresh token dead) → clear + disable. Everything else is
-                // transient → record and retry later, never disable.
                 if msg.contains("invalid_grant") {
                     if let Some(mgr) = &mgr {
-                        let _ = mgr.record_refresh_attempt(account_name, Some("invalid_grant")).await;
-                        let _ = mgr.atomic_clear_refresh_token(account_name).await;
-                    }
-                    tracing::warn!(
-                        target: "jfc::provider::anthropic_oauth::rotation",
-                        account = %account_name,
-                        "refresh failed with invalid_grant — account auto-disabled (needs re-login)"
-                    );
-                } else if let Some(mgr) = &mgr {
-                    let _ = mgr
-                        .record_refresh_attempt(account_name, Some(&msg))
+                        let latest = mgr.read_account_tokens_from_disk_unlocked(account_name).await;
+                        if let Some(outcome) = adopt_peer_refresh(account_name, refresh_token, latest.clone()) {
+                            record_refresh_success_unlocked_best_effort(mgr, account_name).await;
+                            return Ok(outcome);
+                        }
+                        let disable = should_disable_after_invalid_grant(refresh_token, latest);
+                        record_refresh_attempt_unlocked_best_effort(
+                            mgr,
+                            account_name,
+                            Some("invalid_grant"),
+                        )
                         .await;
+                        if disable {
+                            clear_refresh_token_unlocked_best_effort(mgr, account_name).await;
+                            tracing::warn!(
+                                target: "jfc::provider::anthropic_oauth::rotation",
+                                account = %account_name,
+                                "refresh failed with invalid_grant and no valid access token remains — account disabled (needs re-login)"
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: "jfc::provider::anthropic_oauth::rotation",
+                                account = %account_name,
+                                "refresh returned invalid_grant but credentials may be racing — keeping account enabled"
+                            );
+                        }
+                    }
+                } else if let Some(mgr) = &mgr {
+                    record_refresh_attempt_unlocked_best_effort(mgr, account_name, Some(&msg)).await;
                     tracing::warn!(
                         target: "jfc::provider::anthropic_oauth::rotation",
                         account = %account_name,
@@ -3759,6 +3878,98 @@ mod tests {
             manager: tokio::sync::OnceCell::new(),
         };
         assert!(!p.has_usable_config());
+    }
+
+    // ── multi-process refresh-token rotation helpers ──────────────────────
+
+    // Normal: if another process wrote a different refresh token plus a fresh
+    // access token, we adopt it instead of spending the stale token again.
+    #[test]
+    fn adopt_peer_refresh_accepts_fresh_rotated_generation_normal() {
+        let outcome = adopt_peer_refresh(
+            "acct",
+            "old-rt",
+            Some((
+                Some("peer-access".to_owned()),
+                "new-rt".to_owned(),
+                Some(now_ms() + 60 * 60 * 1000),
+            )),
+        )
+        .expect("fresh peer generation should be adopted");
+        assert_eq!(outcome.access_token, "peer-access");
+        assert_eq!(outcome.refresh_token, "new-rt");
+        assert!(outcome.adopted_peer_token);
+    }
+
+    // Robust: a different refresh token is NOT adopted if its access token is
+    // already within the refresh buffer. The caller must refresh the newest
+    // generation instead of considering the account warm.
+    #[test]
+    fn adopt_peer_refresh_rejects_stale_peer_access_robust() {
+        assert!(
+            adopt_peer_refresh(
+                "acct",
+                "old-rt",
+                Some((
+                    Some("peer-access".to_owned()),
+                    "new-rt".to_owned(),
+                    Some(now_ms() + 60_000),
+                )),
+            )
+            .is_none()
+        );
+    }
+
+    // Robust: invalid_grant handling may keep an account enabled only while an
+    // existing access token is still actually usable, not just present.
+    #[test]
+    fn existing_access_token_still_valid_requires_future_expiry_robust() {
+        assert!(existing_access_token_still_valid(Some((
+            Some("access".to_owned()),
+            "rt".to_owned(),
+            Some(now_ms() + 1_000),
+        ))));
+        assert!(!existing_access_token_still_valid(Some((
+            Some("access".to_owned()),
+            "rt".to_owned(),
+            Some(now_ms().saturating_sub(1)),
+        ))));
+        assert!(!existing_access_token_still_valid(Some((
+            None,
+            "rt".to_owned(),
+            Some(now_ms() + 1_000),
+        ))));
+    }
+
+    // Robust: invalid_grant disables only when the same refresh-token generation
+    // is still on disk AND no usable access token remains. If the refresh token
+    // changed or access still works, keep the account enabled and retry later.
+    #[test]
+    fn invalid_grant_disable_decision_is_conservative_robust() {
+        assert!(!should_disable_after_invalid_grant(
+            "old-rt",
+            Some((
+                Some("access".to_owned()),
+                "old-rt".to_owned(),
+                Some(now_ms() + 1_000),
+            )),
+        ));
+        assert!(!should_disable_after_invalid_grant(
+            "old-rt",
+            Some((
+                Some("peer-access".to_owned()),
+                "new-rt".to_owned(),
+                Some(now_ms() + 1_000),
+            )),
+        ));
+        assert!(should_disable_after_invalid_grant(
+            "old-rt",
+            Some((
+                None,
+                "old-rt".to_owned(),
+                Some(now_ms().saturating_sub(1)),
+            )),
+        ));
     }
 
     // ── cached_profile — concurrent-safe read ─────────────────────────────

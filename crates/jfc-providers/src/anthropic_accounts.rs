@@ -41,10 +41,12 @@
 //! round-trips through jfc unchanged.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::fs;
@@ -539,6 +541,30 @@ impl Drop for SweepGuard<'_> {
         self.inner
             .sweep_in_progress
             .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Cross-process advisory lock for the Anthropic accounts store.
+///
+/// Refresh-token rotation is single-use-ish: if process A refreshes and rotates
+/// the refresh token while process B still holds the old token, B may get
+/// `invalid_grant`. This lock is held around the *refresh decision + network
+/// refresh + CAS write* for one process so multiple JFC processes do not spend
+/// the same refresh token concurrently. It is advisory (opencode/old binaries
+/// may ignore it), so the refresh path still re-reads and CAS-checks the JSON.
+pub struct StoreFileLock {
+    file: std::fs::File,
+}
+
+impl Drop for StoreFileLock {
+    fn drop(&mut self) {
+        if let Err(e) = self.file.unlock() {
+            tracing::debug!(
+                target: "jfc::provider::anthropic_oauth::rotation",
+                error = %e,
+                "failed to unlock accounts store lock"
+            );
+        }
     }
 }
 
@@ -1364,6 +1390,29 @@ impl AccountManager {
         }
     }
 
+    /// Acquire the cross-process accounts-store lock. Blocking file I/O/flock is
+    /// moved to a blocking thread so we do not park the async reactor.
+    pub async fn lock_store_file(&self) -> anyhow::Result<StoreFileLock> {
+        let path = self.inner.store_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let lock_path = store_lock_path(&path);
+            if let Some(parent) = lock_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)?;
+            file.lock_exclusive()?;
+            Ok::<_, std::io::Error>(StoreFileLock { file })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("join accounts lock task: {e}"))?
+        .map_err(|e| anyhow::anyhow!("lock accounts store: {e}"))
+    }
+
     /// Acquire (creating if needed) the single-flight refresh lock for one
     /// account. The returned `Arc<Mutex<()>>` is held by the caller for the
     /// duration of a refresh; concurrent callers for the same account serialize
@@ -1386,13 +1435,69 @@ impl AccountManager {
         &self,
         account_name: &str,
     ) -> Option<(Option<String>, String, Option<u64>)> {
-        let _guard = self.inner.disk_lock.lock().await;
+        let _store_lock = self.lock_store_file().await.ok()?;
+        self.read_account_tokens_from_disk_unlocked(account_name).await
+    }
+
+    /// Same as [`Self::read_account_tokens_from_disk`], intended for callers
+    /// already holding [`Self::lock_store_file`]. Does not acquire the in-process
+    /// `disk_lock` so a refresh path can hold the cross-process lock across the
+    /// network refresh without deadlocking with later CAS writes.
+    pub async fn read_account_tokens_from_disk_unlocked(
+        &self,
+        account_name: &str,
+    ) -> Option<(Option<String>, String, Option<u64>)> {
         let (store, _) = read_store(&self.inner.store_path).await.ok()?;
         store
             .accounts
             .into_iter()
             .find(|a| a.name == account_name)
             .map(|a| (a.access_token, a.refresh_token, a.expires_at))
+    }
+
+    /// CAS persist of a successful refresh while the caller holds the
+    /// cross-process store lock. The write is applied only when the on-disk
+    /// refresh token still equals `expected_refresh_token`; if a peer updated it
+    /// first, this returns `false` and leaves the file untouched.
+    pub async fn atomic_update_tokens_if_refresh_matches(
+        &self,
+        name: &str,
+        expected_refresh_token: &str,
+        access_token: String,
+        expires_at_ms: u64,
+        new_refresh_token: Option<String>,
+    ) -> anyhow::Result<bool> {
+        let mut applied = false;
+        self.atomic_modify_unlocked(|store| {
+            let Some(account) = store.accounts.iter_mut().find(|a| a.name == name) else {
+                return Err(anyhow::anyhow!(
+                    "atomic_update_tokens_if_refresh_matches: account '{name}' not found"
+                ));
+            };
+            if account.refresh_token != expected_refresh_token {
+                return Ok(());
+            }
+            account.access_token = Some(access_token.clone());
+            account.expires_at = Some(expires_at_ms);
+            if let Some(rt) = new_refresh_token.clone()
+                && rt != account.refresh_token
+            {
+                tracing::info!(
+                    target: "jfc::provider::anthropic_oauth::rotation",
+                    account = %name,
+                    "refresh token rotated"
+                );
+                account.refresh_token = rt;
+            }
+            if account.enabled == Some(false) && expires_at_ms > now_ms() {
+                account.enabled = Some(true);
+                account.disabled_reason = None;
+            }
+            applied = true;
+            Ok(())
+        })
+        .await?;
+        Ok(applied)
     }
 
     /// Record a refresh *attempt* (audit). Sets `last_refresh_attempt_at` and,
@@ -1404,9 +1509,20 @@ impl AccountManager {
         name: &str,
         error: Option<&str>,
     ) -> anyhow::Result<()> {
+        let _store_lock = self.lock_store_file().await?;
+        self.record_refresh_attempt_unlocked(name, error).await
+    }
+
+    /// Same as [`Self::record_refresh_attempt`], but assumes the caller already
+    /// holds [`Self::lock_store_file`].
+    pub async fn record_refresh_attempt_unlocked(
+        &self,
+        name: &str,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
         let now = now_ms();
         let error = error.map(str::to_owned);
-        self.atomic_modify(move |store| {
+        self.atomic_modify_unlocked(move |store| {
             if let Some(a) = store.accounts.iter_mut().find(|a| a.name == name) {
                 a.last_refresh_attempt_at = Some(now);
                 if let Some(err) = error {
@@ -1423,8 +1539,15 @@ impl AccountManager {
     /// `last_auth_error`, and reset `refresh_failure_count`. Token fields are
     /// persisted separately via [`Self::atomic_update_tokens`].
     pub async fn record_refresh_success(&self, name: &str) -> anyhow::Result<()> {
+        let _store_lock = self.lock_store_file().await?;
+        self.record_refresh_success_unlocked(name).await
+    }
+
+    /// Same as [`Self::record_refresh_success`], but assumes the caller already
+    /// holds [`Self::lock_store_file`].
+    pub async fn record_refresh_success_unlocked(&self, name: &str) -> anyhow::Result<()> {
         let now = now_ms();
-        self.atomic_modify(move |store| {
+        self.atomic_modify_unlocked(move |store| {
             if let Some(a) = store.accounts.iter_mut().find(|a| a.name == name) {
                 a.last_refresh_attempt_at = Some(now);
                 a.last_refresh_success_at = Some(now);
@@ -1517,7 +1640,14 @@ impl AccountManager {
     /// know a refresh token is permanently invalid we wipe it so no other
     /// process can retry with the known-bad value.
     pub async fn atomic_clear_refresh_token(&self, name: &str) -> anyhow::Result<()> {
-        self.atomic_modify(|store| {
+        let _store_lock = self.lock_store_file().await?;
+        self.atomic_clear_refresh_token_unlocked(name).await
+    }
+
+    /// Same as [`Self::atomic_clear_refresh_token`], but assumes the caller
+    /// already holds [`Self::lock_store_file`].
+    pub async fn atomic_clear_refresh_token_unlocked(&self, name: &str) -> anyhow::Result<()> {
+        self.atomic_modify_unlocked(|store| {
             if let Some(a) = store.accounts.iter_mut().find(|a| a.name == name) {
                 a.refresh_token = String::new();
                 a.access_token = None;
@@ -1684,21 +1814,32 @@ impl AccountManager {
         Ok(found)
     }
 
-    /// Generic atomic read-modify-write under the disk lock. Re-reads the
-    /// store from disk before applying the mutation so concurrent processes
-    /// don't clobber each other's writes.
+    /// Generic atomic read-modify-write. Takes the cross-process accounts-file
+    /// lock first, then the in-process disk mutex, then re-reads before writing.
+    /// This prevents two JFC processes from last-writer-wins clobbering each
+    /// other's token/quota updates. Call [`Self::atomic_modify_unlocked`] only
+    /// when the caller already holds [`Self::lock_store_file`].
     async fn atomic_modify<F>(&self, mutator: F) -> anyhow::Result<()>
     where
         F: FnOnce(&mut AccountStore) -> anyhow::Result<()>,
     {
+        let _store_lock = self.lock_store_file().await?;
+        self.atomic_modify_unlocked(mutator).await
+    }
+
+    /// Same as [`Self::atomic_modify`], but assumes the caller already holds the
+    /// cross-process store lock. Still takes the in-process disk mutex and
+    /// re-reads before writing so same-process async tasks merge safely.
+    async fn atomic_modify_unlocked<F>(&self, mutator: F) -> anyhow::Result<()>
+    where
+        F: FnOnce(&mut AccountStore) -> anyhow::Result<()>,
+    {
         let _guard = self.inner.disk_lock.lock().await;
-        // Re-read disk so we don't clobber an opencode-side rotation.
         let (mut store, _) = read_store(&self.inner.store_path).await?;
         mutator(&mut store)?;
         write_store(&self.inner.store_path, &store).await?;
         let mtime = mtime_ns(&self.inner.store_path).await.unwrap_or(0);
         let mut state = self.inner.state.lock().await;
-        // Drop runtime entries for any account that vanished after the mutation.
         let surviving: std::collections::HashSet<String> =
             store.accounts.iter().map(|a| a.name.clone()).collect();
         state.runtime.retain(|name, _| surviving.contains(name));
@@ -1709,6 +1850,17 @@ impl AccountManager {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
+
+fn store_lock_path(path: &Path) -> PathBuf {
+    let mut lock = path.to_path_buf();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!("{e}.lock"))
+        .unwrap_or_else(|| "lock".to_owned());
+    lock.set_extension(ext);
+    lock
+}
 
 /// Whitelist for account names: alnum + a few separators, max 100 chars.
 /// Mirrors opencode's `VALID_ACCOUNT_NAME_REGEX`.
@@ -2036,6 +2188,59 @@ mod tests {
         assert_eq!(access.as_deref(), Some("peer-rotated-at"));
         assert_eq!(refresh, "peer-rt");
         assert!(expires.unwrap() > now_ms());
+    }
+
+    // Normal: CAS update succeeds only when the refresh token generation on disk
+    // still matches the token this process spent.
+    #[tokio::test]
+    async fn atomic_update_tokens_if_refresh_matches_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounts.json");
+        let mgr = AccountManager::load(path).await.unwrap();
+        mgr.atomic_add_account(mk_account("a", None)).await.unwrap();
+        let _lock = mgr.lock_store_file().await.unwrap();
+        let applied = mgr
+            .atomic_update_tokens_if_refresh_matches(
+                "a",
+                "rt-test",
+                "new-access".to_owned(),
+                now_ms() + 10_000,
+                Some("new-refresh".to_owned()),
+            )
+            .await
+            .unwrap();
+        assert!(applied);
+        let (access, refresh, _) = mgr.read_account_tokens_from_disk_unlocked("a").await.unwrap();
+        assert_eq!(access.as_deref(), Some("new-access"));
+        assert_eq!(refresh, "new-refresh");
+    }
+
+    // Robust: if a peer already rotated the refresh token, CAS returns false and
+    // does not overwrite the peer's newer generation.
+    #[tokio::test]
+    async fn atomic_update_tokens_if_refresh_mismatch_preserves_peer_robust() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounts.json");
+        let mgr = AccountManager::load(path).await.unwrap();
+        mgr.atomic_add_account(mk_account("a", None)).await.unwrap();
+        mgr.atomic_update_tokens("a", "peer-access".to_owned(), now_ms() + 10_000, Some("peer-refresh".to_owned()))
+            .await
+            .unwrap();
+        let _lock = mgr.lock_store_file().await.unwrap();
+        let applied = mgr
+            .atomic_update_tokens_if_refresh_matches(
+                "a",
+                "rt-test",
+                "stale-writer-access".to_owned(),
+                now_ms() + 20_000,
+                Some("stale-writer-refresh".to_owned()),
+            )
+            .await
+            .unwrap();
+        assert!(!applied);
+        let (access, refresh, _) = mgr.read_account_tokens_from_disk_unlocked("a").await.unwrap();
+        assert_eq!(access.as_deref(), Some("peer-access"));
+        assert_eq!(refresh, "peer-refresh");
     }
 
     // Normal: tier ranking matches opencode's getTierRank.
