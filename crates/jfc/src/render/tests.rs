@@ -1451,4 +1451,39 @@ mod render_snapshot_tests {
         term.draw(|f| super::super::teammates_panel::teammates_panel(f, &mut app))
             .expect("draw must not panic on small area");
     }
+
+    // The agents fan (render_subagent_tree) consumes the SAME shared glyph
+    // SSOT as the teammates panel. Rendering a running agent through it must
+    // put the filled bullet + description on screen — proving both roster
+    // surfaces render the unified glyph consistently.
+    #[test]
+    fn agents_fan_renders_shared_running_glyph_normal() {
+        use ratatui::layout::Rect;
+        let app = app_with_task(TaskLifecycle::Running, "fan agent");
+        let backend = TestBackend::new(60, 12);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = Rect::new(0, 0, 60, 12);
+            super::super::agents::render_subagent_tree(f, &app, area);
+        })
+        .expect("draw");
+        let text = buffer_text(&term);
+        assert!(text.contains("fan agent"), "desc missing:\n{text}");
+        assert!(text.contains('●'), "shared running glyph missing:\n{text}");
+    }
+
+    // A failed agent in the fan shows the shared cross glyph.
+    #[test]
+    fn agents_fan_renders_shared_failed_glyph_robust() {
+        use ratatui::layout::Rect;
+        let app = app_with_task(TaskLifecycle::Failed, "broke");
+        let backend = TestBackend::new(60, 12);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            super::super::agents::render_subagent_tree(f, &app, Rect::new(0, 0, 60, 12));
+        })
+        .expect("draw");
+        let text = buffer_text(&term);
+        assert!(text.contains('✗'), "shared failed glyph missing:\n{text}");
+    }
 }
