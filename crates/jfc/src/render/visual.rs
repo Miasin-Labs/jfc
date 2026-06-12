@@ -303,16 +303,24 @@ pub fn mcp_status_color(status: McpStatus, theme: Theme) -> Color {
     }
 }
 
+/// Truncate to `max` display CELLS. Forwarding to `truncate_cells` makes
+/// every legacy callsite width-correct at once: the old codepoint counting
+/// overflowed layout budgets by ~2x on CJK/emoji text.
 pub fn truncate_str(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_owned()
+    truncate_cells(s, max)
+}
+
+/// Compact elapsed-time label: `42s`, `3m12s`, `2h05m`. The single owner
+/// of this format — teammates panel, task panel, and the agents fan all
+/// previously hand-rolled identical copies that had already drifted on
+/// the time source.
+pub fn format_elapsed_secs(elapsed_secs: u64) -> String {
+    if elapsed_secs < 60 {
+        format!("{elapsed_secs}s")
+    } else if elapsed_secs < 3600 {
+        format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
     } else {
-        let trunc: String = chars[..max.saturating_sub(1)].iter().collect();
-        format!("{}…", trunc)
+        format!("{}h{}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
     }
 }
 

@@ -319,14 +319,8 @@ fn render_task_detail(f: &mut Frame, app: &App, task: &Task, area: Rect) {
     });
 
     if let Some(bt) = agent_info {
-        let elapsed_secs = bt.started_at.elapsed().as_secs();
-        let elapsed_label = if elapsed_secs < 60 {
-            format!("{elapsed_secs}s")
-        } else if elapsed_secs < 3600 {
-            format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
-        } else {
-            format!("{}h{}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
-        };
+        let elapsed_label =
+            super::visual::format_elapsed_secs(bt.started_at.elapsed().as_secs());
 
         let total_tokens = bt
             .latest_input_tokens

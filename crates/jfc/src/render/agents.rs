@@ -272,14 +272,7 @@ pub(crate) fn render_subagent_tree(f: &mut Frame, app: &App, area: Rect) {
 
         // Right-side metadata, highest-priority last (rightmost = where
         // the eye lands): tool · model · count · time · ↓tok.
-        let elapsed_secs = bt.started_at.elapsed().as_secs();
-        let elapsed = if elapsed_secs < 60 {
-            format!("{elapsed_secs}s")
-        } else if elapsed_secs < 3600 {
-            format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
-        } else {
-            format!("{}h{}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
-        };
+        let elapsed = super::visual::format_elapsed_secs(bt.started_at.elapsed().as_secs());
         let total_tokens = bt
             .latest_input_tokens
             .saturating_add(bt.latest_cache_read_tokens)
@@ -441,9 +434,7 @@ pub(crate) fn render_teammate_tree(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("   ╒═ ", Style::default().fg(t.text_muted)),
         Span::styled(
             "team-lead",
-            Style::default()
-                .fg(ratatui::style::Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         ),
     ]));
 

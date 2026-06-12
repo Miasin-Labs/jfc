@@ -827,11 +827,14 @@ mod pure_helper_tests {
     }
 
     #[test]
-    fn truncate_str_unicode_counts_chars_not_bytes_robust() {
-        // CJK chars are 3 bytes each but 1 column in our model.
+    fn truncate_str_unicode_counts_cells_not_bytes_robust() {
+        // CJK chars are 3 bytes and 2 display CELLS each. A budget of 4
+        // cells fits one CJK char (2 cells) + the 1-cell ellipsis; the old
+        // codepoint model returned 3 CJK chars (6 cells) and overflowed
+        // the layout.
         let s = "日本語のテキスト";
         let result = truncate_str(s, 4);
-        assert_eq!(result.chars().count(), 4);
+        assert_eq!(crate::render::visual::cell_width(&result), 3);
         assert!(result.ends_with('…'));
     }
 
