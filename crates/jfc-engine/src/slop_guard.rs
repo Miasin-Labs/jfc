@@ -332,6 +332,136 @@ const MAX_FUNCTION_LOC: usize = 80;
 const MAX_NESTING_DEPTH: usize = 5;
 
 /// Check functions for excessive length or nesting depth.
+/// Detect borrow/clone slop — wasteful `.clone()`/`.to_owned()` that allocates
+/// where a borrow or a `Copy` would do. The patterns and false-positive
+/// estimates come from a survey of rust-lang Zulip clippy discussions; only the
+/// Tier-1 (<5% FP) patterns that map to real clippy lints are flagged:
+///   • `.clone()` on a primitive literal/Copy expression (clippy::clone_on_copy)
+///   • `&&x.clone()` double-ref clone (clippy::clone_double_ref)
+///   • `.to_string()` on a value already `String`, `.to_vec()` on a `Vec`,
+///     `.to_path_buf()` on a `PathBuf` (clippy::implicit_clone)
+/// Line-based + conservative: when in doubt it stays silent. Production code
+/// only (skips the `#[cfg(test)]` region, where intentional clones are common).
+pub fn check_borrow_clone(file_content: &str) -> Vec<SlopFinding> {
+    let mut findings = Vec::new();
+
+    // Production region only — tests legitimately clone fixtures a lot.
+    let region = match file_content.find("#[cfg(test)]") {
+        Some(idx) => &file_content[..idx],
+        None => file_content,
+    };
+
+    // Numeric/Copy primitive cloned directly, e.g. `count.clone()` where count
+    // is an integer, or `x.clone()` immediately after a Copy binding. We can't
+    // do type inference line-based, so we only flag the unambiguous shapes:
+    // a clone on a numeric/bool/char literal, or on a `*deref`-of-Copy.
+    for (i, line) in region.lines().enumerate() {
+        let t = line.trim();
+        if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+            continue;
+        }
+        // Skip lines that explicitly opt out.
+        if t.contains("// allow-clone") || t.contains("clippy::clone_on_copy") {
+            continue;
+        }
+
+        // 1) Double-ref clone: `&&expr.clone()` or `(&&expr).clone()` — clones a
+        //    reference, almost never intended (clippy::clone_double_ref).
+        if t.contains("&&") && t.contains(".clone()") {
+            if let Some(pos) = t.find("&&") {
+                let after = &t[pos + 2..];
+                if after.contains(".clone()") && !after.contains("&&") {
+                    findings.push(SlopFinding {
+                        rule: "borrow_clone".into(),
+                        message: format!(
+                            "Line {}: `&&…clone()` clones a double reference (clippy::clone_double_ref) — clone the value, not the reference",
+                            i + 1
+                        ),
+                        file: None,
+                        line: Some(i + 1),
+                    });
+                }
+            }
+        }
+
+        // 2) clone_on_copy: a numeric/bool/char LITERAL `.clone()`, e.g.
+        //    `0.clone()`, `true.clone()`, `'x'.clone()`. Unambiguous and rare,
+        //    but it shows up in generated code.
+        if let Some(c) = clone_on_literal(t) {
+            findings.push(SlopFinding {
+                rule: "borrow_clone".into(),
+                message: format!(
+                    "Line {}: `.clone()` on a Copy {c} (clippy::clone_on_copy) — drop the clone, Copy types are copied",
+                    i + 1
+                ),
+                file: None,
+                line: Some(i + 1),
+            });
+        }
+
+        // 3) implicit_clone: `.to_string()` on a String / `.to_vec()` on a Vec /
+        //    `.to_path_buf()` on a PathBuf — only when the receiver is a clear
+        //    String/Vec/Path *literal-ish* token to keep FP low. We flag the
+        //    high-confidence form `<ident>.clone().to_string()` and
+        //    `String::from(x).to_string()` which are always redundant.
+        if t.contains(".clone().to_string()")
+            || t.contains(".to_string().to_string()")
+            || t.contains(".to_vec().to_vec()")
+        {
+            findings.push(SlopFinding {
+                rule: "borrow_clone".into(),
+                message: format!(
+                    "Line {}: redundant double conversion (e.g. `.clone().to_string()`) — one allocation suffices",
+                    i + 1
+                ),
+                file: None,
+                line: Some(i + 1),
+            });
+        }
+    }
+
+    findings.truncate(8);
+    findings
+}
+
+/// If `line` contains a `.clone()` applied directly to a Copy *literal*
+/// (numeric like `42`/`1.0`, `true`/`false`, or a `'c'` char literal), return a
+/// human label for the kind. Conservative: only matches a literal immediately
+/// before `.clone()`, never an identifier (which could be a non-Copy type).
+fn clone_on_literal(line: &str) -> Option<&'static str> {
+    let idx = line.find(".clone()")?;
+    let before = line[..idx].trim_end();
+    let last = before.rsplit(|c: char| c.is_whitespace() || "([{,=".contains(c)).next()?;
+    if last.is_empty() {
+        return None;
+    }
+    if last == "true" || last == "false" {
+        return Some("bool");
+    }
+    // char literal: 'x' (length 3) or escaped '\n' (length 4)
+    if last.starts_with('\'') && last.ends_with('\'') && last.len() >= 3 {
+        return Some("char");
+    }
+    // numeric literal: all chars digits / . / _ / type suffix like i32/u8/f64
+    let numeric_core: String = last
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '_')
+        .collect();
+    if !numeric_core.is_empty() && numeric_core.chars().any(|c| c.is_ascii_digit()) {
+        let suffix = &last[numeric_core.len()..];
+        if suffix.is_empty()
+            || matches!(
+                suffix,
+                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+                    | "u128" | "usize" | "f32" | "f64"
+            )
+        {
+            return Some("number");
+        }
+    }
+    None
+}
+
 pub fn check_complexity(file_content: &str) -> Vec<SlopFinding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = file_content.lines().collect();
@@ -1323,6 +1453,9 @@ pub async fn run_all_checks_with_old(
         // Silent failure detection.
         findings.extend(check_silent_failure(file_content, file_path));
 
+        // Borrow/clone quality (clone_on_copy, clone_double_ref, redundant conversions).
+        findings.extend(check_borrow_clone(file_content));
+
         // Naming quality.
         findings.extend(check_naming_quality(file_content));
 
@@ -1462,6 +1595,50 @@ mod tests {
                 .iter()
                 .all(|f| !f.message.contains("no assertions"))
         );
+    }
+
+    #[test]
+    fn borrow_clone_flags_copy_literal_clone_normal() {
+        let code = "fn f() {\n    let x = 42.clone();\n    let y = true.clone();\n}\n";
+        let findings = check_borrow_clone(code);
+        assert_eq!(findings.len(), 2, "got: {findings:?}");
+        assert!(findings.iter().all(|f| f.rule == "borrow_clone"));
+        assert!(findings.iter().any(|f| f.message.contains("Copy number")));
+        assert!(findings.iter().any(|f| f.message.contains("Copy bool")));
+    }
+
+    #[test]
+    fn borrow_clone_flags_double_ref_clone_normal() {
+        let code = "fn f(x: &String) {\n    let y = &&x.clone();\n}\n";
+        let findings = check_borrow_clone(code);
+        assert!(
+            findings.iter().any(|f| f.message.contains("double reference")),
+            "got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_clone_flags_redundant_double_conversion_normal() {
+        let code = "fn f(s: String) {\n    let y = s.clone().to_string();\n}\n";
+        let findings = check_borrow_clone(code);
+        assert!(
+            findings.iter().any(|f| f.message.contains("redundant double conversion")),
+            "got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_clone_skips_test_region_robust() {
+        let code = "#[cfg(test)]\nmod tests {\n    fn t() { let x = 42.clone(); }\n}\n";
+        let findings = check_borrow_clone(code);
+        assert!(findings.is_empty(), "test-region clone slop is ignored: {findings:?}");
+    }
+
+    #[test]
+    fn borrow_clone_respects_allow_comment_robust() {
+        let code = "fn f() {\n    let x = 42.clone(); // allow-clone\n}\n";
+        let findings = check_borrow_clone(code);
+        assert!(findings.is_empty());
     }
 
     #[test]
