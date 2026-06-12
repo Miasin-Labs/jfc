@@ -18,7 +18,11 @@ use tokio_util::sync::CancellationToken;
 use super::engine::{AgentRequest, ProgressSignal, SubWorkflowRequest, run_script};
 use super::journal::{self, JournalCache, JournalEntry, JournalWriter};
 use jfc_core::{Effort, FanoutDecision, FanoutPlan, FanoutPredictor, PlannedAgent};
-use jfc_provider::{ModelId, Provider};
+use jfc_provider::{ModelId, ModelSpec, PromptCacheKey, Provider, ProviderId};
+
+/// Cache-key namespace for workflow resume keys. Bump when the agent-request
+/// hashing inputs change so a stale journal can't replay against new semantics.
+const WORKFLOW_PROMPT_VERSION: &str = "workflow-agent-v1";
 
 /// Max concurrent agent() calls = min(16, cpus - 2), floor 2.
 pub fn max_concurrency() -> usize {
@@ -125,16 +129,37 @@ impl Orchestrator {
     }
 
     /// Compute the resume key for a request and advance the chain hash.
+    ///
+    /// The per-request material is built through [`PromptCacheKey`] so the key
+    /// binds the provider, the *effective* model (a request's `model: None`
+    /// inherits the orchestrator's model), and a stable hash of the request
+    /// params. That prevents a resumed journal from replaying an answer
+    /// produced by a different provider or model that happened to share a bare
+    /// model id (e.g. litellm vs openai both exposing `gpt-4o`, or two runs
+    /// under different default models). The result is still chained through
+    /// `running_hash` so an agent's position in the DAG remains part of its key.
     fn next_key(&self, req: &AgentRequest) -> String {
-        let opts_json = serde_json::json!({
-            "model": req.model,
+        let effective_model = req
+            .model
+            .clone()
+            .map(ModelId::new)
+            .unwrap_or_else(|| self.model.clone());
+        let params = serde_json::json!({
             "schema": req.schema,
             "agentType": req.agent_type,
             "isolation": req.isolation,
-        })
-        .to_string();
+        });
+        let cache_key = PromptCacheKey::new(
+            WORKFLOW_PROMPT_VERSION,
+            ProviderId::new(self.provider.name()),
+            None,
+            ModelSpec::bare(effective_model),
+            &params,
+            &req.prompt,
+            &[],
+        );
         let mut h = self.running_hash.lock();
-        let k = journal::compute_key(&h, &req.prompt, &opts_json);
+        let k = journal::compute_key(&h, &req.prompt, &cache_key.stable_string());
         *h = k.clone();
         k
     }
@@ -1191,4 +1216,84 @@ mod tests {
         assert_eq!(second.total_agents_dispatched, 0);
         assert_eq!(second.cache_hits, 1);
     }
+
+    // Resume keys bind provider + effective model: a journal written by one
+    // provider must NOT replay for a different provider that exposes the same
+    // bare model id. Here the second run uses a provider with a different name
+    // (and a model that emits different text), so the prior journal entry must
+    // miss and the agent must re-run rather than serve a stale, cross-provider
+    // answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_workflow_resume_key_isolates_providers_regression() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = "return await agent('shared-model work');";
+
+        // First run: provider "anthropic" emits "FIRST_PROVIDER".
+        let first_cfg = cfg_with_provider(
+            script,
+            tmp.path(),
+            Arc::new(EchoProvider {
+                text: "FIRST_PROVIDER".into(),
+                calls: AtomicUsize::new(0),
+            }),
+        );
+        let first = run_workflow(first_cfg).await;
+        assert!(first.error.is_none());
+        assert_eq!(first.total_agents_dispatched, 1);
+
+        // Resume with a DIFFERENT provider (name "openai") emitting different
+        // text. Same script/args/model id, but the provider differs, so the
+        // resume key must not match the prior journal entry.
+        let mut resume = cfg_with_provider(
+            script,
+            tmp.path(),
+            Arc::new(OtherEchoProvider {
+                text: "SECOND_PROVIDER".into(),
+            }),
+        );
+        resume.run_id = "wf_test02".into();
+        resume.resume_from_run_id = Some("wf_test01".into());
+        let second = run_workflow(resume).await;
+        assert!(second.error.is_none(), "error: {:?}", second.error);
+        // The cross-provider entry missed: the agent re-ran and produced the
+        // new provider's output, with zero cache hits.
+        assert_eq!(second.result, serde_json::json!("SECOND_PROVIDER"));
+        assert_eq!(second.total_agents_dispatched, 1);
+        assert_eq!(second.cache_hits, 0);
+    }
+
+    /// Echo provider that reports a different provider name ("openai") so the
+    /// resume-key provider-isolation test can prove two providers sharing a
+    /// model id don't collide in the cache.
+    struct OtherEchoProvider {
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl jfc_provider::Provider for OtherEchoProvider {
+        fn name(&self) -> &str {
+            "openai"
+        }
+        fn available_models(&self) -> Vec<jfc_provider::ModelInfo> {
+            vec![]
+        }
+        async fn stream(
+            &self,
+            _messages: Vec<jfc_provider::ProviderMessage>,
+            _options: &jfc_provider::StreamOptions,
+        ) -> anyhow::Result<jfc_provider::EventStream> {
+            use futures::stream;
+            let events = vec![
+                jfc_provider::StreamEvent::TextDelta {
+                    index: 0,
+                    delta: self.text.clone(),
+                },
+                jfc_provider::StreamEvent::Done {
+                    stop_reason: jfc_provider::StopReason::EndTurn,
+                },
+            ];
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+    impl jfc_provider::seal::Sealed for OtherEchoProvider {}
 }
