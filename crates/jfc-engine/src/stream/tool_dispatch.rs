@@ -49,6 +49,14 @@ impl LocalAdvisorDispatchContext {
     }
 }
 
+/// Whether a failed detached-worker spawn should fall back to running the Task
+/// in-process instead of surfacing a hard failure. True only for the
+/// at-capacity case (`ErrorKind::ResourceBusy`) the daemon returns when the
+/// background-agent pool is full; every other spawn error is a real failure.
+fn spawn_error_means_run_inproc(spawn_result: &std::io::Result<u32>) -> bool {
+    matches!(spawn_result, Err(e) if e.kind() == std::io::ErrorKind::ResourceBusy)
+}
+
 pub struct ToolBatchDispatch {
     pub tx: mpsc::Sender<EngineEvent>,
     pub dedup: Arc<Mutex<ReadDedupCache>>,
@@ -362,6 +370,23 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
                 created_at: std::time::SystemTime::now(),
             };
             let spawn_result = crate::daemon::spawn_background_agent_worker(launch);
+            // When the detached-worker pool is at capacity, don't hard-fail the
+            // Task — fall through to run it IN-PROCESS (foreground) instead, so
+            // the work still completes. This turns the 8/8 cap from a failure
+            // into transparent queuing onto the in-process executor.
+            if spawn_error_means_run_inproc(&spawn_result) {
+                tracing::info!(
+                    target: "jfc::stream",
+                    task_id = %task_id,
+                    "background agent pool at capacity — running this Task in-process instead"
+                );
+                // Flip the flag so the in-process path below treats this as a
+                // true foreground Task: it gates result emission on
+                // `!run_in_background` (e.g. the worktree fail-closed branch),
+                // so leaving it `true` would drop the tool_result and hang the
+                // model. Control then falls through (no done()/continue here).
+                task_input.run_in_background = false;
+            } else {
             match spawn_result {
                 Ok(pid) => {
                     send_critical(
@@ -418,6 +443,9 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
             }
             done();
             continue;
+            } // end else (non-capacity spawn outcome)
+            // Reached only on the ResourceBusy capacity fallback: fall through
+            // to the in-process subagent path below (no done()/continue above).
         }
 
         let cancel_task = cancel.clone();
@@ -1179,6 +1207,38 @@ fn resolve_council_members(
     }
 
     (members, unresolved)
+}
+
+#[cfg(test)]
+mod spawn_fallback_tests {
+    use super::spawn_error_means_run_inproc;
+
+    #[test]
+    fn resource_busy_triggers_inproc_fallback_normal() {
+        let busy: std::io::Result<u32> = Err(std::io::Error::new(
+            std::io::ErrorKind::ResourceBusy,
+            "8/8 already running",
+        ));
+        assert!(spawn_error_means_run_inproc(&busy));
+    }
+
+    #[test]
+    fn other_errors_do_not_fall_back_robust() {
+        let other: std::io::Result<u32> = Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "nope",
+        ));
+        assert!(!spawn_error_means_run_inproc(&other));
+        let not_found: std::io::Result<u32> =
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "x"));
+        assert!(!spawn_error_means_run_inproc(&not_found));
+    }
+
+    #[test]
+    fn success_does_not_fall_back_normal() {
+        let ok: std::io::Result<u32> = Ok(12345);
+        assert!(!spawn_error_means_run_inproc(&ok));
+    }
 }
 
 #[cfg(test)]
