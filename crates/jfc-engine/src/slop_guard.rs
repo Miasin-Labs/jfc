@@ -1693,6 +1693,90 @@ pub fn check_resource_leaks(file_content: &str) -> Vec<SlopFinding> {
     findings
 }
 
+// ─── 16b. Blocking-in-async Detection ───────────────────────────────────
+
+/// Flag blocking calls inside an `async fn`. In a Tokio worker thread a
+/// blocking syscall (`std::thread::sleep`, sync `std::fs`, `reqwest::blocking`)
+/// stalls the executor for every task sharing that thread — the single most
+/// common async-Rust performance footgun and a recurring topic in the Rust
+/// community (clippy's nascent `blocking_in_async`, the Tokio docs' "Spawning
+/// blocking work" guidance). This is a heuristic: it scans the body of each
+/// `async fn` for a fixed set of blocking call shapes and skips lines that
+/// already hop to a blocking pool (`spawn_blocking`, `block_in_place`).
+pub fn check_blocking_in_async(file_content: &str) -> Vec<SlopFinding> {
+    // Blocking call fragments → human label. Kept conservative to avoid noise:
+    // each is unambiguously blocking when run on an async executor thread.
+    const BLOCKING: &[(&str, &str)] = &[
+        ("std::thread::sleep", "std::thread::sleep blocks the executor; use tokio::time::sleep"),
+        ("thread::sleep(", "thread::sleep blocks the executor; use tokio::time::sleep"),
+        ("std::fs::read", "synchronous std::fs read blocks the executor; use tokio::fs or spawn_blocking"),
+        ("std::fs::write", "synchronous std::fs write blocks the executor; use tokio::fs or spawn_blocking"),
+        ("reqwest::blocking", "reqwest::blocking inside async blocks the executor; use the async client"),
+        (".read_to_string(", "synchronous read_to_string blocks the executor; use tokio::io or spawn_blocking"),
+    ];
+
+    let mut findings = Vec::new();
+    let lines: Vec<&str> = file_content.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let is_async_fn = {
+            let t = line.trim_start();
+            t.starts_with("async fn ") || t.starts_with("pub async fn ") || t.contains(" async fn ")
+        };
+        if !is_async_fn {
+            i += 1;
+            continue;
+        }
+        // Walk the function body by brace depth starting at this line.
+        let mut depth: i32 = 0;
+        let mut started = false;
+        let mut j = i;
+        while j < lines.len() {
+            let body_line = lines[j];
+            for c in body_line.chars() {
+                match c {
+                    '{' => {
+                        depth += 1;
+                        started = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            // Inspect body lines (after the opening brace, before close).
+            if started && j > i {
+                let t = body_line.trim_start();
+                let is_comment = t.starts_with("//") || t.starts_with('*');
+                // Skip lines that explicitly hop off the async thread.
+                let hops_off = body_line.contains("spawn_blocking")
+                    || body_line.contains("block_in_place");
+                if !is_comment && !hops_off {
+                    for (frag, msg) in BLOCKING {
+                        if body_line.contains(frag) {
+                            findings.push(SlopFinding {
+                                rule: "blocking_in_async".into(),
+                                message: format!("Line {}: {msg}.", j + 1),
+                                file: None,
+                                line: Some(j + 1),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+            if started && depth <= 0 {
+                break;
+            }
+            j += 1;
+        }
+        i = j + 1;
+    }
+
+    findings.truncate(5);
+    findings
+}
+
 // ─── 17. Complexity Delta Tracking ──────────────────────────────────────
 
 /// Compare complexity between old and new content. Flag significant increases.
@@ -1773,6 +1857,9 @@ pub async fn run_all_checks_with_old(
 
         // Resource leak patterns.
         findings.extend(check_resource_leaks(file_content));
+
+        // Blocking calls inside async fns (stalls the Tokio executor).
+        findings.extend(check_blocking_in_async(file_content));
 
         // Rust security profile: route unsafe/UB/codegen surfaces to proof oracles.
         findings.extend(check_rust_security_profile(
@@ -2176,6 +2263,46 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.rule == "complexity_delta"),
             "expected complexity_delta finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn blocking_in_async_flags_thread_sleep_normal() {
+        let code = "\
+async fn poll() {
+    do_work();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+}";
+        let findings = check_blocking_in_async(code);
+        assert!(
+            findings.iter().any(|f| f.rule == "blocking_in_async"),
+            "expected blocking_in_async finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn blocking_in_async_allows_spawn_blocking_robust() {
+        // The same blocking call wrapped in spawn_blocking is fine.
+        let code = "\
+async fn poll() {
+    tokio::task::spawn_blocking(|| std::fs::read(\"x\")).await.unwrap();
+}";
+        assert!(
+            check_blocking_in_async(code).is_empty(),
+            "spawn_blocking-wrapped call must not be flagged"
+        );
+    }
+
+    #[test]
+    fn blocking_in_async_ignores_sync_fn_robust() {
+        // A blocking call in a *sync* fn is not the executor footgun.
+        let code = "\
+fn helper() {
+    std::thread::sleep(std::time::Duration::from_secs(1));
+}";
+        assert!(
+            check_blocking_in_async(code).is_empty(),
+            "sync fn must not be flagged"
         );
     }
 
