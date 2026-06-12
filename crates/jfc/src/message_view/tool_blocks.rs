@@ -795,7 +795,7 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         | ToolKind::ExitWorktree => Color::Rgb(180, 220, 180),
         ToolKind::NotebookRead | ToolKind::NotebookEdit => Color::Rgb(255, 170, 100),
         ToolKind::ScratchpadRead | ToolKind::ScratchpadWrite => Color::Rgb(200, 200, 160), // warm grey
-        ToolKind::Workflow => Color::Rgb(255, 170, 220), // rose (same family as Task)
+        ToolKind::Workflow | ToolKind::SlashCommand => Color::Rgb(255, 170, 220), // rose (orchestration)
         ToolKind::SendUserMessage => Color::Rgb(100, 200, 255), // bright blue
         ToolKind::SendUserFile => Color::Rgb(255, 200, 130), // amber
         ToolKind::StructuredOutput => Color::Rgb(180, 230, 130), // lime
