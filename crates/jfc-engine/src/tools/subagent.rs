@@ -151,6 +151,96 @@ fn category_to_tier(category: &str) -> Option<&'static str> {
     }
 }
 
+/// Infer a model tier from the *text* of a subagent's task when no explicit
+/// model/category was given — a lightweight, deterministic complexity router in
+/// the spirit of LLM cascades (FrugalGPT / RouteLLM): cheap signals decide
+/// whether the work is mechanical (→ `haiku`), hard reasoning (→ `opus`), or
+/// ordinary (→ `sonnet`).
+///
+/// Strictly a *last* resort: it sits below `category_to_tier` in the cascade,
+/// so an explicit category, config, agent-def, or `model` always wins. It only
+/// upgrades/downgrades the otherwise-inherited (often heavy) parent model for a
+/// bare `Task { prompt }` with no other hint. Conservative by design — it
+/// returns `None` (inherit parent) unless the signal is clear, so it can never
+/// route hard work to a weak model on a weak signal.
+fn prompt_complexity_tier(prompt: &str, description: &str) -> Option<&'static str> {
+    let text = format!("{description}\n{prompt}").to_ascii_lowercase();
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    // Hard-reasoning vocabulary → upgrade. These verbs/nouns reliably mark work
+    // that benefits from the strongest model.
+    const HARD: &[&str] = &[
+        "architect",
+        "design ",
+        "prove",
+        "security",
+        "vulnerab",
+        "exploit",
+        "race condition",
+        "deadlock",
+        "refactor",
+        "redesign",
+        "root cause",
+        "debug ",
+        "why does",
+        "trade-off",
+        "tradeoff",
+        "algorithm",
+        "optimi", // optimise/optimize/optimization
+        "concurren",
+        "unsafe",
+        "invariant",
+    ];
+    // Mechanical / read-only vocabulary → downgrade.
+    const CHEAP: &[&str] = &[
+        "list ",
+        "find ",
+        "grep",
+        "where is",
+        "locate",
+        "rename",
+        "typo",
+        "format ",
+        "lint",
+        "count ",
+        "summari", // summarise/summarize
+        "read ",
+        "look up",
+        "lookup",
+        "extract ",
+        "enumerate",
+        "what files",
+    ];
+
+    let hard_hits = HARD.iter().filter(|kw| text.contains(**kw)).count();
+    let cheap_hits = CHEAP.iter().filter(|kw| text.contains(**kw)).count();
+
+    // A long, multi-part prompt is itself weak evidence of complexity; a very
+    // short one is weak evidence of a mechanical lookup. Use these only to break
+    // a tie, never to override explicit vocabulary.
+    let long = text.len() > 600;
+    let short = text.len() < 80;
+
+    match hard_hits.cmp(&cheap_hits) {
+        std::cmp::Ordering::Greater => Some("opus"),
+        std::cmp::Ordering::Less => Some("haiku"),
+        std::cmp::Ordering::Equal => {
+            if hard_hits > 0 {
+                // Equal but non-zero hits on both → ordinary implementation.
+                Some("sonnet")
+            } else if long {
+                Some("sonnet")
+            } else if short {
+                Some("haiku")
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Lazily cached agent-model config. Config is unlikely to change mid-session,
 /// so we parse it once and reuse the `agents` map on every subagent spawn.
 fn cached_agent_models() -> &'static std::collections::HashMap<String, crate::config::AgentConfig> {
@@ -183,6 +273,17 @@ pub fn selected_subagent_model(
         .and_then(category_to_tier)
         .map(str::to_string);
 
+    // Complexity-based tier from the task text — the lowest-priority hint, used
+    // only when NO category was given at all, so a bare `Task { prompt }` still
+    // routes cost-appropriately instead of inheriting the heavy parent. An
+    // explicit category (even an unrecognized one) is a deliberate signal we
+    // must not override: unknown categories keep inheriting the parent.
+    let complexity_tier = if task_input.category.is_none() {
+        prompt_complexity_tier(&task_input.prompt, &task_input.description).map(str::to_string)
+    } else {
+        None
+    };
+
     let raw = std::env::var("CLAUDE_CODE_SUBAGENT_MODEL")
         .ok()
         .map(|s| s.trim().to_string())
@@ -190,7 +291,8 @@ pub fn selected_subagent_model(
         .or_else(|| task_input.model.clone())
         .or(config_model)
         .or_else(|| agent_def.and_then(|a| a.model.clone()))
-        .or(category_tier);
+        .or(category_tier)
+        .or(complexity_tier);
 
     let Some(raw) = raw else {
         return Ok(parent_model);
@@ -1400,6 +1502,108 @@ mod tests {
             model.as_str(),
             crate::providers::anthropic_models::ALIAS_HAIKU
         );
+    }
+
+    #[test]
+    fn prompt_complexity_tier_upgrades_hard_reasoning_normal() {
+        // Unambiguously hard: two hard signals, no mechanical phrasing → opus.
+        assert_eq!(
+            prompt_complexity_tier("redesign the auth architecture", "design"),
+            Some("opus")
+        );
+        assert_eq!(
+            prompt_complexity_tier(
+                "prove the concurrency invariant holds under the new unsafe block",
+                "audit"
+            ),
+            Some("opus")
+        );
+    }
+
+    #[test]
+    fn prompt_complexity_tier_mixed_signal_is_balanced_robust() {
+        // Mechanical phrasing ("find") + a hard noun ("race condition") is a
+        // genuine tie with non-zero hits → balanced sonnet, never the cheapest.
+        assert_eq!(
+            prompt_complexity_tier("find and fix the race condition in the scheduler", "debug"),
+            Some("sonnet")
+        );
+    }
+
+    #[test]
+    fn prompt_complexity_tier_downgrades_mechanical_normal() {
+        assert_eq!(
+            prompt_complexity_tier("list all files that import serde", "map"),
+            Some("haiku")
+        );
+        assert_eq!(
+            prompt_complexity_tier("grep for the error string", "search"),
+            Some("haiku")
+        );
+    }
+
+    #[test]
+    fn prompt_complexity_tier_inherits_on_weak_signal_robust() {
+        // A medium-length, signal-free prompt yields None (inherit the parent).
+        assert_eq!(
+            prompt_complexity_tier(
+                "Please take a careful pass over the module and report what you see in general.",
+                "task"
+            ),
+            None
+        );
+        // Empty text never routes.
+        assert_eq!(prompt_complexity_tier("", ""), None);
+    }
+
+    // End-to-end: a bare Task (no category, no model) routes by prompt
+    // complexity instead of inheriting the heavy parent model.
+    #[test]
+    fn selected_subagent_model_routes_by_prompt_complexity_when_no_category_normal() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
+
+        let mut input = task_input(None);
+        input.subagent_type = None; // no config-model lookup
+        input.category = None;
+        input.prompt = "list every file that references the old API".to_string();
+        input.description = "find call sites".to_string();
+
+        let model = selected_subagent_model(
+            &input,
+            None,
+            jfc_provider::ModelId::new("claude-opus-4-7"),
+            "anthropic-oauth",
+        )
+        .unwrap();
+
+        // Mechanical lookup → haiku tier, not the inherited opus parent.
+        assert_eq!(model.as_str(), crate::providers::anthropic_models::ALIAS_HAIKU);
+    }
+
+    // An explicit category still wins over the complexity heuristic.
+    #[test]
+    fn selected_subagent_model_category_beats_complexity_robust() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("CLAUDE_CODE_SUBAGENT_MODEL") };
+
+        let mut input = task_input(None);
+        input.subagent_type = None;
+        // Prompt screams "hard" but the explicit category says cheap mapping.
+        input.category = Some("explore".to_string());
+        input.prompt = "redesign the security architecture and prove the invariant".to_string();
+        input.description = "audit".to_string();
+
+        let model = selected_subagent_model(
+            &input,
+            None,
+            jfc_provider::ModelId::new("claude-opus-4-7"),
+            "anthropic-oauth",
+        )
+        .unwrap();
+
+        // category=explore → haiku wins; the opus-leaning prompt is ignored.
+        assert_eq!(model.as_str(), crate::providers::anthropic_models::ALIAS_HAIKU);
     }
 
     #[test]
