@@ -23,7 +23,7 @@ use super::state::{
     BackgroundAgentStatus, DaemonPaths, DaemonState, ScheduledWakeup, SessionId, SessionInfo,
     SessionStatus, load_state, load_state_for_update, save_state, with_state_lock,
 };
-use super::worker::resolve_worker_exe;
+use super::worker::{join_worker_reapers, resolve_worker_exe};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Worker tracking
@@ -431,6 +431,10 @@ pub async fn run_daemon(paths: DaemonPaths) -> std::io::Result<()> {
             }
         }
     }
+
+    // Join any finished worker-reaper threads so we don't exit while a
+    // child.wait() is mid-flight (would otherwise leave a zombie).
+    join_worker_reapers();
 
     if restart_requested {
         remove_pid_file(&paths);

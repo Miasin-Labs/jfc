@@ -193,12 +193,63 @@ pub(super) fn spawn_worker_process(
     cmd.spawn()
 }
 
+/// Live reaper-thread handles. Each detached worker gets one short thread
+/// that blocks on `child.wait()` to avoid leaving a zombie. Tracking the
+/// handles here (instead of `let _ = spawn(...)`) keeps the thread count
+/// bounded: finished handles are pruned on every new spawn, and a daemon
+/// shutdown can join the rest via [`join_worker_reapers`].
+static WORKER_REAPERS: std::sync::OnceLock<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>> =
+    std::sync::OnceLock::new();
+
+fn worker_reapers() -> &'static std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> {
+    WORKER_REAPERS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
 pub(super) fn reap_worker_process(mut child: std::process::Child) {
-    let _ = std::thread::Builder::new()
+    let pid = child.id();
+    match std::thread::Builder::new()
         .name("jfc-worker-reaper".to_owned())
         .spawn(move || {
             let _ = child.wait();
-        });
+        }) {
+        Ok(handle) => {
+            if let Ok(mut reapers) = worker_reapers().lock() {
+                // Drop handles whose worker already exited so a long-lived
+                // daemon that respawns many workers doesn't accumulate
+                // thread handles without bound.
+                reapers.retain(|h| !h.is_finished());
+                reapers.push(handle);
+            }
+        }
+        Err(e) => {
+            // The child still gets reaped by init once we exit, but a
+            // failure to spawn the reaper is unexpected and worth a trace.
+            tracing::warn!(
+                target: "jfc::daemon::worker",
+                error = %e,
+                pid,
+                "failed to spawn worker reaper thread; relying on init to reap"
+            );
+        }
+    }
+}
+
+/// Join any finished reaper threads and drop their handles. Best-effort:
+/// only threads whose worker has already exited are joined, so this never
+/// blocks on a still-running worker. Call on daemon shutdown to clean up.
+pub(super) fn join_worker_reapers() {
+    let Ok(mut reapers) = worker_reapers().lock() else {
+        return;
+    };
+    let mut still_running = Vec::new();
+    for handle in reapers.drain(..) {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            still_running.push(handle);
+        }
+    }
+    *reapers = still_running;
 }
 
 pub(super) fn record_background_agent_worker_pid(
@@ -522,4 +573,47 @@ pub(super) fn record_background_agent_launch_path(
         }
         save_state(paths, &state)
     })
+}
+
+#[cfg(test)]
+mod reaper_tests {
+    use super::{join_worker_reapers, reap_worker_process, worker_reapers};
+
+    // A reaped short-lived child is tracked, then dropped from the registry
+    // once it exits (pruned on the next spawn) and joined on shutdown.
+    #[test]
+    fn reap_then_join_drains_handles_normal() {
+        // Clear any handles left by other tests in this binary.
+        join_worker_reapers();
+
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn `true`");
+        reap_worker_process(child);
+
+        // Let the child exit and the reaper thread finish.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        join_worker_reapers();
+        let remaining = worker_reapers().lock().unwrap().len();
+        assert_eq!(remaining, 0, "finished reaper handles should be drained");
+    }
+
+    // Pruning keeps the registry bounded across many spawns rather than
+    // growing once per lifetime worker.
+    #[test]
+    fn reaper_registry_prunes_finished_robust() {
+        join_worker_reapers();
+        for _ in 0..8 {
+            let child = std::process::Command::new("true")
+                .spawn()
+                .expect("spawn `true`");
+            reap_worker_process(child);
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        // After the children exit, the next prune (or join) collapses the vec.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        join_worker_reapers();
+        assert_eq!(worker_reapers().lock().unwrap().len(), 0);
+    }
 }
