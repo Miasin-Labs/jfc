@@ -537,6 +537,15 @@ impl Provider for AntigravityOAuthProvider {
         StreamConvention::AnthropicNative
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        // Warm the primary Code Assist endpoint (daily sandbox → falls back to prod).
+        Some(CODE_ASSIST_ENDPOINTS[0].to_owned())
+    }
+
     async fn ensure_auth(&self) -> anyhow::Result<()> {
         let Some(AuthMethod::OAuth {
             refresh_token,

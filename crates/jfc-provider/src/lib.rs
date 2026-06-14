@@ -1477,6 +1477,20 @@ pub trait Provider: Send + Sync + seal::Sealed {
     ) -> anyhow::Result<u64> {
         anyhow::bail!("{} does not support count_tokens", self.name())
     }
+
+    /// URL for TLS preconnection warmup (DNS + TCP + TLS priming).
+    /// Returns None if the provider has no public HTTP endpoint or doesn't want warmup.
+    /// Default returns None — providers override to enable connect_warmup.
+    fn warmup_url(&self) -> Option<String> {
+        None
+    }
+
+    /// HTTP client for TLS preconnection warmup.
+    /// Returns None if the provider can't provide a client, disabling warmup.
+    /// Default returns None — providers override to enable connect_warmup.
+    fn http_client(&self) -> Option<reqwest::Client> {
+        None
+    }
 }
 
 #[cfg(test)]

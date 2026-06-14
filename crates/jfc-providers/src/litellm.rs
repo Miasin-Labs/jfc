@@ -142,6 +142,17 @@ impl Provider for LiteLLMProvider {
         Vec::new()
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        // Warm the configured LiteLLM proxy host.
+        reqwest::Url::parse(&self.base_url)
+            .ok()
+            .map(|u| u.origin().ascii_serialization())
+    }
+
     /// Dynamically fetch all models available on the configured LiteLLM instance.
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         let url = format!("{}/models", self.base_url);

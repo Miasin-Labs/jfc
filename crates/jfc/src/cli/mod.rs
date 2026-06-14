@@ -593,6 +593,15 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         provider = resolved.provider;
         model = resolved.model;
     }
+
+    // TLS/DNS preconnect warmup: fire-and-forget before the first user turn.
+    // Skip in `--print` one-shot mode (the response will arrive before the
+    // warmup could help, and it's a scripting path where latency is already
+    // accounted for by the caller).
+    if !print_mode {
+        jfc_provider::http::spawn_connect_warmup(&*provider);
+    }
+
     let advisor_cli = cli.advisor.clone();
     let local_advisor = {
         let cfg = jfc_engine::config::load_arc();

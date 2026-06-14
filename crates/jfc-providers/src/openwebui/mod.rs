@@ -3108,6 +3108,21 @@ impl Provider for OpenWebUIProvider {
         Vec::new()
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        // Resolve the active account's base URL and extract just the origin.
+        // Uses the same precedence as `load_active_account`: env var first,
+        // then the on-disk store.
+        let account = load_active_account(&self.store_path).ok()?;
+        let trimmed = account.base_url.trim_end_matches('/');
+        reqwest::Url::parse(trimmed)
+            .ok()
+            .map(|u| u.origin().ascii_serialization())
+    }
+
     /// Live-fetch the configured OpenWebUI instance's `/api/models`. The list reflects
     /// whatever the admin has wired up (Bedrock, Vertex, Ollama, OpenAI, …) so the picker
     /// can never know it ahead of time — the only correct thing to do is ask the server.

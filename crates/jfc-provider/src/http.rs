@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Default inter-chunk read timeout for streaming responses. A 60s value was
@@ -211,6 +211,102 @@ pub fn report_first_byte_latency(operation: &str, elapsed: std::time::Duration) 
     }
 }
 
+/// Issue a cheap HEAD request to `url` using `client` purely to prime
+/// DNS + TCP + TLS into the idle connection pool.
+///
+/// The request intentionally carries no auth headers and expects to get
+/// back any HTTP response (even 4xx/5xx), or time out, or be refused —
+/// all of those outcomes still establish the TLS session and warm the
+/// DNS/TCP state in the OS and in reqwest's pool. Errors are silently
+/// swallowed: warmup is best-effort and must never affect startup.
+///
+/// Call [`spawn_connect_warmup`] instead of this directly — that helper
+/// applies the env-var opt-out and fire-and-forgets the task.
+pub async fn connect_warmup(url: String, client: reqwest::Client) {
+    let t0 = Instant::now();
+    let outcome = client
+        .head(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    let elapsed = t0.elapsed();
+    match outcome {
+        Ok(resp) => {
+            tracing::debug!(
+                target: "jfc::http::warmup",
+                url = %url,
+                status = resp.status().as_u16(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                "TLS/DNS preconnect warmup completed — connection pool primed"
+            );
+        }
+        Err(e) => {
+            tracing::debug!(
+                target: "jfc::http::warmup",
+                url = %url,
+                elapsed_ms = elapsed.as_millis() as u64,
+                error = %e,
+                "TLS/DNS preconnect warmup failed (best-effort, ignored)"
+            );
+        }
+    }
+}
+
+/// Fire-and-forget TLS/DNS preconnect warmup for the active provider.
+///
+/// Spawns a background task that issues a lightweight HEAD request to
+/// the provider's base origin so that DNS resolution, TCP handshake, and
+/// TLS negotiation are complete before the user's first turn arrives.
+/// The warmed connection lands in the provider's idle pool and is reused
+/// by the first real streaming request, eliminating that latency from the
+/// perceived TTFT.
+///
+/// Guards:
+/// - `JFC_DISABLE_CONNECT_WARMUP=1` (or `true`/`yes`/`on`) opts out entirely.
+/// - Providers that return `None` from `Provider::warmup_url()` or
+///   `Provider::http_client()` are silently skipped.
+/// - The spawned task is detached — completion/failure never surfaces to the
+///   caller.
+pub fn spawn_connect_warmup(provider: &dyn crate::Provider) {
+    // Env-var opt-out.
+    if std::env::var("JFC_DISABLE_CONNECT_WARMUP")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        tracing::debug!(
+            target: "jfc::http::warmup",
+            "JFC_DISABLE_CONNECT_WARMUP set — skipping TLS preconnect warmup"
+        );
+        return;
+    }
+
+    let Some(url) = provider.warmup_url() else {
+        tracing::debug!(
+            target: "jfc::http::warmup",
+            provider = provider.name(),
+            "provider has no warmup_url — skipping TLS preconnect warmup"
+        );
+        return;
+    };
+
+    let Some(client) = provider.http_client() else {
+        tracing::debug!(
+            target: "jfc::http::warmup",
+            provider = provider.name(),
+            "provider has no http_client — skipping TLS preconnect warmup"
+        );
+        return;
+    };
+
+    tracing::debug!(
+        target: "jfc::http::warmup",
+        provider = provider.name(),
+        url = %url,
+        "spawning TLS/DNS preconnect warmup task"
+    );
+    tokio::spawn(connect_warmup(url, client));
+}
+
 /// Translate a `reqwest::Error` from a `.send()` call into a
 /// user-visible string. The default `Display` impl produces
 /// "error sending request for url (…)" which tells the user
@@ -344,6 +440,20 @@ mod tests {
         .await;
         assert!(res.is_ok(), "happy path should succeed");
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry on success");
+    }
+
+    // Normal: connect_warmup completes without panicking even when given an
+    // unreachable address (TEST-NET-1, guaranteed to fail). The function must
+    // swallow the error and return normally — warmup failures must never
+    // propagate to the caller.
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_warmup_swallows_error_on_unreachable_normal() {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        // Should complete without panicking, regardless of outcome.
+        connect_warmup("http://192.0.2.1:9999/".to_owned(), client).await;
     }
 
     // Normal: transient HTTP statuses should be retried before the

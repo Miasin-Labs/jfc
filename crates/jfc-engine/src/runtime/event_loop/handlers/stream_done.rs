@@ -406,6 +406,13 @@ pub async fn handle_stream_done(
             } else {
                 label
             };
+            // Append time-to-first-token when measured this turn — the
+            // API-responsiveness signal CC surfaces as `ttft_ms`. e.g.
+            // `took 2m04s · $0.04 · ttft 420ms`.
+            let label = match state.ttft_ms {
+                Some(ttft) => format!("{label} · ttft {}", crate::runtime::durations::format_ttft(ttft)),
+                None => label,
+            };
             // Pull the assistant's text body for the
             // notification preview before re-borrowing
             // mutably to stamp the elapsed footer.

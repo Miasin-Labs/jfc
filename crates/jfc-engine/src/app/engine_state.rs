@@ -476,6 +476,13 @@ pub struct EngineState {
     /// `thought for Ns`. Mirrors v126's `streamingEndedAt` field on the
     /// thinking-status reducer (cli.js HcH:413585).
     pub thinking_ended_at: Option<Instant>,
+    /// Time-to-first-token for the current turn: the gap between the request
+    /// send (`turn_started_at`) and the first text/reasoning delta landing.
+    /// Captured once per turn in the stream-chunk handler when
+    /// `streaming_response_bytes == 0`; read by the stream-done footer for the
+    /// `ttft Nms` readout. `None` until the first byte arrives (and on
+    /// non-streaming / cached / errored turns).
+    pub ttft_ms: Option<u64>,
     pub provider: Arc<dyn Provider>,
     pub providers: Vec<Arc<dyn Provider>>,
     pub model: ModelId,
@@ -1047,6 +1054,7 @@ impl EngineState {
             last_active_agent_task: None,
             thinking_started_at: None,
             thinking_ended_at: None,
+            ttft_ms: None,
             turn_started_at: None,
             turn_start_cost: 0.0,
             turn_edited_files: std::collections::BTreeSet::new(),

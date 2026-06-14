@@ -375,6 +375,17 @@ impl Provider for CodexOAuthProvider {
         StreamConvention::OpenAiNative
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        // Warm the Codex API endpoint host.
+        reqwest::Url::parse(CODEX_API_ENDPOINT)
+            .ok()
+            .map(|u| u.origin().ascii_serialization())
+    }
+
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         Ok(Self::codex_models())
     }

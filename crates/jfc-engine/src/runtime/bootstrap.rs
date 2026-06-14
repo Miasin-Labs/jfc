@@ -19,6 +19,22 @@ pub struct ProvidersInit {
     pub oauth: Option<Arc<AnthropicOAuthProvider>>,
 }
 
+/// Fire-and-forget TLS/DNS preconnect warmup for the active provider.
+///
+/// Must be called from an async context (a live Tokio runtime). Spawns a
+/// detached task that issues a cheap HEAD request to the active provider's
+/// base origin so DNS + TCP + TLS are complete before the user's first turn.
+/// Errors are silently swallowed — warmup must never affect startup.
+///
+/// Skipped when:
+/// - `JFC_DISABLE_CONNECT_WARMUP=1` is set (env-var opt-out)
+/// - The active provider returns `None` from `warmup_url()` / `http_client()`
+///   (Bedrock shells out; no-pool providers like the last-resort OAuth fallback)
+pub fn spawn_active_provider_warmup(init: &ProvidersInit) {
+    let provider = &*init.providers[init.active_idx];
+    jfc_provider::http::spawn_connect_warmup(provider);
+}
+
 pub struct ProviderModelResolution {
     pub provider: Arc<dyn Provider>,
     pub model: ModelId,

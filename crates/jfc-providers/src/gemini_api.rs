@@ -219,6 +219,14 @@ impl Provider for GeminiApiProvider {
         Self::gemini_models()
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        Some("https://generativelanguage.googleapis.com".to_owned())
+    }
+
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         // Fetch live pricing + model list from models.dev (community registry).
         // Falls back to the hardcoded static list on network failure.

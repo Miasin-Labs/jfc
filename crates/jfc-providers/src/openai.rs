@@ -144,6 +144,27 @@ impl Provider for OpenAIProvider {
         StreamConvention::OpenAiNative
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        // Extract just the origin from the configured base URL so we hit
+        // the same host even when OPENAI_BASE_URL points at a local proxy.
+        reqwest::Url::parse(&self.base_url).ok().map(|u| {
+            let origin = format!(
+                "{}://{}",
+                u.scheme(),
+                u.host_str().unwrap_or("api.openai.com")
+            );
+            if let Some(port) = u.port() {
+                format!("{origin}:{port}")
+            } else {
+                origin
+            }
+        })
+    }
+
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         // First try to get the model list from OpenAI's own /v1/models endpoint.
         let url = self.models_url();

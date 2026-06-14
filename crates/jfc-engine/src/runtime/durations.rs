@@ -20,3 +20,13 @@ pub fn fmt_elapsed(elapsed: Duration) -> String {
 pub fn format_finished(elapsed: Duration) -> String {
     fmt_elapsed(elapsed)
 }
+
+/// Time-to-first-token readout for the turn footer: `420ms` under a second,
+/// `1.4s` above. Compact since it sits alongside elapsed + cost.
+pub fn format_ttft(ttft_ms: u64) -> String {
+    if ttft_ms >= 1000 {
+        format!("{:.1}s", ttft_ms as f64 / 1000.0)
+    } else {
+        format!("{ttft_ms}ms")
+    }
+}

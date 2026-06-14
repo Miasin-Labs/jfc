@@ -111,6 +111,17 @@ impl Provider for OpenRouterProvider {
         StreamConvention::OpenAiNative
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        // Extract just the origin from the base URL (handles OPENROUTER_BASE_URL overrides).
+        reqwest::Url::parse(&self.base_url)
+            .ok()
+            .map(|u| u.origin().ascii_serialization())
+    }
+
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         let url = self.models_url();
         let resp = match jfc_provider::http::send_with_retry("openrouter.models", || {

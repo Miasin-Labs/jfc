@@ -259,6 +259,14 @@ impl Provider for AnthropicProvider {
         super::anthropic_models::anthropic_first_party_models("anthropic")
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        Some("https://api.anthropic.com".to_owned())
+    }
+
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         // Union the live models.dev catalog into the curated canonical list.
         // Replacing canonical wholesale (the old behaviour) lost the alias rows

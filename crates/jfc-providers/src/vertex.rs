@@ -255,6 +255,21 @@ impl Provider for VertexProvider {
         StreamConvention::AnthropicNative
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        // Warm the region-specific AI Platform host. Use the configured region
+        // when available so we prime exactly the endpoint we'll call.
+        let region = self
+            .config
+            .as_ref()
+            .map(|c| c.region_or_default().to_owned())
+            .unwrap_or_else(|| DEFAULT_REGION.to_owned());
+        Some(format!("https://{region}-aiplatform.googleapis.com"))
+    }
+
     async fn stream(
         &self,
         messages: Vec<ProviderMessage>,

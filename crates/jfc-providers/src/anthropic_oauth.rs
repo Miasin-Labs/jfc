@@ -1759,6 +1759,14 @@ impl Provider for AnthropicOAuthProvider {
         super::anthropic_models::anthropic_first_party_models("anthropic-oauth")
     }
 
+    fn http_client(&self) -> Option<reqwest::Client> {
+        Some(self.client.clone())
+    }
+
+    fn warmup_url(&self) -> Option<String> {
+        Some("https://api.anthropic.com".to_owned())
+    }
+
     async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         // The embedded Claude Code OAuth catalog owns the picker layout (alias
         // rows, curated order/names) and is authoritative for OAuth-only entries
