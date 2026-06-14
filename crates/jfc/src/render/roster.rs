@@ -252,7 +252,19 @@ pub(crate) fn agent_detail_lines(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
-    let elapsed_label = super::visual::format_elapsed_secs(bt.started_at.elapsed().as_secs());
+    // Freeze the elapsed clock once the agent reaches a terminal state.
+    // `started_at`/`completed_at` are live `Instant`s, so reading
+    // `started_at.elapsed()` unconditionally made a Failed/Completed
+    // agent's "⏱" counter keep climbing forever (the fan rows already
+    // freeze via `roster_fields`; the detail header did not). For a
+    // terminal agent show the actual run duration (start → completion).
+    let elapsed_secs = match bt.completed_at {
+        Some(done) if bt.status.is_terminal() => {
+            done.saturating_duration_since(bt.started_at).as_secs()
+        }
+        _ => bt.started_at.elapsed().as_secs(),
+    };
+    let elapsed_label = super::visual::format_elapsed_secs(elapsed_secs);
     let total_tokens = bt.total_tokens();
 
     lines.push(Line::from(""));

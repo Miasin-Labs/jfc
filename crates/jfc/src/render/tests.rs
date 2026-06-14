@@ -1658,6 +1658,94 @@ mod render_snapshot_tests {
         );
     }
 
+    // A terminal (Failed/Completed) agent's detail-panel "⏱" clock must
+    // FREEZE at the actual run duration, not keep counting up from spawn.
+    // Regression: `agent_detail_lines` read `started_at.elapsed()`
+    // unconditionally, so a failed agent's detail header climbed forever
+    // (the user saw "⏱ 19m36s" on an agent that died in 0ms). The fan rows
+    // already froze via `roster_fields`; the detail header now matches.
+    #[test]
+    fn agent_detail_freezes_elapsed_on_terminal_state_robust() {
+        let mut app = app_with_task(TaskLifecycle::Failed, "dead agent");
+        let theme = app.theme;
+        let bt = app.engine.background_tasks.get_mut("tx").unwrap();
+        // Ran for ~90s wall-clock, then finished 10 minutes ago.
+        bt.started_at = std::time::Instant::now()
+            - std::time::Duration::from_secs(600)
+            - std::time::Duration::from_secs(90);
+        bt.completed_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(600));
+
+        let first = super::super::roster::agent_detail_lines(
+            app.engine.background_tasks.get("tx").unwrap(),
+            &theme,
+            80,
+        );
+        let render = |lines: &[ratatui::text::Line<'static>]| -> String {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let first_text = render(&first);
+        assert!(
+            first_text.contains("1m30s"),
+            "terminal agent should show frozen 90s run duration:\n{first_text}"
+        );
+
+        // A later render (clock advanced) must show the SAME frozen value —
+        // the timer is pinned to completed_at − started_at, not wall-clock.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = super::super::roster::agent_detail_lines(
+            app.engine.background_tasks.get("tx").unwrap(),
+            &theme,
+            80,
+        );
+        let second_text = render(&second);
+        assert!(
+            second_text.contains("1m30s"),
+            "frozen timer drifted on re-render:\n{second_text}"
+        );
+    }
+
+    // A still-running agent's detail clock must keep ticking (NOT frozen) —
+    // proves the freeze is gated on terminal status, not applied always.
+    #[test]
+    fn agent_detail_running_clock_still_advances_normal() {
+        let mut app = app_with_task(TaskLifecycle::Running, "live agent");
+        let theme = app.theme;
+        let bt = app.engine.background_tasks.get_mut("tx").unwrap();
+        bt.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        bt.completed_at = None;
+        let lines = super::super::roster::agent_detail_lines(
+            app.engine.background_tasks.get("tx").unwrap(),
+            &theme,
+            80,
+        );
+        let text = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // ~5s since spawn — the live elapsed should be in the seconds range,
+        // not a frozen "done" label.
+        assert!(text.contains("⏱"), "elapsed line missing:\n{text}");
+        assert!(
+            text.contains("5s") || text.contains("6s"),
+            "running clock should reflect live elapsed:\n{text}"
+        );
+    }
+
     // t918 slice: both roster surfaces order the same BackgroundTasks the
     // same way (shared roster_sort_key) — a running agent ranks above a
     // completed one. Insert both, render the teammates panel, assert the
