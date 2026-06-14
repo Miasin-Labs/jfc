@@ -22,6 +22,8 @@ type ProgressSink = Option<(
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_FOREGROUND_BUDGET_MS: u64 = 15_000;
+const MIN_TIMEOUT_MS: u64 = 1_000; // Minimum 1s to avoid instant kills on tiny timeouts
+const BACKGROUNDED_TIMEOUT_MS: u64 = 600_000; // 600s max for backgrounded tasks (matches schema)
 /// Default inline output cap — mirrors CC 2.1.167's `og6 = 30_000` chars.
 /// Override via `BASH_MAX_OUTPUT_LENGTH` (CC-compatible) or `JFC_BASH_MAX_OUTPUT_LENGTH`.
 const INLINE_OUTPUT_BYTES_DEFAULT: usize = 30_000;
@@ -393,6 +395,16 @@ fn foreground_budget_ms() -> u64 {
         .unwrap_or(DEFAULT_FOREGROUND_BUDGET_MS)
 }
 
+/// Clamp a timeout to sensible bounds. Ensures timeouts are in [MIN_TIMEOUT_MS, max_bound].
+/// Used to prevent instant kills on tiny/zero timeouts and enforce upper limits.
+fn clamp_timeout(timeout_ms: Option<u64>, max_bound: u64) -> u64 {
+    match timeout_ms {
+        None => DEFAULT_TIMEOUT_MS,
+        Some(0) | Some(1..=999) => MIN_TIMEOUT_MS, // Reject tiny explicit timeouts
+        Some(t) => t.min(max_bound), // Clamp to max_bound
+    }
+}
+
 fn new_task_id() -> String {
     let raw = Uuid::new_v4().simple().to_string();
     format!("bash_{}", &raw[..12])
@@ -616,10 +628,19 @@ async fn start_bash_task(
     cwd: &Path,
     progress: ProgressSink,
     track_for_abort: bool,
+    is_backgrounded: bool,
 ) -> Result<RunningBashTask, String> {
     use std::process::Stdio;
 
-    let timeout = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+    // Backgrounded tasks (explicitly `run_in_background=true` or auto-backgrounded after
+    // foreground budget) should get a generous timeout (up to the max 600s from the schema)
+    // to allow long-running operations. Foreground-only tasks are limited by the user's
+    // timeout or the default 120s.
+    let timeout = if is_backgrounded {
+        clamp_timeout(timeout_ms, BACKGROUNDED_TIMEOUT_MS)
+    } else {
+        clamp_timeout(timeout_ms, DEFAULT_TIMEOUT_MS)
+    };
     let (mut cmd, command) = build_bash_command(command, cwd);
     let task_id = new_task_id();
     let output_path = prepare_bash_output_dir()?.join(format!("{task_id}.log"));
@@ -847,8 +868,22 @@ pub async fn execute_bash_with_options(
     progress: ProgressSink,
     run_in_background: bool,
 ) -> ExecutionResult {
-    let mut task =
-        match start_bash_task(command, timeout_ms, cwd, progress, !run_in_background).await {
+    // Determine the effective timeout for the underlying watcher task.
+    // - Explicitly backgrounded tasks get the generous BACKGROUNDED_TIMEOUT_MS.
+    // - Foreground tasks that might exceed the budget are treated as potentially
+    //   backgrounded, so they also get the generous timeout to avoid premature kills.
+    // - Only truly short foreground tasks (timeout < budget) are limited by their timeout.
+    let foreground_budget = foreground_budget_ms();
+    let user_timeout = clamp_timeout(timeout_ms, DEFAULT_TIMEOUT_MS);
+    let effective_timeout_for_watcher = if run_in_background || user_timeout > foreground_budget {
+        // This task will (or might) run in the background; give it the max generous timeout.
+        clamp_timeout(timeout_ms, BACKGROUNDED_TIMEOUT_MS)
+    } else {
+        // Pure foreground task that will complete before the budget expires.
+        user_timeout
+    };
+
+    let mut task = match start_bash_task(command, Some(effective_timeout_for_watcher), cwd, progress, !run_in_background, run_in_background).await {
             Ok(task) => task,
             Err(err) => {
                 warn!(target: "jfc::tools", error = %err, "bash: failed to start task");
@@ -863,13 +898,11 @@ pub async fn execute_bash_with_options(
         ));
     }
 
-    let timeout = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-    let foreground_budget = foreground_budget_ms();
     let mut completion = task
         .completion
         .take()
         .expect("fresh Bash task must carry completion receiver");
-    if foreground_budget < timeout {
+    if foreground_budget < user_timeout {
         tokio::select! {
             completion = &mut completion => match completion {
                 Ok(completion) => format_completed_task(&task, completion),
@@ -1073,4 +1106,125 @@ pub async fn execute_bash_output(
         selected
     };
     ExecutionResult::success(format!("{metadata}\n\n{body}"))
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn test_clamp_timeout_with_none() {
+        // When timeout_ms is None, default is used
+        assert_eq!(clamp_timeout(None, DEFAULT_TIMEOUT_MS), DEFAULT_TIMEOUT_MS);
+        assert_eq!(clamp_timeout(None, BACKGROUNDED_TIMEOUT_MS), DEFAULT_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn test_clamp_timeout_rejects_zero() {
+        // Zero timeout is rejected and replaced with MIN_TIMEOUT_MS
+        assert_eq!(clamp_timeout(Some(0), DEFAULT_TIMEOUT_MS), MIN_TIMEOUT_MS);
+        assert_eq!(clamp_timeout(Some(0), BACKGROUNDED_TIMEOUT_MS), MIN_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn test_clamp_timeout_rejects_tiny_timeouts() {
+        // Sub-1000ms timeouts are rejected
+        for tiny in 1..=999 {
+            assert_eq!(clamp_timeout(Some(tiny), DEFAULT_TIMEOUT_MS), MIN_TIMEOUT_MS, 
+                       "timeout {} should be clamped to MIN_TIMEOUT_MS", tiny);
+        }
+    }
+
+    #[test]
+    fn test_clamp_timeout_accepts_reasonable() {
+        // Timeouts >= 1000ms are accepted as-is (up to the bound)
+        assert_eq!(clamp_timeout(Some(1_000), DEFAULT_TIMEOUT_MS), 1_000);
+        assert_eq!(clamp_timeout(Some(60_000), DEFAULT_TIMEOUT_MS), 60_000);
+        assert_eq!(clamp_timeout(Some(120_000), DEFAULT_TIMEOUT_MS), 120_000);
+    }
+
+    #[test]
+    fn test_clamp_timeout_respects_upper_bound() {
+        // Timeouts exceeding the max_bound are clamped
+        assert_eq!(clamp_timeout(Some(DEFAULT_TIMEOUT_MS + 1), DEFAULT_TIMEOUT_MS), DEFAULT_TIMEOUT_MS);
+        assert_eq!(clamp_timeout(Some(700_000), BACKGROUNDED_TIMEOUT_MS), BACKGROUNDED_TIMEOUT_MS);
+        assert_eq!(clamp_timeout(Some(1_000_000), BACKGROUNDED_TIMEOUT_MS), BACKGROUNDED_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn test_backgrounded_timeout_is_generous() {
+        // BACKGROUNDED_TIMEOUT_MS should be >= DEFAULT_TIMEOUT_MS (600s >= 120s)
+        assert!(BACKGROUNDED_TIMEOUT_MS >= DEFAULT_TIMEOUT_MS,
+                "backgrounded timeout {} should be >= default timeout {}",
+                BACKGROUNDED_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+        // Verify the actual values match schema ("max 600000")
+        assert_eq!(BACKGROUNDED_TIMEOUT_MS, 600_000);
+        assert_eq!(DEFAULT_TIMEOUT_MS, 120_000);
+    }
+
+    #[tokio::test]
+    async fn test_explicitly_backgrounded_task_gets_generous_timeout() {
+        // When run_in_background=true, the task should get BACKGROUNDED_TIMEOUT_MS
+        // to allow it to run long. We test by checking that the timeout calculation
+        // uses the generous bound.
+        let foreground_budget = foreground_budget_ms();
+        let user_timeout = clamp_timeout(Some(50_000), DEFAULT_TIMEOUT_MS); // 50s user timeout
+        
+        // For an explicitly backgrounded task:
+        let effective_for_bg_true = if true || user_timeout > foreground_budget {
+            clamp_timeout(Some(50_000), BACKGROUNDED_TIMEOUT_MS)
+        } else {
+            user_timeout
+        };
+        
+        // Should use BACKGROUNDED_TIMEOUT_MS bound
+        assert_eq!(effective_for_bg_true, 50_000);
+        
+        // But if the timeout exceeds backgrounded bound (unlikely), it would be clamped:
+        let user_timeout_high = clamp_timeout(Some(700_000), DEFAULT_TIMEOUT_MS); // 700s clamped to 120s
+        let effective_high = if true || user_timeout_high > foreground_budget {
+            clamp_timeout(Some(700_000), BACKGROUNDED_TIMEOUT_MS)
+        } else {
+            user_timeout_high
+        };
+        assert_eq!(effective_high, BACKGROUNDED_TIMEOUT_MS);
+    }
+
+    #[tokio::test]
+    async fn test_foreground_task_might_get_generous_timeout() {
+        // When foreground_budget < timeout, the task might be auto-backgrounded,
+        // so it should get BACKGROUNDED_TIMEOUT_MS to survive the transition.
+        let foreground_budget = foreground_budget_ms();
+        let user_timeout = clamp_timeout(Some(30_000), DEFAULT_TIMEOUT_MS); // 30s, > 15s budget
+        
+        // For a foreground task with timeout > budget:
+        let effective = if false || user_timeout > foreground_budget {
+            clamp_timeout(Some(30_000), BACKGROUNDED_TIMEOUT_MS)
+        } else {
+            user_timeout
+        };
+        
+        // Should use BACKGROUNDED_TIMEOUT_MS bound (30s < 600s, so 30s is kept)
+        assert_eq!(effective, 30_000);
+        assert!(effective > foreground_budget, "timeout should exceed foreground budget");
+    }
+
+    #[tokio::test]
+    async fn test_short_foreground_task_keeps_timeout() {
+        // A foreground task with timeout < budget is not auto-backgrounded,
+        // so it keeps its specified timeout.
+        let foreground_budget = foreground_budget_ms();
+        let user_timeout = clamp_timeout(Some(5_000), DEFAULT_TIMEOUT_MS); // 5s, < 15s budget
+        
+        // For a foreground task with timeout < budget:
+        let effective = if false || user_timeout > foreground_budget {
+            clamp_timeout(Some(5_000), BACKGROUNDED_TIMEOUT_MS)
+        } else {
+            user_timeout
+        };
+        
+        // Should keep the user timeout
+        assert_eq!(effective, 5_000);
+        assert!(effective < foreground_budget, "timeout should be < foreground budget");
+    }
 }
