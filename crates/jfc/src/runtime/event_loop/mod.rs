@@ -1191,21 +1191,19 @@ pub(crate) fn apply_engine_effects(app: &mut App) {
                 }
             }
             crate::app::EngineEffect::PromptRewriteProposed {
-                rewrite, rationale, ..
+                original,
+                rewrite,
+                rationale,
             } => {
-                // Surface the proposal — never apply silently. Prefill the
-                // composer with the reworded prompt so the user can accept
-                // (resubmit), edit, or clear it, and explain why via a toast.
-                app.textarea = ratatui_textarea::TextArea::from(
-                    rewrite.lines().map(|l| l.to_string()).collect::<Vec<_>>(),
-                );
-                jfc_engine::toast::push_with_cap(
-                    &mut app.engine.toasts,
-                    jfc_engine::toast::Toast::new(
-                        jfc_engine::toast::ToastKind::Info,
-                        format!("Prompt reworded to reduce a likely false refusal: {rationale}"),
-                    ),
-                );
+                // Surface the proposal as a blocking modal — never apply it
+                // silently. The user accepts (send rewrite), rejects (send
+                // original), or edits (load rewrite into composer). See
+                // `input::prompt_rewrite`.
+                app.pending_rewrite_proposal = Some(crate::app::PromptRewriteProposal {
+                    original,
+                    rewrite,
+                    rationale,
+                });
             }
         }
     }

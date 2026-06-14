@@ -36,6 +36,7 @@ pub mod policy;
 pub mod retry;
 pub mod rewriter;
 pub mod screener;
+pub mod store;
 pub mod types;
 pub mod verifier;
 
@@ -55,11 +56,14 @@ pub use types::{
 pub(crate) use classifier::extract_json_object as classifier_json;
 
 /// The full rewrite pipeline. Holds the ordered stages plus the few-shot
-/// exemplar pool (prior accepted rewrites, for experience replay). Stateless per
-/// call beyond the exemplars; safe to share behind an `Arc`.
+/// exemplar pool (prior accepted rewrites, for experience replay), the live
+/// constitution the classifier reasons against, and the intent-preservation
+/// threshold τ. Stateless per call beyond these; safe to share behind an `Arc`.
 pub struct RewritePipeline {
     stages: Vec<Box<dyn PromptStage>>,
     exemplars: Vec<Rewrite>,
+    constitution: String,
+    threshold: f64,
 }
 
 impl Default for RewritePipeline {
@@ -69,8 +73,10 @@ impl Default for RewritePipeline {
 }
 
 impl RewritePipeline {
-    /// Build the standard Stage 0→4 pipeline with a given policy gate.
+    /// Build the standard Stage 0→4 pipeline with a given policy gate. The gate's
+    /// constitution is captured so it can be threaded into each call's context.
     pub fn with_default_stages(gate: PolicyGate) -> Self {
+        let constitution = gate.constitution().to_string();
         Self {
             stages: vec![
                 Box::new(screener::Screener),
@@ -80,6 +86,8 @@ impl RewritePipeline {
                 Box::new(verifier::Verifier),
             ],
             exemplars: Vec::new(),
+            constitution,
+            threshold: types::DEFAULT_THRESHOLD,
         }
     }
 
@@ -89,11 +97,32 @@ impl RewritePipeline {
         self
     }
 
+    /// Set the intent-preservation acceptance threshold τ.
+    pub fn with_threshold(mut self, threshold: f64) -> Self {
+        self.threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
     /// Run the cascade over one prompt. `model` is the local/advisor LLM the
     /// LLM-backed stages call; the screener never touches it, so a clearly
     /// benign prompt returns [`RewriteDecision::Pass`] with zero model calls.
     pub async fn run(&self, prompt: &str, model: &dyn RewriteModel) -> Result<RewriteDecision> {
-        let mut ctx = RewriteContext::new(prompt, model, &self.exemplars);
+        self.run_with_history(prompt, model, &[]).await
+    }
+
+    /// Run the cascade with preceding conversation turns for context-aware
+    /// judging (a prompt benign in isolation but harmful in context, or the
+    /// reverse, is judged against `history`).
+    pub async fn run_with_history(
+        &self,
+        prompt: &str,
+        model: &dyn RewriteModel,
+        history: &[String],
+    ) -> Result<RewriteDecision> {
+        let mut ctx = RewriteContext::new(prompt, model, &self.exemplars)
+            .with_history(history)
+            .with_constitution(&self.constitution)
+            .with_threshold(self.threshold);
         for stage in &self.stages {
             match stage.run(&mut ctx).await? {
                 StageOutcome::Continue => {}
@@ -222,6 +251,80 @@ mod tests {
         assert_eq!(rw.risk_flags, vec![RiskFlag::EvasionPhrasing]);
         // classify + rewrite + verify = 3 calls.
         assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// A model whose classifier verdict depends on whether the prompt context
+    /// (history / constitution) is present — used to prove the pipeline actually
+    /// threads that context into the LLM stage.
+    struct ContextSensitiveModel;
+
+    #[async_trait]
+    impl RewriteModel for ContextSensitiveModel {
+        async fn complete(&self, system: &str, user: &str) -> Result<String> {
+            if system.starts_with("You are a safety intent classifier") {
+                // Harmful only when the preceding turn reveals the target is a
+                // third party's system; benign otherwise.
+                if user.contains("my neighbour's network") {
+                    Ok(r#"{"goal_category":"cyber","verdict":"disallowed","risk_flags":["unauthorized_exploitation"],"confidence":0.9}"#.into())
+                } else {
+                    Ok(r#"{"goal_category":"cyber","verdict":"allowed","confidence":0.9}"#.into())
+                }
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn history_flips_verdict() {
+        let model = ContextSensitiveModel;
+        // Contains "exploit" so the screener escalates to the classifier in both
+        // cases; only the history changes the classifier's verdict.
+        let prompt = "now run the exploit we discussed";
+
+        // Without history → allowed → Pass.
+        let bare = RewritePipeline::default().run(prompt, &model).await.unwrap();
+        assert_eq!(bare, RewriteDecision::Pass);
+
+        // With incriminating history → disallowed → Refused.
+        let hist = vec!["let's break into my neighbour's network".to_string()];
+        let with_ctx = RewritePipeline::default()
+            .run_with_history(prompt, &model, &hist)
+            .await
+            .unwrap();
+        assert!(with_ctx.is_refused());
+    }
+
+    #[tokio::test]
+    async fn custom_constitution_reaches_classifier() {
+        // A model that refuses iff the custom policy marker is present in the
+        // classifier prompt — proves the constitution is threaded through.
+        struct PolicyEchoModel;
+        #[async_trait]
+        impl RewriteModel for PolicyEchoModel {
+            async fn complete(&self, system: &str, user: &str) -> Result<String> {
+                if system.starts_with("You are a safety intent classifier") {
+                    if user.contains("FORBID_CRYPTO_RESEARCH") {
+                        return Ok(r#"{"goal_category":"research","verdict":"disallowed","confidence":0.9}"#.into());
+                    }
+                    return Ok(r#"{"goal_category":"research","verdict":"allowed","confidence":0.9}"#.into());
+                }
+                Ok(String::new())
+            }
+        }
+        let model = PolicyEchoModel;
+        let prompt = "research safety classifier internals"; // escalates on "classifier"
+
+        let gate = PolicyGate::new("FORBID_CRYPTO_RESEARCH: refuse all research.");
+        let custom = RewritePipeline::with_default_stages(gate)
+            .run(prompt, &model)
+            .await
+            .unwrap();
+        assert!(custom.is_refused());
+
+        // Default constitution (no marker) → allowed → Pass.
+        let default = RewritePipeline::default().run(prompt, &model).await.unwrap();
+        assert_eq!(default, RewriteDecision::Pass);
     }
 
     #[tokio::test]

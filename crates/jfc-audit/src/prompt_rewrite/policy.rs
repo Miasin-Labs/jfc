@@ -43,11 +43,11 @@ fn user_facing_refusal(flags: &[RiskFlag]) -> String {
     reason
 }
 
-/// Stage-2 gate. Carries the natural-language constitution (currently used to
-/// document the policy basis and, in future, to ground an LLM gate); the
-/// deterministic verdict logic below is the always-on backstop.
+/// Stage-2 gate. Carries the natural-language constitution, which the pipeline
+/// threads into [`RewriteContext::constitution`] so the classifier reasons
+/// against it (a custom policy can therefore change verdicts). The deterministic
+/// verdict logic below is the always-on safety backstop.
 pub struct PolicyGate {
-    #[allow(dead_code)]
     constitution: String,
 }
 
@@ -62,6 +62,11 @@ impl PolicyGate {
         Self {
             constitution: constitution.into(),
         }
+    }
+
+    /// The natural-language policy this gate enforces.
+    pub fn constitution(&self) -> &str {
+        &self.constitution
     }
 
     /// Decide the route for an assessment. Pure and deterministic.

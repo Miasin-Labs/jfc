@@ -184,6 +184,10 @@ pub trait RewriteModel: Send + Sync {
     async fn complete(&self, system: &str, user: &str) -> Result<String>;
 }
 
+/// Default intent-preservation acceptance threshold τ. The verifier accepts a
+/// rewrite only when its confidence ≥ this; tunable via config (`threshold`).
+pub const DEFAULT_THRESHOLD: f64 = 0.5;
+
 /// Mutable state threaded through the stages for one prompt.
 pub struct RewriteContext<'a> {
     /// The original user prompt (never mutated).
@@ -200,6 +204,16 @@ pub struct RewriteContext<'a> {
     pub proposal: Option<Rewrite>,
     /// Few-shot exemplars of prior accepted rewrites (experience replay).
     pub exemplars: &'a [Rewrite],
+    /// Preceding conversation turns (oldest→newest), so a prompt benign in
+    /// isolation but harmful in context (and vice-versa) is judged correctly
+    /// (Defensive M2S arXiv:2601.00454, MTMCS-Bench arXiv:2601.06757). Empty
+    /// when the caller supplies no history.
+    pub history: &'a [String],
+    /// The live natural-language policy the classifier/gate reason against. Lets
+    /// a config-supplied constitution actually change verdicts.
+    pub constitution: &'a str,
+    /// Intent-preservation acceptance threshold τ in [0, 1].
+    pub threshold: f64,
 }
 
 impl<'a> RewriteContext<'a> {
@@ -212,7 +226,44 @@ impl<'a> RewriteContext<'a> {
             gate: None,
             proposal: None,
             exemplars,
+            history: &[],
+            constitution: "",
+            threshold: DEFAULT_THRESHOLD,
         }
+    }
+
+    /// Attach preceding conversation turns for context-aware judging.
+    pub fn with_history(mut self, history: &'a [String]) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// Use a specific constitution (config override) instead of the empty default.
+    pub fn with_constitution(mut self, constitution: &'a str) -> Self {
+        self.constitution = constitution;
+        self
+    }
+
+    /// Set the intent-preservation acceptance threshold τ.
+    pub fn with_threshold(mut self, threshold: f64) -> Self {
+        self.threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Render the recent conversation context as a compact block for an LLM
+    /// stage prompt, or an empty string when there is no history.
+    pub fn history_block(&self) -> String {
+        if self.history.is_empty() {
+            return String::new();
+        }
+        let recent: Vec<&String> = self.history.iter().rev().take(6).rev().collect();
+        let mut s = String::from("Preceding conversation (oldest→newest):\n");
+        for turn in recent {
+            s.push_str("- ");
+            s.push_str(turn);
+            s.push('\n');
+        }
+        s
     }
 }
 

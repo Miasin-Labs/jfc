@@ -402,6 +402,12 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     if !app.engine.pending_elicitations.is_empty() {
         elicitation(f, app);
     }
+
+    // Prompt-rewrite proposal modal (over-refusal gate). Rendered last so it
+    // wins focus when a rewrite awaits the user's accept/reject/edit.
+    if app.pending_rewrite_proposal.is_some() {
+        super::prompt_rewrite::prompt_rewrite(f, app);
+    }
 }
 
 /// Column span `[c0, c1)` of the selection on content `line`, in terminal-

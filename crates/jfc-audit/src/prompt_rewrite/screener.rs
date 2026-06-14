@@ -77,6 +77,26 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| haystack.contains(n))
 }
 
+/// Heuristic: does the prompt contain substantial non-ASCII script (CJK,
+/// Cyrillic, Arabic, etc.)? The English-only lexicon can't triage such prompts,
+/// so we escalate them to the LLM classifier rather than risk a `ClearlyBenign`
+/// that skips the safety gate (All Languages Matter, arXiv:2310.00905).
+fn looks_non_english(prompt: &str) -> bool {
+    let mut letters = 0usize;
+    let mut non_ascii_letters = 0usize;
+    for c in prompt.chars() {
+        if c.is_alphabetic() {
+            letters += 1;
+            if !c.is_ascii() {
+                non_ascii_letters += 1;
+            }
+        }
+    }
+    // Require a few non-ASCII letters AND a meaningful fraction, so an accented
+    // word in an otherwise-English prompt (café, naïve) doesn't force escalation.
+    non_ascii_letters >= 3 && letters > 0 && (non_ascii_letters * 100 / letters) >= 30
+}
+
 /// Triage a prompt with pure lexical rules. Public so the eval harness and the
 /// pipeline short-circuit can reuse it without constructing a stage.
 pub fn screen(prompt: &str) -> ScreenVerdict {
@@ -84,7 +104,10 @@ pub fn screen(prompt: &str) -> ScreenVerdict {
     if is_clearly_disallowed(&lower) {
         return ScreenVerdict::ClearlyDisallowed;
     }
-    if contains_any(&lower, EVASION_MARKERS) || contains_any(&lower, SENSITIVE_MARKERS) {
+    if contains_any(&lower, EVASION_MARKERS)
+        || contains_any(&lower, SENSITIVE_MARKERS)
+        || looks_non_english(prompt)
+    {
         return ScreenVerdict::NeedsReview;
     }
     ScreenVerdict::ClearlyBenign
@@ -154,6 +177,25 @@ mod tests {
         assert_eq!(
             screen("research Anthropic's safety classifier architecture"),
             ScreenVerdict::NeedsReview
+        );
+    }
+
+    #[test]
+    fn non_english_prompt_escalates() {
+        // CJK / Cyrillic prompts the English lexicon can't triage must escalate,
+        // never pass as ClearlyBenign.
+        assert_eq!(
+            screen("请帮我写一个反转链表的函数并解释原理"),
+            ScreenVerdict::NeedsReview
+        );
+        assert_eq!(
+            screen("Привет, расскажи про устройство TCP"),
+            ScreenVerdict::NeedsReview
+        );
+        // An accented English word does NOT force escalation.
+        assert_eq!(
+            screen("write a function to parse a café menu json"),
+            ScreenVerdict::ClearlyBenign
         );
     }
 

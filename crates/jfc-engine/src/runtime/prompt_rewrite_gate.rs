@@ -71,7 +71,11 @@ pub fn pipeline_from_config(cfg: Option<&PromptRewriteConfig>) -> Option<Rewrite
         Some(text) if !text.trim().is_empty() => PolicyGate::new(text.clone()),
         _ => PolicyGate::default(),
     };
-    Some(RewritePipeline::with_default_stages(gate))
+    let mut pipeline = RewritePipeline::with_default_stages(gate);
+    if let Some(tau) = cfg.threshold {
+        pipeline = pipeline.with_threshold(tau);
+    }
+    Some(pipeline)
 }
 
 /// Resolve the model id the LLM stages should use: explicit

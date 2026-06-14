@@ -22,6 +22,7 @@ mod messages;
 mod model_picker;
 mod overlays;
 pub(crate) mod palette;
+mod prompt_rewrite;
 mod question;
 pub(crate) mod roster;
 pub(crate) mod session_picker;

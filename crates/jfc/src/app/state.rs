@@ -128,6 +128,19 @@ pub struct SelectRequest {
     pub kind: SelectKind,
 }
 
+/// A pending prompt-rewrite proposal from the over-refusal gate, awaiting the
+/// user's explicit accept/reject/edit. Held in a modal so the rewrite is NEVER
+/// applied silently (the SPEC "never silent; require confirmation" contract).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptRewriteProposal {
+    /// The user's original prompt (sent verbatim on reject).
+    pub original: String,
+    /// The reworded prompt (sent on accept).
+    pub rewrite: String,
+    /// Why the rewrite was proposed, shown to the user.
+    pub rationale: String,
+}
+
 pub const SPINNER: &[&str] = crate::glyphs::TASK_FRAMES;
 pub const IDLE_TICK_MS: u64 = 80;
 pub const ANIM_TICK_MS: u64 = 33;
@@ -255,6 +268,9 @@ pub struct App {
     pub last_click: Option<(u16, u16, u8, Instant)>,
     /// A word/line selection awaiting renderer resolution against the buffer.
     pub pending_select_request: Option<SelectRequest>,
+    /// A prompt-rewrite proposal awaiting accept/reject/edit. When `Some`, a
+    /// modal is shown and the turn is paused until the user decides.
+    pub pending_rewrite_proposal: Option<PromptRewriteProposal>,
     /// Debounce/cooldown for the clipboard-image-on-refocus hint (fired from
     /// the focus-gained handler). `None` until the first probe.
     pub last_focus_hint_at: Option<Instant>,
@@ -534,6 +550,7 @@ impl App {
             text_selection: None,
             last_click: None,
             pending_select_request: None,
+            pending_rewrite_proposal: None,
             last_focus_hint_at: None,
             last_esc_at: None,
             follow_bottom: true,

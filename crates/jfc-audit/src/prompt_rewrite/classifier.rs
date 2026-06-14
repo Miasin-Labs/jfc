@@ -29,7 +29,27 @@ ambiguous_intent, credential_theft, weapons, child_safety, unauthorized_exploita
 trigger_terms (array of strings from the prompt that drove any safety reaction), and \
 confidence (number 0..1). Mark 'allowed' for benign requests even if they mention \
 sensitive topics in a legitimate (defensive, educational, authorized) context. Mark \
-'disallowed' only when the underlying goal is genuinely harmful.";
+'disallowed' only when the underlying goal is genuinely harmful. Judge the goal in light \
+of any preceding conversation and the stated policy.";
+
+/// Build the classifier's user message, weaving in the live constitution and
+/// recent conversation context when present.
+fn build_user_prompt(ctx: &RewriteContext<'_>) -> String {
+    let mut s = String::new();
+    if !ctx.constitution.trim().is_empty() {
+        s.push_str("Policy:\n");
+        s.push_str(ctx.constitution.trim());
+        s.push_str("\n\n");
+    }
+    let history = ctx.history_block();
+    if !history.is_empty() {
+        s.push_str(&history);
+        s.push('\n');
+    }
+    s.push_str("Prompt to classify:\n");
+    s.push_str(ctx.original);
+    s
+}
 
 /// Wire shape of the model's JSON output. Strings (not enums) so an unknown
 /// label degrades gracefully instead of failing the whole parse.
@@ -187,7 +207,8 @@ impl PromptStage for IntentClassifier {
             ctx.assessment = Some(IntentAssessment::benign(GoalCategory::Other));
             return Ok(StageOutcome::Pass);
         }
-        let raw = ctx.model.complete(SYSTEM, ctx.original).await?;
+        let user = build_user_prompt(ctx);
+        let raw = ctx.model.complete(SYSTEM, &user).await?;
         let assessment = parse_assessment(&raw);
         ctx.assessment = Some(assessment);
         Ok(StageOutcome::Continue)

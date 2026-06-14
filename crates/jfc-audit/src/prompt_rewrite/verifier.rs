@@ -21,26 +21,36 @@ use crate::error::Result;
 
 const SYSTEM: &str = "You verify a proposed rewrite of a user prompt. Compare the ORIGINAL \
 and the REWRITE. Output ONLY a JSON object: {\"intent_preserved\": boolean, \
-\"introduced_harm\": boolean, \"reason\": string}. intent_preserved is true only if the \
-rewrite asks for the same legitimate goal as the original. introduced_harm is true if the \
-rewrite adds any harmful meaning the original did not have.";
+\"introduced_harm\": boolean, \"confidence\": number 0..1, \"reason\": string}. \
+intent_preserved is true only if the rewrite asks for the same legitimate goal as the \
+original. introduced_harm is true if the rewrite adds any harmful meaning the original did \
+not have. confidence is how sure you are that the rewrite preserves intent without adding \
+harm.";
 
 #[derive(Debug, Deserialize)]
 struct RawVerdict {
     intent_preserved: Option<bool>,
     introduced_harm: Option<bool>,
+    confidence: Option<f64>,
 }
 
-/// Whether a verifier response approves the rewrite. Fail-safe: missing/garbled
-/// fields count as not-preserved / harm-introduced.
-pub fn verdict_approves(text: &str) -> bool {
+/// Whether a verifier response approves the rewrite at acceptance threshold τ.
+/// Fail-safe: missing/garbled fields count as not-preserved / harm-introduced.
+/// An elicited confidence below τ is rejected even when the booleans pass, so
+/// τ tunes precision/recall (Confidence Elicitation, arXiv:2306.13063).
+pub fn verdict_approves(text: &str, threshold: f64) -> bool {
     let Some(json) = super::classifier_json(text) else {
         return false;
     };
     let Ok(raw) = serde_json::from_str::<RawVerdict>(json) else {
         return false;
     };
-    raw.intent_preserved.unwrap_or(false) && !raw.introduced_harm.unwrap_or(true)
+    let preserved = raw.intent_preserved.unwrap_or(false);
+    let harmless = !raw.introduced_harm.unwrap_or(true);
+    // Confidence defaults to 1.0 when the model omits it, so a model that
+    // doesn't emit the field still works against the booleans alone.
+    let confident = raw.confidence.unwrap_or(1.0).clamp(0.0, 1.0) >= threshold;
+    preserved && harmless && confident
 }
 
 /// The Stage-4 [`PromptStage`].
@@ -59,7 +69,7 @@ impl PromptStage for Verifier {
         };
         let user = format!("ORIGINAL:\n{}\n\nREWRITE:\n{}", ctx.original, proposal.text);
         let raw = ctx.model.complete(SYSTEM, &user).await?;
-        if verdict_approves(&raw) {
+        if verdict_approves(&raw, ctx.threshold) {
             // Keep the proposal in the context; the pipeline emits it.
             Ok(StageOutcome::Continue)
         } else {
@@ -75,31 +85,43 @@ mod tests {
     use super::super::types::{Rewrite, RewriteModel};
     use super::*;
 
+    const TAU: f64 = super::super::types::DEFAULT_THRESHOLD;
+
     #[test]
     fn approves_preserved_and_harmless() {
         assert!(verdict_approves(
-            r#"{"intent_preserved":true,"introduced_harm":false,"reason":"ok"}"#
+            r#"{"intent_preserved":true,"introduced_harm":false,"reason":"ok"}"#,
+            TAU
         ));
     }
 
     #[test]
     fn rejects_intent_change() {
         assert!(!verdict_approves(
-            r#"{"intent_preserved":false,"introduced_harm":false}"#
+            r#"{"intent_preserved":false,"introduced_harm":false}"#,
+            TAU
         ));
     }
 
     #[test]
     fn rejects_introduced_harm() {
         assert!(!verdict_approves(
-            r#"{"intent_preserved":true,"introduced_harm":true}"#
+            r#"{"intent_preserved":true,"introduced_harm":true}"#,
+            TAU
         ));
     }
 
     #[test]
     fn parse_failure_rejects() {
-        assert!(!verdict_approves("the model rambled with no json"));
-        assert!(!verdict_approves(r#"{"intent_preserved":true}"#)); // missing harm → assume harm
+        assert!(!verdict_approves("the model rambled with no json", TAU));
+        assert!(!verdict_approves(r#"{"intent_preserved":true}"#, TAU)); // missing harm → assume harm
+    }
+
+    #[test]
+    fn low_confidence_rejected_at_high_threshold() {
+        let v = r#"{"intent_preserved":true,"introduced_harm":false,"confidence":0.4}"#;
+        assert!(verdict_approves(v, 0.3)); // τ below confidence → accept
+        assert!(!verdict_approves(v, 0.9)); // τ above confidence → reject
     }
 
     fn proposal() -> Rewrite {

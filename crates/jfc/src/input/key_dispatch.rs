@@ -55,6 +55,12 @@ pub async fn handle_key(
         return Ok(false);
     }
 
+    // Prompt-rewrite proposal modal — blocks the composer until the user
+    // accepts/rejects/edits the reworded prompt (never silent).
+    if prompt_rewrite::handle_prompt_rewrite_key(app, key, tx).await {
+        return Ok(false);
+    }
+
     if modal_handlers::handle_modal_key(app, key, tx).await {
         return Ok(false);
     }

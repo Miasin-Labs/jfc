@@ -12,6 +12,7 @@ mod modal_handlers;
 mod model_picker;
 mod navigation;
 mod palette;
+mod prompt_rewrite;
 mod question;
 mod session_picker;
 mod slash_commands;
