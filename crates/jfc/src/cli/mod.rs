@@ -16,6 +16,7 @@ mod auth;
 mod bridge;
 mod changes;
 mod daemon;
+mod debug;
 mod headless;
 mod logging;
 mod memory;
@@ -35,6 +36,7 @@ use auth::{AuthSubcommand, run_auth_subcommand};
 use bridge::{BridgeSubcommand, run_bridge_subcommand};
 use changes::{ChangesSubcommand, run_changes_subcommand};
 use daemon::{DaemonSubcommand, compact_terminal_agents_on_startup, run_daemon_subcommand};
+use debug::{DebugSubcommand, run_debug_subcommand};
 use headless::{
     HeadlessInputFormat, HeadlessOutputFormat, PrintModeConfig, run_print_mode, run_remote_session,
 };
@@ -334,6 +336,12 @@ enum Command {
     Bridge {
         #[command(subcommand)]
         sub: BridgeSubcommand,
+    },
+    /// Debug raw provider queries — pick a provider/model, send one prompt, and
+    /// stream the raw output (thinking blocks, tool-use JSON, stop reasons).
+    Debug {
+        #[command(subcommand)]
+        sub: DebugSubcommand,
     },
 }
 
@@ -904,6 +912,7 @@ async fn run_subcommand(cmd: Command) -> anyhow::Result<()> {
         Command::Policy { sub } => run_policy_subcommand(sub).await,
         Command::Memory { sub } => run_memory_subcommand(sub).await,
         Command::Bridge { sub } => run_bridge_subcommand(sub).await,
+        Command::Debug { sub } => run_debug_subcommand(sub).await,
     }
 }
 
