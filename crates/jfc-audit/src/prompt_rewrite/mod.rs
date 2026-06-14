@@ -32,6 +32,7 @@
 //! free (Constitutional Classifiers++ cascade, arXiv:2601.04603).
 
 pub mod classifier;
+pub mod detectors;
 pub mod policy;
 pub mod retry;
 pub mod rewriter;
@@ -40,7 +41,7 @@ pub mod store;
 pub mod types;
 pub mod verifier;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::Result;
 use types::{PromptStage, RewriteContext, StageOutcome};
@@ -127,16 +128,33 @@ impl RewritePipeline {
             match stage.run(&mut ctx).await? {
                 StageOutcome::Continue => {}
                 StageOutcome::Pass => {
-                    debug!(target: "jfc::prompt_rewrite", stage = stage.name(), "pass");
+                    debug!(
+                        target: "jfc::prompt_rewrite",
+                        stage = stage.name(),
+                        decision = "pass",
+                        "pipeline short-circuit: prompt passes unchanged"
+                    );
                     return Ok(self.finish(ctx));
                 }
                 StageOutcome::Refuse { reason, flags } => {
-                    debug!(target: "jfc::prompt_rewrite", stage = stage.name(), "refuse");
+                    warn!(
+                        target: "jfc::prompt_rewrite",
+                        stage = stage.name(),
+                        decision = "refuse",
+                        flags = ?flags.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+                        "pipeline REFUSED prompt"
+                    );
                     return Ok(RewriteDecision::Refused { reason, flags });
                 }
             }
         }
-        Ok(self.finish(ctx))
+        let decision = self.finish(ctx);
+        debug!(
+            target: "jfc::prompt_rewrite",
+            decision = if decision.is_pass() { "pass" } else { "rewritten" },
+            "pipeline complete"
+        );
+        Ok(decision)
     }
 
     /// Map terminal context to a decision: an approved proposal becomes a

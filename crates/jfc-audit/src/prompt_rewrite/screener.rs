@@ -11,7 +11,9 @@
 //! escalate on any sensitive or evasion signal.
 
 use async_trait::async_trait;
+use tracing::{debug, warn};
 
+use super::detectors::{self, DetectionReport};
 use super::types::{PromptStage, RewriteContext, ScreenVerdict, StageOutcome};
 use crate::error::Result;
 
@@ -107,95 +109,33 @@ fn looks_non_english(prompt: &str) -> bool {
     non_ascii_letters >= 3 && letters > 0 && (non_ascii_letters * 100 / letters) >= 30
 }
 
-/// Chat-template / special-token injection markers (Family D, file 07).
-/// These role-delimiter strings appear in LLM training templates and, if present
-/// in user input, can re-structure the conversation context (structural injection,
-/// the LLM analogue of SQL injection). Any presence → escalate.
-const TEMPLATE_INJECTION_MARKERS: &[&str] = &[
-    "<|im_start|>",
-    "<|im_end|>",
-    "<|system|>",
-    "<|user|>",
-    "<|assistant|>",
-    "<|endoftext|>",
-    "<|begin_of_text|>",
-    "<|start_header_id|>",
-    "<|eot_id|>",
-    "[inst]",
-    "[/inst]",
-    "<<sys>>",
-    "<</sys>>",
-    "<start_of_turn>",
-    "<end_of_turn>",
-    "<function_calls>",
-    "<invoke>",
-];
-
-/// Semantic-framing reframe markers (Family A, file 07 — past-tense, fiction,
-/// authority-override, hypothetical, third-person laundering). Derived from the
-/// demo4 detector. Presence escalates to the LLM classifier which judges intent.
-const FRAMING_MARKERS: &[&str] = &[
-    "how did people",
-    "how did they",
-    "historically ",
-    "before it was illegal",
-    "for my novel",
-    "in my novel",
-    "my character",
-    "roleplay as",
-    "pretend you are",
-    "pretend to be",
-    "act as if",
-    "you are now dan",
-    "godmode",
-    "new system mode",
-    "safety restrictions lifted",
-    "ignore previous instructions",
-    "ignore all instructions",
-    "developer testing",
-    "hypothetically",
-    "in theory",
-    "what if it were legal",
-    "my friend wants to know",
-    "asking for a friend",
-];
-
-/// Detect hidden Unicode Tag characters (U+E0000–U+E007F). These are invisible
-/// to humans but carry ASCII-mirrored payloads that the tokeniser reads. Used by
-/// Elder Plinius and documented in the /tmp/transformer-dig research corpus.
-fn has_hidden_unicode_tags(prompt: &str) -> bool {
-    prompt.chars().any(|c| ('\u{E0000}'..='\u{E007F}').contains(&c))
-}
-
-/// Detect chat-template / special-token injection.
-fn has_template_injection(lower: &str) -> bool {
-    TEMPLATE_INJECTION_MARKERS
-        .iter()
-        .any(|m| lower.contains(m))
-}
-
-/// Detect semantic-framing reframe markers (Family A).
-fn has_framing_markers(lower: &str) -> bool {
-    FRAMING_MARKERS.iter().any(|m| lower.contains(m))
-}
-
 /// Triage a prompt with pure lexical rules. Public so the eval harness and the
-/// pipeline short-circuit can reuse it without constructing a stage.
+/// pipeline short-circuit can reuse it without constructing a stage. Equivalent
+/// to [`screen_with_report`] discarding the detector report.
 pub fn screen(prompt: &str) -> ScreenVerdict {
+    screen_with_report(prompt).0
+}
+
+/// Triage a prompt and also return the structured [`DetectionReport`] of every
+/// attack-signature that fired, so callers can emit per-signal tracing. The
+/// detectors (obfuscation, semantic-framing, persuasion, distraction, template
+/// injection — the full file-07 family taxonomy) escalate any positive signal to
+/// `NeedsReview`; the cheap keyword lexicons cover the remaining sensitive/evasion
+/// cases.
+pub fn screen_with_report(prompt: &str) -> (ScreenVerdict, DetectionReport) {
     let lower = prompt.to_lowercase();
+    let report = detectors::analyze_prompt(prompt);
     if is_clearly_disallowed(&lower) {
-        return ScreenVerdict::ClearlyDisallowed;
+        return (ScreenVerdict::ClearlyDisallowed, report);
     }
     if contains_any(&lower, EVASION_MARKERS)
         || contains_any(&lower, SENSITIVE_MARKERS)
         || looks_non_english(prompt)
-        || has_hidden_unicode_tags(prompt)
-        || has_template_injection(&lower)
-        || has_framing_markers(&lower)
+        || !report.is_empty()
     {
-        return ScreenVerdict::NeedsReview;
+        return (ScreenVerdict::NeedsReview, report);
     }
-    ScreenVerdict::ClearlyBenign
+    (ScreenVerdict::ClearlyBenign, report)
 }
 
 /// The Stage-0 [`PromptStage`].
@@ -208,8 +148,9 @@ impl PromptStage for Screener {
     }
 
     async fn run(&self, ctx: &mut RewriteContext<'_>) -> Result<StageOutcome> {
-        let verdict = screen(ctx.original);
+        let (verdict, report) = screen_with_report(ctx.original);
         ctx.screen = Some(verdict);
+        emit_detector_tracing(verdict, &report);
         Ok(match verdict {
             ScreenVerdict::ClearlyBenign => StageOutcome::Pass,
             ScreenVerdict::NeedsReview => StageOutcome::Continue,
@@ -220,6 +161,40 @@ impl PromptStage for Screener {
                 flags: Vec::new(),
             },
         })
+    }
+}
+
+/// Emit structured tracing for the screen decision and every fired detector
+/// signal (target `jfc::prompt_rewrite`), so refusals/escalations are auditable.
+fn emit_detector_tracing(verdict: ScreenVerdict, report: &DetectionReport) {
+    debug!(
+        target: "jfc::prompt_rewrite",
+        stage = "screener",
+        verdict = ?verdict,
+        detector_score = report.score(),
+        signals = %report.signal_summary(),
+        "screen verdict"
+    );
+    for signal in &report.signals {
+        // A fired attack-signature is a notable security event; log at info via
+        // warn-level target filtering kept light (debug) to avoid noise, but the
+        // signal kind + family are always captured for audit.
+        debug!(
+            target: "jfc::prompt_rewrite::detector",
+            kind = signal.kind.as_str(),
+            family = signal.kind.family().as_str(),
+            weight = signal.weight,
+            detail = %signal.detail,
+            "detector signal fired"
+        );
+    }
+    if report.score() >= 5.0 {
+        warn!(
+            target: "jfc::prompt_rewrite",
+            detector_score = report.score(),
+            families = ?report.families().iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+            "high-confidence attack signature in prompt"
+        );
     }
 }
 

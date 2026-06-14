@@ -210,6 +210,15 @@ impl PromptStage for IntentClassifier {
         let user = build_user_prompt(ctx);
         let raw = ctx.model.complete(SYSTEM, &user).await?;
         let assessment = parse_assessment(&raw);
+        tracing::debug!(
+            target: "jfc::prompt_rewrite",
+            stage = "classifier",
+            goal_category = assessment.goal_category.as_str(),
+            verdict = ?assessment.verdict,
+            risk_flags = ?assessment.risk_flags.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+            confidence = assessment.confidence,
+            "intent assessment"
+        );
         ctx.assessment = Some(assessment);
         Ok(StageOutcome::Continue)
     }

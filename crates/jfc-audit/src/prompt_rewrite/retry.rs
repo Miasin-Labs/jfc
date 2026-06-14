@@ -68,8 +68,20 @@ pub async fn propose_retry(
     if !looks_like_refusal(response) {
         return Ok(RetryProposal::NotRefused);
     }
+    tracing::debug!(
+        target: "jfc::prompt_rewrite",
+        stage = "retry",
+        "downstream refusal detected; attempting rephrase-and-retry"
+    );
     match pipeline.run(original, model).await? {
-        RewriteDecision::Rewritten(rewrite) => Ok(RetryProposal::Retry(rewrite)),
+        RewriteDecision::Rewritten(rewrite) => {
+            tracing::debug!(
+                target: "jfc::prompt_rewrite",
+                stage = "retry",
+                "retry proposal available"
+            );
+            Ok(RetryProposal::Retry(rewrite))
+        }
         // Pass (no rewrite) or Refused → nothing safe to retry with.
         RewriteDecision::Pass | RewriteDecision::Refused { .. } => Ok(RetryProposal::NoRewrite),
     }

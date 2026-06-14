@@ -113,12 +113,27 @@ impl PromptStage for PolicyGate {
         });
         let verdict = self.decide(&assessment);
         ctx.gate = Some(verdict);
+        tracing::debug!(
+            target: "jfc::prompt_rewrite",
+            stage = "policy_gate",
+            verdict = ?verdict,
+            risk_flags = ?assessment.risk_flags.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+            "gate decision"
+        );
         Ok(match verdict {
             GateVerdict::Allowed | GateVerdict::Ambiguous => StageOutcome::Continue,
-            GateVerdict::Disallowed => StageOutcome::Refuse {
-                reason: user_facing_refusal(&assessment.risk_flags),
-                flags: assessment.risk_flags.clone(),
-            },
+            GateVerdict::Disallowed => {
+                tracing::warn!(
+                    target: "jfc::prompt_rewrite",
+                    stage = "policy_gate",
+                    risk_flags = ?assessment.risk_flags.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+                    "REFUSED: disallowed goal"
+                );
+                StageOutcome::Refuse {
+                    reason: user_facing_refusal(&assessment.risk_flags),
+                    flags: assessment.risk_flags.clone(),
+                }
+            }
         })
     }
 }

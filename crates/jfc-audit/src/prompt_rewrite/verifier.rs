@@ -70,9 +70,21 @@ impl PromptStage for Verifier {
         let user = format!("ORIGINAL:\n{}\n\nREWRITE:\n{}", ctx.original, proposal.text);
         let raw = ctx.model.complete(SYSTEM, &user).await?;
         if verdict_approves(&raw, ctx.threshold) {
+            tracing::debug!(
+                target: "jfc::prompt_rewrite",
+                stage = "verifier",
+                threshold = ctx.threshold,
+                "rewrite ACCEPTED (intent preserved, no harm introduced)"
+            );
             // Keep the proposal in the context; the pipeline emits it.
             Ok(StageOutcome::Continue)
         } else {
+            tracing::debug!(
+                target: "jfc::prompt_rewrite",
+                stage = "verifier",
+                threshold = ctx.threshold,
+                "rewrite REJECTED (failed intent/harm/confidence check) — keeping original"
+            );
             // Reject the rewrite; fall back to the original prompt.
             ctx.proposal = None;
             Ok(StageOutcome::Pass)

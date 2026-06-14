@@ -94,6 +94,12 @@ impl PromptStage for Rewriter {
         let user = build_user_prompt(ctx, &assessment);
         let raw = ctx.model.complete(SYSTEM, &user).await?;
         ctx.proposal = parse_rewrite(&raw, &assessment);
+        tracing::debug!(
+            target: "jfc::prompt_rewrite",
+            stage = "rewriter",
+            proposed = ctx.proposal.is_some(),
+            "rewrite proposal generated"
+        );
         // Continue regardless: the verifier (Stage 4) decides whether to emit
         // the proposal or pass the original through.
         Ok(StageOutcome::Continue)
