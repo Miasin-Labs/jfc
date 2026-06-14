@@ -68,6 +68,11 @@ pub struct WorkflowOutcome {
     pub cache_hits: u32,
     pub logs: Vec<String>,
     pub error: Option<String>,
+    /// True when the run ended because its cancellation token fired (user
+    /// Ctrl+C, shutdown, or a superseding turn) rather than a genuine failure.
+    /// Lets callers (e.g. auto-review) report a cancelled run distinctly
+    /// instead of surfacing the orchestrator-teardown error as a crash.
+    pub cancelled: bool,
 }
 
 /// Holds the orchestration state while a workflow runs. Owns the semaphore,
@@ -514,6 +519,10 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
         },
     };
 
+    // When the run was cancelled, the engine thread's error is the
+    // orchestrator-teardown artifact ("workflow orchestrator unavailable" /
+    // "workflow cancelled") rather than a real failure. Surface cancellation
+    // explicitly so callers don't treat a deliberately-stopped run as a crash.
     WorkflowOutcome {
         result: engine_outcome.result,
         agent_count: engine_outcome.agent_count,
@@ -521,6 +530,7 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
         cache_hits: cache_hits.load(Ordering::Relaxed),
         logs,
         error: engine_outcome.error,
+        cancelled,
     }
 }
 
@@ -562,30 +572,16 @@ async fn run_one_agent(
         })
         .await;
 
-    let task_input = crate::types::TaskInput {
-        description: req.label.clone(),
-        prompt: req.prompt.clone(),
-        subagent_type: req.agent_type.clone(),
-        category: None,
-        run_in_background: false,
-        model: req.model.clone(),
-        effort: None,
-        name: None,
-        team_name: None,
-        mode: None,
-        isolation: req.isolation.clone(),
-        parent_task_id: None,
-        schema: req.schema.clone(),
-    };
+    // In-process workflow sub-agents get a daemon-registry row created lazily
+    // the first time their streamed output is recorded (under `agent_id`).
+    // Nothing ever recorded a *terminal* status for that row, so after the UI
+    // exited the reconcile pass marked every one "stale: owning process
+    // exited" — a phantom Failed per sub-agent that leaked into
+    // `daemon-state.json` forever. We now finalize the row on every exit path
+    // below via `finalize_agent_row`.
 
-    // Resolve an agent definition if a custom agentType was requested.
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let agents = crate::agents::load_agents(&cwd);
-    let agent_def = req
-        .agent_type
-        .as_deref()
-        .and_then(|t| agents.iter().find(|a| a.name.eq_ignore_ascii_case(t)))
-        .cloned();
+    let task_input = build_agent_task_input(&req);
+    let agent_def = resolve_agent_def(&req);
 
     // Race the dispatch against cancellation.
     let result = tokio::select! {
@@ -607,24 +603,13 @@ async fn run_one_agent(
     };
 
     if result.is_error() {
-        // Emit failure progress event before replying.
-        if let Some(tx) = &tx {
-            let task_id = crate::ids::TaskId::from(workflow_task_id.clone());
-            let index = req.index;
-            let error = result.output.clone();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let _ = tx
-                    .send(crate::runtime::EngineEvent::WorkflowProgress(
-                        crate::runtime::WorkflowProgressEvent::AgentFailed {
-                            task_id,
-                            index,
-                            error,
-                        },
-                    ))
-                    .await;
-            });
-        }
+        // Finalize the daemon row so it never goes stale-Failed after the UI
+        // exits. Cancellation is recorded distinctly from a genuine failure.
+        finalize_agent_row(
+            &agent_id,
+            agent_error_outcome(cancel.is_cancelled(), &result.output),
+        );
+        emit_agent_failed(&tx, &workflow_task_id, req.index, result.output.clone());
         let _ = req.reply.send(Err(result.output.clone()));
         return;
     }
@@ -635,56 +620,32 @@ async fn run_one_agent(
     let token_estimate = text.len() as u64 / 4;
     tokens_spent.fetch_add(token_estimate, Ordering::Relaxed);
 
-    // When the agent ran under a StructuredOutput schema, its output should be
-    // the validated JSON object (execute_task installs the schema + requires the
-    // tool). Parse it so the journal stores a real object and the workflow
-    // script receives structured data — not an opaque JSON string. If parsing
-    // fails despite a schema, that's a genuine contract violation: surface it as
-    // an agent failure rather than silently stringifying (which used to hide
-    // schema breaches and surprise scripts expecting object fields).
-    let structured_result: Option<serde_json::Value> = if req.schema.is_some() {
-        match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                let error = format!(
-                    "workflow agent declared a StructuredOutput schema but returned \
-                     output that is not valid JSON: {e}"
-                );
-                if let Some(tx) = &tx {
-                    let task_id = crate::ids::TaskId::from(workflow_task_id.clone());
-                    let index = req.index;
-                    let error = error.clone();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        let _ = tx
-                            .send(crate::runtime::EngineEvent::WorkflowProgress(
-                                crate::runtime::WorkflowProgressEvent::AgentFailed {
-                                    task_id,
-                                    index,
-                                    error,
-                                },
-                            ))
-                            .await;
-                    });
-                }
-                let _ = journal_writer
-                    .append(&JournalEntry::Result {
-                        key,
-                        agent_id,
-                        result: serde_json::Value::String(text.clone()),
-                    })
-                    .await;
-                let _ = req.reply.send(Err(error));
-                return;
-            }
+    let structured_result = match parse_structured_result(&req, &text) {
+        Ok(v) => v,
+        Err(error) => {
+            // Schema contract violation: surface as an agent failure rather
+            // than silently stringifying (which used to hide schema breaches
+            // and surprise scripts expecting object fields).
+            emit_agent_failed(&tx, &workflow_task_id, req.index, error.clone());
+            finalize_agent_row(&agent_id, agent_error_outcome(cancel.is_cancelled(), &error));
+            let _ = journal_writer
+                .append(&JournalEntry::Result {
+                    key,
+                    agent_id,
+                    result: serde_json::Value::String(text.clone()),
+                })
+                .await;
+            let _ = req.reply.send(Err(error));
+            return;
         }
-    } else {
-        None
     };
 
     let journal_result = structured_result
         .clone()
         .unwrap_or_else(|| serde_json::Value::String(text.clone()));
+
+    // Finalize the daemon row as Completed before consuming `agent_id`.
+    finalize_agent_row(&agent_id, AgentRowOutcome::Completed);
 
     // Record the result journal entry.
     let _ = journal_writer
@@ -695,19 +656,7 @@ async fn run_one_agent(
         })
         .await;
 
-    // Emit success progress event.
-    if let Some(tx) = &tx {
-        let task_id = crate::ids::TaskId::from(workflow_task_id.clone());
-        let index = req.index;
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let _ = tx
-                .send(crate::runtime::EngineEvent::WorkflowProgress(
-                    crate::runtime::WorkflowProgressEvent::AgentDone { task_id, index },
-                ))
-                .await;
-        });
-    }
+    emit_agent_done(&tx, &workflow_task_id, req.index);
 
     // For schema agents, hand back the canonical JSON serialization of the
     // parsed object so the workflow bridge resolves it to a JS object with real
@@ -718,6 +667,139 @@ async fn run_one_agent(
         None => text,
     };
     let _ = req.reply.send(Ok(reply_text));
+}
+
+/// Build the `TaskInput` for a workflow sub-agent dispatch from its request.
+fn build_agent_task_input(req: &AgentRequest) -> crate::types::TaskInput {
+    crate::types::TaskInput {
+        description: req.label.clone(),
+        prompt: req.prompt.clone(),
+        subagent_type: req.agent_type.clone(),
+        category: None,
+        run_in_background: false,
+        model: req.model.clone(),
+        effort: None,
+        name: None,
+        team_name: None,
+        mode: None,
+        isolation: req.isolation.clone(),
+        parent_task_id: None,
+        schema: req.schema.clone(),
+    }
+}
+
+/// Resolve a custom agent definition when the request named an `agentType`.
+fn resolve_agent_def(req: &AgentRequest) -> Option<crate::agents::AgentDef> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let agents = crate::agents::load_agents(&cwd);
+    req.agent_type
+        .as_deref()
+        .and_then(|t| agents.iter().find(|a| a.name.eq_ignore_ascii_case(t)))
+        .cloned()
+}
+
+/// Parse a schema-bound agent's output into a JSON object. Returns `Ok(None)`
+/// for non-schema agents, `Ok(Some(value))` on success, and `Err(message)`
+/// when a schema was declared but the output isn't valid JSON.
+fn parse_structured_result(
+    req: &AgentRequest,
+    text: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    if req.schema.is_none() {
+        return Ok(None);
+    }
+    serde_json::from_str::<serde_json::Value>(text)
+        .map(Some)
+        .map_err(|e| {
+            format!(
+                "workflow agent declared a StructuredOutput schema but returned \
+                 output that is not valid JSON: {e}"
+            )
+        })
+}
+
+/// Spawn a fire-and-forget send of an `AgentFailed` progress event. A no-op
+/// when no event sender is wired (e.g. tests). Keeping the spawn here keeps
+/// `run_one_agent`'s nesting shallow.
+fn emit_agent_failed(
+    tx: &Option<mpsc::Sender<crate::runtime::EngineEvent>>,
+    workflow_task_id: &str,
+    index: u32,
+    error: String,
+) {
+    let Some(tx) = tx.clone() else { return };
+    let task_id = crate::ids::TaskId::from(workflow_task_id.to_owned());
+    tokio::spawn(async move {
+        let _ = tx
+            .send(crate::runtime::EngineEvent::WorkflowProgress(
+                crate::runtime::WorkflowProgressEvent::AgentFailed {
+                    task_id,
+                    index,
+                    error,
+                },
+            ))
+            .await;
+    });
+}
+
+/// Spawn a fire-and-forget send of an `AgentDone` progress event. A no-op when
+/// no event sender is wired.
+fn emit_agent_done(
+    tx: &Option<mpsc::Sender<crate::runtime::EngineEvent>>,
+    workflow_task_id: &str,
+    index: u32,
+) {
+    let Some(tx) = tx.clone() else { return };
+    let task_id = crate::ids::TaskId::from(workflow_task_id.to_owned());
+    tokio::spawn(async move {
+        let _ = tx
+            .send(crate::runtime::EngineEvent::WorkflowProgress(
+                crate::runtime::WorkflowProgressEvent::AgentDone { task_id, index },
+            ))
+            .await;
+    });
+}
+
+/// Outcome of a single workflow sub-agent dispatch, used to finalize its
+/// daemon-registry row with the right terminal status.
+enum AgentRowOutcome<'a> {
+    Completed,
+    Cancelled,
+    Failed(&'a str),
+}
+
+/// Record a terminal status for an in-process workflow sub-agent's daemon
+/// registry row.
+///
+/// The row is created lazily (epoch 0) the first time the sub-agent streams
+/// output under `agent_id`; if it was never created (no streamed output) the
+/// underlying registry call is a no-op because it looks the id up with
+/// `get_mut`. Without this finalize the reconcile pass later marks the row
+/// "stale: owning process exited", producing a phantom Failed entry per
+/// sub-agent. Cancellation is recorded as `Cancelled`, not `Failed`, so a user
+/// Ctrl+C isn't misreported as a crash.
+fn finalize_agent_row(agent_id: &str, outcome: AgentRowOutcome<'_>) {
+    let (status, message) = match outcome {
+        AgentRowOutcome::Completed => (
+            jfc_daemon::BackgroundAgentStatus::Completed,
+            "workflow agent completed",
+        ),
+        AgentRowOutcome::Cancelled => (
+            jfc_daemon::BackgroundAgentStatus::Cancelled,
+            "workflow cancelled",
+        ),
+        AgentRowOutcome::Failed(err) => (jfc_daemon::BackgroundAgentStatus::Failed, err),
+    };
+    jfc_daemon::record_background_agent_finished(agent_id, status, message);
+}
+
+/// Map a sub-agent error string + cancellation flag to a row outcome.
+fn agent_error_outcome(cancelled: bool, error: &str) -> AgentRowOutcome<'_> {
+    if cancelled {
+        AgentRowOutcome::Cancelled
+    } else {
+        AgentRowOutcome::Failed(error)
+    }
 }
 
 #[cfg(test)]
@@ -866,6 +948,13 @@ mod tests {
             out.error.is_some(),
             "cancelled workflow should surface an error"
         );
+        // The distinguishing signal for callers (auto-review): the run is
+        // flagged `cancelled`, so the orchestrator-teardown error is NOT
+        // misreported as a genuine failure.
+        assert!(
+            out.cancelled,
+            "cancelled workflow must set the cancelled flag"
+        );
     }
 
     // A single agent() call flows engine → orchestrator → execute_task →
@@ -878,6 +967,8 @@ mod tests {
         assert_eq!(out.result, serde_json::json!("AGENT_OUTPUT"));
         assert_eq!(out.total_agents_dispatched, 1);
         assert_eq!(out.cache_hits, 0);
+        // A normal run is never flagged cancelled.
+        assert!(!out.cancelled, "successful workflow must not be cancelled");
     }
 
     // parallel() dispatches multiple agents through the orchestrator.

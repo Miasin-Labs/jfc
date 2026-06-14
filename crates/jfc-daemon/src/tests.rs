@@ -738,6 +738,95 @@ fn background_agent_stale_owner_marked_failed_robust() {
     assert!(read_last_lines(&log_path, 1)[0].contains("[Failed] stale"));
 }
 
+#[test]
+fn reconcile_prunes_terminal_agents_beyond_retention_bound_robust() {
+    // SAFETY: env mutation in a single-threaded test; restored at the end.
+    unsafe { std::env::set_var("JFC_DAEMON_MAX_TERMINAL_AGENTS", "3") };
+    let tmp = TempDir::new().unwrap();
+    let paths = DaemonPaths::new(tmp.path());
+    paths.ensure_dirs().unwrap();
+    let mut state = DaemonState::default();
+    // The agents/ subdir is created lazily by the registry; make it here so
+    // the test can seed log files directly.
+    std::fs::create_dir_all(paths.log_dir.join("agents")).unwrap();
+
+    // 10 terminal (Completed) rows + 1 Running row. Stagger completed_at so
+    // the prune keeps the newest 3 terminal rows and never the Running one.
+    let base = SystemTime::now();
+    for i in 0..10u64 {
+        let id = format!("bgwf_x:agent_{i}");
+        let log_path = background_agent_log_path(&paths, &id);
+        std::fs::write(&log_path, format!("log {i}\n")).unwrap();
+        state.background_agents.insert(
+            id.clone(),
+            terminal_agent(&id, log_path, base + Duration::from_secs(i)),
+        );
+    }
+    let running_id = "bgwf_x:agent_running".to_owned();
+    let running_log = background_agent_log_path(&paths, &running_id);
+    std::fs::write(&running_log, "running\n").unwrap();
+    let mut running = terminal_agent(&running_id, running_log.clone(), base);
+    running.status = BackgroundAgentStatus::Running;
+    running.completed_at = None;
+    // Give it this live process's PID + a fresh heartbeat so reconcile sees the
+    // owner as alive and leaves it Running (rather than marking it stale).
+    running.pid = Some(std::process::id());
+    running.last_heartbeat_at = Some(SystemTime::now());
+    state.background_agents.insert(running_id.clone(), running);
+    save_state(&paths, &state).unwrap();
+
+    let state = reconcile_background_agents(&paths).unwrap();
+
+    // Running row is always kept; only 3 newest terminal rows survive.
+    assert!(state.background_agents.contains_key(&running_id));
+    let terminal_kept: Vec<_> = state
+        .background_agents
+        .keys()
+        .filter(|k| k.contains("agent_") && !k.contains("running"))
+        .cloned()
+        .collect();
+    assert_eq!(terminal_kept.len(), 3, "kept: {terminal_kept:?}");
+    assert!(state.background_agents.contains_key("bgwf_x:agent_9"));
+    assert!(state.background_agents.contains_key("bgwf_x:agent_7"));
+    assert!(!state.background_agents.contains_key("bgwf_x:agent_0"));
+    // The pruned row's log file is deleted.
+    assert!(!background_agent_log_path(&paths, "bgwf_x:agent_0").exists());
+    // A kept row's log file remains.
+    assert!(background_agent_log_path(&paths, "bgwf_x:agent_9").exists());
+
+    unsafe { std::env::remove_var("JFC_DAEMON_MAX_TERMINAL_AGENTS") };
+}
+
+fn terminal_agent(id: &str, log_path: PathBuf, completed_at: SystemTime) -> BackgroundAgentInfo {
+    BackgroundAgentInfo {
+        id: id.to_owned(),
+        description: id.to_owned(),
+        parent_session_id: None,
+        status: BackgroundAgentStatus::Completed,
+        started_at: completed_at,
+        updated_at: completed_at,
+        completed_at: Some(completed_at),
+        pid: None,
+        worker_epoch: 0,
+        last_heartbeat_at: None,
+        takeover_count: 0,
+        model: None,
+        worktree_path: None,
+        log_path,
+        launch_path: None,
+        cancel_requested: false,
+        respawn_count: 0,
+        summary: Some("done".to_owned()),
+        error: None,
+        tool_use_count: 0,
+        latest_input_tokens: 0,
+        latest_cache_read_tokens: 0,
+        latest_cache_write_tokens: 0,
+        cumulative_output_tokens: 0,
+        last_tool: None,
+    }
+}
+
 // ─── ScheduleWakeup persistence (DO-178B _normal/_robust) ───────────
 
 #[test]

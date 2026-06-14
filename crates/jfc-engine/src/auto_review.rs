@@ -12,7 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::app::EngineState;
 use crate::runtime::{EngineEvent, EventSender, FrontendEvent, TaskEvent};
@@ -110,7 +110,7 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
     // Derive a child token from the session so a user Ctrl+C / shutdown aborts
     // the background review instead of letting its agents keep hitting the API.
     let cancel = state.cancel_token.child_token();
-    let target = auto_review_target(&files);
+    let target = auto_review_target(&cwd, &files);
     let level = std::env::var("JFC_AUTO_REVIEW_LEVEL").unwrap_or_else(|_| "high".to_owned());
     let args = serde_json::json!({
         "level": level,
@@ -212,7 +212,39 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
         )
         .await;
 
-        if let Some(error) = outcome.error {
+        if outcome.cancelled {
+            // The run was deliberately stopped (user Ctrl+C, shutdown, or a
+            // superseding turn). This is NOT a failure: the orchestrator
+            // teardown error ("workflow orchestrator unavailable") is an
+            // artifact of cancellation, not a crash. Always free the dedup
+            // signature so the same edits can be reviewed again, and report a
+            // `cancelled:`-prefixed terminal event so the UI + daemon record it
+            // as Cancelled rather than Failed (see handle_task_failed).
+            {
+                let mut slot = signature_slot.lock();
+                if slot.as_deref() == Some(signature.as_str()) {
+                    *slot = None;
+                }
+            }
+            // If the review nonetheless produced findings before cancellation,
+            // still surface them so completed work isn't silently discarded.
+            if let Some(review) = review {
+                let _ = tx_bg
+                    .send(EngineEvent::Frontend(FrontendEvent::ReviewCompleted {
+                        review,
+                    }))
+                    .await;
+            }
+            let reason = outcome
+                .error
+                .unwrap_or_else(|| "workflow cancelled".to_owned());
+            let _ = tx_bg
+                .send(EngineEvent::Task(TaskEvent::Failed {
+                    task_id: crate::ids::TaskId::from(task_id),
+                    error: format!("cancelled: {reason}"),
+                }))
+                .await;
+        } else if let Some(error) = outcome.error {
             // The run failed (e.g. provider auth/transient errors). Clear the
             // dedup signature so an identical follow-up edit set can re-trigger
             // the review instead of being permanently suppressed. Only clear if
@@ -313,17 +345,33 @@ fn auto_review_proof_oracles_enabled() -> bool {
     }
 }
 
+/// Normalize an edited-file path to a cwd-relative, forward-slashed form.
+///
+/// `turn_edited_files` records whatever path the Edit/Write tool saw, which is
+/// usually absolute (`/home/u/proj/crates/x/Cargo.toml`). The trigger's
+/// prefix checks (`crates/`, `.github/workflows/`) and exact matches
+/// (`Cargo.toml`) only fire on repo-relative paths, so strip the cwd prefix
+/// first. Paths already relative, or outside cwd, pass through unchanged.
+fn normalize_repo_relative(cwd: &Path, file: &str) -> String {
+    let path = Path::new(file);
+    let rel = path.strip_prefix(cwd).unwrap_or(path);
+    rel.to_string_lossy().replace('\\', "/")
+}
+
 async fn smart_auto_review_trigger(cwd: &Path, files: &[String]) -> Option<String> {
     if files.len() >= 3 {
         return Some(format!("changed {} files", files.len()));
     }
 
     if files.iter().any(|file| {
-        file.ends_with(".rs")
-            || file == "Cargo.toml"
-            || file == "Cargo.lock"
-            || file.starts_with("crates/")
-            || file.starts_with(".github/workflows/")
+        let rel = normalize_repo_relative(cwd, file);
+        rel.ends_with(".rs")
+            || rel == "Cargo.toml"
+            || rel == "Cargo.lock"
+            || rel.ends_with("/Cargo.toml")
+            || rel.ends_with("/Cargo.lock")
+            || rel.starts_with("crates/")
+            || rel.starts_with(".github/workflows/")
     }) {
         return Some("rust/workflow-sensitive file changed".to_owned());
     }
@@ -401,8 +449,12 @@ async fn git_diff_has_review_signal(cwd: &Path, files: &[String]) -> bool {
     TOKENS.iter().any(|token| diff.contains(token))
 }
 
-fn auto_review_target(files: &[String]) -> String {
-    let mut shown = files.iter().take(16).cloned().collect::<Vec<_>>();
+fn auto_review_target(cwd: &Path, files: &[String]) -> String {
+    let mut shown = files
+        .iter()
+        .take(16)
+        .map(|file| normalize_repo_relative(cwd, file))
+        .collect::<Vec<_>>();
     let suffix = if files.len() > shown.len() {
         format!(" plus {} more", files.len() - shown.len())
     } else {
@@ -639,15 +691,47 @@ async fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> std::io::Result<(
     file.write_all(b"\n").await
 }
 
+/// Cross-run dedup only needs to compare against *recent* findings, so we read
+/// a bounded tail of `findings.jsonl` rather than the whole file. Without this
+/// the per-run load was O(total findings ever recorded) and the file grows
+/// unbounded — re-reading megabytes on every auto-review. 64 KiB comfortably
+/// covers thousands of recent findings.
+const FINGERPRINT_TAIL_BYTES: u64 = 64 * 1024;
+
 async fn load_existing_fingerprints(dir: &Path) -> HashSet<String> {
     let path = dir.join("findings.jsonl");
-    let Ok(body) = tokio::fs::read_to_string(path).await else {
-        return HashSet::new();
+    let body = match read_tail_string(&path, FINGERPRINT_TAIL_BYTES).await {
+        Some(body) => body,
+        None => return HashSet::new(),
     };
     body.lines()
         .filter_map(|line| serde_json::from_str::<ReviewFindingRecord>(line).ok())
         .map(|record| record.fingerprint)
         .collect()
+}
+
+/// Read at most the last `max_bytes` of a file as UTF-8 (lossy), dropping a
+/// leading partial line so JSONL parsing starts on a record boundary. Returns
+/// `None` if the file can't be opened.
+async fn read_tail_string(path: &Path, max_bytes: u64) -> Option<String> {
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let len = file.metadata().await.ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    }
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut buf).await.ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    // Drop a partial first line when we seeked into the middle of the file so
+    // we never parse a truncated record.
+    if start > 0 {
+        if let Some(nl) = text.find('\n') {
+            return Some(text[nl + 1..].to_owned());
+        }
+        return Some(String::new());
+    }
+    Some(text)
 }
 
 fn extract_finding_records(
@@ -741,6 +825,170 @@ pub fn apply_patch_paths(patch: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_review_mode_parses_known_values_normal() {
+        // SAFETY: tests run single-threaded per-process for env mutation here;
+        // each case sets then restores the var.
+        for (val, expect_smart, expect_off, expect_always, expect_manual) in [
+            ("smart", true, false, false, false),
+            ("", true, false, false, false),
+            ("off", false, true, false, false),
+            ("0", false, true, false, false),
+            ("always", false, false, true, false),
+            ("on", false, false, true, false),
+            ("manual", false, false, false, true),
+            ("garbage", true, false, false, false),
+        ] {
+            unsafe { std::env::set_var("JFC_AUTO_REVIEW", val) };
+            let mode = auto_review_mode();
+            assert_eq!(matches!(mode, AutoReviewMode::Smart), expect_smart, "{val}");
+            assert_eq!(matches!(mode, AutoReviewMode::Off), expect_off, "{val}");
+            assert_eq!(
+                matches!(mode, AutoReviewMode::Always),
+                expect_always,
+                "{val}"
+            );
+            assert_eq!(
+                matches!(mode, AutoReviewMode::Manual),
+                expect_manual,
+                "{val}"
+            );
+        }
+        unsafe { std::env::remove_var("JFC_AUTO_REVIEW") };
+    }
+
+    #[test]
+    fn normalize_repo_relative_strips_cwd_prefix_robust() {
+        let cwd = Path::new("/home/u/proj");
+        assert_eq!(
+            normalize_repo_relative(cwd, "/home/u/proj/crates/x/Cargo.toml"),
+            "crates/x/Cargo.toml"
+        );
+        // Already-relative passes through.
+        assert_eq!(
+            normalize_repo_relative(cwd, "crates/x/src/lib.rs"),
+            "crates/x/src/lib.rs"
+        );
+        // Outside cwd is left intact.
+        assert_eq!(normalize_repo_relative(cwd, "/etc/hosts"), "/etc/hosts");
+    }
+
+    #[tokio::test]
+    async fn smart_trigger_fires_on_absolute_rust_paths_robust() {
+        let cwd = Path::new("/home/u/proj");
+        // Single absolute .rs path must still trigger the rust branch.
+        let files = vec!["/home/u/proj/crates/x/src/lib.rs".to_owned()];
+        assert!(smart_auto_review_trigger(cwd, &files).await.is_some());
+
+        // Absolute Cargo.toml under a crate dir must trigger (was dead code
+        // before path normalization).
+        let files = vec!["/home/u/proj/crates/x/Cargo.toml".to_owned()];
+        assert!(smart_auto_review_trigger(cwd, &files).await.is_some());
+
+        // Absolute workspace-root Cargo.toml must trigger.
+        let files = vec!["/home/u/proj/Cargo.toml".to_owned()];
+        assert!(smart_auto_review_trigger(cwd, &files).await.is_some());
+
+        // Absolute path under crates/ that isn't .rs must trigger via prefix.
+        let files = vec!["/home/u/proj/crates/x/README.md".to_owned()];
+        assert!(smart_auto_review_trigger(cwd, &files).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn smart_trigger_count_branch_fires_on_three_files_normal() {
+        let cwd = Path::new("/home/u/proj");
+        let files = vec![
+            "/home/u/proj/a.txt".to_owned(),
+            "/home/u/proj/b.txt".to_owned(),
+            "/home/u/proj/c.txt".to_owned(),
+        ];
+        let reason = smart_auto_review_trigger(cwd, &files).await;
+        assert_eq!(reason.as_deref(), Some("changed 3 files"));
+    }
+
+    #[tokio::test]
+    async fn smart_trigger_skips_single_benign_file_robust() {
+        // A lone non-rust, non-sensitive file in a non-git temp dir should not
+        // trigger (no risk tokens, no git diff signal).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let note = tmp.path().join("note.md");
+        tokio::fs::write(&note, "just some prose\n").await.unwrap();
+        let files = vec![note.to_string_lossy().into_owned()];
+        assert!(smart_auto_review_trigger(tmp.path(), &files).await.is_none());
+    }
+
+    #[test]
+    fn auto_review_target_normalizes_and_sorts_normal() {
+        let cwd = Path::new("/home/u/proj");
+        let files = vec![
+            "/home/u/proj/crates/z/src/b.rs".to_owned(),
+            "/home/u/proj/crates/a/src/a.rs".to_owned(),
+        ];
+        let target = auto_review_target(cwd, &files);
+        assert_eq!(
+            target,
+            "current git diff limited to edited files: \
+             crates/a/src/a.rs, crates/z/src/b.rs"
+        );
+    }
+
+    #[test]
+    fn auto_review_target_empty_is_full_diff_normal() {
+        let cwd = Path::new("/home/u/proj");
+        assert_eq!(auto_review_target(cwd, &[]), "current git diff");
+    }
+
+    #[tokio::test]
+    async fn read_tail_string_drops_partial_leading_line_robust() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("findings.jsonl");
+        // Three lines; cap small enough to slice mid-first-line.
+        tokio::fs::write(&path, "AAAAAAAAAA\nBBBB\nCCCC\n")
+            .await
+            .unwrap();
+        let tail = read_tail_string(&path, 10).await.unwrap();
+        // The truncated "AAAA…" head line must be dropped; only whole lines remain.
+        assert!(!tail.contains('A'), "partial line leaked: {tail:?}");
+        assert!(tail.contains("CCCC"));
+    }
+
+    #[tokio::test]
+    async fn load_existing_fingerprints_reads_bounded_tail_robust() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        // Write more findings than the tail window can hold, with a unique
+        // fingerprint per line; only recent ones should load, and the call
+        // must stay bounded regardless of total size.
+        let mut body = String::new();
+        for i in 0..5000 {
+            let rec = ReviewFindingRecord {
+                schema_version: 1,
+                run_id: "r".to_owned(),
+                created_at_ms: 0,
+                fingerprint: format!("fp{i:08}"),
+                duplicate: false,
+                file: Some("src/lib.rs".to_owned()),
+                line: Some(1),
+                severity: None,
+                category: None,
+                summary: None,
+                evidence: None,
+                confidence: None,
+            };
+            body.push_str(&serde_json::to_string(&rec).unwrap());
+            body.push('\n');
+        }
+        tokio::fs::write(dir.join("findings.jsonl"), &body)
+            .await
+            .unwrap();
+        let fps = load_existing_fingerprints(dir).await;
+        assert!(!fps.is_empty(), "should load some recent fingerprints");
+        // The most recent fingerprint must be present...
+        assert!(fps.contains("fp00004999"));
+        // ...and the oldest must have been dropped by the tail bound.
+        assert!(!fps.contains("fp00000000"));
+    }
 
     #[test]
     fn apply_patch_paths_extracts_changed_files_normal() {

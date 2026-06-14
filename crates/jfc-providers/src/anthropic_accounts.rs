@@ -1927,7 +1927,48 @@ async fn write_store(path: &Path, store: &AccountStore) -> anyhow::Result<()> {
         let _ = fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
     }
     fs::rename(&tmp, path).await?;
+    // Best-effort: reap our own leaked temp siblings. Each write uses a unique
+    // `json.tmp-<pid>-<nonce>` name, so a process killed between write and
+    // rename orphans one temp file per interrupted write (the audit found 42).
+    // Only delete siblings older than the safety window so we never race a
+    // concurrent writer's in-flight temp file.
+    sweep_stale_tmp_siblings(path, TMP_SIBLING_MIN_AGE).await;
     Ok(())
+}
+
+/// Minimum age before an orphaned `*.tmp-*` sibling is eligible for cleanup.
+/// Comfortably longer than any real write, so a concurrent writer's in-flight
+/// temp file is never deleted out from under it.
+const TMP_SIBLING_MIN_AGE: Duration = Duration::from_secs(3600);
+
+/// Delete stale atomic-write temp siblings (`<file>.tmp-*`) left behind when a
+/// process died between write and rename. Best-effort; errors are ignored.
+async fn sweep_stale_tmp_siblings(path: &Path, min_age: Duration) {
+    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.tmp-", file_name.to_string_lossy());
+    let Ok(mut entries) = fs::read_dir(parent).await else {
+        return;
+    };
+    let now = SystemTime::now();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        let old_enough = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= min_age);
+        if old_enough {
+            let _ = fs::remove_file(entry.path()).await;
+        }
+    }
 }
 
 async fn mtime_ns(path: &Path) -> anyhow::Result<u128> {
@@ -2105,6 +2146,48 @@ mod tests {
         assert_eq!(a.last_auth_error, None);
         assert_eq!(a.refresh_failure_count, Some(0));
         assert!(a.last_refresh_success_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn write_store_writes_real_file_and_leaves_no_temp_robust() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounts.json");
+        write_store(&path, &AccountStore::default()).await.unwrap();
+        assert!(path.exists(), "real store file must be written");
+        // The write's own temp sibling must have been renamed away.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp sibling should remain");
+    }
+
+    #[tokio::test]
+    async fn sweep_stale_tmp_siblings_respects_min_age_robust() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounts.json");
+        std::fs::write(&path, b"{}").unwrap();
+
+        // Two orphaned temp siblings + one unrelated file.
+        let orphan_a = dir.path().join("accounts.json.tmp-999999-123456789");
+        let orphan_b = dir.path().join("accounts.json.tmp-111111-987654321");
+        let unrelated = dir.path().join("accounts.json");
+        std::fs::write(&orphan_a, b"orphan").unwrap();
+        std::fs::write(&orphan_b, b"orphan").unwrap();
+
+        // min_age = 0 makes every just-created sibling eligible, so both
+        // orphans go and the real store file (no `.tmp-`) is untouched.
+        sweep_stale_tmp_siblings(&path, Duration::ZERO).await;
+        assert!(!orphan_a.exists(), "orphan A should be swept");
+        assert!(!orphan_b.exists(), "orphan B should be swept");
+        assert!(unrelated.exists(), "the real store file must be preserved");
+
+        // With a long min_age, a fresh sibling is preserved.
+        let fresh = dir.path().join("accounts.json.tmp-222222-555555555");
+        std::fs::write(&fresh, b"in-flight").unwrap();
+        sweep_stale_tmp_siblings(&path, Duration::from_secs(3600)).await;
+        assert!(fresh.exists(), "a fresh sibling must be preserved");
     }
 
     // Robust: consecutive failures accumulate (so an operator can see a
