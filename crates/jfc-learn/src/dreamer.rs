@@ -34,6 +34,12 @@ pub enum DreamerTask {
     /// candidate variants against their eval set and select the best. A no-op
     /// unless [`Dreamer::with_prompt_compile`] was set.
     CompilePrompts,
+    /// Mine completed session traces for recurring successful tool-sequences and
+    /// surface scored [`crate::skill_induction::SkillProposal`]s. A no-op unless
+    /// [`Dreamer::with_skill_induction`] was set. Proposals are *surfaced*, never
+    /// silently installed — the agent or user confirms before a SKILL.md is
+    /// written via `jfc_agents::registry::write_agent_skill`.
+    InduceSkills,
 }
 
 /// Configuration for [`DreamerTask::CompilePrompts`]: the candidate variants,
@@ -93,6 +99,20 @@ pub struct Dreamer {
     /// When set, [`DreamerTask::CompilePrompts`] runs the prompt/policy
     /// compiler. `None` makes that task a no-op.
     pub prompt_compile: Option<PromptCompileJob>,
+    /// When set, [`DreamerTask::InduceSkills`] mines these session traces for
+    /// recurring tool-sequences and stores the resulting proposals in
+    /// [`Dreamer::skill_proposals`]. `None` makes that task a no-op.
+    pub skill_induction: Option<SkillInductionJob>,
+    /// Output slot for the most recent [`DreamerTask::InduceSkills`] run — the
+    /// scored proposals to surface to the user / agent for confirmation.
+    pub skill_proposals: std::sync::Mutex<Vec<crate::skill_induction::SkillProposal>>,
+}
+
+/// Configuration for [`DreamerTask::InduceSkills`]: the session traces to mine
+/// and the induction thresholds.
+pub struct SkillInductionJob {
+    pub traces: Vec<crate::skill_induction::SessionTrace>,
+    pub config: crate::skill_induction::InductionConfig,
 }
 
 impl Dreamer {
@@ -101,7 +121,25 @@ impl Dreamer {
             lease_path,
             project_root: None,
             prompt_compile: None,
+            skill_induction: None,
+            skill_proposals: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Builder hook: configure skill induction so [`DreamerTask::InduceSkills`]
+    /// mines the supplied session traces during a cycle.
+    pub fn with_skill_induction(mut self, job: SkillInductionJob) -> Self {
+        self.skill_induction = Some(job);
+        self
+    }
+
+    /// The proposals produced by the most recent [`DreamerTask::InduceSkills`]
+    /// run. Cloned out so callers can surface them without holding the lock.
+    pub fn skill_proposals(&self) -> Vec<crate::skill_induction::SkillProposal> {
+        self.skill_proposals
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Builder hook: configure the prompt/policy compiler so
@@ -145,6 +183,7 @@ impl Dreamer {
                 DreamerTask::Improve => self.improve(),
                 DreamerTask::MaintainDocs => self.maintain_docs(memories),
                 DreamerTask::CompilePrompts => self.compile_prompts(),
+                DreamerTask::InduceSkills => self.induce_skills(),
             };
             let duration_ms = now_ms() - start;
 
@@ -174,6 +213,24 @@ impl Dreamer {
             tasks_run: results,
             circuit_breaker_fired: false,
         })
+    }
+
+    /// InduceSkills: mine the configured session traces for recurring,
+    /// successful tool-sequences and store the scored proposals in
+    /// [`Dreamer::skill_proposals`]. Returns the number of proposals produced
+    /// (the "actions taken" for the cycle report). A no-op returning `Ok(0)`
+    /// when no [`SkillInductionJob`] is configured. Proposals are surfaced, not
+    /// installed — confirmation happens downstream.
+    fn induce_skills(&self) -> Result<usize, LearnError> {
+        let Some(job) = &self.skill_induction else {
+            return Ok(0);
+        };
+        let proposals = crate::skill_induction::induce_skills(&job.traces, &job.config);
+        let count = proposals.len();
+        if let Ok(mut slot) = self.skill_proposals.lock() {
+            *slot = proposals;
+        }
+        Ok(count)
     }
 
     /// CompilePrompts: score the configured candidate prompt/policy variants
@@ -633,6 +690,54 @@ mod tests {
             .unwrap();
         assert_eq!(report.tasks_run[0].actions_taken, 2, "both variants scored");
         assert!(report.tasks_run[0].error.is_none());
+    }
+
+    // Robust: with a configured induction job, InduceSkills mines the traces
+    // and stores proposals (surfaced, not installed). Reports proposal count.
+    #[test]
+    fn induce_skills_surfaces_proposals_robust() {
+        use crate::skill_induction::{InductionConfig, SessionTrace, ToolStep};
+
+        let traces: Vec<SessionTrace> = (0..3)
+            .map(|i| {
+                SessionTrace::new(
+                    format!("s{i}"),
+                    vec![
+                        ToolStep::new("Grep", true),
+                        ToolStep::new("Read", true),
+                        ToolStep::new("Edit", true),
+                    ],
+                )
+            })
+            .collect();
+        let job = SkillInductionJob {
+            traces,
+            config: InductionConfig::default(),
+        };
+        let tmp = TempDir::new().unwrap();
+        let dreamer = Dreamer::new(tmp.path().join("d.lock")).with_skill_induction(job);
+        let mut memories = Vec::new();
+        let report = dreamer
+            .run_cycle(&[DreamerTask::InduceSkills], &mut memories)
+            .unwrap();
+        assert!(report.tasks_run[0].error.is_none());
+        assert!(report.tasks_run[0].actions_taken >= 1, "at least one proposal");
+        let proposals = dreamer.skill_proposals();
+        assert!(proposals.iter().any(|p| p.sequence.len() == 3));
+    }
+
+    // Robust: InduceSkills with no configured job is a clean no-op.
+    #[test]
+    fn induce_skills_noop_without_job_robust() {
+        let tmp = TempDir::new().unwrap();
+        let dreamer = Dreamer::new(tmp.path().join("d.lock"));
+        let mut memories = Vec::new();
+        let report = dreamer
+            .run_cycle(&[DreamerTask::InduceSkills], &mut memories)
+            .unwrap();
+        assert_eq!(report.tasks_run[0].actions_taken, 0);
+        assert!(report.tasks_run[0].error.is_none());
+        assert!(dreamer.skill_proposals().is_empty());
     }
 
     #[test]

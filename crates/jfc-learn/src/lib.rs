@@ -20,6 +20,7 @@ pub mod lifecycle;
 pub mod normalize_hash;
 pub mod project_files;
 pub mod scaffold_detector;
+pub mod skill_induction;
 pub mod skill_usage;
 pub mod trajectory;
 pub mod user_memory;

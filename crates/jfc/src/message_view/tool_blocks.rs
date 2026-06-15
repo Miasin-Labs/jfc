@@ -33,6 +33,11 @@ use super::*;
 pub(super) fn tool_body_line_count(tool: &ToolCall, content_w: usize) -> usize {
     let t = crate::theme::Theme::dark();
     let expanded = tool.display.is_expanded();
+    // AskModel has a bespoke gutter renderer; count its lines directly so the
+    // height index matches what tool_body_lines_themed produces.
+    if let ToolInput::AskModel { model, prompt, .. } = &tool.input {
+        return ask_model_exchange_lines(model, prompt, &tool.output, content_w, t).len();
+    }
     match &tool.output {
         ToolOutput::Empty => 0,
         ToolOutput::Text(s) => {
@@ -178,6 +183,14 @@ pub(super) fn tool_body_lines_themed(
     t: Theme,
     app: Option<&App>,
 ) -> Vec<Line<'static>> {
+    // AskModel renders as an attributed cross-model exchange: the asked
+    // model's reply sits behind a provider-colored side gutter (blue=Claude,
+    // green=GPT, …) with a label + glyph header, so the stream reads as a
+    // conversation between models rather than a flat tool result.
+    if let ToolInput::AskModel { model, prompt, .. } = &tool.input {
+        return ask_model_exchange_lines(model, prompt, &tool.output, content_w, t);
+    }
+
     // Body content branch by tool.output (mirrors render_tool_content_with_skip).
     match &tool.output {
         ToolOutput::Empty => Vec::new(),
@@ -786,6 +799,125 @@ fn tool_status_icon(tool: &ToolCall, t: &Theme) -> (&'static str, Style) {
     }
 }
 
+/// Build the body lines for an `AskModel` cross-model exchange. Renders two
+/// attributed sections behind provider-colored side gutters:
+///
+/// ```text
+/// ┃ › You → Claude
+/// ┃ why is the sky blue?
+/// ║ ▲ GPT
+/// ║ Rayleigh scattering — shorter wavelengths scatter more…
+/// ```
+///
+/// The reply gutter uses the *asked* provider's color/glyph/bar (green=GPT,
+/// blue=Claude, …); the prompt uses a neutral "you" gutter. Attribution is
+/// redundant (color + label + glyph + bar shape) so it survives monochrome
+/// terminals and color-vision deficiency.
+fn ask_model_exchange_lines(
+    model: &str,
+    prompt: &str,
+    output: &ToolOutput,
+    content_w: usize,
+    t: Theme,
+) -> Vec<Line<'static>> {
+    let reply_style = provider_style_for_model(model);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── Sent prompt (neutral "you" gutter) ──────────────────────────────
+    let sent_bar = "▏";
+    let sent_color = t.text_secondary;
+    lines.push(Line::from(vec![
+        Span::styled(format!("{sent_bar} "), Style::default().fg(sent_color)),
+        Span::styled(
+            format!("› You → {}", reply_style.label),
+            Style::default().fg(sent_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    for chunk in gutter_wrap(prompt, sent_bar, sent_color, content_w, t.text_muted) {
+        lines.push(chunk);
+    }
+
+    // ── Reply (asked provider's colored gutter) ─────────────────────────
+    let reply_text = match output {
+        ToolOutput::Text(s) => s.clone(),
+        ToolOutput::LargeText(lt) => lt.content.clone(),
+        ToolOutput::Empty => String::new(),
+        other => format!("{other:?}"),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{} ", reply_style.bar),
+            Style::default().fg(reply_style.color),
+        ),
+        Span::styled(
+            format!("{} {}", reply_style.glyph, reply_style.label),
+            Style::default()
+                .fg(reply_style.color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if reply_text.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", reply_style.bar),
+                Style::default().fg(reply_style.color),
+            ),
+            Span::styled(
+                "(awaiting reply…)".to_owned(),
+                Style::default()
+                    .fg(t.text_muted)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    } else {
+        for chunk in gutter_wrap(
+            &reply_text,
+            reply_style.bar,
+            reply_style.color,
+            content_w,
+            t.text_secondary,
+        ) {
+            lines.push(chunk);
+        }
+    }
+
+    lines
+}
+
+/// Wrap `text` to `content_w`, prefixing every wrapped continuation line with
+/// a colored gutter `bar` so the side bar persists down the whole block (a
+/// `Block` border can't repeat per logical line inside a `Paragraph`). Caps at
+/// 80 lines to match the other body renderers.
+fn gutter_wrap(
+    text: &str,
+    bar: &str,
+    bar_color: ratatui::style::Color,
+    content_w: usize,
+    text_color: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    let inner_w = content_w.saturating_sub(2).max(1);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut count = 0usize;
+    'outer: for raw in text.lines() {
+        let clean = sanitize_terminal_text(raw);
+        for chunk in markdown::hard_wrap_str(&clean, inner_w) {
+            if count >= 80 {
+                out.push(Line::from(Span::styled(
+                    format!("{bar} … more · press o to expand"),
+                    Style::default().fg(bar_color),
+                )));
+                break 'outer;
+            }
+            out.push(Line::from(vec![
+                Span::styled(format!("{bar} "), Style::default().fg(bar_color)),
+                Span::styled(chunk, Style::default().fg(text_color)),
+            ]));
+            count += 1;
+        }
+    }
+    out
+}
+
 /// Distinct accent color per tool kind. The gutter bar and tool name
 /// span both pick this color (mixed with status state for Running /
 /// Failed) so the user can spot at a glance "this is a Bash" vs
@@ -889,6 +1021,115 @@ pub fn tool_kind_color(kind: &ToolKind, t: &Theme) -> ratatui::style::Color {
         // from a normal Generic row.
         ToolKind::UnknownTool { .. } => t.text_muted,
     }
+}
+
+/// Visual identity for a model provider, used to attribute cross-model
+/// exchanges (AskModel results, heterogeneous teammate messages) in the
+/// stream. Per the accessibility research, attribution must be redundant —
+/// color ALONE fails ~8% of users (color-vision deficiency) — so every
+/// provider carries three independent channels: a `color`, a non-color
+/// `glyph`, and a distinctly-shaped `bar` character for the side gutter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderStyle {
+    /// Human-facing short label, e.g. "Claude", "GPT".
+    pub label: &'static str,
+    /// Gutter / accent color (ignored under NO_COLOR; glyph+bar+label carry it).
+    pub color: ratatui::style::Color,
+    /// Non-color sigil shown in the header, distinct per provider family.
+    pub glyph: &'static str,
+    /// Side-bar character — shape differs per provider so the gutter is
+    /// distinguishable in monochrome, not just by hue.
+    pub bar: &'static str,
+}
+
+/// Provider family a model belongs to. Owns both its classification (from a
+/// bare or `provider/`-qualified model id) and its visual identity, so callers
+/// never branch on stringly-typed provider names. Enums-over-strings keeps the
+/// "which model family is this" decision in one exhaustive place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFamily {
+    Anthropic,
+    OpenAI,
+    Gemini,
+    Other,
+}
+
+impl ProviderFamily {
+    /// Classify a model id (e.g. "claude-opus-4-7", "openai/gpt-5.5",
+    /// "gpt-5.5", "gemini-2.5-pro"). Matches an explicit `provider/` prefix
+    /// first, then falls back to model-name heuristics.
+    pub fn classify(model: &str) -> Self {
+        let lower = model.to_ascii_lowercase();
+        let (prefix, bare) = match lower.split_once('/') {
+            Some((p, b)) => (p, b),
+            None => ("", lower.as_str()),
+        };
+
+        if prefix == "anthropic"
+            || prefix == "anthropic-oauth"
+            || bare.starts_with("claude-")
+            || bare.starts_with("fable")
+            || bare.starts_with("mythos")
+        {
+            Self::Anthropic
+        } else if prefix == "openai"
+            || prefix == "codex"
+            || bare.starts_with("gpt-")
+            || bare.starts_with("o1")
+            || bare.starts_with("o3")
+            || bare.starts_with("o4")
+            || bare.contains("codex")
+        {
+            Self::OpenAI
+        } else if prefix == "gemini" || prefix == "antigravity" || bare.starts_with("gemini") {
+            Self::Gemini
+        } else {
+            Self::Other
+        }
+    }
+
+    /// The redundant (color + label + glyph + bar-shape) visual identity for
+    /// this family — see [`ProviderStyle`] for why all four channels exist.
+    pub fn style(self) -> ProviderStyle {
+        use ratatui::style::Color;
+        match self {
+            Self::Anthropic => ProviderStyle {
+                label: "Claude",
+                color: Color::Rgb(120, 180, 255), // Anthropic blue gutter
+                glyph: "◆",
+                bar: "┃",
+            },
+            Self::OpenAI => ProviderStyle {
+                label: "GPT",
+                color: Color::Rgb(120, 220, 150), // OpenAI green gutter
+                glyph: "▲",
+                bar: "║",
+            },
+            Self::Gemini => ProviderStyle {
+                label: "Gemini",
+                color: Color::Rgb(190, 160, 250), // violet gutter
+                glyph: "●",
+                bar: "█",
+            },
+            Self::Other => ProviderStyle {
+                label: "Model",
+                color: Color::Rgb(200, 200, 200),
+                glyph: "◇",
+                bar: "▏",
+            },
+        }
+    }
+}
+
+impl From<&str> for ProviderFamily {
+    fn from(model: &str) -> Self {
+        Self::classify(model)
+    }
+}
+
+/// Convenience wrapper: classify a model id and return its [`ProviderStyle`].
+pub fn provider_style_for_model(model: &str) -> ProviderStyle {
+    ProviderFamily::classify(model).style()
 }
 
 /// 4-frame star-burst rotation used for Running tools — same shape family
