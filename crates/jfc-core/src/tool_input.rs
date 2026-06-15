@@ -354,6 +354,7 @@ macro_rules! for_each_regular_tool_input {
             Research => { question: req_str @ "question", export: bool_field @ "export" }
             Council => { question: req_str @ "question", models: str_vec @ "models" }
             AskModel => { model: req_str @ "model", prompt: req_str @ "prompt", system: opt_str @ "system" }
+            SkillCreate => { name: req_str @ "name", description: req_str @ "description", body: req_str @ "body" }
         }
     };
 }
@@ -882,6 +883,11 @@ pub enum ToolInput {
         prompt: String,
         system: Option<String>,
     },
+    SkillCreate {
+        name: String,
+        description: String,
+        body: String,
+    },
     Generic {
         summary: String,
     },
@@ -1213,6 +1219,7 @@ impl ToolInput {
                 let preview: String = prompt.chars().take(50).collect();
                 format!("ask {model}: {preview}")
             }
+            Self::SkillCreate { name, .. } => format!("skill create: {name}"),
         }
     }
 
@@ -2357,6 +2364,31 @@ mod macro_equivalence_tests {
         assert_eq!(ToolKind::from_name("ask_model"), ToolKind::AskModel);
         assert_eq!(ToolKind::from_name("ask"), ToolKind::AskModel);
         assert_eq!(ToolKind::AskModel.api_name(), "ask_model");
+    }
+
+    #[test]
+    fn skill_create_parses_normal() {
+        let input = ToolInput::from_value(
+            "SkillCreate",
+            json!({"name": "rust-crate-bump", "description": "bump a crate version", "body": "1. edit Cargo.toml\n2. cargo update"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            input,
+            ToolInput::SkillCreate { ref name, ref description, ref body }
+                if name == "rust-crate-bump"
+                    && description == "bump a crate version"
+                    && body.contains("Cargo.toml")
+        ));
+        assert!(input.summary().contains("skill create: rust-crate-bump"));
+        assert_eq!(ToolKind::from_name("create_skill"), ToolKind::SkillCreate);
+        assert_eq!(ToolKind::SkillCreate.api_name(), "skill_create");
+    }
+
+    #[test]
+    fn skill_create_requires_all_fields_robust() {
+        assert!(ToolInput::from_value("SkillCreate", json!({"name": "x", "description": "d"})).is_err());
+        assert!(ToolInput::from_value("SkillCreate", json!({"name": "x", "body": "b"})).is_err());
     }
 
     #[test]

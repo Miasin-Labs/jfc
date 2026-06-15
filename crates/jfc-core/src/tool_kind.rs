@@ -99,6 +99,7 @@ pub enum ToolKind {
     Research,
     Council,
     AskModel,
+    SkillCreate,
     ServerWebSearch,
     ServerCodeExecution,
     ServerAdvisor,
@@ -272,6 +273,7 @@ impl ToolKind {
             Self::Research => ["research", "deep_research"],
             Self::Council => ["council", "model_council"],
             Self::AskModel => ["ask_model", "askmodel", "ask"],
+            Self::SkillCreate => ["skill_create", "skillcreate", "create_skill"],
         )
     }
 
@@ -409,6 +411,7 @@ impl ToolKind {
             Self::Research => "Research",
             Self::Council => "Council",
             Self::AskModel => "AskModel",
+            Self::SkillCreate => "SkillCreate",
             Self::ServerWebSearch => "ServerWebSearch",
             Self::ServerCodeExecution => "ServerCodeExecution",
             Self::ServerAdvisor => "ServerAdvisor",
@@ -541,6 +544,7 @@ impl ToolKind {
             Self::Research => "research",
             Self::Council => "council",
             Self::AskModel => "ask_model",
+            Self::SkillCreate => "skill_create",
             Self::ServerWebSearch => "server_tool_use:web_search",
             Self::ServerCodeExecution => "server_tool_use:code_execution",
             Self::ServerAdvisor => "server_tool_use:advisor",

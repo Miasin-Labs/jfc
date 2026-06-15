@@ -1405,6 +1405,21 @@ pub async fn execute_tool(
                  resolve the requested provider/model from the registry."
                 .to_string(),
         ),
+        (
+            ToolKind::SkillCreate,
+            ToolInput::SkillCreate {
+                name,
+                description,
+                body,
+            },
+        ) => match jfc_agents::write_agent_skill(&cwd, &name, &description, &body) {
+            Ok(path) => ExecutionResult::success(format!(
+                "Created skill `{name}` at {}. It is now loadable via the Skill tool. \
+                 (provenance: created-by: agent)",
+                path.display()
+            )),
+            Err(e) => ExecutionResult::failure(format!("SkillCreate failed: {e}")),
+        },
         (ToolKind::ConnectGitHub, ToolInput::ConnectGitHub {}) => ExecutionResult::failure(
             "ConnectGitHub is not supported in this environment. \
                  Use `gh auth login` via the Bash tool instead."
