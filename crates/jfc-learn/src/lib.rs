@@ -18,6 +18,7 @@ pub mod error;
 pub mod historian;
 pub mod key_files;
 pub mod lifecycle;
+pub mod next_task;
 pub mod normalize_hash;
 pub mod project_files;
 pub mod provision;
