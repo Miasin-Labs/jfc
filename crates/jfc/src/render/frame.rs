@@ -239,9 +239,10 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
 
-    // TODO: Wire sidebar_progress to App animation fields once Agent A adds them.
-    // For now, snap to 0.0/1.0 so the ease_out_cubic path is exercised but
-    // the visual result is identical to the old binary toggle.
+    // Sidebar animation: currently snaps (0.0/1.0). To animate, add
+    // `sidebar_anim_target: f32` and `sidebar_anim_current: f32` fields to
+    // App, lerp `sidebar_anim_current` toward `sidebar_anim_target` on each
+    // tick, and use `sidebar_anim_current` here. Low priority — snap feels fine.
     // The right info sidebar is gone entirely — Context, the git diff
     // stat (Δ), and MCP/LSP health all live in the status bar now, so a
     // whole column of chrome bought nothing. The left sessions sidebar

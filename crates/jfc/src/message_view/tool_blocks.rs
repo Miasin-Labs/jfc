@@ -25,6 +25,7 @@ use super::syntax::{
     produce_highlighted_with_line_numbers_line_count, produce_highlighted_with_line_numbers_lines,
 };
 use super::tool_height::tool_block_height;
+use super::detection::detect_background_task_notification;
 use super::*;
 
 /// Count the rows produced by `tool_body_lines_themed` without constructing
@@ -35,6 +36,10 @@ pub(super) fn tool_body_line_count(tool: &ToolCall, content_w: usize) -> usize {
     match &tool.output {
         ToolOutput::Empty => 0,
         ToolOutput::Text(s) => {
+            // Compact render for background task notifications
+            if detect_background_task_notification(s).is_some() {
+                return 1;
+            }
             if let Some(lang) = infer_lang_from_tool(tool) {
                 produce_highlighted_with_line_numbers_line_count(
                     &lang,
@@ -68,6 +73,10 @@ pub(super) fn tool_body_line_count(tool: &ToolCall, content_w: usize) -> usize {
             stderr,
             exit_code,
         } => {
+            // Compact render for background task notifications
+            if detect_background_task_notification(stdout).is_some() {
+                return 1;
+            }
             let cmd_str = match &tool.input {
                 ToolInput::Bash { command, .. } => command.as_str(),
                 _ => "",
@@ -173,6 +182,16 @@ pub(super) fn tool_body_lines_themed(
     match &tool.output {
         ToolOutput::Empty => Vec::new(),
         ToolOutput::Text(s) => {
+            // Compact render for background task notifications — show a
+            // single muted line instead of the full infrastructure block.
+            if let Some(task_id) = detect_background_task_notification(s) {
+                return vec![Line::from(Span::styled(
+                    format!("⏳ backgrounded → {task_id}"),
+                    Style::default()
+                        .fg(t.text_muted)
+                        .add_modifier(Modifier::ITALIC),
+                ))];
+            }
             let lang = infer_lang_from_tool(tool);
             if let Some(lang) = lang.as_deref() {
                 let diag_lines = if matches!(tool.kind, ToolKind::Read) {
@@ -247,6 +266,15 @@ pub(super) fn tool_body_lines_themed(
             stderr,
             exit_code,
         } => {
+            // Compact render for background task notifications
+            if let Some(task_id) = detect_background_task_notification(stdout) {
+                return vec![Line::from(Span::styled(
+                    format!("⏳ backgrounded → {task_id}"),
+                    Style::default()
+                        .fg(t.text_muted)
+                        .add_modifier(Modifier::ITALIC),
+                ))];
+            }
             let cmd_str = match &tool.input {
                 ToolInput::Bash { command, .. } => command.as_str(),
                 _ => "",

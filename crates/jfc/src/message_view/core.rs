@@ -465,6 +465,12 @@ impl Widget for MessageView<'_> {
 
 pub enum RenderItem<'a> {
     TextLine(Line<'a>),
+    /// Attachment placeholder block (image or PDF) with metadata.
+    AttachmentBlock {
+        kind: jfc_core::AttachmentKind,
+        size_bytes: usize,
+        id: u32,
+    },
     /// Carries `&App` so the renderer can read `ctx.diagnostics`
     /// when rendering a Read result — without piping the whole App
     /// through the render-stack as a separate parameter at every
@@ -526,6 +532,7 @@ impl<'a> RenderItem<'a> {
             }
             RenderItem::ToolBlock(tool) => tool_block_height(tool, width),
             RenderItem::ToolGroup { .. } => 1,
+            RenderItem::AttachmentBlock { .. } => 1,
             // Scope markers occupy no rows — they only affect the
             // surrounding draw context (gutter color, bg tint).
             RenderItem::MessageStart { .. } | RenderItem::MessageEnd => 0,
@@ -545,6 +552,42 @@ impl<'a> RenderItem<'a> {
             }
             RenderItem::ToolBlock(tool) => {
                 render_tool_block(app, tool, area, t, buf, skip);
+            }
+            RenderItem::AttachmentBlock { kind, size_bytes, id } => {
+                if skip > 0 || area.height == 0 {
+                    return;
+                }
+                let (icon, label) = match kind {
+                    jfc_core::AttachmentKind::ImagePng => ("🖼", "PNG"),
+                    jfc_core::AttachmentKind::ImageJpeg => ("🖼", "JPEG"),
+                    jfc_core::AttachmentKind::ImageGif => ("🖼", "GIF"),
+                    jfc_core::AttachmentKind::ImageWebp => ("🖼", "WebP"),
+                    jfc_core::AttachmentKind::ApplicationPdf => ("📄", "PDF"),
+                };
+                let size_display = if *size_bytes >= 1_000_000 {
+                    format!("{:.1}MB", *size_bytes as f64 / 1_000_000.0)
+                } else if *size_bytes >= 1_000 {
+                    format!("{}KB", size_bytes / 1000)
+                } else {
+                    format!("{}B", size_bytes)
+                };
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("  {icon} "),
+                        Style::default().fg(t.accent),
+                    ),
+                    Span::styled(
+                        format!("[{label} #{id}]"),
+                        Style::default().fg(t.text_secondary),
+                    ),
+                    Span::styled(
+                        format!(" {size_display}"),
+                        Style::default().fg(t.text_muted),
+                    ),
+                ]);
+                Paragraph::new(line)
+                    .style(Style::default().bg(t.bg))
+                    .render(area, buf);
             }
             RenderItem::ToolGroup {
                 kind_label,
@@ -867,6 +910,19 @@ pub(crate) fn build_message_items<'a>(
         };
         if !suppress_label {
             items.push(RenderItem::TextLine(label_line));
+        }
+
+        // Push attachment placeholders for user messages. These render as
+        // one-line blocks showing type + size, letting the user see their
+        // pasted images/PDFs in the transcript.
+        if msg.role == Role::User {
+            for att in &msg.attachments {
+                items.push(RenderItem::AttachmentBlock {
+                    kind: att.kind,
+                    size_bytes: att.bytes.len(),
+                    id: att.id,
+                });
+            }
         }
 
         // Default: expanded only while this block is the actively-streaming

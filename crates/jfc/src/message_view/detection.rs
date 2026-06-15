@@ -30,6 +30,27 @@ pub(super) fn looks_like_git_diff_output(text: &str) -> bool {
 /// like `src/main.rs --- 1/3 --- Rust` or
 /// `src/main.rs --- Text (exceeded DFT_GRAPH_LIMIT)` and then emits aligned
 /// old/new columns. Treat this as preformatted diff output rather than code.
+/// Detect background-task-started notifications. These are infrastructure
+/// messages the model needs (task_id, output_file) but the user doesn't need
+/// to see in full — they clutter the transcript. Returns the task_id if this
+/// is a background notification, for compact rendering.
+pub(super) fn detect_background_task_notification(text: &str) -> Option<&str> {
+    // Pattern: starts with "Command exceeded..." or ends with
+    // "Use BashOutput with..." and contains "task_id:" line.
+    let is_bg_notice = text.contains("was moved to the background")
+        || text.contains("Use BashOutput with");
+    if !is_bg_notice {
+        return None;
+    }
+    // Extract task_id from "task_id: bash_abc123" line
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("task_id:") {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 pub(super) fn looks_like_difftastic_output(text: &str) -> bool {
     for raw in text.lines().take(40) {
         let line = sanitize_terminal_text(raw);
