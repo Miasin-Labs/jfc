@@ -41,7 +41,11 @@ pub(super) async fn cmd_compact(
     // with the live gauge and could show "0%" for a session the
     // sidebar reports as 90%-full.
     let est = state.tool_ctx.approx_tokens;
-    let level = crate::compact::compact_level(est, state.max_context_tokens);
+    let level = crate::compact::compact_level_with_output(
+        est,
+        state.max_context_tokens,
+        state.max_output_tokens,
+    );
     let pct = (est * 100)
         .checked_div(state.max_context_tokens)
         .map_or(0, |p| p.min(999));

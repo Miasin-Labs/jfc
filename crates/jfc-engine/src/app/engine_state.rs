@@ -632,6 +632,10 @@ pub struct EngineState {
     /// EndTurn responses on prompts that were expected to call tools.
     pub current_stream_request: Option<StreamRequestMetadata>,
     pub max_context_tokens: usize,
+    /// Max output tokens for the current model. Used by compact threshold
+    /// calculation to match CC 177's behavior (subtract min(output, 20k) from
+    /// window before applying headroom).
+    pub max_output_tokens: Option<usize>,
     /// Set by `/compact` slash command. Picked up by the main loop next time
     /// it would otherwise check `compact::should_compact` — forces compaction
     /// regardless of token level. Cleared after the compact runs (success or
@@ -1130,6 +1134,7 @@ impl EngineState {
             compacting_attempt_baseline: 0,
             compacting_last_progress: 0,
             max_context_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            max_output_tokens: None,
             provider_models: HashMap::new(),
             seat_tier: None,
             subscription_type: None,
@@ -1725,7 +1730,10 @@ impl EngineState {
 
     pub fn sync_selected_context_window(&mut self) {
         let old = self.max_context_tokens;
+        let old_output = self.max_output_tokens;
         self.max_context_tokens = self.selected_context_window_tokens();
+        // Also sync max_output_tokens — used by compact threshold calculation.
+        self.max_output_tokens = self.selected_model_info().and_then(|m| m.max_output_tokens);
         // When the model/provider changes, re-estimate token count. But if
         // we already have a usage-based estimate from a loaded session
         // (recompute_token_estimate found a message with `usage`), prefer
@@ -1749,6 +1757,8 @@ impl EngineState {
             target: "jfc::app",
             old_max_context_tokens = old,
             new_max_context_tokens = self.max_context_tokens,
+            old_max_output_tokens = ?old_output,
+            new_max_output_tokens = ?self.max_output_tokens,
             approx_tokens = self.tool_ctx.approx_tokens,
             has_usage_based_estimate,
             model = %self.model,

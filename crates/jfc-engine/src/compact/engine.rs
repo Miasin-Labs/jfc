@@ -1128,6 +1128,7 @@ fn insert_restored_files(compacted: &mut Vec<ChatMessage>, restored_files: &[Str
 #[cfg(test)]
 mod level_tests {
     use super::*;
+    use crate::compact::{compact_level_with_output, compact_threshold_with_output};
 
     const W: usize = 200_000;
 
@@ -1159,32 +1160,38 @@ mod level_tests {
     }
 
     #[test]
-    fn threshold_default_is_window_minus_13k_normal() {
+    fn threshold_default_is_window_minus_output_headroom_minus_13k_normal() {
         let _g = lock();
         clear_env();
-        assert_eq!(compact_threshold(W), 187_000);
-        assert_eq!(compact_threshold(1_000_000), 987_000);
+        // v177 parity: effective_window = window - min(max_output, 20k)
+        // With None (default 20k): threshold = (200k - 20k) - 13k = 167k
+        assert_eq!(compact_threshold(W), 167_000);
+        // 1M window: (1M - 20k) - 13k = 967k
+        assert_eq!(compact_threshold(1_000_000), 967_000);
     }
 
     #[test]
-    fn levels_match_v126_at_each_boundary_normal() {
+    fn levels_match_v177_at_each_boundary_normal() {
         let _g = lock();
         clear_env();
-        // ok zone (below 80% of compact threshold)
-        // compact threshold = 187K, 80% = 149_600
+        // v177 parity: effective_window = 200k - 20k = 180k
+        // compact threshold = 180k - 13k = 167k
+        // warn = compact - 20k = 147k
+        // blocked = effective_window - 3k = 177k
+        // precompute = 80% of compact = 133_600
         assert_eq!(compact_level(0, W), CompactLevel::Ok);
-        assert_eq!(compact_level(149_599, W), CompactLevel::Ok);
-        // precompute at 80% of compact threshold ≈ 149_600
-        assert_eq!(compact_level(149_600, W), CompactLevel::Precompute);
-        assert_eq!(compact_level(166_999, W), CompactLevel::Precompute);
-        // warn at compact - 20K = 167K
-        assert_eq!(compact_level(167_000, W), CompactLevel::Warn);
-        assert_eq!(compact_level(186_999, W), CompactLevel::Warn);
-        // compact at window - 13K = 187K
-        assert_eq!(compact_level(187_000, W), CompactLevel::Compact);
-        assert_eq!(compact_level(196_999, W), CompactLevel::Compact);
-        // blocked at window - 3K = 197K
-        assert_eq!(compact_level(197_000, W), CompactLevel::Blocked);
+        assert_eq!(compact_level(133_599, W), CompactLevel::Ok);
+        // precompute at 80% of compact threshold ≈ 133_600
+        assert_eq!(compact_level(133_600, W), CompactLevel::Precompute);
+        assert_eq!(compact_level(146_999, W), CompactLevel::Precompute);
+        // warn at compact - 20K = 147K
+        assert_eq!(compact_level(147_000, W), CompactLevel::Warn);
+        assert_eq!(compact_level(166_999, W), CompactLevel::Warn);
+        // compact at effective_window - 13K = 167K
+        assert_eq!(compact_level(167_000, W), CompactLevel::Compact);
+        assert_eq!(compact_level(176_999, W), CompactLevel::Compact);
+        // blocked at effective_window - 3K = 177K
+        assert_eq!(compact_level(177_000, W), CompactLevel::Blocked);
         assert_eq!(compact_level(W + 999, W), CompactLevel::Blocked);
     }
 
@@ -1197,16 +1204,14 @@ mod level_tests {
         unsafe {
             std::env::set_var("JFC_AUTOCOMPACT_PCT_OVERRIDE", "50");
         }
-        // pct=50 → compact at 100K (min of 50% and the default base of 187K).
-        // warn = compact - 20K = 80K; blocked = window - 3K = 197K. Verify each
-        // band including the boundary just below compact (which falls in warn,
-        // not ok, since lowering compact pulls warn down with it).
-        assert_eq!(compact_threshold(W), 100_000);
-        assert_eq!(compact_level(79_999, W), CompactLevel::Ok);
-        assert_eq!(compact_level(80_000, W), CompactLevel::Warn);
-        assert_eq!(compact_level(99_999, W), CompactLevel::Warn);
-        assert_eq!(compact_level(100_000, W), CompactLevel::Compact);
-        assert_eq!(compact_level(197_000, W), CompactLevel::Blocked);
+        // pct=50 → effective = 180k, 50% = 90k (min of 90k and base 167k).
+        // warn = compact - 20K = 70K; blocked = effective - 3K = 177K.
+        assert_eq!(compact_threshold(W), 90_000);
+        assert_eq!(compact_level(69_999, W), CompactLevel::Ok);
+        assert_eq!(compact_level(70_000, W), CompactLevel::Warn);
+        assert_eq!(compact_level(89_999, W), CompactLevel::Warn);
+        assert_eq!(compact_level(90_000, W), CompactLevel::Compact);
+        assert_eq!(compact_level(177_000, W), CompactLevel::Blocked);
         clear_env();
     }
 
@@ -1218,8 +1223,8 @@ mod level_tests {
         unsafe {
             std::env::set_var("JFC_AUTOCOMPACT_PCT_OVERRIDE", "99");
         }
-        // 99% of 200K = 198K, but compact base = 187K → min wins.
-        assert_eq!(compact_threshold(W), 187_000);
+        // 99% of effective_window (180K) = 178.2K, but compact base = 167K → min wins.
+        assert_eq!(compact_threshold(W), 167_000);
         clear_env();
     }
 
@@ -1231,12 +1236,12 @@ mod level_tests {
         unsafe {
             std::env::set_var("JFC_DISABLE_AUTO_COMPACT", "1");
         }
-        // Even at 195K (would be compact), level should fall back to warn —
+        // Even at 170K (would be compact at 167k), level should fall back to warn —
         // user disabled auto-compact, but blocked still applies (it's a hard
         // API constraint, not a preference).
-        assert_eq!(compact_level(195_000, W), CompactLevel::Warn);
-        // Blocked still applies though.
-        assert_eq!(compact_level(198_000, W), CompactLevel::Blocked);
+        assert_eq!(compact_level(170_000, W), CompactLevel::Warn);
+        // Blocked still applies though (at effective_window - 3k = 177k).
+        assert_eq!(compact_level(177_000, W), CompactLevel::Blocked);
         clear_env();
     }
 
@@ -1244,11 +1249,13 @@ mod level_tests {
     fn small_window_saturates_without_underflow_robust() {
         let _g = lock();
         clear_env();
-        // A 5K window can't even hold 13K headroom — saturating arithmetic
-        // means the compact threshold collapses to 0 (everything is "compact"
-        // territory). Importantly: no panic, no underflow.
+        // A 5K window can't even hold 20K output headroom — saturating arithmetic
+        // collapses effective_window to 0, then compact and blocked thresholds
+        // also collapse to 0. Everything is "blocked" territory.
+        // Importantly: no panic, no underflow.
         assert_eq!(compact_threshold(5_000), 0);
-        assert_eq!(compact_level(1, 5_000), CompactLevel::Compact);
+        // At 1 token with all thresholds at 0, we're in Blocked territory.
+        assert_eq!(compact_level(1, 5_000), CompactLevel::Blocked);
     }
 
     #[test]
@@ -1609,10 +1616,10 @@ mod level_tests {
     fn should_compact_fires_at_compact_threshold_normal() {
         let _g = lock();
         clear_env();
-        // Compact threshold for 200K window = 187K.
-        assert!(!should_compact(186_999, W));
-        assert!(should_compact(187_000, W));
-        assert!(should_compact(199_000, W));
+        // v177: effective = 180K, compact threshold = 167K.
+        assert!(!should_compact(166_999, W));
+        assert!(should_compact(167_000, W));
+        assert!(should_compact(180_000, W));
     }
 
     // Robust: when auto-compact is disabled, should_compact only fires at
@@ -1625,9 +1632,10 @@ mod level_tests {
         unsafe {
             std::env::set_var("JFC_DISABLE_AUTO_COMPACT", "1");
         }
-        assert!(!should_compact(195_000, W));
-        // Blocked still fires regardless of disable.
-        assert!(should_compact(198_000, W));
+        // At 170K, would be Compact normally, but disabled → Warn.
+        assert!(!should_compact(170_000, W));
+        // Blocked at effective_window - 3k = 177k still fires regardless.
+        assert!(should_compact(177_000, W));
         clear_env();
     }
 
@@ -1674,17 +1682,65 @@ mod level_tests {
         unsafe {
             std::env::set_var("JFC_AUTOCOMPACT_PCT_OVERRIDE", "not-a-number");
         }
-        assert_eq!(compact_threshold(W), 187_000);
+        assert_eq!(compact_threshold(W), 167_000);
         unsafe {
             std::env::set_var("JFC_AUTOCOMPACT_PCT_OVERRIDE", "0");
         }
-        assert_eq!(compact_threshold(W), 187_000);
+        assert_eq!(compact_threshold(W), 167_000);
         unsafe {
             std::env::set_var("JFC_AUTOCOMPACT_PCT_OVERRIDE", "200");
         }
         // Out of range — ignored.
-        assert_eq!(compact_threshold(W), 187_000);
+        assert_eq!(compact_threshold(W), 167_000);
         clear_env();
+    }
+
+    // Normal: v177 parity — explicit max_output_tokens affects threshold.
+    #[test]
+    fn threshold_with_explicit_output_matches_cc177_normal() {
+        let _g = lock();
+        clear_env();
+        // CC 177 formula: Q9H = window - min(maxOutput, 20k), mu8 = Q9H - 13k
+        // With explicit 64k output (capped to 20k): (200k - 20k) - 13k = 167k
+        assert_eq!(compact_threshold_with_output(W, Some(64_000)), 167_000);
+        // With explicit 8k output: (200k - 8k) - 13k = 179k
+        assert_eq!(compact_threshold_with_output(W, Some(8_000)), 179_000);
+        // With explicit 0 output: (200k - 0) - 13k = 187k
+        assert_eq!(compact_threshold_with_output(W, Some(0)), 187_000);
+        // With None (defaults to 20k cap): (200k - 20k) - 13k = 167k
+        assert_eq!(compact_threshold_with_output(W, None), 167_000);
+    }
+
+    // Normal: v177 parity — compact_level_with_output uses the correct effective window.
+    #[test]
+    fn level_with_output_uses_correct_thresholds_normal() {
+        let _g = lock();
+        clear_env();
+        // Model with 8k output: effective = 200k - 8k = 192k
+        // compact = 192k - 13k = 179k
+        // precompute = 80% of 179k = 143_200
+        // warn = 179k - 20k = 159k
+        // blocked = 192k - 3k = 189k
+        assert_eq!(
+            compact_level_with_output(143_199, W, Some(8_000)),
+            CompactLevel::Ok
+        );
+        assert_eq!(
+            compact_level_with_output(143_200, W, Some(8_000)),
+            CompactLevel::Precompute
+        );
+        assert_eq!(
+            compact_level_with_output(159_000, W, Some(8_000)),
+            CompactLevel::Warn
+        );
+        assert_eq!(
+            compact_level_with_output(179_000, W, Some(8_000)),
+            CompactLevel::Compact
+        );
+        assert_eq!(
+            compact_level_with_output(189_000, W, Some(8_000)),
+            CompactLevel::Blocked
+        );
     }
 
     // Normal: estimate_group_tokens of a single-message group equals

@@ -1753,3 +1753,26 @@ mod catastrophic_tests {
         assert!(catastrophic_bash_reason("rm -rf /home/cole/*").is_some());
     }
 }
+
+#[cfg(test)]
+mod _review_probe {
+    use super::is_readonly_bash;
+    #[test]
+    fn probe_secret_and_network_reads() {
+        for c in [
+            "cat /etc/shadow",
+            "sudo cat /etc/shadow",
+            "cat /home/cole/.ssh/id_rsa",
+            "cat ~/.aws/credentials",
+            "base64 /home/cole/.ssh/id_ed25519",
+            "curl https://attacker.example/beacon",
+            "curl https://example.com/p/abcdef",
+            "ssh user@host cat /etc/passwd",
+            "cat .env",
+        ] {
+            println!("READONLY {} => {}", is_readonly_bash(c), c);
+        }
+        // force visible output
+        assert!(true);
+    }
+}

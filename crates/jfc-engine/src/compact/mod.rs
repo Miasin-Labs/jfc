@@ -33,18 +33,27 @@ pub const CIRCUIT_BREAKER_LIMIT: u32 = 3;
 /// which made the breaker trip one turn earlier than upstream.
 pub const THRASH_TURN_WINDOW: u32 = 3;
 
-// v126 threshold algorithm — `gG6` / `ZB7` in cli.js (lines 397177-397203).
-// The model's nominal window minus three headrooms gives three trigger levels.
-// Using fixed token offsets (not percentages) keeps behavior consistent across
-// 200K and 1M-context models — the buffer needed for the next user turn + the
-// outgoing compaction summary doesn't scale with window size.
+// v177 threshold algorithm — `Q9H` / `mu8` / `ZB7` in cli.js.
+// The model's nominal window minus output headroom gives the effective window,
+// then three headrooms from that give the trigger levels. Using fixed token
+// offsets (not percentages) keeps behavior consistent across 200K and 1M-context
+// models — the buffer needed for the next user turn + the outgoing compaction
+// summary doesn't scale with window size.
 //
-//   tokens >= window - BLOCKED_HEADROOM → can't even submit; force compact
-//   tokens >= window - COMPACT_HEADROOM → auto-compact triggers (this turn)
-//   tokens >= window - WARN_HEADROOM    → UI warning, no action
+// Step 1 (Q9H): effective_window = window - min(max_output_tokens, OUTPUT_HEADROOM_CAP)
+// Step 2 (mu8): compact_threshold = effective_window - COMPACT_HEADROOM
+//
+// Trigger levels:
+//   tokens >= effective_window - BLOCKED_HEADROOM → can't even submit; force compact
+//   tokens >= effective_window - COMPACT_HEADROOM → auto-compact triggers (this turn)
+//   tokens >= compact_threshold - 20_000          → UI warning, no action
 const COMPACT_HEADROOM: usize = 13_000;
 const BLOCKED_HEADROOM: usize = 3_000;
-// warn = compact_threshold - 20_000 (matches v126's `_ - 2e4` in ZB7);
+/// Cap on how much max_output_tokens is subtracted from the window to compute
+/// the effective context. CC 177's `In4 = 2e4` — even models with 64k/128k output
+/// only reserve 20k for this calculation.
+const OUTPUT_HEADROOM_CAP: usize = 20_000;
+// warn = compact_threshold - 20_000 (matches v177's `_ - 2e4` in ZB7);
 // computed inline rather than as a const since it depends on the runtime
 // compact threshold (which itself shifts with the pct override).
 
@@ -119,38 +128,69 @@ pub fn auto_compact_disabled() -> bool {
     via_config
 }
 
-/// Compute the absolute token offset at which auto-compaction triggers.
-/// Mirrors v126 `gG6` (cli.js:397177-397182).
+/// Compute the effective context window after reserving output headroom.
+/// Mirrors v177's `Q9H` (cli.js:496582): `window - min(maxOutputTokens, In4)`.
 ///
-/// If `autoCompactWindow` is set in the config (and falls within the valid
-/// range 100_000–1_000_000), that value is used instead of the caller-supplied
-/// `window` argument for the headroom calculation.
-pub fn compact_threshold(window: usize) -> usize {
+/// This is the window used for all threshold calculations — it accounts for
+/// the tokens the model needs for its response.
+pub fn effective_window(window: usize, max_output_tokens: Option<usize>) -> usize {
     // Config-level window override (valid range: 100_000–1_000_000).
-    let effective_window = crate::config::load_arc()
+    let config_window = crate::config::load_arc()
         .auto_compact_window
         .map(|w| w as usize)
         .filter(|&w| (100_000..=1_000_000).contains(&w))
         .unwrap_or(window);
 
-    let base = effective_window.saturating_sub(COMPACT_HEADROOM);
+    // v177: subtract min(max_output_tokens, OUTPUT_HEADROOM_CAP) from the window.
+    // For models with 64k/128k output, we still only reserve 20k — that's the cap.
+    // If max_output_tokens is unknown (None), assume modern models with large
+    // output limits and use the full cap. This matches CC 177's default behavior.
+    let output_reserve = max_output_tokens
+        .map(|v| v.min(OUTPUT_HEADROOM_CAP))
+        .unwrap_or(OUTPUT_HEADROOM_CAP);
+
+    config_window.saturating_sub(output_reserve)
+}
+
+/// Compute the absolute token offset at which auto-compaction triggers.
+/// Mirrors v177's `mu8` (cli.js:496636): `effective_window - 13000`.
+///
+/// If `autoCompactWindow` is set in the config (and falls within the valid
+/// range 100_000–1_000_000), that value is used instead of the caller-supplied
+/// `window` argument for the headroom calculation.
+pub fn compact_threshold(window: usize) -> usize {
+    compact_threshold_with_output(window, None)
+}
+
+/// Compute the compact threshold with explicit max_output_tokens.
+/// Use this when you have access to the model's output limit.
+pub fn compact_threshold_with_output(window: usize, max_output_tokens: Option<usize>) -> usize {
+    let eff_window = effective_window(window, max_output_tokens);
+    let base = eff_window.saturating_sub(COMPACT_HEADROOM);
     if let Some(pct) = pct_override() {
-        let from_pct = ((effective_window as f64) * pct / 100.0).floor() as usize;
+        let from_pct = ((eff_window as f64) * pct / 100.0).floor() as usize;
         let threshold = from_pct.min(base);
-        debug!(target: "jfc::compact", window, effective_window, pct, from_pct, base, threshold, "compact_threshold (pct override)");
+        debug!(target: "jfc::compact", window, eff_window, pct, from_pct, base, threshold, "compact_threshold (pct override)");
         return threshold;
-    }
-    if effective_window != window {
-        debug!(target: "jfc::compact", window, effective_window, base, "compact_threshold (config window override)");
     }
     base
 }
 
-/// Mirrors v126 `ZB7` (cli.js:397183-397203).
+/// Mirrors v177's `ZB7` (cli.js:397183-397203).
 pub fn compact_level(tokens: usize, window: usize) -> CompactLevel {
-    let compact = compact_threshold(window);
+    compact_level_with_output(tokens, window, None)
+}
+
+/// Compute compact level with explicit max_output_tokens for accurate thresholds.
+pub fn compact_level_with_output(
+    tokens: usize,
+    window: usize,
+    max_output_tokens: Option<usize>,
+) -> CompactLevel {
+    let eff_window = effective_window(window, max_output_tokens);
+    let compact = compact_threshold_with_output(window, max_output_tokens);
     let warn = compact.saturating_sub(20_000);
-    let blocked = blocked_override().unwrap_or_else(|| window.saturating_sub(BLOCKED_HEADROOM));
+    let blocked = blocked_override().unwrap_or_else(|| eff_window.saturating_sub(BLOCKED_HEADROOM));
     // Precompute threshold: 80% of the compact threshold. When context
     // hits this level, the system could start a speculative compact in
     // the background so it's ready if the session continues growing.
@@ -170,7 +210,7 @@ pub fn compact_level(tokens: usize, window: usize) -> CompactLevel {
 
     debug!(
         target: "jfc::compact",
-        tokens, window, compact_threshold = compact, warn_threshold = warn,
+        tokens, window, eff_window, compact_threshold = compact, warn_threshold = warn,
         blocked_threshold = blocked, ?level,
         "compact_level evaluated"
     );
@@ -181,7 +221,7 @@ pub fn compact_level(tokens: usize, window: usize) -> CompactLevel {
 ///
 /// Callers should pass the *calibrated* context size — i.e. `tool_ctx
 /// .approx_tokens`, which `recompute_token_estimate` keeps in sync with the
-/// last API-reported usage (mirroring v126's `tokenCountWithEstimation`:
+/// last API-reported usage (mirroring v177's `tokenCountWithEstimation`:
 /// API anchor + rough estimate of messages added after the anchor).
 ///
 /// We do NOT recompute `estimate_tokens(messages)` here. The raw estimator
@@ -192,7 +232,16 @@ pub fn compact_level(tokens: usize, window: usize) -> CompactLevel {
 /// context with plenty of headroom — the "randomly starts compacting"
 /// symptom.
 pub fn should_compact(current_tokens: usize, max_context_tokens: usize) -> bool {
-    let level = compact_level(current_tokens, max_context_tokens);
+    should_compact_with_output(current_tokens, max_context_tokens, None)
+}
+
+/// Decide whether compaction should fire, with explicit max_output_tokens.
+pub fn should_compact_with_output(
+    current_tokens: usize,
+    max_context_tokens: usize,
+    max_output_tokens: Option<usize>,
+) -> bool {
+    let level = compact_level_with_output(current_tokens, max_context_tokens, max_output_tokens);
     let should = matches!(level, CompactLevel::Compact | CompactLevel::Blocked);
     debug!(
         target: "jfc::compact",

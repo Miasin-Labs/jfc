@@ -347,7 +347,11 @@ pub async fn submit_prompt(
     // calibrated value makes pre-submit and post-tool compaction agree on
     // when the session is actually full.
     let mut est = state.tool_ctx.approx_tokens;
-    let mut level = crate::compact::compact_level(est, state.max_context_tokens);
+    let mut level = crate::compact::compact_level_with_output(
+        est,
+        state.max_context_tokens,
+        state.max_output_tokens,
+    );
     if !state.force_compact_pending {
         let saved_tokens = crate::compact::microcompact_if_helpful(
             &mut state.messages,
@@ -356,7 +360,11 @@ pub async fn submit_prompt(
         );
         if saved_tokens > 0 {
             est = state.tool_ctx.approx_tokens;
-            level = crate::compact::compact_level(est, state.max_context_tokens);
+            level = crate::compact::compact_level_with_output(
+                est,
+                state.max_context_tokens,
+                state.max_output_tokens,
+            );
             tracing::info!(
                 target: "jfc::compact::micro",
                 saved_tokens,

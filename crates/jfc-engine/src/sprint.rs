@@ -183,8 +183,12 @@ impl HandoffSummary {
 
 /// Check if the current context pressure warrants a sprint boundary warning.
 /// Returns the compact level for UI/logging purposes.
-pub fn check_sprint_pressure(current_tokens: usize, context_window: usize) -> CompactLevel {
-    crate::compact::compact_level(current_tokens, context_window)
+pub fn check_sprint_pressure(
+    current_tokens: usize,
+    context_window: usize,
+    max_output_tokens: Option<usize>,
+) -> CompactLevel {
+    crate::compact::compact_level_with_output(current_tokens, context_window, max_output_tokens)
 }
 
 /// Auto-commit progress when a sprint boundary is hit. This prevents losing

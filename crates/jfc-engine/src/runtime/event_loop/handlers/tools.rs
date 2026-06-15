@@ -539,9 +539,10 @@ pub async fn handle_all_complete(state: &mut EngineState, tx: &EventSender) {
         );
     } else {
         if !manual {
-            let level = crate::compact::compact_level(
+            let level = crate::compact::compact_level_with_output(
                 state.tool_ctx.approx_tokens,
                 state.max_context_tokens,
+                state.max_output_tokens,
             );
             let saved_tokens = crate::compact::microcompact_if_helpful(
                 &mut state.messages,
@@ -558,9 +559,10 @@ pub async fn handle_all_complete(state: &mut EngineState, tx: &EventSender) {
             }
         }
         if manual
-            || crate::compact::should_compact(
+            || crate::compact::should_compact_with_output(
                 state.tool_ctx.approx_tokens,
                 state.max_context_tokens,
+                state.max_output_tokens,
             )
         {
             if manual {
