@@ -531,6 +531,28 @@ pub enum SerializedToolOutput {
     Empty,
 }
 
+/// Best-effort recovery of human-readable text from a tool-output object whose
+/// `type` this build doesn't recognize. Keeps `--resume` informative across
+/// serialize/deserialize version skew instead of dropping the cell to nothing.
+/// Recognizes the `background_bash` shape (`tail`) and a few generic text-ish
+/// keys; otherwise yields `Empty`.
+fn salvage_unknown_tool_output(value: &serde_json::Value) -> SerializedToolOutput {
+    let obj = match value.as_object() {
+        Some(o) => o,
+        None => return SerializedToolOutput::Empty,
+    };
+    for key in ["tail", "content", "text", "stdout", "message"] {
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str())
+            && !s.is_empty()
+        {
+            return SerializedToolOutput::Text {
+                content: s.to_owned(),
+            };
+        }
+    }
+    SerializedToolOutput::Empty
+}
+
 /// Custom deserializer that handles both:
 /// - The new internally-tagged enum format: `{"type": "text", "content": "..."}`
 /// - The old plain-string format from May 4 sessions: `"some output text"`
@@ -588,7 +610,18 @@ impl<'de> serde::Deserialize<'de> for SerializedToolOutput {
                         content: serde_json::Value,
                     },
                     Empty,
+                    /// Forward-compat catch-all: any tool-output `type` this
+                    /// build doesn't know (e.g. a `background_bash` output
+                    /// written by a newer build, or a variant since removed).
+                    /// Without this, ONE unknown variant anywhere in the
+                    /// transcript fails the whole-session parse and `--resume`
+                    /// silently starts fresh — the "resume shows empty history"
+                    /// bug. Degrades to `Empty` so the rest of the transcript
+                    /// loads.
+                    #[serde(other)]
+                    Unknown,
                 }
+                let original = value.clone();
                 let inner: Inner = serde_json::from_value(value).map_err(de::Error::custom)?;
                 Ok(match inner {
                     Inner::Text { content } => SerializedToolOutput::Text { content },
@@ -635,6 +668,11 @@ impl<'de> serde::Deserialize<'de> for SerializedToolOutput {
                         SerializedToolOutput::ServerToolResult { wire_type, content }
                     }
                     Inner::Empty => SerializedToolOutput::Empty,
+                    // Unknown/legacy variant: try to salvage human-readable
+                    // text from common shapes (e.g. a `background_bash`
+                    // output's `tail`) so resume shows *something*; otherwise
+                    // fall back to Empty. Never fails the parse.
+                    Inner::Unknown => salvage_unknown_tool_output(&original),
                 })
             }
             // Anything else → treat as Empty

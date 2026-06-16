@@ -2,7 +2,6 @@
 mod tests {
     use crate::ids::SessionId;
     use crate::session::deserialize::*;
-
     use crate::session::serialize::*;
     use crate::types::{
         DiffHunk, DiffLine, DiffLineKind, DiffView, MessagePart, ReplacementMode, TaskLifecycle,
@@ -438,5 +437,75 @@ mod cwd_filter_tests {
         assert!(parsed.usage.is_none());
         let round = deserialize_message(parsed);
         assert!(round.usage.is_none());
+    }
+
+    // Regression: an UNKNOWN tool-output `type` must not fail the whole-session
+    // parse. Before the `#[serde(other)]` catch-all, a single unrecognized
+    // variant (e.g. `background_bash` written by a newer build) made
+    // `serde_json::from_str::<SerializedSession>` return Err → `--resume`
+    // silently started fresh and the transcript showed empty. The variant must
+    // degrade gracefully and leave every other message intact.
+    #[test]
+    fn unknown_tool_output_variant_does_not_poison_session_parse_robust() {
+        let session = r#"{
+            "id": "ses_x",
+            "created_at": "2026-06-12T00:00:00Z",
+            "messages": [
+                {
+                    "role": "user",
+                    "parts": [{ "type": "text", "content": "run the tests" }]
+                },
+                {
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "text", "content": "done" },
+                        {
+                            "type": "tool",
+                            "id": "t1",
+                            "kind": "Bash",
+                            "status": "completed",
+                            "output": {
+                                "type": "background_bash",
+                                "task_id": "bash_abc",
+                                "status": { "state": "completed", "exit_code": 0 },
+                                "tail": "test result: ok. 3 passed",
+                                "total_bytes": 24,
+                                "total_lines": 1
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        // The whole session must parse despite the unknown output variant.
+        let parsed: SerializedSession = serde_json::from_str(session)
+            .expect("session with unknown tool output must still load");
+        assert_eq!(parsed.messages.len(), 2);
+
+        // And the unknown variant salvages its human-readable `tail` text
+        // rather than vanishing.
+        let salvaged = parsed.messages[1]
+            .parts
+            .iter()
+            .find_map(|p| match p {
+                SerializedPart::Tool { tool } => Some(tool),
+                _ => None,
+            })
+            .expect("tool part present");
+        match &salvaged.output {
+            Some(SerializedToolOutput::Text { content }) => {
+                assert!(content.contains("3 passed"), "tail not salvaged: {content}");
+            }
+            _ => panic!("expected salvaged Text output from background_bash tail"),
+        }
+    }
+
+    // Unknown variant with no salvageable text degrades to Empty, never errors.
+    #[test]
+    fn unknown_tool_output_with_no_text_becomes_empty_robust() {
+        let json = r#"{ "type": "some_future_variant", "widget_id": 7 }"#;
+        let parsed: SerializedToolOutput =
+            serde_json::from_str(json).expect("unknown variant must not error");
+        assert!(matches!(parsed, SerializedToolOutput::Empty));
     }
 }
