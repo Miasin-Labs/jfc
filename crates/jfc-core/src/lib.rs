@@ -7,26 +7,36 @@
 mod agent_def;
 mod assertions;
 mod attachment;
+pub mod attention;
 mod compaction;
 pub mod context;
+pub mod context_budget;
+pub mod context_management;
 mod decision_quality;
 pub mod diff;
+pub mod diff_compression;
 mod execution;
 mod execution_result;
 mod fanout;
+pub mod hierarchical_compression;
 mod ids;
+pub mod information_bottleneck;
+pub mod kv_cache;
 pub mod mcp_elicitation;
 mod message;
 mod paging;
 mod plan_cache;
+pub mod position_encoding;
 mod prompt_queue;
 mod routing;
+pub mod semantic_hash;
 mod server_tool;
 mod status;
 mod task;
 mod task_store;
 mod tool;
 pub mod tool_call;
+pub mod tool_dispatch_model;
 pub mod tool_display;
 mod tool_input;
 mod tool_kind;
@@ -55,7 +65,7 @@ pub use paging::{PageStore, Pressure, estimate_tokens};
 pub use plan_cache::{CachedPlan, PlanCache, normalize_signature};
 pub use prompt_queue::{
     DEFERRED_TOOL_USES_CAP, DeferredToolUse, MessageQueue, QueuePriority, QueuedPrompt,
-    TOOL_USE_SUMMARIES_CAP, ToolUseSummary,
+    TOOL_USE_SUMMARIES_CAP, ToolUseSummary, push_bounded_drop_oldest, should_preserve_prompt,
 };
 pub use routing::{cascade_pick, knapsack_select};
 pub use server_tool::ServerToolResultKind;

@@ -298,6 +298,20 @@ macro_rules! for_each_regular_tool_input {
             MemoryDelete => { path: req_str @ "path" }
             TeamCreate => { team_name: req_str @ "team_name", description: opt_str @ "description" }
             TeamMemberMode => { member_name: req_str @ "member_name", mode: req_str @ "mode" }
+            HcomStatus => { json: raw_bool_opt @ "json", logs: raw_bool_opt @ "logs" }
+            HcomList => { name: opt_str @ "name", field: opt_str @ "field", stopped: raw_bool_opt @ "stopped", json: raw_bool_opt @ "json", names: raw_bool_opt @ "names", verbose: raw_bool_opt @ "verbose", all: raw_bool_opt @ "all", last: opt_u64 @ "last", format: opt_str @ "format" }
+            HcomSend => { targets: str_vec @ "targets", message: req_str @ "message", intent: opt_str @ "intent", reply_to: opt_str @ "reply_to", thread: opt_str @ "thread", from: opt_str @ "from", title: opt_str @ "title", description: opt_str @ "description", events: opt_str @ "events", files: str_vec @ "files", transcript: opt_str @ "transcript", extends: opt_str @ "extends" }
+            HcomEvents => { args: str_vec @ "args" }
+            HcomListen => { timeout: opt_u64 @ "timeout", json: raw_bool_opt @ "json", sql: opt_str @ "sql", args: str_vec @ "args" }
+            HcomTranscript => { args: str_vec @ "args" }
+            HcomBundle => { args: str_vec @ "args" }
+            HcomTerm => { args: str_vec @ "args" }
+            HcomLaunch => { tool: req_str @ "tool", count: opt_u64 @ "count", tag: opt_str @ "tag", terminal: opt_str @ "terminal", headless: raw_bool_opt @ "headless", device: opt_str @ "device", dir: opt_str @ "dir", prompt: opt_str @ "prompt", system_prompt: opt_str @ "system_prompt", batch_id: opt_str @ "batch_id", run_here: raw_bool_opt @ "run_here", args: str_vec @ "args" }
+            HcomResume => { target: req_str @ "target", args: str_vec @ "args" }
+            HcomFork => { target: req_str @ "target", args: str_vec @ "args" }
+            HcomKill => { targets: str_vec @ "targets" }
+            HcomRelay => { args: str_vec @ "args" }
+            HcomRun => { script: opt_str @ "script", args: str_vec @ "args" }
             BashOutput => { task_id: req_str @ "task_id", offset: opt_u64 @ "offset", limit: opt_u64 @ "limit", block: raw_bool_opt @ "block", timeout: opt_u64_loose @ "timeout", wait_up_to: opt_u64_loose @ "wait_up_to" }
             PlanCreate => { title: req_str @ "title", body: opt_str @ "body" }
             PlanList => { status: opt_str @ "status" }
@@ -352,7 +366,7 @@ macro_rules! for_each_regular_tool_input {
             DesignServe => { project_dir: req_str @ "project_dir", port: opt_u64_as_u32 @ "port", file: opt_str @ "file" }
             SetGoal => { condition: req_str @ "condition" }
             Research => { question: req_str @ "question", export: bool_field @ "export" }
-            Council => { question: req_str @ "question", models: str_vec @ "models" }
+            Council => { question: req_str @ "question", models: str_vec @ "models", intent: opt_str @ "intent", mode: opt_str @ "mode", archive: raw_bool_opt @ "archive", quorum: opt_u64 @ "quorum", retry_on_fail: opt_u64 @ "retry_on_fail", member_timeout_ms: opt_u64 @ "member_timeout_ms" }
             AskModel => { model: req_str @ "model", prompt: req_str @ "prompt", system: opt_str @ "system" }
             SkillCreate => { name: req_str @ "name", description: req_str @ "description", body: req_str @ "body" }
         }
@@ -605,6 +619,85 @@ pub enum ToolInput {
     TeamMemberMode {
         member_name: String,
         mode: String,
+    },
+    HcomStatus {
+        json: Option<bool>,
+        logs: Option<bool>,
+    },
+    HcomList {
+        name: Option<String>,
+        field: Option<String>,
+        stopped: Option<bool>,
+        json: Option<bool>,
+        names: Option<bool>,
+        verbose: Option<bool>,
+        all: Option<bool>,
+        last: Option<u64>,
+        format: Option<String>,
+    },
+    HcomSend {
+        targets: Vec<String>,
+        message: String,
+        intent: Option<String>,
+        reply_to: Option<String>,
+        thread: Option<String>,
+        from: Option<String>,
+        title: Option<String>,
+        description: Option<String>,
+        events: Option<String>,
+        files: Vec<String>,
+        transcript: Option<String>,
+        extends: Option<String>,
+    },
+    HcomEvents {
+        args: Vec<String>,
+    },
+    HcomListen {
+        timeout: Option<u64>,
+        json: Option<bool>,
+        sql: Option<String>,
+        args: Vec<String>,
+    },
+    HcomTranscript {
+        args: Vec<String>,
+    },
+    HcomBundle {
+        args: Vec<String>,
+    },
+    HcomTerm {
+        args: Vec<String>,
+    },
+    HcomLaunch {
+        tool: String,
+        count: Option<u64>,
+        tag: Option<String>,
+        terminal: Option<String>,
+        headless: Option<bool>,
+        device: Option<String>,
+        dir: Option<String>,
+        prompt: Option<String>,
+        system_prompt: Option<String>,
+        batch_id: Option<String>,
+        run_here: Option<bool>,
+        args: Vec<String>,
+    },
+    HcomResume {
+        target: String,
+        args: Vec<String>,
+    },
+    HcomFork {
+        target: String,
+        args: Vec<String>,
+    },
+    HcomKill {
+        targets: Vec<String>,
+    },
+    HcomRelay {
+        args: Vec<String>,
+    },
+    HcomRun {
+        script: Option<String>,
+        args: Vec<String>,
     },
     PostBounty {
         description: String,
@@ -877,6 +970,12 @@ pub enum ToolInput {
     Council {
         question: String,
         models: Vec<String>,
+        intent: Option<String>,
+        mode: Option<String>,
+        archive: Option<bool>,
+        quorum: Option<u64>,
+        retry_on_fail: Option<u64>,
+        member_timeout_ms: Option<u64>,
     },
     AskModel {
         model: String,
@@ -996,6 +1095,38 @@ impl ToolInput {
             Self::TeamMemberMode { member_name, mode } => {
                 format!("set {member_name} → {mode}")
             }
+            Self::HcomStatus { .. } => "hcom status".into(),
+            Self::HcomList { name, .. } => match name {
+                Some(name) => format!("hcom list: {name}"),
+                None => "hcom list".into(),
+            },
+            Self::HcomSend {
+                targets, message, ..
+            } => {
+                let preview: String = message.chars().take(50).collect();
+                if targets.is_empty() {
+                    format!("hcom send: {preview}")
+                } else {
+                    format!("hcom send {}: {preview}", targets.join(","))
+                }
+            }
+            Self::HcomEvents { args } => format!("hcom events {}", args.join(" ")),
+            Self::HcomListen { .. } => "hcom listen".into(),
+            Self::HcomTranscript { args } => format!("hcom transcript {}", args.join(" ")),
+            Self::HcomBundle { args } => format!("hcom bundle {}", args.join(" ")),
+            Self::HcomTerm { args } => format!("hcom term {}", args.join(" ")),
+            Self::HcomLaunch { tool, count, .. } => match count {
+                Some(count) if *count > 1 => format!("hcom launch {count} {tool}"),
+                _ => format!("hcom launch {tool}"),
+            },
+            Self::HcomResume { target, .. } => format!("hcom resume {target}"),
+            Self::HcomFork { target, .. } => format!("hcom fork {target}"),
+            Self::HcomKill { targets } => format!("hcom kill {}", targets.join(",")),
+            Self::HcomRelay { args } => format!("hcom relay {}", args.join(" ")),
+            Self::HcomRun { script, .. } => match script {
+                Some(script) => format!("hcom run {script}"),
+                None => "hcom run".into(),
+            },
             Self::PlanCreate { title, .. } => format!("plan_create: {title}"),
             Self::PlanList { .. } => "plan_list".into(),
             Self::PlanShow { slug, .. } => format!("plan_show: {slug}"),
@@ -2045,6 +2176,32 @@ mod macro_equivalence_tests {
             ("TeamDelete", json!({})),
             ("SendMessage", json!({"to":"a","message":"m","summary":"s"})),
             ("TeamMemberMode", json!({"member_name":"a","mode":"plan"})),
+            ("HcomStatus", json!({"json":true})),
+            ("HcomList", json!({"name":"luna","json":true,"last":5})),
+            (
+                "HcomSend",
+                json!({"targets":["luna"],"message":"please review","intent":"request","thread":"api","files":["src/lib.rs"]}),
+            ),
+            ("HcomEvents", json!({"args":["--last","5"]})),
+            (
+                "HcomListen",
+                json!({"timeout":30,"json":true,"args":["--type","message"]}),
+            ),
+            ("HcomTranscript", json!({"args":["@luna","--last","10"]})),
+            ("HcomBundle", json!({"args":["prepare","--json"]})),
+            ("HcomTerm", json!({"args":["screen","luna"]})),
+            (
+                "HcomLaunch",
+                json!({"tool":"codex","count":2,"tag":"api","headless":true,"args":["--model","gpt-5.5"]}),
+            ),
+            (
+                "HcomResume",
+                json!({"target":"luna","args":["--model","opus"]}),
+            ),
+            ("HcomFork", json!({"target":"luna"})),
+            ("HcomKill", json!({"targets":["luna"]})),
+            ("HcomRelay", json!({"args":["status"]})),
+            ("HcomRun", json!({"script":"debate","args":["luna","milo"]})),
             (
                 "code_index",
                 json!({"path":"src","query":"q","kind":"function","max_entries":10}),
@@ -2327,13 +2484,33 @@ mod macro_equivalence_tests {
     fn council_parses_and_serializes_normal() {
         let input = ToolInput::from_value(
             "Council",
-            json!({"question": "which db?", "models": ["a", "b"]}),
+            json!({
+                "question": "which db?",
+                "models": ["a", "b"],
+                "intent": "audit",
+                "archive": true,
+                "quorum": 2,
+                "retry_on_fail": 1,
+                "member_timeout_ms": 5000
+            }),
         )
         .unwrap();
-        assert!(
-            matches!(input, ToolInput::Council { ref question, ref models } if question == "which db?" && models.len() == 2)
-        );
+        assert!(matches!(
+            input,
+            ToolInput::Council {
+                ref question,
+                ref models,
+                ref intent,
+                archive: Some(true),
+                quorum: Some(2),
+                retry_on_fail: Some(1),
+                member_timeout_ms: Some(5000),
+                ..
+            } if question == "which db?" && models.len() == 2 && intent.as_deref() == Some("audit")
+        ));
         assert_eq!(input.to_value()["models"], json!(["a", "b"]));
+        assert_eq!(input.to_value()["intent"], json!("audit"));
+        assert_eq!(input.to_value()["archive"], json!(true));
         assert!(input.summary().contains("council"));
         assert_eq!(ToolKind::from_name("model_council"), ToolKind::Council);
     }
@@ -2359,7 +2536,10 @@ mod macro_equivalence_tests {
                     && system.as_deref() == Some("be terse")
         ));
         assert_eq!(input.to_value()["model"], json!("gpt-5.5"));
-        assert_eq!(input.to_value()["prompt"], json!("what is rayleigh scattering?"));
+        assert_eq!(
+            input.to_value()["prompt"],
+            json!("what is rayleigh scattering?")
+        );
         assert!(input.summary().contains("ask gpt-5.5"));
         assert_eq!(ToolKind::from_name("ask_model"), ToolKind::AskModel);
         assert_eq!(ToolKind::from_name("ask"), ToolKind::AskModel);
@@ -2387,7 +2567,9 @@ mod macro_equivalence_tests {
 
     #[test]
     fn skill_create_requires_all_fields_robust() {
-        assert!(ToolInput::from_value("SkillCreate", json!({"name": "x", "description": "d"})).is_err());
+        assert!(
+            ToolInput::from_value("SkillCreate", json!({"name": "x", "description": "d"})).is_err()
+        );
         assert!(ToolInput::from_value("SkillCreate", json!({"name": "x", "body": "b"})).is_err());
     }
 
@@ -2396,10 +2578,7 @@ mod macro_equivalence_tests {
         let input =
             ToolInput::from_value("ask", json!({"model": "claude-opus-4-7", "prompt": "hi"}))
                 .unwrap();
-        assert!(matches!(
-            input,
-            ToolInput::AskModel { system: None, .. }
-        ));
+        assert!(matches!(input, ToolInput::AskModel { system: None, .. }));
     }
 
     #[test]

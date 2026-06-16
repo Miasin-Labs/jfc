@@ -37,13 +37,16 @@ pub struct Retention {
     pub summary: Option<String>,
 }
 
-/// Keep the newest turns whose cumulative tokens fit `budget_tokens`, masking
-/// the rest. Recency-weighted: we walk from the newest turn backward, keeping
-/// while the budget holds, so the most recent context always survives.
+/// Keep the newest contiguous suffix whose cumulative tokens fit
+/// `budget_tokens`, masking the rest.
 ///
-/// A single turn larger than the whole budget is still kept if it is the
-/// newest (we never return an empty retention for a non-empty input) — dropping
-/// the latest turn would discard the very context the next step needs.
+/// This mirrors the proved Coq model in
+/// `rcoq-tests/theorems/RecencyRetention.v`: walk from the newest turn
+/// backward, stop at the first turn that would exceed the remaining budget, and
+/// never skip over that blocking turn to pick cheaper older context. The core
+/// selector is therefore budget-strict (`sum(kept.tokens) <= budget_tokens`).
+/// Runtime callers that need a non-empty floor should clamp at their own
+/// boundary, as compaction does for "preserve at least one group".
 pub fn select_retained(turns: &[TurnCost], budget_tokens: u64) -> Retention {
     if turns.is_empty() {
         return Retention {
@@ -57,10 +60,8 @@ pub fn select_retained(turns: &[TurnCost], budget_tokens: u64) -> Retention {
     let mut keep_from = turns.len();
     for i in (0..turns.len()).rev() {
         let t = turns[i].tokens;
-        if used + t <= budget_tokens || keep_from == turns.len() {
-            // Always keep at least the newest turn (the `|| keep_from == len`
-            // clause), even if it alone exceeds the budget.
-            used += t;
+        if t <= budget_tokens.saturating_sub(used) {
+            used = used.saturating_add(t);
             keep_from = i;
         } else {
             break;
@@ -133,14 +134,44 @@ mod tests {
         assert_eq!(r.masked, vec![1]);
     }
 
-    // Robust: the newest turn is kept even when it alone exceeds the budget —
-    // we never discard the latest context.
+    // Robust: the core selector is budget-strict. If the newest turn alone
+    // exceeds the budget, nothing is kept; callers that need a non-empty floor
+    // clamp outside this proof-backed primitive.
     #[test]
-    fn keeps_newest_even_if_oversized_robust() {
+    fn oversized_newest_keeps_none_robust() {
         let t = turns(&[(1, 5), (2, 999)]);
         let r = select_retained(&t, 10);
-        assert_eq!(r.kept, vec![2]);
-        assert_eq!(r.masked, vec![1]);
+        assert!(r.kept.is_empty());
+        assert_eq!(r.masked, vec![1, 2]);
+        assert!(r.summary.is_none());
+    }
+
+    // Robust: the retained suffix always stays inside the token budget.
+    #[test]
+    fn selected_tokens_never_exceed_budget_robust() {
+        let t = turns(&[(1, 5), (2, 7), (3, 11), (4, 13)]);
+        let budget = 24;
+        let r = select_retained(&t, budget);
+        let kept_tokens: u64 = t
+            .iter()
+            .filter(|turn| r.kept.contains(&turn.id))
+            .map(|turn| turn.tokens)
+            .sum();
+        assert!(
+            kept_tokens <= budget,
+            "kept {kept_tokens} tokens with budget {budget}"
+        );
+    }
+
+    // Robust: greedy recency selection stops at the newest blocking turn. It
+    // does not skip that blocker to keep a cheaper older turn, so the result is
+    // always a contiguous newest suffix.
+    #[test]
+    fn blocker_prevents_selecting_cheaper_older_turn_robust() {
+        let t = turns(&[(1, 2), (2, 100)]);
+        let r = select_retained(&t, 50);
+        assert!(r.kept.is_empty());
+        assert_eq!(r.masked, vec![1, 2]);
     }
 
     // Robust: empty input yields an empty retention, no panic.

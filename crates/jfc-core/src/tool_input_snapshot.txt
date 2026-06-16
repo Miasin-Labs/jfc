@@ -73,6 +73,48 @@ SendMessage
 TeamMemberMode
   to_value={"member_name":"a","mode":"plan"}
   summary=set a → plan
+HcomStatus
+  to_value={"json":true}
+  summary=hcom status
+HcomList
+  to_value={"name":"luna","json":true,"last":5}
+  summary=hcom list: luna
+HcomSend
+  to_value={"targets":["luna"],"message":"please review","intent":"request","thread":"api","files":["src/lib.rs"]}
+  summary=hcom send luna: please review
+HcomEvents
+  to_value={"args":["--last","5"]}
+  summary=hcom events --last 5
+HcomListen
+  to_value={"timeout":30,"json":true,"args":["--type","message"]}
+  summary=hcom listen
+HcomTranscript
+  to_value={"args":["@luna","--last","10"]}
+  summary=hcom transcript @luna --last 10
+HcomBundle
+  to_value={"args":["prepare","--json"]}
+  summary=hcom bundle prepare --json
+HcomTerm
+  to_value={"args":["screen","luna"]}
+  summary=hcom term screen luna
+HcomLaunch
+  to_value={"tool":"codex","count":2,"tag":"api","headless":true,"args":["--model","gpt-5.5"]}
+  summary=hcom launch 2 codex
+HcomResume
+  to_value={"target":"luna","args":["--model","opus"]}
+  summary=hcom resume luna
+HcomFork
+  to_value={"target":"luna"}
+  summary=hcom fork luna
+HcomKill
+  to_value={"targets":["luna"]}
+  summary=hcom kill luna
+HcomRelay
+  to_value={"args":["status"]}
+  summary=hcom relay status
+HcomRun
+  to_value={"script":"debate","args":["luna","milo"]}
+  summary=hcom run debate
 code_index
   to_value={"path":"src","query":"q","kind":"function","max_entries":10}
   summary=code index (kind=function, query=q, path=src)
