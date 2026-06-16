@@ -508,4 +508,24 @@ mod cwd_filter_tests {
             serde_json::from_str(json).expect("unknown variant must not error");
         assert!(matches!(parsed, SerializedToolOutput::Empty));
     }
+
+    // A whitespace-only text field is treated as no text: salvage skips it and
+    // falls through to the next key (here `message`), never returning a blank
+    // Text cell.
+    #[test]
+    fn unknown_tool_output_whitespace_text_skips_to_next_key_robust() {
+        let json = r#"{ "type": "future", "tail": "  \n\t ", "message": "real text" }"#;
+        let parsed: SerializedToolOutput =
+            serde_json::from_str(json).expect("unknown variant must not error");
+        match parsed {
+            SerializedToolOutput::Text { content } => assert_eq!(content, "real text"),
+            _ => panic!("expected fallthrough to `message`"),
+        }
+
+        // Whitespace-only everywhere → Empty.
+        let blank = r#"{ "type": "future", "tail": "   ", "content": "\n" }"#;
+        let parsed: SerializedToolOutput =
+            serde_json::from_str(blank).expect("unknown variant must not error");
+        assert!(matches!(parsed, SerializedToolOutput::Empty));
+    }
 }

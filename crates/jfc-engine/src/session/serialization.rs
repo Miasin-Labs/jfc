@@ -541,9 +541,12 @@ fn salvage_unknown_tool_output(value: &serde_json::Value) -> SerializedToolOutpu
         Some(o) => o,
         None => return SerializedToolOutput::Empty,
     };
+    // Probed in priority order: `tail` is the background-bash shape; the rest
+    // are generic text-ish keys. A whitespace-only value is treated as no text
+    // (skip to the next key) so a blank `tail` doesn't mask a useful `message`.
     for key in ["tail", "content", "text", "stdout", "message"] {
         if let Some(s) = obj.get(key).and_then(|v| v.as_str())
-            && !s.is_empty()
+            && !s.trim().is_empty()
         {
             return SerializedToolOutput::Text {
                 content: s.to_owned(),
@@ -621,8 +624,11 @@ impl<'de> serde::Deserialize<'de> for SerializedToolOutput {
                     #[serde(other)]
                     Unknown,
                 }
-                let original = value.clone();
-                let inner: Inner = serde_json::from_value(value).map_err(de::Error::custom)?;
+                // Deserialize by reference so we DON'T clone the (potentially
+                // large, e.g. Diff) value on the common known-variant path. The
+                // borrow is only kept long enough to salvage text on the rare
+                // `Unknown` branch, where `value` is still available.
+                let inner = Inner::deserialize(&value).map_err(de::Error::custom)?;
                 Ok(match inner {
                     Inner::Text { content } => SerializedToolOutput::Text { content },
                     Inner::LargeText {
@@ -672,7 +678,7 @@ impl<'de> serde::Deserialize<'de> for SerializedToolOutput {
                     // text from common shapes (e.g. a `background_bash`
                     // output's `tail`) so resume shows *something*; otherwise
                     // fall back to Empty. Never fails the parse.
-                    Inner::Unknown => salvage_unknown_tool_output(&original),
+                    Inner::Unknown => salvage_unknown_tool_output(&value),
                 })
             }
             // Anything else → treat as Empty
