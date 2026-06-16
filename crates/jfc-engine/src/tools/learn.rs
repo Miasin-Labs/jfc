@@ -1,12 +1,14 @@
 //! /learn slash command — status, historize, dream, key-files, user-profile.
 //!
 //! The Dreamer cycle, user-profile pipeline, key-file store, and status are
-//! fully wired here. Historian *extraction* needs an LLM provider, which the
-//! synchronous tool-dispatch path does not have — so `historize` stages the
-//! pending transcripts and reports readiness; the LLM extraction runs from the
-//! daemon scheduler (`dreamer_scheduler`) which owns a provider.
+//! fully wired here. Historian LLM extraction still belongs in the daemon
+//! scheduler, but `historize` now also performs a conservative deterministic
+//! write-through so pending transcripts become searchable project memory even
+//! when the daemon is not running.
 
 use super::ExecutionResult;
+use jfc_memory::{MemoryLevel, MemoryScope, MemoryType};
+use std::path::{Path, PathBuf};
 
 /// `/learn status` — report learning subsystem state.
 pub fn execute_learn_status() -> ExecutionResult {
@@ -37,26 +39,202 @@ fn count_pending(cwd: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
-/// `/learn historize` — report pending transcript readiness.
-///
-/// Extraction requires an LLM provider, which the tool-dispatch path doesn't
-/// carry. The daemon's dreamer scheduler runs the actual Historian against a
-/// real provider. This command surfaces how many transcripts are staged.
+/// `/learn historize` — consume pending transcripts into durable project memory.
 pub fn execute_learn_historize() -> ExecutionResult {
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let pending = count_pending(&cwd);
+    execute_learn_historize_in(&cwd)
+}
+
+fn execute_learn_historize_in(cwd: &Path) -> ExecutionResult {
+    let pending = count_pending(cwd);
     if pending == 0 {
         return ExecutionResult::success(
             "No pending transcripts. Sessions queue transcripts on exit; the \
-             Historian (run by the daemon scheduler) extracts facts from them.",
+             Historian will write durable project memories when transcripts are staged.",
         );
     }
-    ExecutionResult::success(format!(
-        "{pending} transcript(s) staged for historization in \
-         `.jfc/learn/pending/`. The daemon's dreamer scheduler runs the \
-         Historian against the active provider to extract memories; run \
-         `jfc daemon start` if it isn't already running."
-    ))
+
+    match historize_pending(cwd) {
+        Ok(report) => ExecutionResult::success(format!(
+            "Historian write-through: {} pending transcript(s), {} memory file(s) created, {} skipped, {} failed.",
+            report.pending, report.created, report.skipped, report.failed
+        )),
+        Err(e) => ExecutionResult::failure(format!("Historian write-through failed: {e}")),
+    }
+}
+
+#[derive(Default)]
+struct HistorizeWriteThroughReport {
+    pending: usize,
+    created: usize,
+    skipped: usize,
+    failed: usize,
+}
+
+fn historize_pending(cwd: &Path) -> Result<HistorizeWriteThroughReport, String> {
+    let pending_dir = cwd.join(".jfc").join("learn").join("pending");
+    let processed_dir = cwd.join(".jfc").join("learn").join("processed");
+    let failed_dir = cwd.join(".jfc").join("learn").join("failed");
+    std::fs::create_dir_all(&processed_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&failed_dir).map_err(|e| e.to_string())?;
+
+    let mut files = pending_files(&pending_dir);
+    files.sort();
+    let mut report = HistorizeWriteThroughReport {
+        pending: files.len(),
+        ..Default::default()
+    };
+
+    for path in files {
+        match historize_one(cwd, &path) {
+            Ok(true) => {
+                report.created += 1;
+                move_pending(&path, &processed_dir)?;
+            }
+            Ok(false) => {
+                report.skipped += 1;
+                move_pending(&path, &processed_dir)?;
+            }
+            Err(error) => {
+                report.failed += 1;
+                tracing::warn!(
+                    target: "jfc::learn",
+                    path = %path.display(),
+                    error = %error,
+                    "historian write-through failed for pending transcript"
+                );
+                move_pending(&path, &failed_dir)?;
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn pending_files(pending_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(pending_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect()
+}
+
+fn historize_one(cwd: &Path, path: &Path) -> Result<bool, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let transcript: Vec<(String, String)> =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let Some(body) = build_handoff_memory(path, &transcript) else {
+        return Ok(false);
+    };
+    jfc_memory::create_memory_checked(
+        MemoryLevel::Project,
+        MemoryType::Project,
+        MemoryScope::Private,
+        &body,
+        cwd,
+    )?;
+    Ok(true)
+}
+
+fn build_handoff_memory(path: &Path, transcript: &[(String, String)]) -> Option<String> {
+    let last_user = transcript
+        .iter()
+        .rev()
+        .find(|(role, content)| role == "user" && !content.trim().is_empty())
+        .map(|(_, content)| content.trim())?;
+    let last_assistant = transcript
+        .iter()
+        .rev()
+        .find(|(role, content)| role == "assistant" && !content.trim().is_empty())
+        .map(|(_, content)| content.trim())
+        .unwrap_or("");
+    let turn_count = transcript
+        .iter()
+        .filter(|(_, content)| !content.trim().is_empty())
+        .count();
+    if turn_count < 4 {
+        return None;
+    }
+
+    let session = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("pending-session");
+    let user = truncate_chars(last_user, 500);
+    let assistant = truncate_chars(last_assistant, 500);
+    let files = mentioned_paths(transcript);
+
+    let mut body = format!(
+        "Session handoff `{session}`: {}\n\
+         Why: This was captured from a pending JFC transcript so future sessions can recover the work after restart or compaction.\n\
+         How to apply: Use this as project-local context when continuing the same task. Last user request: {user}",
+        first_line(&user)
+    );
+    if !assistant.is_empty() {
+        body.push_str(&format!("\nRecent assistant state: {assistant}"));
+    }
+    if !files.is_empty() {
+        body.push_str("\nMentioned paths: ");
+        body.push_str(&files.join(", "));
+    }
+    Some(body)
+}
+
+fn mentioned_paths(transcript: &[(String, String)]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for (_, content) in transcript {
+        for raw in content.split_whitespace() {
+            let token = raw.trim_matches(|c: char| {
+                matches!(c, '`' | '\'' | '"' | ',' | '.' | ')' | '(' | '[' | ']')
+            });
+            if looks_like_path(token) && !paths.iter().any(|p| p == token) {
+                paths.push(token.to_owned());
+                if paths.len() >= 8 {
+                    return paths;
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn looks_like_path(token: &str) -> bool {
+    (token.contains('/') || token.starts_with('.'))
+        && token.len() > 2
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
+}
+
+fn move_pending(path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("invalid pending path: {}", path.display()))?;
+    let mut dest = dest_dir.join(file_name);
+    if dest.exists() {
+        let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
+        let name = file_name.to_string_lossy();
+        dest = dest_dir.join(format!("{stamp}-{name}"));
+    }
+    std::fs::rename(path, dest).map_err(|e| e.to_string())
+}
+
+fn first_line(text: &str) -> String {
+    truncate_chars(
+        text.lines().find(|l| !l.trim().is_empty()).unwrap_or(text),
+        120,
+    )
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
 }
 
 /// `/learn dream` — run the Dreamer maintenance cycle.
@@ -196,10 +374,63 @@ mod tests {
 
     #[test]
     fn learn_historize_reports_pending() {
-        let result = execute_learn_historize();
+        let temp = tempfile::tempdir().unwrap();
+        let result = execute_learn_historize_in(temp.path());
         assert!(!result.is_error());
         // Either "No pending" or "N transcript(s) staged".
         assert!(result.output.contains("pending") || result.output.contains("transcript"));
+    }
+
+    #[test]
+    fn build_handoff_memory_extracts_recent_state_normal() {
+        let transcript = vec![
+            (
+                "user".to_string(),
+                "start work in crates/foo/src/lib.rs".to_string(),
+            ),
+            ("assistant".to_string(), "read the file".to_string()),
+            ("user".to_string(), "continue the parser fix".to_string()),
+            ("assistant".to_string(), "patched parser tests".to_string()),
+        ];
+        let body = build_handoff_memory(Path::new("20260616_010203.json"), &transcript).unwrap();
+        assert!(body.contains("continue the parser fix"));
+        assert!(body.contains("patched parser tests"));
+        assert!(body.contains("crates/foo/src/lib.rs"));
+    }
+
+    #[test]
+    fn historize_pending_creates_memory_and_moves_file_normal() {
+        let temp = tempfile::tempdir().unwrap();
+        let pending = temp.path().join(".jfc").join("learn").join("pending");
+        std::fs::create_dir_all(&pending).unwrap();
+        let transcript = vec![
+            (
+                "user".to_string(),
+                "start work in crates/foo/src/lib.rs".to_string(),
+            ),
+            ("assistant".to_string(), "read the file".to_string()),
+            ("user".to_string(), "continue the parser fix".to_string()),
+            ("assistant".to_string(), "patched parser tests".to_string()),
+        ];
+        std::fs::write(
+            pending.join("20260616_010203.json"),
+            serde_json::to_vec(&transcript).unwrap(),
+        )
+        .unwrap();
+
+        let report = historize_pending(temp.path()).unwrap();
+
+        assert_eq!(report.pending, 1);
+        assert_eq!(report.created, 1);
+        assert!(
+            temp.path()
+                .join(".jfc")
+                .join("learn")
+                .join("processed")
+                .exists()
+        );
+        assert_eq!(count_pending(temp.path()), 0);
+        assert!(temp.path().join(".jfc").join("memory").exists());
     }
 
     #[test]

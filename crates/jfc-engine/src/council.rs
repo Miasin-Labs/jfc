@@ -23,10 +23,19 @@
 //! [`CouncilMember`]s. That keeps the orchestration logic unit-testable with
 //! mock providers and free of registry coupling.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, hash_map::DefaultHasher},
+    fs,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Result, anyhow};
 use futures::future::join_all;
+use serde::Serialize;
+use tokio::time::timeout;
 
 use jfc_provider::{
     CompletionResponse, ModelId, Provider, ProviderContent, ProviderMessage, ProviderRole,
@@ -36,6 +45,7 @@ use jfc_provider::{
 /// Default max output tokens for a single member or arbiter completion.
 const DEFAULT_MEMBER_MAX_TOKENS: u32 = 2048;
 const DEFAULT_ARBITER_MAX_TOKENS: u32 = 3072;
+const DEFAULT_MEMBER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Default token budget for one full council run (all members + arbiter).
 /// Conservative — roughly a 3-member council with synthesis on a 200K model.
@@ -61,6 +71,104 @@ where members AGREE (higher confidence) and where they DISAGREE or diverge \
 (lower confidence, present the options), and (3) never invents agreement that \
 isn't there. Prefer claims corroborated by multiple members. If members \
 conflict on a fact, say so rather than silently picking one.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilIntent {
+    Diagnose,
+    Audit,
+    Plan,
+    Evaluate,
+    Explain,
+    Create,
+    Perspectives,
+    Freeform,
+}
+
+impl CouncilIntent {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "diagnose" | "debug" | "root_cause" | "root-cause" => Some(Self::Diagnose),
+            "audit" | "review" | "security" => Some(Self::Audit),
+            "plan" | "design" | "architecture" => Some(Self::Plan),
+            "evaluate" | "compare" | "choose" | "decision" => Some(Self::Evaluate),
+            "explain" | "teach" | "summarize" | "summarise" => Some(Self::Explain),
+            "create" | "draft" | "generate" => Some(Self::Create),
+            "perspectives" | "perspective" | "brainstorm" => Some(Self::Perspectives),
+            "freeform" | "general" | "default" => Some(Self::Freeform),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Diagnose => "diagnose",
+            Self::Audit => "audit",
+            Self::Plan => "plan",
+            Self::Evaluate => "evaluate",
+            Self::Explain => "explain",
+            Self::Create => "create",
+            Self::Perspectives => "perspectives",
+            Self::Freeform => "freeform",
+        }
+    }
+
+    fn member_instruction(self) -> &'static str {
+        match self {
+            Self::Diagnose => {
+                "Intent: diagnose. Focus on likely causes, evidence, reproduction paths, and the smallest decisive next check."
+            }
+            Self::Audit => {
+                "Intent: audit. Focus on concrete findings, severity, affected surface, evidence, and missing tests or guardrails."
+            }
+            Self::Plan => {
+                "Intent: plan. Focus on implementation order, dependencies, tradeoffs, and risks that change the plan."
+            }
+            Self::Evaluate => {
+                "Intent: evaluate. Compare options against explicit criteria and give a defensible recommendation."
+            }
+            Self::Explain => {
+                "Intent: explain. Make the answer clear, accurate, and concise; call out assumptions."
+            }
+            Self::Create => {
+                "Intent: create. Produce the requested artifact or design, plus only the constraints needed to use it."
+            }
+            Self::Perspectives => {
+                "Intent: perspectives. Provide a distinct useful angle; avoid duplicating the obvious default view."
+            }
+            Self::Freeform => {
+                "Intent: freeform. Answer naturally while preserving uncertainty and evidence."
+            }
+        }
+    }
+
+    fn arbiter_instruction(self) -> &'static str {
+        match self {
+            Self::Diagnose => {
+                "Synthesis intent: diagnose. Lead with the most likely cause and the decisive evidence/checks."
+            }
+            Self::Audit => {
+                "Synthesis intent: audit. Lead with actionable findings ordered by severity and confidence."
+            }
+            Self::Plan => {
+                "Synthesis intent: plan. Lead with the recommended implementation order and risk controls."
+            }
+            Self::Evaluate => {
+                "Synthesis intent: evaluate. Lead with the recommendation and why it beats alternatives."
+            }
+            Self::Explain => {
+                "Synthesis intent: explain. Lead with the clearest correct explanation."
+            }
+            Self::Create => {
+                "Synthesis intent: create. Deliver the requested artifact and reconcile member differences."
+            }
+            Self::Perspectives => {
+                "Synthesis intent: perspectives. Preserve genuinely different useful viewpoints."
+            }
+            Self::Freeform => "Synthesis intent: freeform. Produce the best consolidated answer.",
+        }
+    }
+}
 
 /// A single council member: which provider to call and under what model id.
 #[derive(Clone)]
@@ -93,7 +201,7 @@ impl CouncilMember {
 }
 
 /// The result of a single member's deliberation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemberSummary {
     pub label: String,
     pub model: String,
@@ -102,7 +210,7 @@ pub struct MemberSummary {
     pub tokens_used: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum MemberOutcome {
     Answered(String),
     Failed(String),
@@ -123,13 +231,16 @@ impl MemberSummary {
 
 /// The full council deliberation: every member summary plus the arbiter's
 /// synthesised final answer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CouncilReport {
     pub question: String,
     pub members: Vec<MemberSummary>,
     /// The arbiter's consolidated answer.
     pub synthesis: String,
     pub tokens_used: u64,
+    pub intent: Option<CouncilIntent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_dir: Option<PathBuf>,
 }
 
 impl CouncilReport {
@@ -142,6 +253,9 @@ impl CouncilReport {
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
         out.push_str("## Model Council\n\n");
+        if let Some(intent) = self.intent {
+            out.push_str(&format!("_Intent: {}_\n\n", intent.as_str()));
+        }
         out.push_str(&self.synthesis);
         out.push_str("\n\n---\n");
         out.push_str(&format!(
@@ -158,6 +272,9 @@ impl CouncilReport {
                     out.push_str(&format!("- ⚠️ `{}` — {}\n", m.label, reason));
                 }
             }
+        }
+        if let Some(dir) = &self.archive_dir {
+            out.push_str(&format!("\n_Archive: `{}`_\n", dir.display()));
         }
         out
     }
@@ -205,7 +322,11 @@ fn estimate_tokens(usage: &TokenUsage, fallback_chars: usize) -> u64 {
     usage.billable_tokens(fallback_chars).0
 }
 
-fn member_messages(question: &str, context: Option<&str>) -> Vec<ProviderMessage> {
+fn member_messages(
+    question: &str,
+    context: Option<&str>,
+    intent: Option<CouncilIntent>,
+) -> Vec<ProviderMessage> {
     let mut messages = Vec::new();
     if let Some(ctx) = context.filter(|c| !c.trim().is_empty()) {
         messages.push(ProviderMessage {
@@ -215,6 +336,14 @@ fn member_messages(question: &str, context: Option<&str>) -> Vec<ProviderMessage
             ))],
         });
     }
+    if let Some(intent) = intent {
+        messages.push(ProviderMessage {
+            role: ProviderRole::User,
+            content: vec![ProviderContent::Text(
+                intent.member_instruction().to_owned(),
+            )],
+        });
+    }
     messages.push(ProviderMessage {
         role: ProviderRole::User,
         content: vec![ProviderContent::Text(format!("Question: {question}"))],
@@ -222,7 +351,11 @@ fn member_messages(question: &str, context: Option<&str>) -> Vec<ProviderMessage
     messages
 }
 
-fn arbiter_messages(question: &str, members: &[MemberSummary]) -> Vec<ProviderMessage> {
+fn arbiter_messages(
+    question: &str,
+    members: &[MemberSummary],
+    intent: Option<CouncilIntent>,
+) -> Vec<ProviderMessage> {
     let mut block = format!("Original question:\n{question}\n\nMember answers:\n");
     for (i, m) in members.iter().enumerate() {
         if let MemberOutcome::Answered(answer) = &m.outcome {
@@ -233,6 +366,9 @@ fn arbiter_messages(question: &str, members: &[MemberSummary]) -> Vec<ProviderMe
                 answer
             ));
         }
+    }
+    if let Some(intent) = intent {
+        block.push_str(&format!("\n{}\n", intent.arbiter_instruction()));
     }
     block.push_str("\nSynthesise these into one consolidated answer.");
     vec![ProviderMessage {
@@ -253,6 +389,29 @@ async fn complete_with_fallback(
 }
 
 /// Configuration for a council run.
+#[derive(Debug, Clone)]
+pub struct CouncilRunOptions {
+    pub quorum: Option<usize>,
+    pub retry_on_fail: u32,
+    pub member_timeout: Option<Duration>,
+    pub archive: bool,
+    pub archive_root: Option<PathBuf>,
+    pub intent: Option<CouncilIntent>,
+}
+
+impl Default for CouncilRunOptions {
+    fn default() -> Self {
+        Self {
+            quorum: None,
+            retry_on_fail: 0,
+            member_timeout: Some(DEFAULT_MEMBER_TIMEOUT),
+            archive: false,
+            archive_root: None,
+            intent: None,
+        }
+    }
+}
+
 pub struct CouncilRequest {
     pub question: String,
     /// Optional shared context (e.g. a transcript snapshot or research notes).
@@ -261,6 +420,7 @@ pub struct CouncilRequest {
     /// Which member resolves the synthesis. If `None`, the first member is used.
     pub arbiter: Option<CouncilMember>,
     pub budget: CouncilBudget,
+    pub options: CouncilRunOptions,
 }
 
 impl CouncilRequest {
@@ -271,6 +431,7 @@ impl CouncilRequest {
             members,
             arbiter: None,
             budget: CouncilBudget::default(),
+            options: CouncilRunOptions::default(),
         }
     }
 
@@ -288,6 +449,37 @@ impl CouncilRequest {
         self.budget = CouncilBudget::new(budget);
         self
     }
+
+    pub fn with_quorum(mut self, quorum: Option<usize>) -> Self {
+        self.options.quorum = quorum;
+        self
+    }
+
+    pub fn with_retry_on_fail(mut self, retry_on_fail: u32) -> Self {
+        self.options.retry_on_fail = retry_on_fail;
+        self
+    }
+
+    pub fn with_member_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.options.member_timeout = timeout;
+        self
+    }
+
+    pub fn with_archive(mut self, archive: bool, root: Option<PathBuf>) -> Self {
+        self.options.archive = archive;
+        self.options.archive_root = root;
+        self
+    }
+
+    pub fn with_intent(mut self, intent: Option<CouncilIntent>) -> Self {
+        self.options.intent = intent;
+        self
+    }
+
+    pub fn with_intent_str(mut self, intent: Option<&str>) -> Self {
+        self.options.intent = intent.and_then(CouncilIntent::parse);
+        self
+    }
 }
 
 /// Deliberate a single council member: one tool-less completion, mapped into a
@@ -296,29 +488,61 @@ async fn deliberate_member(
     member: CouncilMember,
     question: &str,
     context: Option<&str>,
+    intent: Option<CouncilIntent>,
+    timeout_after: Option<Duration>,
+    retry_on_fail: u32,
 ) -> MemberSummary {
     let label = member.display_label();
     let model = member.model.as_str().to_owned();
-    let messages = member_messages(question, context);
-    let opts = StreamOptions::new(member.model.clone())
-        .system(MEMBER_SYSTEM_PROMPT)
-        .max_tokens(DEFAULT_MEMBER_MAX_TOKENS);
-    match complete_with_fallback(member.provider.as_ref(), messages, &opts).await {
-        Ok(resp) => {
-            let used = estimate_tokens(&resp.usage, question.len() + resp.content.len());
-            MemberSummary {
-                label,
-                model,
-                outcome: MemberOutcome::Answered(resp.content),
-                tokens_used: used,
+    let mut attempt = 0;
+    loop {
+        let messages = member_messages(question, context, intent);
+        let opts = StreamOptions::new(member.model.clone())
+            .system(MEMBER_SYSTEM_PROMPT)
+            .max_tokens(DEFAULT_MEMBER_MAX_TOKENS);
+        let call = complete_with_fallback(member.provider.as_ref(), messages, &opts);
+        let outcome = match timeout_after {
+            Some(duration) => match timeout(duration, call).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!("timed out after {}ms", duration.as_millis().max(1))),
+            },
+            None => call.await,
+        };
+
+        match outcome {
+            Ok(resp) => {
+                let used = estimate_tokens(&resp.usage, question.len() + resp.content.len());
+                return MemberSummary {
+                    label,
+                    model,
+                    outcome: MemberOutcome::Answered(resp.content),
+                    tokens_used: used,
+                };
+            }
+            Err(e) if attempt < retry_on_fail => {
+                attempt += 1;
+                tracing::warn!(
+                    target: "jfc::council",
+                    member = %label,
+                    attempt,
+                    error = %e,
+                    "council member failed; retrying"
+                );
+            }
+            Err(e) => {
+                let reason = if attempt == 0 {
+                    e.to_string()
+                } else {
+                    format!("{} (after {} retries)", e, attempt)
+                };
+                return MemberSummary {
+                    label,
+                    model,
+                    outcome: MemberOutcome::Failed(reason),
+                    tokens_used: 0,
+                };
             }
         }
-        Err(e) => MemberSummary {
-            label,
-            model,
-            outcome: MemberOutcome::Failed(e.to_string()),
-            tokens_used: 0,
-        },
     }
 }
 
@@ -327,12 +551,234 @@ async fn fan_out_members(
     members: &[CouncilMember],
     question: &str,
     context: Option<&str>,
+    options: &CouncilRunOptions,
     budget: &mut CouncilBudget,
 ) -> Vec<MemberSummary> {
-    let futures = members
-        .iter()
-        .cloned()
-        .map(|m| deliberate_member(m, question, context));
+    let futures = members.iter().cloned().map(|m| {
+        deliberate_member(
+            m,
+            question,
+            context,
+            options.intent,
+            options.member_timeout,
+            options.retry_on_fail,
+        )
+    });
+    let summaries: Vec<MemberSummary> = join_all(futures).await;
+    for s in &summaries {
+        budget.record(s.tokens_used);
+    }
+    summaries
+}
+
+fn council_member_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "evidence": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["low", "medium", "high"]
+            },
+            "recommendation": { "type": "string" }
+        },
+        "required": ["findings", "evidence", "confidence", "recommendation"],
+        "additionalProperties": true
+    })
+}
+
+fn council_member_agent_def() -> crate::agents::AgentDef {
+    crate::agents::AgentDef {
+        name: "CouncilMember".to_owned(),
+        source: PathBuf::from("builtin:council-member"),
+        model: None,
+        isolation: None,
+        skills: Vec::new(),
+        allowed_tools: vec![
+            "Read".to_owned(),
+            "Glob".to_owned(),
+            "Grep".to_owned(),
+            "LSP".to_owned(),
+            "StructuredOutput".to_owned(),
+        ],
+        disallowed_tools: vec![
+            "Write".to_owned(),
+            "Edit".to_owned(),
+            "MultiEdit".to_owned(),
+            "ApplyPatch".to_owned(),
+            "Bash".to_owned(),
+            "Task".to_owned(),
+        ],
+        permission_mode: None,
+        forks_parent_context: None,
+        background: Some(false),
+        color: None,
+        effort: None,
+        max_turns: Some(8),
+        max_input_tokens: None,
+        memory: None,
+        mcp_servers: Vec::new(),
+        hooks: HashMap::new(),
+        key_trigger: None,
+        use_when: Vec::new(),
+        avoid_when: Vec::new(),
+        cost: None,
+        system_prompt: "\
+You are a read-only member of a model council. Inspect the repository only when it improves the answer. \
+Use Read, Glob, Grep, and LSP for evidence; do not edit files, run shell commands, or spawn agents. \
+Return your final answer by calling StructuredOutput with findings, evidence, confidence, and recommendation."
+            .to_owned(),
+    }
+}
+
+fn agentic_member_prompt(
+    question: &str,
+    context: Option<&str>,
+    intent: Option<CouncilIntent>,
+    label: &str,
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(&format!("Council member: {label}\n\n"));
+    if let Some(intent) = intent {
+        prompt.push_str(intent.member_instruction());
+        prompt.push_str("\n\n");
+    }
+    if let Some(ctx) = context.filter(|c| !c.trim().is_empty()) {
+        prompt.push_str("<shared_context>\n");
+        prompt.push_str(ctx);
+        prompt.push_str("\n</shared_context>\n\n");
+    }
+    prompt.push_str("Question:\n");
+    prompt.push_str(question);
+    prompt.push_str(
+        "\n\nInvestigate independently. Use read-only tools when useful. \
+Return StructuredOutput with concise findings, concrete evidence, a low/medium/high confidence value, and a recommendation.",
+    );
+    prompt
+}
+
+async fn deliberate_agentic_member(
+    member: CouncilMember,
+    question: &str,
+    context: Option<&str>,
+    options: &CouncilRunOptions,
+    task_store: Option<Arc<jfc_session::TaskStore>>,
+    active_team_name: Option<String>,
+    cwd: PathBuf,
+) -> MemberSummary {
+    let label = member.display_label();
+    let model = member.model.as_str().to_owned();
+    let agent_def = council_member_agent_def();
+    let schema = council_member_output_schema();
+    let mut attempt = 0;
+
+    loop {
+        let task_input = crate::types::TaskInput {
+            description: format!("Council member `{label}`"),
+            prompt: agentic_member_prompt(question, context, options.intent, &label),
+            subagent_type: Some("CouncilMember".to_owned()),
+            category: Some("audit".to_owned()),
+            run_in_background: false,
+            model: Some("inherit".to_owned()),
+            effort: None,
+            name: None,
+            team_name: None,
+            mode: Some("read-only".to_owned()),
+            isolation: None,
+            parent_task_id: None,
+            schema: Some(schema.clone()),
+        };
+        let call = crate::tools::execute_task(
+            &task_input,
+            member.provider.as_ref(),
+            member.model.clone(),
+            None,
+            None,
+            Some(&agent_def),
+            Some(cwd.clone()),
+            task_store.clone(),
+            active_team_name.as_deref(),
+        );
+        let result = match options.member_timeout {
+            Some(duration) => match timeout(duration, call).await {
+                Ok(result) => result,
+                Err(_) => crate::runtime::ExecutionResult::failure(format!(
+                    "timed out after {}ms",
+                    duration.as_millis().max(1)
+                )),
+            },
+            None => call.await,
+        };
+
+        if !result.is_error() {
+            let output = result.output;
+            let answer = match serde_json::from_str::<serde_json::Value>(&output) {
+                Ok(value) => serde_json::to_string_pretty(&value).unwrap_or(output),
+                Err(_) => output,
+            };
+            return MemberSummary {
+                label,
+                model,
+                outcome: MemberOutcome::Answered(answer),
+                tokens_used: 0,
+            };
+        }
+
+        if attempt < options.retry_on_fail {
+            attempt += 1;
+            tracing::warn!(
+                target: "jfc::council",
+                member = %label,
+                attempt,
+                error = %result.output,
+                "agentic council member failed; retrying"
+            );
+            continue;
+        }
+
+        let reason = if attempt == 0 {
+            result.output
+        } else {
+            format!("{} (after {} retries)", result.output, attempt)
+        };
+        return MemberSummary {
+            label,
+            model,
+            outcome: MemberOutcome::Failed(reason),
+            tokens_used: 0,
+        };
+    }
+}
+
+async fn fan_out_agentic_members(
+    members: &[CouncilMember],
+    question: &str,
+    context: Option<&str>,
+    options: &CouncilRunOptions,
+    task_store: Option<Arc<jfc_session::TaskStore>>,
+    active_team_name: Option<&str>,
+    cwd: PathBuf,
+    budget: &mut CouncilBudget,
+) -> Vec<MemberSummary> {
+    let team = active_team_name.map(str::to_owned);
+    let futures = members.iter().cloned().map(|m| {
+        deliberate_agentic_member(
+            m,
+            question,
+            context,
+            options,
+            task_store.clone(),
+            team.clone(),
+            cwd.clone(),
+        )
+    });
     let summaries: Vec<MemberSummary> = join_all(futures).await;
     for s in &summaries {
         budget.record(s.tokens_used);
@@ -347,9 +793,10 @@ async fn synthesize(
     question: &str,
     members: &[MemberSummary],
     arbiter: CouncilMember,
+    intent: Option<CouncilIntent>,
     budget: &mut CouncilBudget,
 ) -> String {
-    let messages = arbiter_messages(question, members);
+    let messages = arbiter_messages(question, members, intent);
     let opts = StreamOptions::new(arbiter.model.clone())
         .system(ARBITER_SYSTEM_PROMPT)
         .max_tokens(DEFAULT_ARBITER_MAX_TOKENS);
@@ -369,6 +816,64 @@ async fn synthesize(
             );
             local_synthesis(question, members)
         }
+    }
+}
+
+fn archive_id(question: &str) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    question.hash(&mut hasher);
+    format!("{now_ms}-{:016x}", hasher.finish())
+}
+
+fn archive_council_report(root: &Path, report: &CouncilReport) -> Result<PathBuf> {
+    let dir = root
+        .join(".jfc")
+        .join("council")
+        .join(archive_id(&report.question));
+    let member_outputs = dir.join("member-outputs");
+    fs::create_dir_all(&member_outputs)?;
+    fs::write(dir.join("prompt.md"), &report.question)?;
+    fs::write(dir.join("synthesis.md"), &report.synthesis)?;
+    fs::write(
+        dir.join("members.json"),
+        serde_json::to_vec_pretty(&report.members)?,
+    )?;
+    for member in &report.members {
+        let file_stem = sanitize_archive_name(&member.label);
+        fs::write(
+            member_outputs.join(format!("{file_stem}.json")),
+            serde_json::to_vec_pretty(member)?,
+        )?;
+    }
+    let meta = serde_json::json!({
+        "schema_version": 1,
+        "question": &report.question,
+        "intent": report.intent.map(CouncilIntent::as_str),
+        "member_count": report.members.len(),
+        "successful_members": report.successful_members(),
+        "tokens_used": report.tokens_used,
+    });
+    fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(&meta)?)?;
+    Ok(dir)
+}
+
+fn sanitize_archive_name(label: &str) -> String {
+    let mut out = String::with_capacity(label.len().min(80));
+    for ch in label.chars().take(80) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "member".to_owned()
+    } else {
+        out
     }
 }
 
@@ -398,6 +903,7 @@ pub async fn run_council(mut request: CouncilRequest) -> Result<CouncilReport> {
         &request.members,
         &question,
         context.as_deref(),
+        &request.options,
         &mut request.budget,
     )
     .await;
@@ -405,6 +911,12 @@ pub async fn run_council(mut request: CouncilRequest) -> Result<CouncilReport> {
     let answered = members.iter().filter(|m| m.succeeded()).count();
     if answered == 0 {
         return Err(anyhow!("all {} council members failed", members.len()));
+    }
+    let quorum = request.options.quorum.unwrap_or(1).max(1);
+    if answered < quorum {
+        return Err(anyhow!(
+            "council quorum not met: {answered}/{quorum} members answered"
+        ));
     }
 
     // One answer or no budget left → local merge; otherwise pay for arbitration.
@@ -416,15 +928,132 @@ pub async fn run_council(mut request: CouncilRequest) -> Result<CouncilReport> {
             .clone()
             .or_else(|| request.members.first().cloned())
             .expect("members non-empty checked above");
-        synthesize(&question, &members, arbiter, &mut request.budget).await
+        synthesize(
+            &question,
+            &members,
+            arbiter,
+            request.options.intent,
+            &mut request.budget,
+        )
+        .await
     };
 
-    Ok(CouncilReport {
+    let mut report = CouncilReport {
         question,
         members,
         synthesis,
         tokens_used: request.budget.used,
-    })
+        intent: request.options.intent,
+        archive_dir: None,
+    };
+
+    if request.options.archive {
+        let root = request
+            .options
+            .archive_root
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        match archive_council_report(&root, &report) {
+            Ok(dir) => report.archive_dir = Some(dir),
+            Err(e) => tracing::warn!(
+                target: "jfc::council",
+                error = %e,
+                "failed to archive council run"
+            ),
+        }
+    }
+
+    Ok(report)
+}
+
+/// Run the council with each member as a read-only task-backed subagent. This
+/// is slower than [`run_council`] but lets members inspect the codebase through
+/// Read/Glob/Grep/LSP before returning a schema-validated finding bundle.
+#[tracing::instrument(
+    target = "jfc::council",
+    skip(request, task_store),
+    fields(
+        members = request.members.len(),
+        budget = request.budget.limit,
+    ),
+)]
+pub async fn run_agentic_council(
+    mut request: CouncilRequest,
+    task_store: Option<Arc<jfc_session::TaskStore>>,
+    active_team_name: Option<&str>,
+    cwd: PathBuf,
+) -> Result<CouncilReport> {
+    let question = request.question.trim().to_owned();
+    if question.is_empty() {
+        return Err(anyhow!("council question is empty"));
+    }
+    if request.members.is_empty() {
+        return Err(anyhow!("council has no members"));
+    }
+
+    let context = request.context.clone();
+    let members = fan_out_agentic_members(
+        &request.members,
+        &question,
+        context.as_deref(),
+        &request.options,
+        task_store,
+        active_team_name,
+        cwd.clone(),
+        &mut request.budget,
+    )
+    .await;
+
+    let answered = members.iter().filter(|m| m.succeeded()).count();
+    if answered == 0 {
+        return Err(anyhow!("all {} council members failed", members.len()));
+    }
+    let quorum = request.options.quorum.unwrap_or(1).max(1);
+    if answered < quorum {
+        return Err(anyhow!(
+            "council quorum not met: {answered}/{quorum} members answered"
+        ));
+    }
+
+    let synthesis = if answered == 1 || request.budget.is_exhausted() {
+        local_synthesis(&question, &members)
+    } else {
+        let arbiter = request
+            .arbiter
+            .clone()
+            .or_else(|| request.members.first().cloned())
+            .expect("members non-empty checked above");
+        synthesize(
+            &question,
+            &members,
+            arbiter,
+            request.options.intent,
+            &mut request.budget,
+        )
+        .await
+    };
+
+    let mut report = CouncilReport {
+        question,
+        members,
+        synthesis,
+        tokens_used: request.budget.used,
+        intent: request.options.intent,
+        archive_dir: None,
+    };
+
+    if request.options.archive {
+        let root = request.options.archive_root.unwrap_or(cwd);
+        match archive_council_report(&root, &report) {
+            Ok(dir) => report.archive_dir = Some(dir),
+            Err(e) => tracing::warn!(
+                target: "jfc::council",
+                error = %e,
+                "failed to archive agentic council run"
+            ),
+        }
+    }
+
+    Ok(report)
 }
 
 /// Deterministic fallback synthesis: concatenate the successful member answers
@@ -489,6 +1118,18 @@ mod tests {
                 replies: Mutex::new(replies.into_iter().map(|s| Ok(s.to_owned())).collect()),
             })
         }
+
+        fn sequence_results(name: &'static str, replies: Vec<Result<&str>>) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                replies: Mutex::new(
+                    replies
+                        .into_iter()
+                        .map(|result| result.map(str::to_owned))
+                        .collect(),
+                ),
+            })
+        }
     }
 
     #[async_trait]
@@ -530,6 +1171,7 @@ mod tests {
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,
                 },
+                context_signals: None,
             })
         }
     }
@@ -636,6 +1278,65 @@ mod tests {
             .await
             .expect_err("all-fail must error");
         assert!(err.to_string().contains("all 2 council members failed"));
+    }
+
+    #[tokio::test]
+    async fn run_council_retries_failed_member_robust() {
+        let members = vec![CouncilMember::new(
+            ScriptedProvider::sequence_results(
+                "p1",
+                vec![Err(anyhow!("transient")), Ok("Recovered answer.")],
+            ),
+            "model-a",
+        )];
+        let report = run_council(CouncilRequest::new("Q?", members).with_retry_on_fail(1))
+            .await
+            .expect("retry should recover");
+        assert_eq!(report.successful_members(), 1);
+        assert_eq!(report.synthesis, "Recovered answer.");
+    }
+
+    #[tokio::test]
+    async fn run_council_quorum_failure_is_error_robust() {
+        let members = vec![
+            CouncilMember::new(ScriptedProvider::failing("p1", "boom"), "model-a"),
+            member("p2", "model-b", "Only survivor."),
+        ];
+        let err = run_council(CouncilRequest::new("Q?", members).with_quorum(Some(2)))
+            .await
+            .expect_err("quorum should fail");
+        assert!(err.to_string().contains("quorum not met"));
+    }
+
+    #[tokio::test]
+    async fn run_council_archives_artifact_bundle_normal() {
+        let root = std::env::temp_dir().join(format!(
+            "jfc-council-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let members = vec![member("p1", "model-a", "Archived answer.")];
+        let report = run_council(
+            CouncilRequest::new("Archive this?", members)
+                .with_intent(Some(CouncilIntent::Audit))
+                .with_archive(true, Some(root.clone())),
+        )
+        .await
+        .expect("archive run succeeds");
+        let archive_dir = report.archive_dir.as_ref().expect("archive dir");
+        assert!(archive_dir.join("prompt.md").exists());
+        assert!(archive_dir.join("synthesis.md").exists());
+        assert!(archive_dir.join("members.json").exists());
+        assert!(
+            archive_dir
+                .join("member-outputs")
+                .join("model-a.json")
+                .exists()
+        );
+        assert!(report.to_markdown().contains("_Intent: audit_"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

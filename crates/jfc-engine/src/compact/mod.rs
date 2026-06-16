@@ -70,15 +70,18 @@ pub enum CompactLevel {
 }
 
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    let base: usize = messages
+    let content_chars: usize = messages
         .iter()
         .map(|m| {
-            let content_chars: usize = m.parts.iter().map(|p| p.approx_text_len()).sum();
-            content_chars / CHARS_PER_TOKEN
+            m.parts
+                .iter()
+                .map(|part| part.approx_text_len())
+                .sum::<usize>()
         })
         .sum();
+    let base = content_chars / CHARS_PER_TOKEN;
     let est = base * OVERHEAD_MULTIPLIER_NUM / OVERHEAD_MULTIPLIER_DEN;
-    trace!(target: "jfc::compact", message_count = messages.len(), base, est, "estimate_tokens (with overhead)");
+    trace!(target: "jfc::compact", message_count = messages.len(), content_chars, base, est, "estimate_tokens (with overhead)");
     est
 }
 

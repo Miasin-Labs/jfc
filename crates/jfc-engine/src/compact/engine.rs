@@ -1,7 +1,10 @@
 use crate::context::ToolContext;
-use crate::types::ChatMessage;
+use crate::types::{ChatMessage, MessagePart, Role};
 use futures::StreamExt;
+use jfc_core::context_management::{ContextItem, ContextItemKind, ContextSignals};
 use jfc_provider::{Provider, ProviderContent, ProviderMessage, ProviderRole, StreamOptions};
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use tracing::{debug, info, instrument, trace, warn};
 
 use super::{
@@ -23,37 +26,151 @@ fn estimate_group_tokens(group: &ConversationGroup) -> usize {
     tokens
 }
 
-/// Fraction of the context window the newest groups are allowed to occupy
-/// verbatim before the first compaction pass. Recency-weighted retention: keep
-/// recent detail rather than collapsing everything but the last group.
-const RECENCY_PRESERVE_FRACTION: f64 = 0.30;
-
 /// Compute the recency-weighted preserve floor — how many of the newest groups
 /// to keep verbatim on the *first* compaction attempt — via
-/// [`jfc_core::select_retained`].
+/// [`jfc_core::context_management::recency_preserve_floor`].
 ///
 /// `group_tokens` is oldest-first (matching `split_into_groups`).
-/// [`jfc_core::select_retained`] keeps the newest turns whose cumulative tokens
-/// fit a budget; we map each group to one `TurnCost`, budget = `fraction *
-/// window`, and return the count kept (clamped to `[1, total-1]` so there is
-/// always at least one group to preserve and at least one to summarize).
+/// The core policy keeps the newest turns whose cumulative tokens fit the
+/// proof-backed recency budget, then clamps to `[1, total-1]` so there is
+/// always at least one group to preserve and at least one to summarize.
 fn recency_preserve_floor(group_tokens: &[usize], window: usize) -> usize {
-    let total = group_tokens.len();
-    if total <= 1 {
-        return 1;
+    jfc_core::context_management::recency_preserve_floor(group_tokens, window)
+}
+
+fn context_item_kind_for_group(group: &ConversationGroup) -> ContextItemKind {
+    if group.messages.iter().any(ChatMessage::is_compact_boundary) {
+        return ContextItemKind::CompactSummary;
     }
-    let budget = ((window as f64) * RECENCY_PRESERVE_FRACTION) as u64;
-    let turns: Vec<jfc_core::TurnCost> = group_tokens
+
+    if group
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .any(|part| matches!(part, MessagePart::Tool(_)))
+    {
+        return ContextItemKind::ToolOutput;
+    }
+
+    if group
+        .messages
+        .iter()
+        .any(|message| message.role == Role::User)
+    {
+        ContextItemKind::UserText
+    } else {
+        ContextItemKind::AssistantText
+    }
+}
+
+fn context_items_for_groups(
+    groups: &[ConversationGroup],
+    group_tokens: &[usize],
+) -> Vec<ContextItem> {
+    groups
         .iter()
         .enumerate()
-        .map(|(i, &t)| jfc_core::TurnCost {
-            id: i as u64,
-            tokens: t as u64,
+        .map(|(idx, group)| ContextItem {
+            id: idx as u64,
+            position: idx as u64,
+            token_estimate: group_tokens.get(idx).copied().unwrap_or(1).max(1) as u64,
+            kind: context_item_kind_for_group(group),
+            duplicate_count: 0,
         })
-        .collect();
-    let retention = jfc_core::select_retained(&turns, budget);
-    // Keep at least 1, and always leave at least 1 group to summarize.
-    retention.kept.len().clamp(1, total - 1)
+        .collect()
+}
+
+fn provider_signal_preserve_floor(
+    groups: &[ConversationGroup],
+    group_tokens: &[usize],
+    window: usize,
+    signals: &ContextSignals,
+) -> Option<usize> {
+    if groups.len() <= 1 {
+        return Some(1);
+    }
+
+    let items = context_items_for_groups(groups, group_tokens);
+    let signal_budget = jfc_core::context_management::recency_budget(window) as u64;
+    let selected = jfc_core::context_management::select_context_items_with_signals(
+        &items,
+        signal_budget,
+        Some(signals),
+    );
+    let oldest_selected = selected
+        .into_iter()
+        .filter_map(|id| usize::try_from(id).ok())
+        .filter(|idx| *idx < groups.len())
+        .min()?;
+
+    Some(
+        groups
+            .len()
+            .saturating_sub(oldest_selected)
+            .min(groups.len() - 1)
+            .max(1),
+    )
+}
+
+fn truncated_signal_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push_str("\n[truncated]");
+    out
+}
+
+fn context_signal_probe_messages(groups: &[ConversationGroup]) -> Vec<ProviderMessage> {
+    let mut body = String::from(
+        "JFC context-signal probe. If this provider exposes attention or KV-cache metadata, \
+         return scores mapped to the numeric context_item ids below. Do not answer the user.\n",
+    );
+
+    for (idx, group) in groups.iter().enumerate() {
+        let _ = writeln!(
+            body,
+            "\n<context_item id=\"{idx}\" messages=\"{}\">",
+            group.messages.len()
+        );
+        for message in &group.messages {
+            let _ = writeln!(body, "[role={}]", message.role);
+            for part in &message.parts {
+                let _ = writeln!(body, "{}", truncated_signal_text(&part.text_only(), 4096));
+            }
+        }
+        body.push_str("</context_item>\n");
+    }
+
+    vec![ProviderMessage {
+        role: ProviderRole::User,
+        content: vec![ProviderContent::Text(body)],
+    }]
+}
+
+async fn provider_context_signals_for_groups(
+    provider: &dyn Provider,
+    model: &str,
+    groups: &[ConversationGroup],
+) -> Option<ContextSignals> {
+    if !provider.supports_context_signals() {
+        return None;
+    }
+
+    let messages = context_signal_probe_messages(groups);
+    match provider.context_signals(model, messages).await {
+        Ok(Some(signals)) if !signals.is_empty() => Some(signals),
+        Ok(_) => None,
+        Err(error) => {
+            debug!(
+                target: "jfc::compact",
+                error = %error,
+                "provider context-signal export failed; using synthetic context policy"
+            );
+            None
+        }
+    }
 }
 
 /// Quantified before/after for the recency-weighted compaction floor.
@@ -136,31 +253,28 @@ fn split_into_groups(messages: &[ChatMessage]) -> Vec<ConversationGroup> {
 ///
 /// Falls back to exponential doubling when `token_gap` is None.
 fn token_gap_step(token_gap: Option<usize>, group_tokens: &[usize], current_split: usize) -> usize {
-    let Some(gap) = token_gap else {
-        let step = (current_split / 2).max(1);
-        debug!(
-            target: "jfc::compact",
-            current_split, step,
-            "token_gap_step: no gap info, falling back to halving"
-        );
-        return step;
-    };
-
-    let mut freed: usize = 0;
-    let mut step: usize = 0;
-    for i in (0..current_split).rev() {
-        if freed >= gap {
-            break;
+    let step = jfc_core::context_management::token_gap_step(token_gap, group_tokens, current_split);
+    match token_gap {
+        None => {
+            debug!(
+                target: "jfc::compact",
+                current_split, step,
+                "token_gap_step: no gap info, falling back to halving"
+            );
         }
-        freed += group_tokens.get(i).copied().unwrap_or(0);
-        step += 1;
+        Some(gap) => {
+            let freed: usize = group_tokens[..current_split.min(group_tokens.len())]
+                .iter()
+                .rev()
+                .take(step)
+                .fold(0usize, |sum, tokens| sum.saturating_add(*tokens));
+            debug!(
+                target: "jfc::compact",
+                gap, current_split, freed, step,
+                "token_gap_step: computed step from token gap"
+            );
+        }
     }
-    let step = step.max(1);
-    debug!(
-        target: "jfc::compact",
-        gap, current_split, freed, step,
-        "token_gap_step: computed step from token gap"
-    );
     step
 }
 
@@ -253,6 +367,7 @@ pub async fn complete_or_stream(
             Ok(jfc_provider::CompletionResponse {
                 content: collected,
                 usage: Default::default(),
+                context_signals: None,
             })
         }
         Err(e) => Err(e),
@@ -330,6 +445,23 @@ pub async fn compact(
     // aggressive. The retry loop only ever *raises* preserve_count, so starting
     // at this floor (>= 1) is always safe.
     let mut preserve_count: usize = recency_preserve_floor(&group_tokens, window);
+    if let Some(signals) =
+        provider_context_signals_for_groups(provider, options.model.as_str(), &groups).await
+        && let Some(signal_floor) =
+            provider_signal_preserve_floor(&groups, &group_tokens, window, &signals)
+    {
+        let previous_floor = preserve_count;
+        preserve_count = preserve_count.max(signal_floor);
+        debug!(
+            target: "jfc::compact",
+            previous_floor,
+            signal_floor,
+            preserve_count,
+            attention_items = signals.attention_tokens.len(),
+            kv_entries = signals.kv_entries.len(),
+            "provider context signals adjusted initial preserve floor"
+        );
+    }
     let mut attempt: u32 = 0;
     let mut strip_media = false;
     // Sourced from API error bodies: `actualTokens - limitTokens` for
@@ -497,7 +629,35 @@ pub async fn compact(
                     formatted_len = formatted.len(),
                     "formatted compact summary"
                 );
-                let summary_msg = ChatMessage::compact_boundary(&formatted, pre_tokens);
+                let mut boundary_summary = formatted;
+                match crate::compact_archive::archive_current_project(
+                    &to_summarize,
+                    pre_tokens,
+                    &boundary_summary,
+                ) {
+                    Ok(Some(meta)) => {
+                        let _ = writeln!(
+                            &mut boundary_summary,
+                            "\nRaw compacted transcript archive: `{}` ({} messages). Use `/expand {}` to recover the exact pre-compaction messages.",
+                            meta.id, meta.message_count, meta.id
+                        );
+                        debug!(
+                            target: "jfc::compact",
+                            archive_id = %meta.id,
+                            path = %meta.path.display(),
+                            "archived compacted transcript range"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(
+                            target: "jfc::compact",
+                            error = %error,
+                            "failed to archive compacted transcript range"
+                        );
+                    }
+                }
+                let summary_msg = ChatMessage::compact_boundary(&boundary_summary, pre_tokens);
                 let mut compacted = vec![summary_msg];
                 compacted.extend(to_preserve);
 
@@ -835,6 +995,87 @@ fn count_user_turns_since_last_compact(messages: &[ChatMessage]) -> u32 {
     count
 }
 
+#[derive(Debug, Clone)]
+struct SeenSummaryOutput {
+    label: usize,
+    text: String,
+    approx_tokens: usize,
+}
+
+#[derive(Debug, Default)]
+struct SummaryOutputCompressor {
+    by_hash: HashMap<u64, Vec<SeenSummaryOutput>>,
+    full_outputs: Vec<SeenSummaryOutput>,
+    next_label: usize,
+}
+
+impl SummaryOutputCompressor {
+    const MIN_COMPRESS_CHARS: usize = 128;
+    const MIN_DIFF_PREFIX_CHARS: usize = 256;
+    const MAX_DIFF_SUFFIX_CHARS: usize = 1024;
+
+    fn render(&mut self, output_text: &str) -> String {
+        if output_text.chars().count() < Self::MIN_COMPRESS_CHARS {
+            return output_text.to_owned();
+        }
+
+        let hash = jfc_core::semantic_hash::content_hash_bytes(output_text.as_bytes());
+        if let Some(seen) = self
+            .by_hash
+            .get(&hash)
+            .and_then(|candidates| candidates.iter().find(|seen| seen.text == output_text))
+        {
+            return format!(
+                "[duplicate of earlier tool output #{} | ~{} tokens omitted]",
+                seen.label, seen.approx_tokens
+            );
+        }
+
+        if let Some((seen, prefix_chars, suffix)) = self.best_prefix_delta(output_text) {
+            return format!(
+                "[same first {prefix_chars} chars as earlier tool output #{}; new suffix follows]\n{}",
+                seen.label, suffix
+            );
+        }
+
+        let seen = SeenSummaryOutput {
+            label: self.next_label,
+            text: output_text.to_owned(),
+            approx_tokens: output_text.len() / CHARS_PER_TOKEN,
+        };
+        self.next_label += 1;
+        self.by_hash.entry(hash).or_default().push(seen.clone());
+        self.full_outputs.push(seen);
+        output_text.to_owned()
+    }
+
+    fn best_prefix_delta<'a>(
+        &'a self,
+        output_text: &'a str,
+    ) -> Option<(&'a SeenSummaryOutput, usize, String)> {
+        let current_chars: Vec<u64> = output_text.chars().map(|ch| ch as u64).collect();
+        let mut best: Option<(&SeenSummaryOutput, usize)> = None;
+        for seen in &self.full_outputs {
+            let seen_chars: Vec<u64> = seen.text.chars().map(|ch| ch as u64).collect();
+            let prefix = jfc_core::diff_compression::common_prefix_len(&seen_chars, &current_chars);
+            if prefix < Self::MIN_DIFF_PREFIX_CHARS {
+                continue;
+            }
+            if best.is_none_or(|(_, best_prefix)| prefix > best_prefix) {
+                best = Some((seen, prefix));
+            }
+        }
+
+        let (seen, prefix_chars) = best?;
+        let suffix: String = output_text.chars().skip(prefix_chars).collect();
+        let suffix_chars = suffix.chars().count();
+        if suffix_chars == 0 || suffix_chars > Self::MAX_DIFF_SUFFIX_CHARS {
+            return None;
+        }
+        Some((seen, prefix_chars, suffix))
+    }
+}
+
 fn build_summary_text(messages: &[ChatMessage], strip_media: bool) -> String {
     debug!(
         target: "jfc::compact",
@@ -848,6 +1089,9 @@ fn build_summary_text(messages: &[ChatMessage], strip_media: bool) -> String {
     // (NeurIPS DL4C '25) — simple observation masking halves cost with
     // zero accuracy loss compared to full LLM summarization.
     const MASK_THRESHOLD_CHARS: usize = 2000;
+    const MAX_TEXT_PART_CHARS: usize = 6000;
+
+    let mut output_compressor = SummaryOutputCompressor::default();
 
     for msg in messages {
         let role = if msg.role_is_user() {
@@ -878,6 +1122,7 @@ fn build_summary_text(messages: &[ChatMessage], strip_media: bool) -> String {
                             approx_tokens,
                         ));
                     } else {
+                        let output_text = output_compressor.render(&output_text);
                         text.push_str(&format!(
                             "[Tool: {} | Input: {} | Output: {}]\n",
                             tc.kind.label(),
@@ -887,11 +1132,16 @@ fn build_summary_text(messages: &[ChatMessage], strip_media: bool) -> String {
                     }
                 }
                 _ => {
-                    if strip_media {
-                        text.push_str(&part.text_only());
+                    let rendered = if strip_media {
+                        part.text_only()
                     } else {
-                        text.push_str(&part.to_display_string());
-                    }
+                        part.to_display_string()
+                    };
+                    let rendered = jfc_core::context_management::prune_text_with_sink_window(
+                        &rendered,
+                        MAX_TEXT_PART_CHARS,
+                    );
+                    text.push_str(&rendered);
                     text.push('\n');
                 }
             }
@@ -1063,21 +1313,50 @@ fn restore_recent_files(cache: &crate::context::ReadDedupCache) -> Vec<String> {
         b_mtime.cmp(&a_mtime)
     });
 
-    for path in sorted_paths.iter().take(MAX_FILES) {
+    let path_count = sorted_paths.len();
+    let candidates = sorted_paths
+        .iter()
+        .enumerate()
+        .map(|(idx, path)| {
+            let token_estimate = std::fs::metadata(path)
+                .map(|meta| meta.len() / CHARS_PER_TOKEN as u64)
+                .unwrap_or(1)
+                .max(1);
+            jfc_core::context_management::ContextItem {
+                id: idx as u64,
+                // `sorted_paths` is most-recent first; the synthetic attention
+                // model scores later positions as more recent.
+                position: path_count.saturating_sub(idx + 1) as u64,
+                token_estimate,
+                kind: jfc_core::context_management::ContextItemKind::Memory,
+                duplicate_count: 0,
+            }
+        })
+        .collect::<Vec<_>>();
+    let selected_ids = jfc_core::context_management::select_context_items_by_count(
+        &candidates,
+        MAX_FILES.min(path_count),
+    );
+
+    for (idx, path) in sorted_paths.iter().enumerate() {
+        if !selected_ids.contains(&(idx as u64)) {
+            continue;
+        }
         if total_chars >= MAX_TOTAL_CHARS {
             break;
         }
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
-        let truncated: String = content.chars().take(MAX_CHARS_PER_FILE).collect();
-        let was_truncated = content.len() > MAX_CHARS_PER_FILE;
-        let suffix = if was_truncated {
-            format!("\n… [truncated at {} chars]", MAX_CHARS_PER_FILE)
-        } else {
-            String::new()
-        };
-        let entry = format!("--- {} ---\n{}{}", path.display(), truncated, suffix,);
+        let remaining_chars = MAX_TOTAL_CHARS.saturating_sub(total_chars);
+        if remaining_chars == 0 {
+            break;
+        }
+        let content_budget = MAX_CHARS_PER_FILE.min(remaining_chars);
+        let restored =
+            jfc_core::context_management::prune_text_with_sink_window(&content, content_budget);
+        let was_pruned = content.chars().count() > content_budget;
+        let entry = format!("--- {} ---\n{}", path.display(), restored);
         let entry_len = entry.len();
         total_chars += entry_len;
         results.push(entry);
@@ -1086,8 +1365,8 @@ fn restore_recent_files(cache: &crate::context::ReadDedupCache) -> Vec<String> {
             target: "jfc::compact",
             path = %path.display(),
             chars = entry_len,
-            truncated = was_truncated,
-            "restored file post-compact"
+            pruned = was_pruned,
+            "restored file post-compact via context salience"
         );
     }
 
@@ -1356,7 +1635,10 @@ mod level_tests {
     // should_compact boundary, and is_usable_summary additional paths.
     // ──────────────────────────────────────────────────────────────────
 
-    use crate::types::ChatMessage;
+    use crate::types::{
+        ChatMessage, MessagePart, ToolCall, ToolDisplayState, ToolInput, ToolKind, ToolOutput,
+        ToolStatus,
+    };
 
     fn user_msg(text: &str) -> ChatMessage {
         ChatMessage::user(text.to_owned())
@@ -1364,6 +1646,22 @@ mod level_tests {
 
     fn assistant_msg(text: &str) -> ChatMessage {
         ChatMessage::assistant(text.to_owned())
+    }
+
+    fn tool_msg(output: &str) -> ChatMessage {
+        ChatMessage::assistant_parts(vec![MessagePart::tool(ToolCall {
+            id: crate::ids::ToolId::from("tool_1"),
+            kind: ToolKind::Bash,
+            status: ToolStatus::Completed,
+            input: ToolInput::Generic {
+                summary: "run command".into(),
+            },
+            output: ToolOutput::Text(output.to_owned()),
+            display: ToolDisplayState::DEFAULT,
+            elapsed_ms: None,
+            started_at: None,
+            thought_signature: None,
+        })])
     }
 
     // Normal: splitting on user-turn boundaries collects groups so each
@@ -1414,10 +1712,67 @@ mod level_tests {
         assert_eq!(est, 6);
     }
 
+    // Robust: estimate_tokens divides after summing visible chars. Dividing
+    // each message first loses remainders and underestimates fragmented
+    // transcripts; TokenEstimation.v proves the aggregate formula.
+    #[test]
+    fn estimate_tokens_uses_aggregate_chars_robust() {
+        let messages = vec![user_msg("abc"), assistant_msg("de")];
+        // total chars = 5 -> base = 1 -> overhead floor(1 * 3 / 2) = 1.
+        // A per-message floor would be 0 + 0 -> 0.
+        assert_eq!(estimate_tokens(&messages), 1);
+    }
+
     // Normal: estimate_tokens on empty input returns 0.
     #[test]
     fn estimate_tokens_empty_is_zero_normal() {
         assert_eq!(estimate_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn summary_text_deduplicates_repeated_tool_outputs_normal() {
+        let repeated = format!("header\n{}\nfooter", "same output line\n".repeat(20));
+        let messages = vec![tool_msg(&repeated), tool_msg(&repeated)];
+        let summary = build_summary_text(&messages, false);
+        assert!(summary.contains("same output line"));
+        assert!(summary.contains("duplicate of earlier tool output #0"));
+    }
+
+    #[test]
+    fn summary_text_uses_prefix_delta_for_similar_tool_outputs_normal() {
+        let shared = "shared-prefix-line\n".repeat(20);
+        let first = format!("{shared}first unique suffix");
+        let second = format!("{shared}second unique suffix");
+        let messages = vec![tool_msg(&first), tool_msg(&second)];
+        let summary = build_summary_text(&messages, false);
+        assert!(summary.contains("same first"));
+        assert!(summary.contains("earlier tool output #0"));
+        assert!(summary.contains("second unique suffix"));
+    }
+
+    #[test]
+    fn summary_text_large_outputs_still_take_mask_path_robust() {
+        let large = "x".repeat(2_500);
+        let messages = vec![tool_msg(&large), tool_msg(&large)];
+        let summary = build_summary_text(&messages, false);
+        assert!(summary.contains("Output: ~625 tokens, truncated"));
+        assert!(!summary.contains("duplicate of earlier tool output"));
+    }
+
+    #[test]
+    fn summary_text_prunes_long_regular_text_with_sink_window_normal() {
+        let long = format!(
+            "{}{}{}",
+            "A".repeat(2_000),
+            "M".repeat(8_000),
+            "Z".repeat(2_000)
+        );
+        let summary = build_summary_text(&[user_msg(&long)], false);
+        assert!(summary.contains("omitted"));
+        assert!(summary.contains(&"A".repeat(100)));
+        assert!(summary.contains(&"Z".repeat(100)));
+        assert!(summary.len() < long.len());
+        assert!(!summary.contains(&"M".repeat(4_000)));
     }
 
     // Normal: the recency preserve floor keeps the newest groups that fit ~30%
@@ -1469,6 +1824,70 @@ mod level_tests {
         assert_eq!(recency_preserve_floor(&[42], 1000), 1);
     }
 
+    #[test]
+    fn provider_attention_signals_raise_preserve_floor_normal() {
+        let messages = vec![
+            user_msg("g0"),
+            assistant_msg("a0"),
+            user_msg("important old group"),
+            assistant_msg("a1"),
+            user_msg("g2"),
+            assistant_msg("a2"),
+            user_msg("g3"),
+            assistant_msg("a3"),
+        ];
+        let groups = split_into_groups(&messages);
+        let group_tokens = vec![100usize, 100, 100, 100];
+        let signals = jfc_core::context_management::ContextSignals {
+            attention_tokens: vec![jfc_core::attention::ScoredToken {
+                token_id: 1,
+                token_position: 1,
+                attention_weight: 1000,
+            }],
+            kv_entries: Vec::new(),
+        };
+
+        assert_eq!(
+            provider_signal_preserve_floor(&groups, &group_tokens, 500, &signals),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn provider_kv_signals_take_precedence_over_attention_normal() {
+        let messages = vec![
+            user_msg("g0"),
+            assistant_msg("a0"),
+            user_msg("attention wants this"),
+            assistant_msg("a1"),
+            user_msg("kv wants this"),
+            assistant_msg("a2"),
+            user_msg("g3"),
+            assistant_msg("a3"),
+        ];
+        let groups = split_into_groups(&messages);
+        let group_tokens = vec![100usize, 100, 100, 100];
+        let signals = jfc_core::context_management::ContextSignals {
+            attention_tokens: vec![jfc_core::attention::ScoredToken {
+                token_id: 1,
+                token_position: 1,
+                attention_weight: 1000,
+            }],
+            kv_entries: vec![jfc_core::kv_cache::KVEntry {
+                position: 2,
+                layer: 0,
+                attention_score: 1000,
+                recent_access: 100,
+                size_bytes: 400,
+            }],
+        };
+
+        assert_eq!(
+            provider_signal_preserve_floor(&groups, &group_tokens, 500, &signals),
+            Some(2)
+        );
+    }
+
     // Normal: count_user_turns counts back from the end and stops at the
     // first compact boundary it sees.
     #[test]
@@ -1516,6 +1935,27 @@ mod level_tests {
         assert_eq!(token_gap_step(Some(500), &group_tokens, 4), 2);
         // gap=999_999: walks all 4 groups.
         assert_eq!(token_gap_step(Some(999_999), &group_tokens, 4), 4);
+    }
+
+    // Robust: when the newest `split` groups can cover a positive gap, the
+    // returned step covers it, matching CompressionBounds.token_gap_step_covers.
+    #[test]
+    fn token_gap_step_covers_gap_when_possible_robust() {
+        let group_tokens = vec![50usize, 125, 250, 500, 1000];
+        let split = 4;
+        let gap = 700;
+        let step = token_gap_step(Some(gap), &group_tokens, split);
+        let covered: usize = group_tokens[..split].iter().rev().take(step).sum();
+        assert!(covered >= gap, "step {step} covered {covered}, gap {gap}");
+    }
+
+    // Robust: the accumulator saturates instead of overflowing when token
+    // estimates are pathological. Nat proofs assume unbounded arithmetic; this
+    // is the Rust-side counterpart.
+    #[test]
+    fn token_gap_step_saturates_pathological_counts_robust() {
+        let group_tokens = vec![usize::MAX, usize::MAX];
+        assert_eq!(token_gap_step(Some(usize::MAX), &group_tokens, 2), 1);
     }
 
     // Robust: token_gap_step returns at least 1 even when gap is 0.
@@ -1765,7 +2205,7 @@ mod level_tests {
 
     // ─── post-compact restored-file placement (regression: fix #5) ──────
 
-    use crate::types::{MessagePart, Role};
+    use crate::types::Role;
 
     /// Build a minimal compacted transcript: [boundary, preserved tail…].
     fn compacted_with_tail() -> Vec<ChatMessage> {

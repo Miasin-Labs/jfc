@@ -7,6 +7,7 @@ mod dispatch;
 mod dispatch_heavy;
 mod economy;
 mod filesystem;
+mod hcom;
 mod learn;
 mod lsp;
 mod memory;
@@ -45,6 +46,9 @@ pub use dispatch::advance_linked_plans;
 pub(crate) use catalog::is_code_navigation_tool_name;
 pub use catalog::progressive_tool_defs;
 pub use defs::all_tool_defs;
+pub use hcom::{
+    hcom_available, is_hcom_tool_name, system_prompt_section as hcom_system_prompt_section,
+};
 pub use safe_tools::all_tool_defs_with_mcp;
 
 const PEWTER_OWL_SEND_USER_MESSAGE_PROMPT: &str = "Send a message the user will read verbatim. Use this for content they need to see exactly as written between tool calls — a generated code snippet, a specific value, a direct reply to something they asked mid-task. Don't use it for routine narration of what you're about to do, or for your final answer — normal text reaches them for those.\n\n`status`: 'normal' when replying to what they just asked; 'proactive' when you're surfacing something unprompted.";

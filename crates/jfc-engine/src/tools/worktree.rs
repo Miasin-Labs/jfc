@@ -26,6 +26,16 @@ pub async fn execute_enter_plan_mode(reason: &str) -> ExecutionResult {
     ))
 }
 
+/// Whether a (already-trimmed) `SetGoal` condition *clears* the goal: an empty
+/// string or one of the clear-words (`clear`/`stop`/…). This MUST match the
+/// engine handler's clear test (`handle_set_goal`, which clears on
+/// `is_empty() || goal::is_clear_arg`) — otherwise the tool result reports
+/// "Session goal set" while the engine actually cleared it (the model then
+/// believes it set a goal named "clear"). See `goal::is_clear_arg`.
+fn set_goal_clears(condition: &str) -> bool {
+    condition.is_empty() || crate::goal::is_clear_arg(condition)
+}
+
 /// Model-invocable `SetGoal`: emit a `GoalSet` FrontendEvent so the main loop
 /// sets (or clears) the session stop-condition on a single owning task — the
 /// same path `/goal` uses. An empty/clear `condition` clears the goal.
@@ -47,7 +57,10 @@ pub async fn execute_set_goal(condition: &str) -> ExecutionResult {
     {
         return ExecutionResult::failure(format!("set_goal: send failed: {e}"));
     }
-    if condition.is_empty() {
+    // Mirror the engine handler's clear test so the success message matches what
+    // actually happened: a clear-word like "clear"/"stop" clears the goal, it
+    // does NOT register a goal literally named "clear".
+    if set_goal_clears(&condition) {
         ExecutionResult::success("Session goal cleared.".to_owned())
     } else {
         ExecutionResult::success(format!(
@@ -184,3 +197,48 @@ pub fn find_repo_root(start: &Path) -> Option<std::path::PathBuf> {
 // of strings), and code cells additionally have `outputs`. We parse,
 // splice, and write back without round-tripping through nbformat — keeps
 // the tool dependency-free.
+
+#[cfg(test)]
+mod tests {
+    use super::set_goal_clears;
+
+    // The tool's success-message branch MUST agree with the engine handler's
+    // clear test (handle_set_goal: empty || goal::is_clear_arg). Otherwise
+    // `SetGoal("clear")` clears the goal but the tool reports it as set — the
+    // exact regression this guards.
+    #[test]
+    fn clear_words_clear_the_goal_normal() {
+        for word in ["", "clear", "stop", "off", "reset", "none", "cancel"] {
+            assert!(
+                set_goal_clears(word),
+                "{word:?} should clear the goal (parity with handle_set_goal)"
+            );
+        }
+    }
+
+    // Real conditions must NOT be treated as a clear — they register a goal.
+    #[test]
+    fn real_conditions_set_the_goal_normal() {
+        for cond in ["all tests pass", "the build is green", "clear the backlog"] {
+            assert!(
+                !set_goal_clears(cond),
+                "{cond:?} is a real goal condition, not a clear"
+            );
+        }
+    }
+
+    // `execute_set_goal` trims the raw arg and `is_clear_arg` lowercases before
+    // matching, so mixed-case and whitespace-padded clear-words must clear too.
+    // Replicate that trim→classify chain (the tool does `condition.trim()` then
+    // `set_goal_clears`) so the end-to-end path is covered, not just lowercase
+    // post-trim forms.
+    #[test]
+    fn clear_words_clear_regardless_of_case_and_padding_robust() {
+        for raw in ["CLEAR", "Stop", " off ", "\tReset\n", "NONE", "  cancel"] {
+            assert!(
+                set_goal_clears(raw.trim()),
+                "{raw:?} (after trim) should clear the goal"
+            );
+        }
+    }
+}

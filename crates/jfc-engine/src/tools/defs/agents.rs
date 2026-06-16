@@ -316,7 +316,37 @@ pub fn agent_tool_defs() -> Vec<ToolDef> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional explicit member model ids. When omitted, \
-                            the council uses the active model plus the local advisor model."
+                            the council uses configured [council].members when present, \
+                            otherwise the active model plus the local advisor model."
+                    },
+                    "intent": {
+                        "type": "string",
+                        "enum": ["diagnose", "audit", "plan", "evaluate", "explain", "create", "perspectives", "freeform"],
+                        "description": "Optional council intent. Shapes member prompts and synthesis."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["direct", "agentic"],
+                        "description": "Optional mode override. direct is the fast tool-less council path; agentic runs read-only task-backed members that inspect the repo and return StructuredOutput."
+                    },
+                    "archive": {
+                        "type": "boolean",
+                        "description": "When true, write a durable .jfc/council artifact bundle."
+                    },
+                    "quorum": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Minimum successful member answers required before synthesis."
+                    },
+                    "retry_on_fail": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Additional attempts for each failed or timed-out council member."
+                    },
+                    "member_timeout_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Per-member timeout in milliseconds. 0 disables the timeout."
                     }
                 },
                 "required": ["question"]

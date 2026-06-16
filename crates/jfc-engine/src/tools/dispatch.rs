@@ -25,6 +25,12 @@ use super::design::{
 use super::dispatch_heavy;
 use super::economy::strip_html_tags;
 use super::filesystem::{execute_apply_patch, execute_edit, execute_read, execute_write};
+use super::hcom::{
+    execute_hcom_bundle, execute_hcom_events, execute_hcom_fork, execute_hcom_kill,
+    execute_hcom_launch, execute_hcom_list, execute_hcom_listen, execute_hcom_relay,
+    execute_hcom_resume, execute_hcom_run, execute_hcom_send, execute_hcom_status,
+    execute_hcom_term, execute_hcom_transcript,
+};
 use super::lsp::execute_lsp;
 use super::memory::{execute_memory_create, execute_memory_delete};
 use super::notebook::{execute_notebook_edit, execute_notebook_read};
@@ -446,6 +452,130 @@ pub async fn execute_tool(
         ) => execute_send_message(&to, &message, summary.as_deref(), active_team_name).await,
         (ToolKind::TeamMemberMode, ToolInput::TeamMemberMode { member_name, mode }) => {
             execute_team_member_mode(&member_name, &mode, active_team_name).await
+        }
+        (ToolKind::HcomStatus, ToolInput::HcomStatus { json, logs }) => {
+            execute_hcom_status(json, logs, &cwd).await
+        }
+        (
+            ToolKind::HcomList,
+            ToolInput::HcomList {
+                name,
+                field,
+                stopped,
+                json,
+                names,
+                verbose,
+                all,
+                last,
+                format,
+            },
+        ) => {
+            execute_hcom_list(
+                name, field, stopped, json, names, verbose, all, last, format, &cwd,
+            )
+            .await
+        }
+        (
+            ToolKind::HcomSend,
+            ToolInput::HcomSend {
+                targets,
+                message,
+                intent,
+                reply_to,
+                thread,
+                from,
+                title,
+                description,
+                events,
+                files,
+                transcript,
+                extends,
+            },
+        ) => {
+            execute_hcom_send(
+                targets,
+                message,
+                intent,
+                reply_to,
+                thread,
+                from,
+                title,
+                description,
+                events,
+                files,
+                transcript,
+                extends,
+                &cwd,
+            )
+            .await
+        }
+        (ToolKind::HcomEvents, ToolInput::HcomEvents { args }) => {
+            execute_hcom_events(args, &cwd).await
+        }
+        (
+            ToolKind::HcomListen,
+            ToolInput::HcomListen {
+                timeout,
+                json,
+                sql,
+                args,
+            },
+        ) => execute_hcom_listen(timeout, json, sql, args, &cwd).await,
+        (ToolKind::HcomTranscript, ToolInput::HcomTranscript { args }) => {
+            execute_hcom_transcript(args, &cwd).await
+        }
+        (ToolKind::HcomBundle, ToolInput::HcomBundle { args }) => {
+            execute_hcom_bundle(args, &cwd).await
+        }
+        (ToolKind::HcomTerm, ToolInput::HcomTerm { args }) => execute_hcom_term(args, &cwd).await,
+        (
+            ToolKind::HcomLaunch,
+            ToolInput::HcomLaunch {
+                tool,
+                count,
+                tag,
+                terminal,
+                headless,
+                device,
+                dir,
+                prompt,
+                system_prompt,
+                batch_id,
+                run_here,
+                args,
+            },
+        ) => {
+            execute_hcom_launch(
+                tool,
+                count,
+                tag,
+                terminal,
+                headless,
+                device,
+                dir,
+                prompt,
+                system_prompt,
+                batch_id,
+                run_here,
+                args,
+                &cwd,
+            )
+            .await
+        }
+        (ToolKind::HcomResume, ToolInput::HcomResume { target, args }) => {
+            execute_hcom_resume(target, args, &cwd).await
+        }
+        (ToolKind::HcomFork, ToolInput::HcomFork { target, args }) => {
+            execute_hcom_fork(target, args, &cwd).await
+        }
+        (ToolKind::HcomKill, ToolInput::HcomKill { targets }) => {
+            execute_hcom_kill(targets, &cwd).await
+        }
+        (ToolKind::HcomRelay, ToolInput::HcomRelay { args }) => {
+            execute_hcom_relay(args, &cwd).await
+        }
+        (ToolKind::HcomRun, ToolInput::HcomRun { script, args }) => {
+            execute_hcom_run(script, args, &cwd).await
         }
         (ToolKind::PlanCreate, ToolInput::PlanCreate { title, body }) => {
             crate::tools::plans::execute_plan_create(&title, body.as_deref())
