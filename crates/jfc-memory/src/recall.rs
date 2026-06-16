@@ -725,6 +725,7 @@ mod tests {
     use crate::store::{MemoryFrontmatter, MemoryLevel, MemoryScope, MemoryType};
     use async_trait::async_trait;
     use jfc_provider::{CompletionResponse, EventStream, ModelInfo, StreamConvention, TokenUsage};
+    use serial_test::serial;
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
@@ -874,6 +875,7 @@ mod tests {
     // Normal: a well-formed `selected_memories` array round-trips through the
     // parser and gets filtered against the actual memory list.
     #[tokio::test]
+    #[serial]
     async fn select_returns_canned_filenames_normal() {
         clear_cache();
         let provider = MockProvider::with_responses([
@@ -901,6 +903,7 @@ mod tests {
     // Robust: malformed JSON is swallowed — we return an empty selection
     // instead of panicking. The recall pipeline must never break a turn.
     #[tokio::test]
+    #[serial]
     async fn select_malformed_returns_empty_robust() {
         clear_cache();
         let provider = MockProvider::with_responses(["this is not json at all".to_owned()]);
@@ -915,6 +918,7 @@ mod tests {
 
     // Robust: hallucinated filenames not present in `available` are dropped.
     #[tokio::test]
+    #[serial]
     async fn select_drops_hallucinated_filenames_robust() {
         clear_cache();
         let provider = MockProvider::with_responses([
@@ -931,6 +935,7 @@ mod tests {
     // Robust: empty memory list returns empty selection without calling the
     // provider — saves a network round-trip on greenfield repos.
     #[tokio::test]
+    #[serial]
     async fn select_empty_memories_skips_provider_robust() {
         clear_cache();
         let provider = MockProvider::with_responses([]);
@@ -949,6 +954,7 @@ mod tests {
     // Normal: a well-formed `relevant_facts` payload becomes a recall block
     // with the expected `<system-reminder>` envelope and source citations.
     #[tokio::test]
+    #[serial]
     async fn synthesize_emits_system_reminder_block_normal() {
         clear_cache();
         let provider = MockProvider::with_responses([json!({
@@ -979,6 +985,7 @@ mod tests {
 
     // Normal: empty selected list returns None without calling the provider.
     #[tokio::test]
+    #[serial]
     async fn synthesize_empty_selection_returns_none_normal() {
         clear_cache();
         let provider = MockProvider::with_responses([]);
@@ -991,6 +998,7 @@ mod tests {
 
     // Robust: malformed synthesize response → returns None, no panic.
     #[tokio::test]
+    #[serial]
     async fn synthesize_malformed_returns_none_robust() {
         clear_cache();
         let provider = MockProvider::with_responses(["not even close to json".to_owned()]);
@@ -1004,6 +1012,7 @@ mod tests {
     // Robust: empty `relevant_facts` array returns None instead of an empty
     // `<system-reminder>` block — empty blocks would just bloat the prompt.
     #[tokio::test]
+    #[serial]
     async fn synthesize_empty_facts_returns_none_robust() {
         clear_cache();
         let provider = MockProvider::with_responses([
@@ -1058,6 +1067,7 @@ mod tests {
     // Normal: end-to-end happy path — select returns one file, synthesize
     // returns one fact, the cache stores the result.
     #[tokio::test]
+    #[serial]
     async fn run_recall_full_pipeline_normal() {
         clear_cache();
         let provider = MockProvider::with_responses([
@@ -1096,6 +1106,7 @@ mod tests {
     // Robust: empty memories list short-circuits before the provider is hit
     // and the result is cached as None.
     #[tokio::test]
+    #[serial]
     async fn run_recall_empty_memories_returns_none_robust() {
         clear_cache();
         let provider = MockProvider::with_responses([]);

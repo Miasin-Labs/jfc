@@ -133,6 +133,19 @@ pub async fn execute_tool(
         }
     }
 
+    // AI-access exclusion: `.jfcignore` / `.claudeignore` hide intentionally
+    // git-tracked-but-AI-private files (secrets, proprietary docs) from the
+    // agent's structured Read tool. Glob/Grep are filtered natively by passing
+    // the ignore files to `rg --ignore-file` (see search.rs). Bash is NOT gated
+    // here — `cat secret.env` can bypass — so this is an accident guard, not a
+    // sandbox (documented in `access_policy`).
+    if let ToolInput::Read { file_path, .. } = &input {
+        let policy = crate::access_policy::AccessPolicy::for_root(&cwd);
+        if !policy.is_empty() && policy.is_blocked(std::path::Path::new(file_path)) {
+            return ExecutionResult::failure(crate::access_policy::AccessPolicy::refusal(file_path));
+        }
+    }
+
     // Audit ledger: record mutating tool calls as immutable facts so "what did
     // this agent do, when" is answerable. The mutating/read-only classification
     // is derived from the unified CommandSpec metadata (one source), not a

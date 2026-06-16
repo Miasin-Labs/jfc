@@ -14,6 +14,7 @@
 //! extracted from (stage 5) so history stays traceable; stage 6/7 flatten
 //! the names.
 
+pub mod access_policy;
 pub mod advisor;
 pub mod agentic_vocabulary;
 pub mod agents;

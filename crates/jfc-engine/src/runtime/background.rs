@@ -189,6 +189,16 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
         }
 
         if let Some(completion) = terminal_completion {
+            // Background agents run detached from the foreground turn, so the
+            // turn-complete notification never covers them. Fire a desktop
+            // notification here — this is the only signal a user focused
+            // elsewhere gets that a long-running agent finished. Gated by the
+            // same `JFC_DISABLE_NOTIFICATIONS` env as every other notify call.
+            crate::notifications::notify_background_agent_done(
+                completion.status.label(),
+                &completion.description,
+                &completion.body,
+            );
             state.queue_background_agent_completion(completion);
         }
 

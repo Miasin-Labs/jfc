@@ -32,16 +32,23 @@ fn notifications_enabled() -> bool {
 /// Post a notification. Spawns a task and returns immediately so the
 /// caller never blocks on the daemon. Errors are logged via tracing.
 pub fn notify(summary: impl Into<String>, body: impl Into<String>) {
-    if !notifications_enabled() {
+    // Never hit the OS notification daemon from the test harness — emitting real
+    // desktop toasts during `cargo test` is noise, and the daemon may be absent
+    // in CI. The env-var gate stays separately unit-tested via
+    // `notifications_enabled`.
+    if cfg!(test) || !notifications_enabled() {
         return;
     }
     let summary = summary.into();
     let body = body.into();
-    tokio::spawn(async move {
-        // notify-rust is sync; the spawn keeps it off the UI thread.
-        // Showing through the system notification daemon (`notify-send`
-        // / xdg-notify on Linux, NotificationCenter on macOS, Toast
-        // on Windows) — same surface every other dev tool uses.
+    // notify-rust is sync; we keep it off the calling thread so the daemon
+    // round-trip never stalls the UI/event loop. Prefer a Tokio task when a
+    // runtime is present (the live app), but fall back to a plain OS thread so
+    // synchronous callers — daemon sync, headless tools, tests — don't panic
+    // with "no reactor running". Showing through the system notification daemon
+    // (`notify-send` / xdg-notify on Linux, NotificationCenter on macOS, Toast
+    // on Windows) — the same surface every other dev tool uses.
+    let post = move || {
         let result = notify_rust::Notification::new()
             .summary(&summary)
             .body(&body)
@@ -51,7 +58,12 @@ pub fn notify(summary: impl Into<String>, body: impl Into<String>) {
         if let Err(e) = result {
             tracing::debug!(target: "jfc::notify", error = %e, "notification failed");
         }
-    });
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(post);
+    } else {
+        std::thread::spawn(post);
+    }
 }
 
 /// Fire a "turn complete" notification when the elapsed exceeds the
@@ -98,6 +110,30 @@ pub fn notify_tool_failed(tool_name: &str, message: &str) {
 
 pub fn notify_compact_failed(reason: &str) {
     notify("jfc · compaction failed", reason.to_owned());
+}
+
+/// Notify when a background agent reaches a terminal state. Background agents
+/// run detached from the foreground turn, so the turn-complete notification
+/// never fires for them — the user has no signal that a long-running agent
+/// finished while they were focused elsewhere. `status_label` is the
+/// `TaskLifecycle::label()` ("completed"/"failed"/"cancelled"); `description`
+/// is the agent's task summary. Also rings the terminal bell, matching
+/// `notify_turn_complete`.
+pub fn notify_background_agent_done(status_label: &str, description: &str, summary: &str) {
+    let title = format!("jfc · agent {status_label}");
+    let desc: String = description.chars().take(80).collect();
+    let body = if summary.trim().is_empty() {
+        desc
+    } else {
+        let preview: String = summary.chars().take(100).collect();
+        if desc.is_empty() {
+            preview
+        } else {
+            format!("{desc} — {preview}")
+        }
+    };
+    notify(title, body);
+    ring_bell();
 }
 
 /// Build the body string a `notify_turn_complete` call would produce — split out

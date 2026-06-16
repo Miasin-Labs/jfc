@@ -3021,6 +3021,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "serial_test",
  "tempfile",
  "tokio",
  "tracing",

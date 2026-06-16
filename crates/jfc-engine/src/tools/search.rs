@@ -14,6 +14,9 @@ pub async fn execute_glob(pattern: &str, path: Option<&str>, cwd: &Path) -> Exec
         .arg("--glob")
         .arg(pattern)
         .current_dir(&base);
+    // Apply `.jfcignore` / `.claudeignore` so AI-private files never surface in
+    // glob results, mirroring the Read guard in dispatch.rs.
+    apply_access_policy_ignores(&mut cmd, cwd);
     configure_tool_command(&mut cmd);
     match cmd.output().await {
         Ok(out) => {
@@ -80,6 +83,9 @@ pub async fn execute_grep(
     }
 
     cmd.arg(pattern).arg(search_path).current_dir(cwd);
+    // Apply `.jfcignore` / `.claudeignore` so AI-private file contents never
+    // surface in grep results, mirroring the Read guard in dispatch.rs.
+    apply_access_policy_ignores(&mut cmd, cwd);
     configure_tool_command(&mut cmd);
 
     match cmd.output().await {
@@ -102,5 +108,18 @@ pub async fn execute_grep(
             warn!(target: "jfc::tools", error = %e, "grep: rg not found or failed");
             ExecutionResult::failure(format!("rg not found or failed: {e}"))
         }
+    }
+}
+
+/// Pass any `.jfcignore` / `.claudeignore` rules to `rg` via `--ignore-file`,
+/// so AI-private files are filtered out of Glob/Grep results the same way the
+/// Read tool refuses them. No-op when the project defines no such files (the
+/// common case), so projects not using the feature pay nothing. `rg` treats
+/// these as additional gitignore-format rule files layered on its own
+/// gitignore handling.
+fn apply_access_policy_ignores(cmd: &mut Command, cwd: &Path) {
+    let policy = crate::access_policy::AccessPolicy::for_root(cwd);
+    for file in policy.ignore_files() {
+        cmd.arg("--ignore-file").arg(file);
     }
 }
