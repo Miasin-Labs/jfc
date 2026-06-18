@@ -54,7 +54,7 @@ mod task_view_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            collapsed_text.contains("press o to expand"),
+            collapsed_text.contains("ctrl+o to expand"),
             "collapsed view should show expansion hint, got: {collapsed_text}"
         );
         assert!(
@@ -95,7 +95,7 @@ mod task_view_tests {
             "expanded view should include last line"
         );
         assert!(
-            !expanded_text.contains("press o to expand"),
+            !expanded_text.contains("ctrl+o to expand"),
             "expanded view should not show the collapse hint"
         );
     }
@@ -109,7 +109,7 @@ mod task_view_tests {
         let lines = task_view_body_lines(&messages, &HashSet::new(), &theme, 80, false);
         let joined: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("just one short line"));
-        assert!(!joined.contains("press o to expand"));
+        assert!(!joined.contains("ctrl+o to expand"));
     }
 
     #[test]
@@ -122,7 +122,7 @@ mod task_view_tests {
         let lines = task_view_body_lines(&messages, &HashSet::new(), &theme, 80, false);
         let joined: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(
-            joined.contains("press o to expand"),
+            joined.contains("ctrl+o to expand"),
             "byte-threshold trip should show expansion hint"
         );
     }
@@ -1734,7 +1734,9 @@ mod render_snapshot_tests {
         .expect("draw");
         let text = buffer_text(&term);
 
-        assert!(text.contains("3 tasks (1 done, 2 open)"), "{text}");
+        // Header shows open-task count; recently-completed are shown separately
+        // with a "✓ N just completed" line (not rolled into the header total).
+        assert!(text.contains("2 tasks (2 open)"), "{text}");
         assert!(text.contains("Clean tool headers"), "{text}");
         assert!(text.contains("Run render tests"), "{text}");
         assert!(!text.contains("1/3"), "historical progress leaked:\n{text}");

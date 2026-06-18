@@ -15,6 +15,14 @@ fn line_with_background(mut line: Line<'static>, bg: Color) -> Line<'static> {
     line
 }
 
+fn push_wrapped_terminal_line(
+    lines: &mut Vec<Line<'static>>,
+    line: Line<'static>,
+    content_w: usize,
+) {
+    lines.extend(terminal_output::wrap_styled_line(&line, content_w));
+}
+
 /// Append `body` to `spans`, with substrings matching `pattern`
 /// rendered in `match_style` and the rest in `body_style`. Mirrors
 /// the way GNU grep / ripgrep highlight matches via GREP_COLORS
@@ -387,15 +395,13 @@ pub(super) fn produce_path_list_output_lines(
         }
     }
     if total > max_lines {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - max_lines
-            ),
+        lines.push(terminal_output::expand_hint_line(
+            total - max_lines,
+            "line",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )));
+        ));
     }
     if !stderr.is_empty() {
         if !lines.is_empty() {
@@ -484,7 +490,6 @@ pub(super) fn produce_git_diff_output_lines(
     // this strip the prefix checks below never fire and the raw
     // escapes leak into the rendered Paragraph.
     let cleaned: Vec<String> = stdout.lines().map(sanitize_terminal_text).collect();
-    let total = cleaned.len();
 
     if looks_like_difftastic_output(stdout) {
         return produce_difftastic_output_lines(
@@ -492,13 +497,14 @@ pub(super) fn produce_git_diff_output_lines(
         );
     }
 
+    let mut body_lines: Vec<Line<'static>> = Vec::new();
     let mut current_lang: Option<String> = None;
     let mut hunk: Vec<(DiffLineKind, String)> = Vec::new();
 
     let flush = |hunk: &mut Vec<(DiffLineKind, String)>,
                  lang: &Option<String>,
-                 lines: &mut Vec<Line<'static>>,
-                 max_lines: usize,
+                 body_lines: &mut Vec<Line<'static>>,
+                 content_w: usize,
                  t: Theme| {
         if hunk.is_empty() {
             return;
@@ -517,9 +523,6 @@ pub(super) fn produce_git_diff_output_lines(
             (hl.len() == hunk.len()).then_some(hl)
         });
         for (idx, (kind, content)) in hunk.drain(..).enumerate() {
-            if lines.len() >= max_lines {
-                break;
-            }
             let (bg_color, fg_color, sigil) = match kind {
                 DiffLineKind::Added => (t.code_bg, ui_tokens.diff_added, '+'),
                 DiffLineKind::Removed => (t.code_bg, ui_tokens.diff_removed, '-'),
@@ -563,25 +566,28 @@ pub(super) fn produce_git_diff_output_lines(
                     }
                 }
             }
-            lines.push(Line::from(spans).style(Style::default().bg(bg_color)));
+            push_wrapped_terminal_line(
+                body_lines,
+                Line::from(spans).style(Style::default().bg(bg_color)),
+                content_w,
+            );
         }
     };
 
     for clean in &cleaned {
-        if lines.len() >= max_lines && hunk.is_empty() {
-            continue;
-        }
         // Pull language from the b-side (post-edit) path so renames
         // pick up the destination's extension, not the source's.
         if let Some(rest) = clean.strip_prefix("diff --git ") {
-            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
+            flush(&mut hunk, &current_lang, &mut body_lines, content_w, t);
             current_lang = parse_diff_git_paths(rest).and_then(|(_, b)| lang_from_path(&b));
-            if lines.len() < max_lines {
-                lines.push(Line::from(Span::styled(
+            push_wrapped_terminal_line(
+                &mut body_lines,
+                Line::from(Span::styled(
                     clean.clone(),
                     Style::default().fg(t.text_muted),
-                )));
-            }
+                )),
+                content_w,
+            );
             continue;
         }
         if clean.starts_with("index ")
@@ -595,42 +601,43 @@ pub(super) fn produce_git_diff_output_lines(
             || clean.starts_with("copy from ")
             || clean.starts_with("copy to ")
         {
-            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
-            if lines.len() < max_lines {
-                lines.push(Line::from(Span::styled(
+            flush(&mut hunk, &current_lang, &mut body_lines, content_w, t);
+            push_wrapped_terminal_line(
+                &mut body_lines,
+                Line::from(Span::styled(
                     clean.clone(),
                     Style::default().fg(t.text_muted),
-                )));
-            }
+                )),
+                content_w,
+            );
             continue;
         }
         if clean.starts_with("--- ") || clean.starts_with("+++ ") {
-            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
-            if lines.len() < max_lines {
-                lines.push(Line::from(Span::styled(
+            flush(&mut hunk, &current_lang, &mut body_lines, content_w, t);
+            push_wrapped_terminal_line(
+                &mut body_lines,
+                Line::from(Span::styled(
                     clean.clone(),
                     Style::default()
                         .fg(t.text_primary)
                         .add_modifier(Modifier::BOLD),
-                )));
-            }
+                )),
+                content_w,
+            );
             continue;
         }
         if clean.starts_with("@@") {
-            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
-            if lines.len() < max_lines {
-                lines.push(Line::from(Span::styled(
-                    clean.clone(),
-                    Style::default().fg(t.accent),
-                )));
-            }
+            flush(&mut hunk, &current_lang, &mut body_lines, content_w, t);
+            push_wrapped_terminal_line(
+                &mut body_lines,
+                Line::from(Span::styled(clean.clone(), Style::default().fg(t.accent))),
+                content_w,
+            );
             continue;
         }
         if let Some(spans) = terminal_output::colorize_diffstat_line(clean, t.text_secondary, t) {
-            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
-            if lines.len() < max_lines {
-                lines.push(Line::from(spans));
-            }
+            flush(&mut hunk, &current_lang, &mut body_lines, content_w, t);
+            push_wrapped_terminal_line(&mut body_lines, Line::from(spans), content_w);
             continue;
         }
         if let Some(content) = clean.strip_prefix('+') {
@@ -640,36 +647,35 @@ pub(super) fn produce_git_diff_output_lines(
         } else if let Some(content) = clean.strip_prefix(' ') {
             hunk.push((DiffLineKind::Context, content.to_owned()));
         } else {
-            flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
-            if lines.len() < max_lines {
-                lines.push(Line::from(Span::styled(
+            flush(&mut hunk, &current_lang, &mut body_lines, content_w, t);
+            push_wrapped_terminal_line(
+                &mut body_lines,
+                Line::from(Span::styled(
                     clean.clone(),
                     Style::default().fg(t.text_muted),
-                )));
-            }
+                )),
+                content_w,
+            );
         }
     }
-    flush(&mut hunk, &current_lang, &mut lines, max_lines, t);
-    if total > max_lines {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - max_lines
-            ),
-            Style::default()
-                .fg(t.text_muted)
-                .add_modifier(Modifier::ITALIC),
-        )));
-    }
+    flush(&mut hunk, &current_lang, &mut body_lines, content_w, t);
+
+    let bash_bg = t.claude_ui_tokens().bash_message_background_color;
+    lines.extend(terminal_output::truncate_lines_middle(
+        body_lines,
+        max_lines,
+        Style::default().fg(t.text_muted).bg(bash_bg),
+    ));
     if !stderr.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
         for sl in stderr.lines() {
-            lines.push(Line::from(Span::styled(
+            let line = Line::from(Span::styled(
                 sanitize_terminal_text(sl),
                 Style::default().fg(t.error),
-            )));
+            ));
+            push_wrapped_terminal_line(&mut lines, line, content_w);
         }
     }
     lines
@@ -689,10 +695,46 @@ pub(super) fn produce_git_diff_output_line_count(
     }
 
     let max_lines = if expanded { 1000usize } else { 200usize };
-    let pre_rows = usize::from(exit_code.is_some_and(|code| code > 1));
-    let total = stdout.lines().count();
-    let rows = capped_stdout_row_count(pre_rows, total, max_lines);
-    rows + stderr_suffix_row_count(rows, stderr)
+    let mut rows = usize::from(exit_code.is_some_and(|code| code > 1));
+
+    let body_rows: usize = stdout
+        .lines()
+        .map(sanitize_terminal_text)
+        .map(|clean| git_diff_rendered_row_count(&clean, content_w))
+        .sum();
+    rows += terminal_output::truncate_lines_middle_row_count(body_rows, max_lines);
+
+    if !stderr.is_empty() {
+        if rows > 0 {
+            rows += 1;
+        }
+        rows += stderr
+            .lines()
+            .map(|line| {
+                terminal_output::wrapped_text_row_count(&sanitize_terminal_text(line), content_w)
+            })
+            .sum::<usize>();
+    }
+
+    rows
+}
+
+fn git_diff_rendered_row_count(clean: &str, content_w: usize) -> usize {
+    if clean.starts_with("--- ") || clean.starts_with("+++ ") {
+        return terminal_output::wrapped_text_row_count(clean, content_w);
+    }
+
+    if let Some(content) = clean.strip_prefix('+') {
+        return terminal_output::wrapped_text_row_count(&format!("+ {content}"), content_w);
+    }
+    if let Some(content) = clean.strip_prefix('-') {
+        return terminal_output::wrapped_text_row_count(&format!("- {content}"), content_w);
+    }
+    if let Some(content) = clean.strip_prefix(' ') {
+        return terminal_output::wrapped_text_row_count(&format!("  {content}"), content_w);
+    }
+
+    terminal_output::wrapped_text_row_count(clean, content_w)
 }
 
 fn produce_difftastic_output_lines(
@@ -901,15 +943,13 @@ pub(super) fn produce_git_log_output_lines(
         }
     }
     if total > max_lines {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - max_lines
-            ),
+        lines.push(terminal_output::expand_hint_line(
+            total - max_lines,
+            "line",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )));
+        ));
     }
     if !stderr.is_empty() {
         if !lines.is_empty() {
@@ -970,15 +1010,13 @@ pub(super) fn produce_cat_markdown_output_lines(
     if lines.len() > MAX_LINES {
         let total = lines.len();
         lines.truncate(MAX_LINES);
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - MAX_LINES
-            ),
+        lines.push(terminal_output::expand_hint_line(
+            total - MAX_LINES,
+            "line",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )));
+        ));
     }
 
     if !stderr.is_empty() {
@@ -1085,15 +1123,13 @@ pub(super) fn produce_hex_dump_output_lines(
         )));
     }
     if total > max_lines {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - max_lines
-            ),
+        lines.push(terminal_output::expand_hint_line(
+            total - max_lines,
+            "line",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )));
+        ));
     }
     if !stderr.is_empty() {
         if !lines.is_empty() {
@@ -1178,15 +1214,13 @@ pub(super) fn produce_tabular_list_output_lines(
         lines.push(Line::from(Span::styled(raw.to_owned(), style)));
     }
     if total > max_lines {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - max_lines
-            ),
+        lines.push(terminal_output::expand_hint_line(
+            total - max_lines,
+            "line",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )));
+        ));
     }
     if !stderr.is_empty() {
         if !lines.is_empty() {
@@ -1468,15 +1502,13 @@ pub(super) fn produce_compiler_output_lines(
         )));
     }
     if total > max_lines {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - max_lines
-            ),
+        lines.push(terminal_output::expand_hint_line(
+            total - max_lines,
+            "line",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )));
+        ));
     }
     lines
 }
@@ -1518,15 +1550,13 @@ pub(super) fn produce_cat_output_lines(
     }
     lines.extend(highlighted);
     if truncated {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more lines · click or press o to expand",
-                total - max_lines
-            ),
+        lines.push(terminal_output::expand_hint_line(
+            total - max_lines,
+            "line",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )));
+        ));
     }
 
     if !stderr.is_empty() {

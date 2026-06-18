@@ -692,7 +692,7 @@ impl jfc_economy::reporting::SwarmProvider for StubSwarm {
     ) -> Option<std::path::PathBuf> {
         Some(std::path::PathBuf::from(format!(
             "/tmp/stub-{bounty_id}-{}",
-            agent_id.0
+            agent_id.label()
         )))
     }
     async fn remove_worktree(&self, _path: &std::path::Path) {}
@@ -909,11 +909,11 @@ fn looks_like_unified_diff_rejects_prose_robust() {
 // FILE-block paths under cwd.
 #[test]
 fn apply_winning_solution_writes_file_blocks_normal() {
-    use jfc_economy::types::{AgentId, Solution};
+    use jfc_economy::types::{AgentId, MarketAgentId, Solution};
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path();
     let sol = Solution {
-        agent_id: AgentId::new("solver"),
+        agent_id: AgentId::market_unique("solver"),
         bounty_id: "test_b".into(),
         patch: "===FILE: hello.txt===\nhi there\n===END===\n".into(),
         explanation: "wrote hello".into(),
@@ -940,11 +940,11 @@ fn apply_winning_solution_writes_file_blocks_normal() {
 // failed is refused, and nothing is written to the main checkout.
 #[test]
 fn apply_winning_solution_refuses_failed_tests_robust() {
-    use jfc_economy::types::{AgentId, Solution};
+    use jfc_economy::types::{AgentId, MarketAgentId, Solution};
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path();
     let sol = Solution {
-        agent_id: AgentId::new("solver"),
+        agent_id: AgentId::market_unique("solver"),
         bounty_id: "gated".into(),
         patch: "===FILE: hello.txt===\nhi\n===END===\n".into(),
         explanation: "x".into(),
@@ -966,11 +966,11 @@ fn apply_winning_solution_refuses_failed_tests_robust() {
 // Robust: a solution flagged suspicious by the validator is likewise refused.
 #[test]
 fn apply_winning_solution_refuses_suspicious_robust() {
-    use jfc_economy::types::{AgentId, Solution};
+    use jfc_economy::types::{AgentId, MarketAgentId, Solution};
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path();
     let sol = Solution {
-        agent_id: AgentId::new("solver"),
+        agent_id: AgentId::market_unique("solver"),
         bounty_id: "susp".into(),
         patch: "===FILE: x.txt===\nx\n===END===\n".into(),
         explanation: "x".into(),
@@ -998,12 +998,12 @@ fn apply_winning_solution_none_solution_robust() {
 
 #[test]
 fn apply_winning_solution_rejects_file_block_path_escape_robust() {
-    use jfc_economy::types::{AgentId, Solution};
+    use jfc_economy::types::{AgentId, MarketAgentId, Solution};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let outside = tmp.path().join("outside.txt");
     let sol = Solution {
-        agent_id: AgentId::new("solver"),
+        agent_id: AgentId::market_unique("solver"),
         bounty_id: "escape".into(),
         patch: "===FILE: ../outside.txt===\nowned\n===END===\n".into(),
         explanation: "try escape".into(),
@@ -1025,7 +1025,7 @@ fn apply_winning_solution_rejects_file_block_path_escape_robust() {
 // command; otherwise validators can rubber-stamp a broken patch.
 #[tokio::test]
 async fn verify_bounty_solution_rejects_broken_zig_build_robust() {
-    use jfc_economy::types::{AgentId, Solution};
+    use jfc_economy::types::{AgentId, MarketAgentId, Solution};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path();
@@ -1033,7 +1033,7 @@ async fn verify_bounty_solution_rejects_broken_zig_build_robust() {
     std::fs::write(cwd.join("build.zig"), "this is not zig syntax\n").expect("build.zig");
 
     let sol = Solution {
-        agent_id: AgentId::new("solver"),
+        agent_id: AgentId::market_unique("solver"),
         bounty_id: "zig_bounty".into(),
         patch: "===FILE: src/main.zig===\npub fn main() void {}\n===END===\n".into(),
         explanation: "wrote zig app".into(),
@@ -1765,6 +1765,44 @@ async fn multiedit_missing_old_string_includes_stale_recovery_regression() {
         result.output
     );
     assert!(result.output.contains("sha256:"), "{}", result.output);
+}
+
+#[tokio::test]
+async fn multiedit_success_attaches_diff_for_tui_regression() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("multi-diff.txt");
+    tokio::fs::write(&path, "alpha\nbeta\ngamma\n")
+        .await
+        .unwrap();
+
+    let result = execute_tool(
+        ToolKind::MultiEdit,
+        ToolInput::MultiEdit {
+            file_path: path.to_string_lossy().to_string(),
+            edits: serde_json::json!([
+                {"old_string": "beta", "new_string": "bravo"},
+                {"old_string": "gamma", "new_string": "charlie"}
+            ]),
+        },
+        dir.path().to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!result.is_error(), "{}", result.output);
+    let diff = result.diff.expect("MultiEdit must produce a DiffView");
+    assert_eq!(diff.file_path.as_str(), path.to_string_lossy().as_ref());
+    assert_eq!(diff.additions, 2);
+    assert_eq!(diff.deletions, 2);
+    assert!(
+        diff.hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| line.content == "bravo"),
+        "{diff:?}"
+    );
 }
 
 #[tokio::test]

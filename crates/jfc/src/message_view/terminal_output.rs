@@ -35,7 +35,7 @@ pub(super) fn wrap_styled_line(line: &Line<'static>, width: usize) -> Vec<Line<'
                 if !buf.is_empty() {
                     current.push(Span::styled(std::mem::take(&mut buf), span.style));
                 }
-                out.push(Line::from(std::mem::take(&mut current)));
+                out.push(Line::from(std::mem::take(&mut current)).style(line.style));
                 current_w = 0;
             }
             buf.push(ch);
@@ -47,7 +47,7 @@ pub(super) fn wrap_styled_line(line: &Line<'static>, width: usize) -> Vec<Line<'
     }
 
     if !current.is_empty() {
-        out.push(Line::from(current));
+        out.push(Line::from(current).style(line.style));
     }
     if out.is_empty() {
         out.push(line.clone());

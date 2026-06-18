@@ -2697,6 +2697,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jfc-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fs2",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "jfc-agents"
 version = "0.1.0"
 dependencies = [
@@ -2889,6 +2904,7 @@ name = "jfc-economy"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "jfc-agent",
  "jfc-core",
  "serde",
  "serde_json",
@@ -2915,6 +2931,7 @@ dependencies = [
  "ignore",
  "image",
  "indexmap 2.14.0",
+ "jfc-agent",
  "jfc-agents",
  "jfc-anthropic-sdk",
  "jfc-audit",

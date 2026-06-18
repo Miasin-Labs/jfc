@@ -5,20 +5,35 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Unique agent identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId(pub String);
+///
+/// This is the workspace-wide [`jfc_agent::AgentId`] — the economy no longer
+/// defines its own. The economy used to key trust/ledger/collusion maps on a
+/// bare `String`; the unified id keeps that behaviour because every economy
+/// constructor below sets a stable display-name *label*, and equality/hashing
+/// on a labelled id is derived deterministically from that label.
+pub use jfc_agent::AgentId;
 
-impl AgentId {
-    /// Create a unique (ephemeral) agent identity. Trust does NOT persist across bounties.
-    pub fn new(name: &str) -> Self {
-        Self(format!("{}_{}", name, uuid::Uuid::new_v4().as_simple()))
+/// Economy-specific constructors for the unified [`AgentId`].
+///
+/// Kept as an extension trait so call sites read the same as before
+/// (`AgentId::market_unique("solver")`, `AgentId::market_stable("solver", 0)`)
+/// while the underlying type is the shared one.
+pub trait MarketAgentId {
+    /// Create a unique (ephemeral) agent identity. Trust does NOT persist
+    /// across bounties.
+    fn market_unique(name: &str) -> Self;
+    /// Create a stable identity that persists across bounties so trust/collusion
+    /// metrics accumulate. Format: `<role>-<index>` (e.g. `solver-0`).
+    fn market_stable(role: &str, index: usize) -> Self;
+}
+
+impl MarketAgentId for AgentId {
+    fn market_unique(name: &str) -> Self {
+        AgentId::from_label(format!("{}_{}", name, uuid::Uuid::new_v4().as_simple()))
     }
 
-    /// Create a stable identity that persists across bounties so trust/collusion
-    /// metrics accumulate. Format: `<role>-<index>` (e.g., `solver-0`, `validator-1`).
-    /// The same role+index always maps to the same AgentId.
-    pub fn new_stable(role: &str, index: usize) -> Self {
-        Self(format!("{role}-{index}"))
+    fn market_stable(role: &str, index: usize) -> Self {
+        AgentId::stable(role, index as u64)
     }
 }
 
@@ -167,8 +182,8 @@ mod tests {
 
     #[test]
     fn test_agent_id_unique() {
-        let a = AgentId::new("solver");
-        let b = AgentId::new("solver");
+        let a = AgentId::market_unique("solver");
+        let b = AgentId::market_unique("solver");
         assert_ne!(a, b);
     }
 

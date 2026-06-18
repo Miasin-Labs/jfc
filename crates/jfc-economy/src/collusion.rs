@@ -133,7 +133,7 @@ mod tests {
     use super::*;
 
     fn agent(name: &str) -> AgentId {
-        AgentId(name.to_string())
+        AgentId::from_label(name.to_string())
     }
 
     #[test]

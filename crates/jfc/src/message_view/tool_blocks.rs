@@ -267,7 +267,7 @@ pub(super) fn tool_body_lines_themed(
                 || lt.content.len() > LargeText::COLLAPSE_BYTES;
             if huge && !tool.display.is_expanded() {
                 vec![Line::from(Span::styled(
-                    format!("[{} · click or press o to expand]", lt.size_label()),
+                    format!("[{} · ctrl+o to expand]", lt.size_label()),
                     Style::default()
                         .fg(t.text_muted)
                         .add_modifier(Modifier::ITALIC),
@@ -869,20 +869,20 @@ pub(super) fn build_header_inner_spans<'a>(
             spans
         }
         ToolInput::Edit { file_path, .. } => {
-            let path = truncate_str(file_path, max_w.saturating_sub(8));
+            let path = truncate_str(file_path, max_w.saturating_sub(6));
             let linked = maybe_osc8_file_link(file_path, &path);
             vec![
-                Span::styled("Update", kind_style),
+                Span::styled("Edit", kind_style),
                 Span::styled("(", Style::default().fg(t.text_muted)),
                 Span::styled(linked, Style::default().fg(t.text_primary)),
                 Span::styled(")", Style::default().fg(t.text_muted)),
             ]
         }
         ToolInput::MultiEdit { file_path, .. } => {
-            let path = truncate_str(file_path, max_w.saturating_sub(8));
+            let path = truncate_str(file_path, max_w.saturating_sub(6));
             let linked = maybe_osc8_file_link(file_path, &path);
             vec![
-                Span::styled("Update", kind_style),
+                Span::styled("Edit", kind_style),
                 Span::styled("(", Style::default().fg(t.text_muted)),
                 Span::styled(linked, Style::default().fg(t.text_primary)),
                 Span::styled(")", Style::default().fg(t.text_muted)),
@@ -1135,7 +1135,13 @@ fn gutter_wrap(
         for chunk in markdown::hard_wrap_str(&clean, inner_w) {
             if count >= 80 {
                 out.push(Line::from(Span::styled(
-                    format!("{bar} … more · press o to expand"),
+                    format!(
+                        "{bar} {}",
+                        terminal_output::expand_hint_text(
+                            text.lines().count().saturating_sub(count).max(1),
+                            "line",
+                        )
+                    ),
                     Style::default().fg(bar_color),
                 )));
                 break 'outer;
@@ -1568,22 +1574,20 @@ pub(super) fn produce_text_block_lines(
     let max_lines = if expanded { 500usize } else { 80usize };
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut count = 0usize;
+    let total_rows = soft_wrapped_text_row_count(text, width.max(1));
 
     'outer: for raw in text.lines() {
         let clean_raw = sanitize_terminal_text(raw);
-        let wrapped = markdown::hard_wrap_str(&clean_raw, width.max(1));
+        let wrapped = soft_wrap_text_str(&clean_raw, width.max(1));
         for chunk in wrapped {
             if count >= max_lines {
-                let total = text.lines().count();
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "… {} more lines · click or press o to expand",
-                        total.saturating_sub(count)
-                    ),
+                lines.push(terminal_output::expand_hint_line(
+                    total_rows.saturating_sub(count),
+                    "line",
                     Style::default()
                         .fg(t.text_muted)
                         .add_modifier(Modifier::ITALIC),
-                )));
+                ));
                 break 'outer;
             }
             let clean = chunk;
@@ -1616,6 +1620,75 @@ pub(super) fn produce_text_block_lines(
     lines
 }
 
+fn soft_wrap_text_str(s: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+
+    fn text_width(s: &str) -> usize {
+        s.chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(1))
+            .sum()
+    }
+
+    if width == 0 || text_width(s) <= width {
+        return vec![s.to_owned()];
+    }
+
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut col = 0usize;
+    let mut last_break: Option<usize> = None;
+
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if cw > 0 && col + cw > width && !buf.is_empty() {
+            if ch.is_whitespace() {
+                out.push(buf.trim_end().to_owned());
+                buf.clear();
+                col = 0;
+                last_break = None;
+                continue;
+            }
+
+            if let Some(idx) = last_break
+                && !buf[..idx].trim().is_empty()
+            {
+                let remainder = buf[idx..].trim_start().to_owned();
+                out.push(buf[..idx].trim_end().to_owned());
+                buf = remainder;
+                col = text_width(&buf);
+                last_break = buf
+                    .char_indices()
+                    .filter_map(|(i, c)| c.is_whitespace().then_some(i))
+                    .last();
+            } else {
+                out.push(std::mem::take(&mut buf));
+                col = 0;
+                last_break = None;
+            }
+        }
+
+        if ch.is_whitespace() && !buf.trim().is_empty() {
+            last_break = Some(buf.len());
+        }
+        buf.push(ch);
+        col += cw;
+    }
+
+    if !buf.is_empty() {
+        out.push(buf.trim_end().to_owned());
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn soft_wrapped_text_row_count(text: &str, width: usize) -> usize {
+    text.lines()
+        .map(|raw| soft_wrap_text_str(&sanitize_terminal_text(raw), width.max(1)).len())
+        .sum()
+}
+
 fn produce_text_block_line_count(
     text: &str,
     width: usize,
@@ -1623,20 +1696,13 @@ fn produce_text_block_line_count(
     expanded: bool,
 ) -> usize {
     let max_lines = if expanded { 500usize } else { 80usize };
-    let mut count = 0usize;
+    let total_rows = soft_wrapped_text_row_count(text, width.max(1));
 
-    'outer: for raw in text.lines() {
-        let clean_raw = sanitize_terminal_text(raw);
-        for _ in markdown::hard_wrap_str(&clean_raw, width.max(1)) {
-            if count >= max_lines {
-                count += 1;
-                break 'outer;
-            }
-            count += 1;
-        }
+    if total_rows > max_lines {
+        max_lines + 1
+    } else {
+        total_rows
     }
-
-    count
 }
 
 #[cfg(test)]

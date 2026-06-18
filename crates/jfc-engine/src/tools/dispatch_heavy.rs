@@ -102,7 +102,7 @@ pub async fn execute_post_bounty(
             tracing::info!(
                 target: "jfc::ui::bounty",
                 bounty_id = %bounty_id,
-                winner = outcome.settlement.winner.as_ref().map(|a| a.0.as_str()).unwrap_or("(none)"),
+                winner = outcome.settlement.winner.as_ref().map(|a| a.label()).unwrap_or("(none)"),
                 files_written = written.files.len(),
                 "post_bounty auto_dispatch settled"
             );
@@ -118,7 +118,7 @@ pub async fn execute_post_bounty(
                     .settlement
                     .winner
                     .as_ref()
-                    .map(|a| a.0.as_str())
+                    .map(|a| a.label())
                     .unwrap_or("(no winning solution)"),
                 outcome.settlement.total_cost,
                 outcome.settlement.payouts.len(),
@@ -188,7 +188,7 @@ pub async fn execute_run_bounty(
             tracing::info!(
                 target: "jfc::ui::bounty",
                 bounty_id = %bounty_id,
-                winner = outcome.settlement.winner.as_ref().map(|a| a.0.as_str()).unwrap_or("(none)"),
+                winner = outcome.settlement.winner.as_ref().map(|a| a.label()).unwrap_or("(none)"),
                 files_written = written.files.len(),
                 "run_bounty settled"
             );
@@ -204,7 +204,7 @@ pub async fn execute_run_bounty(
                     .settlement
                     .winner
                     .as_ref()
-                    .map(|a| a.0.as_str())
+                    .map(|a| a.label())
                     .unwrap_or("(no winning solution)"),
                 outcome.settlement.total_cost,
                 outcome.settlement.payouts.len(),

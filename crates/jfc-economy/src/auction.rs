@@ -130,7 +130,7 @@ mod tests {
 
     fn make_bid(agent_name: &str, bounty_id: &str, price: u64) -> Bid {
         Bid {
-            agent_id: AgentId(format!("agent_{agent_name}")),
+            agent_id: AgentId::from_label(format!("agent_{agent_name}")),
             bounty_id: bounty_id.to_string(),
             price,
             approach: "standard approach".to_string(),
@@ -165,8 +165,8 @@ mod tests {
         let mut engine = AuctionEngine::new();
         let mut registry = TrustRegistry::new();
 
-        let high_trust = AgentId("agent_high".into());
-        let low_trust = AgentId("agent_low".into());
+        let high_trust = AgentId::from_label("agent_high");
+        let low_trust = AgentId::from_label("agent_low");
 
         registry.register(high_trust.clone());
         registry.register(low_trust.clone());
@@ -207,8 +207,8 @@ mod tests {
         let mut engine = AuctionEngine::new();
         let mut registry = TrustRegistry::new();
 
-        let cheap = AgentId("agent_cheap".into());
-        let expensive = AgentId("agent_expensive".into());
+        let cheap = AgentId::from_label("agent_cheap");
+        let expensive = AgentId::from_label("agent_expensive");
 
         // Same trust for both (register both at default 50)
         registry.register(cheap.clone());
@@ -245,8 +245,8 @@ mod tests {
 
         // Each bid is independently stored
         let bids = engine.bids();
-        assert_eq!(bids[0].agent_id.0, "agent_alice");
-        assert_eq!(bids[1].agent_id.0, "agent_bob");
+        assert_eq!(bids[0].agent_id.label(), "agent_alice");
+        assert_eq!(bids[1].agent_id.label(), "agent_bob");
         assert_ne!(bids[0].agent_id, bids[1].agent_id);
 
         // Clearing doesn't affect previously extracted references

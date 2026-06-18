@@ -128,7 +128,7 @@ impl MarketOrchestrator {
         n_validators_per_solution: u8,
     ) -> Result<crate::reporting::CycleOutcome, OrchestratorError> {
         use crate::reporting::{CycleOutcome, SolverPrompt, ValidatorPrompt};
-        use crate::types::{AgentId, ValidationChallenge};
+        use crate::types::{AgentId, MarketAgentId, ValidationChallenge};
 
         let bounty = self
             .bounties
@@ -177,7 +177,7 @@ impl MarketOrchestrator {
         // 1. Spawn solver pool entries + worktrees, build prompts.
         let mut prompts: Vec<SolverPrompt> = Vec::with_capacity(actual_solvers);
         for i in 0..actual_solvers {
-            let agent_id = AgentId::new_stable("solver", i);
+            let agent_id = AgentId::market_stable("solver", i);
             self.solvers.spawn_with_id(agent_id.clone(), bounty_id);
             self.trust.register(agent_id.clone());
             let worktree = swarm.create_worktree(bounty_id, &agent_id).await;
@@ -242,7 +242,7 @@ impl MarketOrchestrator {
                 Err(e) => {
                     tracing::warn!(
                         target: "jfc::economy",
-                        agent = %agent_id.0,
+                        agent = %agent_id.label(),
                         error = %e,
                         "solver invocation failed"
                     );
@@ -276,7 +276,7 @@ impl MarketOrchestrator {
         let mut validator_counter = 0usize;
         for solution in solutions {
             for _ in 0..actual_validators {
-                let validator_id = AgentId::new_stable("validator", validator_counter);
+                let validator_id = AgentId::market_stable("validator", validator_counter);
                 validator_counter += 1;
                 self.trust.register(validator_id.clone());
                 // Anti-collusion: the validator MUST NOT be the
@@ -309,7 +309,7 @@ impl MarketOrchestrator {
                             Err(e) => {
                                 tracing::warn!(
                                     target: "jfc::economy",
-                                    validator = %validator_id.0,
+                                    validator = %validator_id.label(),
                                     error = %e,
                                     "validator session start failed"
                                 );
@@ -358,7 +358,7 @@ impl MarketOrchestrator {
                     Err(e) => {
                         tracing::warn!(
                             target: "jfc::economy",
-                            validator = %validator_id.0,
+                            validator = %validator_id.label(),
                             error = %e,
                             "validator invocation failed"
                         );
@@ -406,7 +406,7 @@ impl MarketOrchestrator {
         tracing::info!(
             target: "jfc::economy::cycle",
             bounty_id = %bounty_id,
-            winner = settlement.winner.as_ref().map(|a| a.0.as_str()).unwrap_or("(none)"),
+            winner = settlement.winner.as_ref().map(|a| a.label()).unwrap_or("(none)"),
             total_cost = settlement.total_cost,
             payouts = settlement.payouts.len(),
             patch_bytes = winning_solution.as_ref().map(|s| s.patch.len()).unwrap_or(0),

@@ -24,7 +24,9 @@ use super::design::{
 };
 use super::dispatch_heavy;
 use super::economy::strip_html_tags;
-use super::filesystem::{execute_apply_patch, execute_edit, execute_read, execute_write};
+use super::filesystem::{
+    build_edit_diff_view, execute_apply_patch, execute_edit, execute_read, execute_write,
+};
 use super::hcom::{
     execute_hcom_bundle, execute_hcom_events, execute_hcom_fork, execute_hcom_kill,
     execute_hcom_launch, execute_hcom_list, execute_hcom_listen, execute_hcom_relay,
@@ -822,8 +824,10 @@ pub async fn execute_tool(
                 bytes = content.len(),
                 "MultiEdit applied"
             );
+            let diff = build_edit_diff_view(&file_path, &old_content, &content);
             let result =
-                ExecutionResult::success(format!("Applied {applied} edits to {file_path}."));
+                ExecutionResult::success(format!("Applied {applied} edits to {file_path}."))
+                    .with_diff(diff);
             // Slop guard: check the final content for quality issues.
             maybe_run_slop_guard(
                 result,

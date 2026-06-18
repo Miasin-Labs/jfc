@@ -84,16 +84,16 @@ mod tests {
         let charter = Charter::default();
         let ledger = TokenLedger::new(100_000, 100_000, 0);
         let mut trust = TrustRegistry::new();
-        trust.register(AgentId("winner_1".into()));
-        trust.register(AgentId("validator_a".into()));
-        trust.register(AgentId("validator_b".into()));
+        trust.register(AgentId::from_label("winner_1"));
+        trust.register(AgentId::from_label("validator_a"));
+        trust.register(AgentId::from_label("validator_b"));
         (charter, ledger, trust)
     }
 
     #[test]
     fn test_settle_winner_gets_reward() {
         let (charter, mut ledger, mut trust) = setup();
-        let winner = AgentId("winner_1".into());
+        let winner = AgentId::from_label("winner_1");
 
         let settlement = SettlementEngine::settle(
             "bounty-1",
@@ -120,8 +120,8 @@ mod tests {
     #[test]
     fn test_settle_validator_flaw_upheld() {
         let (charter, mut ledger, mut trust) = setup();
-        let winner = AgentId("winner_1".into());
-        let validator = AgentId("validator_a".into());
+        let winner = AgentId::from_label("winner_1");
+        let validator = AgentId::from_label("validator_a");
 
         let settlement = SettlementEngine::settle(
             "bounty-1",
@@ -155,8 +155,8 @@ mod tests {
     #[test]
     fn test_settle_validator_dismissed() {
         let (charter, mut ledger, mut trust) = setup();
-        let winner = AgentId("winner_1".into());
-        let validator = AgentId("validator_b".into());
+        let winner = AgentId::from_label("winner_1");
+        let validator = AgentId::from_label("validator_b");
 
         let settlement = SettlementEngine::settle(
             "bounty-1",
@@ -210,7 +210,7 @@ mod tests {
         charter.payment_floor = 0.7;
         let mut ledger = TokenLedger::new(100_000, 100_000, 0);
         let mut trust = TrustRegistry::new();
-        let winner = AgentId("winner_1".into());
+        let winner = AgentId::from_label("winner_1");
         trust.register(winner.clone());
 
         let settlement = SettlementEngine::settle(

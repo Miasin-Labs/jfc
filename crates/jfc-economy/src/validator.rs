@@ -253,11 +253,11 @@ mod tests {
     use super::*;
 
     fn validator_id(name: &str) -> AgentId {
-        AgentId(format!("validator_{name}"))
+        AgentId::from_label(format!("validator_{name}"))
     }
 
     fn solver_id(name: &str) -> AgentId {
-        AgentId(format!("solver_{name}"))
+        AgentId::from_label(format!("solver_{name}"))
     }
 
     fn make_challenge(
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_self_validation_blocked() {
-        let agent = AgentId("agent_same".to_string());
+        let agent = AgentId::from_label("agent_same");
         let result = ValidationSession::new(agent.clone(), agent, "bounty-1".to_string());
 
         assert!(result.is_err());

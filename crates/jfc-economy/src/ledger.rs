@@ -316,7 +316,7 @@ mod tests {
     use super::*;
 
     fn test_agent() -> AgentId {
-        AgentId("test-agent-001".into())
+        AgentId::from_label("test-agent-001")
     }
 
     // A pathological amount near u64::MAX must clamp to i64::MAX, not wrap

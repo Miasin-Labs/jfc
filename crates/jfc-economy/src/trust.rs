@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn test_trust_meets_minimum() {
         let mut registry = TrustRegistry::new();
-        let agent = AgentId("agent_001".into());
+        let agent = AgentId::from_label("agent_001");
         registry.register(agent.clone());
         assert!(registry.meets_minimum(&agent, 30));
         assert!(registry.meets_minimum(&agent, 50));

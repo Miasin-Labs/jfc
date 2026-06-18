@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::types::{AgentId, Solution};
+use crate::types::{AgentId, MarketAgentId, Solution};
 
 /// Solver lifecycle state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub struct SolverAgent {
 impl SolverAgent {
     pub fn new(bounty_id: &str) -> Self {
         Self {
-            id: AgentId::new("solver"),
+            id: AgentId::market_unique("solver"),
             bounty_id: bounty_id.to_string(),
             worktree_path: None,
             status: SolverStatus::Pending,
@@ -184,7 +184,7 @@ mod tests {
         tokens: u64,
     ) -> Solution {
         Solution {
-            agent_id: AgentId(format!("agent_{agent_name}")),
+            agent_id: AgentId::from_label(format!("agent_{agent_name}")),
             bounty_id: bounty_id.to_string(),
             patch: "diff --git a/foo.rs".to_string(),
             explanation: "fixed the bug".to_string(),
@@ -276,7 +276,7 @@ mod tests {
 
         let ranked = pool.rank_solutions();
         assert_eq!(ranked.len(), 1);
-        assert_eq!(ranked[0].agent_id.0, "agent_a");
+        assert_eq!(ranked[0].agent_id.label(), "agent_a");
     }
 
     #[test]
@@ -309,7 +309,7 @@ mod tests {
 
         let ranked = pool.rank_solutions();
         assert_eq!(ranked.len(), 1);
-        assert_eq!(ranked[0].agent_id.0, "agent_clean");
+        assert_eq!(ranked[0].agent_id.label(), "agent_clean");
     }
 
     #[test]

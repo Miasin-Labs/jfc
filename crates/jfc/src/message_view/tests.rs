@@ -6,7 +6,8 @@ use super::core::{
 };
 use super::detection::{looks_like_difftastic_output, looks_like_git_diff_output};
 use super::formatters::{
-    produce_command_output_lines, produce_git_diff_output_lines, produce_grep_output_lines,
+    produce_command_output_lines, produce_git_diff_output_line_count,
+    produce_git_diff_output_lines, produce_grep_output_lines,
 };
 use super::output_style::path_color;
 use super::outputs::{diff_lang, produce_diff_view_lines};
@@ -1156,7 +1157,7 @@ mod helper_tests {
             "expected tail of output:\n{rendered}"
         );
         assert!(
-            rendered.contains("omitted lines"),
+            rendered.contains("ctrl+o to expand"),
             "expected middle truncation marker:\n{rendered}"
         );
     }
@@ -1918,7 +1919,7 @@ mod helper_tests {
             ToolKind::Edit,
         );
         let spans = build_header_inner_spans(&tool, &t, 80);
-        assert_eq!(spans[0].content, "Update");
+        assert_eq!(spans[0].content, "Edit");
     }
 
     #[test]
@@ -1933,7 +1934,7 @@ mod helper_tests {
             ToolKind::MultiEdit,
         );
         let spans = build_header_inner_spans(&tool, &t, 80);
-        assert_eq!(spans[0].content, "Update");
+        assert_eq!(spans[0].content, "Edit");
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(combined.contains("src/lib.rs"));
         assert!(!combined.contains("MultiEdit"));
@@ -2420,6 +2421,35 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
         assert!(!rendered.contains('\u{1b}'));
     }
 
+    #[test]
+    fn produce_text_block_lines_wraps_words_without_single_letter_artifacts() {
+        let t = Theme::dark();
+        let lines =
+            produce_text_block_lines("hello world this is a test", 10, t.text_secondary, t, true);
+        let rendered = lines_to_plain(&lines);
+
+        assert_eq!(rendered, "hello\nworld this\nis a test");
+        assert!(!rendered.contains("\nd "));
+    }
+
+    #[test]
+    fn produce_text_block_lines_expansion_hint_counts_wrapped_rows_robust() {
+        let t = Theme::dark();
+        let text = "a".repeat(410);
+        let lines = produce_text_block_lines(&text, 5, t.text_secondary, t, false);
+        let rendered = lines_to_plain(&lines);
+
+        assert_eq!(lines.len(), 81);
+        assert!(
+            rendered.contains("+2 lines"),
+            "expected hint to count hidden wrapped rows:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("+0 lines"),
+            "wrapped content must not produce a zero-line hint:\n{rendered}"
+        );
+    }
+
     // --- Git-diff rendering regressions ------------------------------
     //
     // The screenshot bug: `git diff <file>` output was being routed
@@ -2578,6 +2608,52 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
             saw_del,
             "no `-` remove line in rendered output:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn git_diff_wrapped_row_count_matches_rendered_rows_regression() {
+        let deep_path = [
+            "crates",
+            "jfc",
+            "src",
+            "message_view",
+            "deeply_nested_renderer_component_with_long_name.rs",
+        ]
+        .join("/");
+        let old_line = format!("let rendered_message = \"{}\";", "alpha ".repeat(18));
+        let new_line = format!("let rendered_message = \"{}\";", "bravo ".repeat(18));
+        let stdout = format!(
+            "diff --git a/{deep_path} b/{deep_path}\n\
+             index 1111111..2222222 100644\n\
+             --- a/{deep_path}\n\
+             +++ b/{deep_path}\n\
+             @@ -1 +1 @@\n\
+             -{old_line}\n\
+             +{new_line}\n"
+        );
+        let stderr = format!("warning: {}\n", "diagnostic ".repeat(16));
+        let width = 32usize;
+        let lines =
+            produce_git_diff_output_lines(&stdout, &stderr, Some(0), width, Theme::dark(), true);
+        let predicted = produce_git_diff_output_line_count(&stdout, &stderr, Some(0), width, true);
+        let rendered = lines_to_plain(&lines);
+
+        assert_eq!(
+            predicted,
+            lines.len(),
+            "git diff height predictor must match rendered rows:\n{rendered}"
+        );
+        assert!(
+            lines.len() > stdout.lines().count() + stderr.lines().count(),
+            "fixture should force wrapping so the regression is meaningful:\n{rendered}"
+        );
+        for line in &lines {
+            let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                plain.chars().count() <= width,
+                "git diff row exceeded render width {width}: {plain:?}\n{rendered}"
+            );
+        }
     }
 
     #[test]

@@ -101,7 +101,7 @@ impl MarketReport {
         let flagged: Vec<String> = collusion
             .flagged_agents()
             .iter()
-            .map(|(id, reason)| format!("{}: {}", id.0, reason))
+            .map(|(id, reason)| format!("{}: {}", id.label(), reason))
             .collect();
 
         Self {
@@ -288,7 +288,7 @@ mod tests {
     fn test_market_health_critical() {
         let charter = Charter::default();
         let mut orchestrator = MarketOrchestrator::with_budget(charter, 100);
-        let agent = AgentId("spender".into());
+        let agent = AgentId::from_label("spender");
         orchestrator.trust.register(agent.clone());
         // Use large token counts so integer division yields non-zero cost
         orchestrator
@@ -314,7 +314,7 @@ mod tests {
         let charter = Charter::default();
         let orchestrator = MarketOrchestrator::with_budget(charter, 5000);
         let mut collusion = CollusionDetector::new();
-        let rubber_stamper = AgentId("rubber_stamper".into());
+        let rubber_stamper = AgentId::from_label("rubber_stamper");
         for _ in 0..6 {
             collusion.record(&rubber_stamper, ValidationVerdict::NoFlawFound);
         }
@@ -366,9 +366,9 @@ mod tests {
         );
 
         // 2. Register agents
-        let solver_a = AgentId("solver_a".into());
-        let solver_b = AgentId("solver_b".into());
-        let validator = AgentId("validator".into());
+        let solver_a = AgentId::from_label("solver_a");
+        let solver_b = AgentId::from_label("solver_b");
+        let validator = AgentId::from_label("validator");
         orchestrator.trust.register(solver_a.clone());
         orchestrator.trust.register(solver_b.clone());
         orchestrator.trust.register(validator.clone());
@@ -519,7 +519,7 @@ mod tests {
         }
 
         let provider: Box<dyn SwarmProvider> = Box::new(MockSwarm);
-        let agent = AgentId("test".into());
+        let agent = AgentId::from_label("test");
         let path = provider.create_worktree("bounty-1", &agent).await;
         assert_eq!(path, Some(PathBuf::from("/tmp/mock")));
     }

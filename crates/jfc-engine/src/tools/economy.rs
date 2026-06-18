@@ -1,7 +1,46 @@
 use std::process::Stdio;
 
-use super::registry::{collusion_detector, market_orchestrator, snapshot_event_sender};
+use jfc_agent::{AgentRegistry, AgentResult, AgentRole, AgentState};
+
+use super::registry::{
+    agent_registry, collusion_detector, market_orchestrator, snapshot_event_sender,
+};
 use crate::runtime::send_critical;
+
+/// Register an economy agent (solver/validator) in the unified registry and
+/// mark it `Running`, so it appears in the same roster as every other agent.
+///
+/// Idempotent across a cycle: `register` overwrites any prior entry for the
+/// same stable id, which is what we want when a stable solver/validator id is
+/// reused across bounties.
+async fn register_economy_agent(id: &jfc_agent::AgentId, role: AgentRole, description: &str) {
+    let registry = agent_registry();
+    registry
+        .register(AgentState::new(id.clone(), role, description.to_string()))
+        .await;
+    registry
+        .update_status(id, jfc_agent::AgentStatus::Running)
+        .await;
+}
+
+/// Mark an economy agent completed in the unified registry, recording the
+/// token spend and a short summary.
+async fn complete_economy_agent(
+    id: &jfc_agent::AgentId,
+    summary: &str,
+    tokens: u64,
+    elapsed_ms: u64,
+) {
+    agent_registry()
+        .complete(id, AgentResult {
+            id: id.clone(),
+            output: summary.to_string(),
+            tokens_used: tokens,
+            elapsed_ms,
+            patch: None,
+        })
+        .await;
+}
 
 /// SwarmProvider impl for jfc — delegates to the existing
 /// `worktrees` module. Each solver gets a worktree named
@@ -36,7 +75,7 @@ impl jfc_economy::reporting::SwarmProvider for EconomySwarmProvider {
             })
             .collect();
         let safe_agent: String = agent_id
-            .0
+            .label()
             .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -53,7 +92,7 @@ impl jfc_economy::reporting::SwarmProvider for EconomySwarmProvider {
                 tracing::warn!(
                     target: "jfc::economy",
                     bounty = bounty_id,
-                    agent = %agent_id.0,
+                    agent = %agent_id.label(),
                     error = %e,
                     "create_worktree failed; solver will run without worktree isolation"
                 );
@@ -93,7 +132,7 @@ impl jfc_economy::reporting::SwarmProvider for EconomySwarmProvider {
         // routing through main.rs's event channel and is deferred.
         tracing::info!(
             target: "jfc::economy",
-            agent = %agent_id.0,
+            agent = %agent_id.label(),
             msg = %message.chars().take(200).collect::<String>(),
             "swarm send_message (audit-only stub)"
         );
@@ -288,7 +327,7 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
         &self,
         prompt: jfc_economy::reporting::SolverPrompt,
     ) -> Result<jfc_economy::types::Solution, String> {
-        let task_id = format!("economy-solver-{}", prompt.agent_id.0);
+        let task_id = format!("economy-solver-{}", prompt.agent_id.label());
         let desc = format!(
             "Solver: {}",
             prompt
@@ -301,6 +340,17 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
                 .collect::<String>()
         );
         self.emit_started(&task_id, &desc);
+        // Mirror into the unified agent registry so the solver shows up in the
+        // same roster as every other agent, with its bounty + worktree role.
+        register_economy_agent(
+            &prompt.agent_id,
+            jfc_agent::AgentRole::Solver {
+                bounty_id: prompt.bounty_id.clone(),
+                worktree: prompt.worktree.clone(),
+            },
+            &desc,
+        )
+        .await;
         let started_at = std::time::Instant::now();
 
         // Build a TaskInput that runs the solver as a full agentic loop
@@ -324,7 +374,7 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
             run_in_background: false,
             model: Some(self.model.as_str().to_string()),
             effort: None,
-            name: Some(prompt.agent_id.0.clone()),
+            name: Some(prompt.agent_id.label().to_string()),
             team_name: None,
             mode: Some("default".to_string()),
             isolation: None, // Worktree already created by SwarmProvider
@@ -335,7 +385,7 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
 
         tracing::info!(
             target: "jfc::ui::economy",
-            agent = %prompt.agent_id.0,
+            agent = %prompt.agent_id.label(),
             bounty_id = %prompt.bounty_id,
             worktree = ?prompt.worktree,
             "invoke_solver: dispatching agentic loop"
@@ -358,6 +408,9 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
 
         if result.is_error() {
             self.emit_failed(&task_id, &result.output);
+            agent_registry()
+                .fail(&prompt.agent_id, result.output.clone())
+                .await;
             return Err(format!("Solver execution failed: {}", result.output));
         }
 
@@ -408,6 +461,7 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
 
         let summary = format!("{} bytes patch", patch.len());
         self.emit_completed(&task_id, &summary, elapsed_ms);
+        complete_economy_agent(&solution.agent_id, &summary, tokens_estimate, elapsed_ms).await;
         Ok(solution)
     }
 
@@ -415,7 +469,7 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
         &self,
         prompt: jfc_economy::reporting::ValidatorPrompt,
     ) -> Result<jfc_economy::reporting::ValidatorOutcome, String> {
-        let task_id = format!("economy-validator-{}", prompt.validator_id.0);
+        let task_id = format!("economy-validator-{}", prompt.validator_id.label());
         let desc = format!(
             "Validator: {}",
             prompt
@@ -428,12 +482,20 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
                 .collect::<String>()
         );
         self.emit_started(&task_id, &desc);
+        register_economy_agent(
+            &prompt.validator_id,
+            jfc_agent::AgentRole::Validator {
+                bounty_id: prompt.bounty_id.clone(),
+            },
+            &desc,
+        )
+        .await;
         let started_at = std::time::Instant::now();
         tracing::debug!(
             target: "jfc::ui::economy",
-            validator = %prompt.validator_id.0,
+            validator = %prompt.validator_id.label(),
             bounty_id = %prompt.bounty_id,
-            solver = %prompt.solution.agent_id.0,
+            solver = %prompt.solution.agent_id.label(),
             max_tokens = prompt.max_tokens,
             "invoke_validator: streaming"
         );
@@ -483,7 +545,9 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
                     ),
                     (None, _) => format!("no flaw found (conf {confidence:.2})"),
                 };
-                self.emit_completed(&task_id, &summary, started_at.elapsed().as_millis() as u64);
+                let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                self.emit_completed(&task_id, &summary, elapsed_ms);
+                complete_economy_agent(&prompt.validator_id, &summary, tokens, elapsed_ms).await;
                 Ok(jfc_economy::reporting::ValidatorOutcome {
                     flaw,
                     test_code,
@@ -493,6 +557,9 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
             }
             Err(e) => {
                 self.emit_failed(&task_id, &e);
+                agent_registry()
+                    .fail(&prompt.validator_id, e.clone())
+                    .await;
                 Err(e)
             }
         }
@@ -637,7 +704,7 @@ pub fn apply_winning_solution(
         tracing::warn!(
             target: "jfc::ui::bounty",
             bounty_id = %bounty_id,
-            winner = %sol.agent_id.0,
+            winner = %sol.agent_id.label(),
             reason,
             "refusing to apply winning solution to the main checkout (review/test gate)"
         );
@@ -678,7 +745,7 @@ pub fn apply_winning_solution(
     tracing::info!(
         target: "jfc::ui::bounty",
         bounty_id = %bounty_id,
-        winner = %sol.agent_id.0,
+        winner = %sol.agent_id.label(),
         patch_bytes = sol.patch.len(),
         audit_dir = %audit_dir.display(),
         "wrote winner audit files"
@@ -847,7 +914,7 @@ pub async fn verify_bounty_solution(
     if deleted_tests > 0 {
         tracing::warn!(
             target: "jfc::economy::charter",
-            agent = %solution.agent_id.0,
+            agent = %solution.agent_id.label(),
             bounty_id,
             deleted_tests,
             "Solution rejected: patch deletes existing test annotations (Charter: TestDeletion)"

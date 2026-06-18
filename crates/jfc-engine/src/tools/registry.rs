@@ -44,6 +44,26 @@ pub fn collusion_detector() -> &'static std::sync::Mutex<jfc_economy::collusion:
 }
 
 // ---------------------------------------------------------------------------
+// Unified agent registry
+// ---------------------------------------------------------------------------
+
+/// Process-global unified [`AgentRegistry`](jfc_agent::AgentRegistry).
+///
+/// Single source of truth for every spawned agent's lifecycle — solo
+/// subagents, teammates, council seats, and economy solvers/validators all
+/// register here, so the UI roster, `wait`, and `abort` see one consistent
+/// view instead of the previous three parallel trackers (`BackgroundTask`,
+/// `BackgroundAgentInfo`, `InProcessTeammateState`).
+///
+/// Held as a singleton (mirroring `market_orchestrator` / `active_event_sender`)
+/// so spawn paths don't have to thread a registry parameter through
+/// `execute_tool`'s 20 callsites or bolt it onto the `EngineState` god-object.
+pub fn agent_registry() -> &'static Arc<crate::agents::AgentRegistryImpl> {
+    static R: OnceLock<Arc<crate::agents::AgentRegistryImpl>> = OnceLock::new();
+    R.get_or_init(|| Arc::new(crate::agents::AgentRegistryImpl::new()))
+}
+
+// ---------------------------------------------------------------------------
 // Active provider handle
 // ---------------------------------------------------------------------------
 
