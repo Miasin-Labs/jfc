@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+
+use jfc_core::{ChatMessage, MessagePart, ToolInput, ToolOutput, ToolStatus};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -124,6 +127,16 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
             format!("{} queued", app.engine.queued_prompts.len()),
             muted,
             80
+        );
+    }
+    if let Some(label) = shell_activity_badge(&app.engine.messages) {
+        push1!(
+            label,
+            Style::default()
+                .fg(t.bg)
+                .bg(t.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+            87,
         );
     }
 
@@ -289,6 +302,76 @@ pub(super) fn effort_status_badge(app: &App) -> String {
     "effort default".to_string()
 }
 
+pub(super) fn shell_activity_badge(messages: &[ChatMessage]) -> Option<String> {
+    let count = shell_activity_count(messages);
+    if count == 0 {
+        None
+    } else {
+        Some(format!(
+            " {count} shell{} ",
+            if count == 1 { "" } else { "s" }
+        ))
+    }
+}
+
+fn shell_activity_count(messages: &[ChatMessage]) -> usize {
+    let mut active = 0usize;
+    let mut backgrounded = BTreeSet::new();
+    let mut finished = BTreeSet::new();
+
+    for message in messages {
+        for part in &message.parts {
+            let MessagePart::Tool(tool) = part else {
+                continue;
+            };
+            match &tool.input {
+                ToolInput::Bash { .. } => {
+                    if matches!(tool.status, ToolStatus::Pending | ToolStatus::Running) {
+                        active += 1;
+                    }
+                    if let Some(task_id) = background_task_id_from_output(&tool.output) {
+                        backgrounded.insert(task_id);
+                    }
+                }
+                ToolInput::BashOutput { task_id, .. } => {
+                    if bash_output_finished_task(&tool.output) {
+                        finished.insert(task_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for task_id in finished {
+        backgrounded.remove(&task_id);
+    }
+    active + backgrounded.len()
+}
+
+fn background_task_id_from_output(output: &ToolOutput) -> Option<String> {
+    let text = match output {
+        ToolOutput::Text(text) => text.as_str(),
+        ToolOutput::LargeText(text) => text.content.as_str(),
+        _ => return None,
+    };
+    text.lines()
+        .find_map(|line| line.strip_prefix("task_id: "))
+        .map(str::trim)
+        .filter(|task_id| task_id.starts_with("bash_"))
+        .map(ToOwned::to_owned)
+}
+
+fn bash_output_finished_task(output: &ToolOutput) -> bool {
+    let text = match output {
+        ToolOutput::Text(text) => text.as_str(),
+        ToolOutput::LargeText(text) => text.content.as_str(),
+        _ => return false,
+    };
+    text.lines()
+        .any(|line| line == "retrieval_status: success" || line.starts_with("status: completed"))
+}
+
 /// Build the rate-limit quota badge from the OAuth account snapshot, or `None`
 /// when no utilization is known. Returns `(label, peak_percent)` where the
 /// label shows the highest-pressure window (5h or 7d) plus an overage hint, and
@@ -410,6 +493,7 @@ pub(super) fn fit_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jfc_core::{ToolCall, ToolKind};
     use jfc_engine::providers::anthropic_accounts::AccountSnapshot;
 
     fn snap(u5: Option<f64>, u7: Option<f64>) -> AccountSnapshot {
@@ -452,5 +536,94 @@ mod tests {
         s.overage_disabled_reason = Some("out_of_credits".into());
         let (label, _) = quota_badge(&s).unwrap();
         assert!(label.contains("overage off"), "got {label}");
+    }
+
+    fn tool(input: ToolInput, status: ToolStatus, output: ToolOutput) -> MessagePart {
+        MessagePart::tool(ToolCall {
+            id: "tool-1".into(),
+            kind: match &input {
+                ToolInput::Bash { .. } => ToolKind::Bash,
+                ToolInput::BashOutput { .. } => ToolKind::BashOutput,
+                _ => ToolKind::Generic("test".into()),
+            },
+            status,
+            input,
+            output,
+            display: jfc_core::ToolDisplayState::DEFAULT,
+            elapsed_ms: None,
+            started_at: None,
+            thought_signature: None,
+        })
+    }
+
+    #[test]
+    fn shell_activity_badge_counts_running_bash_normal() {
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(tool(
+            ToolInput::Bash {
+                command: "cargo test".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: None,
+                suppress_output: None,
+            },
+            ToolStatus::Running,
+            ToolOutput::Empty,
+        ));
+
+        assert_eq!(shell_activity_badge(&[msg]).as_deref(), Some(" 1 shell "));
+    }
+
+    #[test]
+    fn shell_activity_badge_keeps_unretrieved_background_task_regression() {
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(tool(
+            ToolInput::Bash {
+                command: "sleep 60".into(),
+                timeout: Some(120_000),
+                workdir: None,
+                run_in_background: Some(true),
+                suppress_output: None,
+            },
+            ToolStatus::Completed,
+            ToolOutput::Text(
+                "Command running in background.\ntask_id: bash_abc123\nstatus: running".into(),
+            ),
+        ));
+
+        assert_eq!(shell_activity_badge(&[msg]).as_deref(), Some(" 1 shell "));
+    }
+
+    #[test]
+    fn shell_activity_badge_clears_background_after_successful_read_regression() {
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(tool(
+            ToolInput::Bash {
+                command: "sleep 0.1".into(),
+                timeout: Some(120_000),
+                workdir: None,
+                run_in_background: Some(true),
+                suppress_output: None,
+            },
+            ToolStatus::Completed,
+            ToolOutput::Text("task_id: bash_done\nstatus: running".into()),
+        ));
+        msg.parts.push(tool(
+            ToolInput::BashOutput {
+                task_id: "bash_done".into(),
+                offset: None,
+                limit: None,
+                block: None,
+                timeout: None,
+                wait_up_to: None,
+            },
+            ToolStatus::Completed,
+            ToolOutput::Text("retrieval_status: success\nstatus: completed exit=0\n\nok".into()),
+        ));
+
+        assert_eq!(shell_activity_badge(&[msg]), None);
     }
 }

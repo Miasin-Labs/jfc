@@ -1606,6 +1606,11 @@ mod helper_tests {
     }
 
     #[test]
+    fn bash_is_hidden_from_normal_transcript_regression() {
+        assert!(is_invisible_in_transcript(&ToolKind::Bash));
+    }
+
+    #[test]
     fn render_items_drop_bash_output_compatibility_tool_regression() {
         let mut app = stub_app();
         let mut msg = ChatMessage::assistant(String::new());
@@ -1632,6 +1637,35 @@ mod helper_tests {
                 .iter()
                 .any(|item| matches!(item, super::core::RenderItem::ToolBlock(_))),
             "BashOutput compatibility calls should not produce transcript tool widgets"
+        );
+    }
+
+    #[test]
+    fn render_items_drop_bash_tool_regression() {
+        let mut app = stub_app();
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(MessagePart::Tool(Box::new(dummy_tool(
+            ToolInput::Bash {
+                command: "cargo test".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: None,
+                suppress_output: None,
+            },
+            ToolOutput::Text("test result: ok".into()),
+            ToolKind::Bash,
+        ))));
+        app.engine.messages.push(msg);
+
+        let ctx = RenderCtx::from_app(&app);
+        let items = build_render_items_ctx(&ctx, 80);
+
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, super::core::RenderItem::ToolBlock(_))),
+            "Bash calls should surface through footer/background state, not transcript tool widgets"
         );
     }
 

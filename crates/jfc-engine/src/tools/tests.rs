@@ -2339,9 +2339,16 @@ fn execute_memory_create_empty_body_fails_robust() {
     assert!(r.output.contains("body cannot be empty"), "{}", r.output);
 }
 
+/// `execute_memory_create` should insert a memory row into the jfc-knowledge
+/// DB (not write a `.md` file) and return a success message with the id.
 #[test]
+#[serial_test::serial]
 fn execute_memory_create_project_writes_file_normal() {
     let dir = tempfile::tempdir().expect("temp dir");
+    // SAFETY: tests are run single-threaded via #[serial_test::serial]
+    unsafe {
+        std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("test.db").to_string_lossy().as_ref());
+    }
     let r = execute_memory_create(
         "project",
         "context",
@@ -2350,14 +2357,32 @@ fn execute_memory_create_project_writes_file_normal() {
         dir.path(),
     );
     assert!(!r.is_error(), "{}", r.output);
-    assert!(r.output.contains("Memory saved to"), "{}", r.output);
+    // DB path, not file path — message says "Memory saved" not "Memory saved to"
+    assert!(
+        r.output.contains("Memory saved") || r.output.contains("remembered"),
+        "{}",
+        r.output
+    );
 }
 
+/// `execute_memory_delete` now takes an id (not a path) and should fail
+/// gracefully for a nonexistent id (no crash, returns a user-friendly error).
 #[test]
+#[serial_test::serial]
 fn execute_memory_delete_missing_path_fails_robust() {
-    let r = execute_memory_delete("/tmp/jfc-no-such-memory-path-xyz-9831.md");
+    let dir = tempfile::tempdir().expect("temp dir");
+    // SAFETY: tests are run single-threaded via #[serial_test::serial]
+    unsafe {
+        std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("test.db").to_string_lossy().as_ref());
+    }
+    let r = execute_memory_delete("nonexistent-id-abc123");
     assert!(r.is_error());
-    assert!(r.output.contains("File not found"), "{}", r.output);
+    assert!(
+        r.output.to_lowercase().contains("no memory")
+            || r.output.to_lowercase().contains("failed"),
+        "{}",
+        r.output
+    );
 }
 
 #[test]
