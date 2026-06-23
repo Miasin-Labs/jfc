@@ -2997,6 +2997,7 @@ dependencies = [
  "jfc-daemon",
  "jfc-design",
  "jfc-economy",
+ "jfc-knowledge",
  "jfc-learn",
  "jfc-mcp",
  "jfc-memory",

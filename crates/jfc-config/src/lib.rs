@@ -95,6 +95,10 @@ pub struct Config {
     pub memory_recall_enabled: bool,
     #[serde(default = "default_plan_recall_enabled")]
     pub plan_recall_enabled: bool,
+    /// Cross-project knowledge recall (jfc-knowledge). Default OFF: until a
+    /// baseline A/B shows it helps, the default prompt is unchanged.
+    #[serde(default)]
+    pub cross_project_recall_enabled: bool,
     #[serde(default)]
     pub session_cost_budget_usd: Option<f64>,
     #[serde(default = "default_auto_compact_enabled")]
@@ -635,6 +639,7 @@ impl Default for Config {
             slate_rules: None,
             memory_recall_enabled: default_memory_recall_enabled(),
             plan_recall_enabled: default_plan_recall_enabled(),
+            cross_project_recall_enabled: false,
             session_cost_budget_usd: None,
             auto_compact_enabled: default_auto_compact_enabled(),
             auto_compact_window: None,
@@ -706,6 +711,7 @@ impl Config {
             slate_enabled: local_wins!(slate_enabled),
             memory_recall_enabled: local_wins!(memory_recall_enabled),
             plan_recall_enabled: local_wins!(plan_recall_enabled),
+            cross_project_recall_enabled: local_wins!(cross_project_recall_enabled),
             auto_compact_enabled: local_wins!(auto_compact_enabled),
             auto_compact_threshold_pct: local_wins!(auto_compact_threshold_pct),
             always_show_thinking: local_wins!(always_show_thinking),

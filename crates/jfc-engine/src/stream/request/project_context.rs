@@ -4,7 +4,8 @@ use crate::runtime::StreamRequestOverrides;
 use jfc_provider::{ModelId, Provider, ProviderMessage};
 
 use super::memory::{
-    append_memory_recall_context, fast_recall_model, sdk_memory_store_prompt_section,
+    append_cross_project_knowledge, append_memory_recall_context, fast_recall_model,
+    sdk_memory_store_prompt_section,
 };
 use super::messages::last_user_text;
 
@@ -123,6 +124,13 @@ pub(super) async fn append_project_context(
             recall_enabled,
             recall_was_fresh,
         );
+
+        // Cross-project knowledge recall (jfc-knowledge). Gated off by default;
+        // screened as reference data. Appended after the per-project memory block.
+        if let Some(query) = last_user_text(messages) {
+            recalled_memory_chars +=
+                append_cross_project_knowledge(system_prompt, &cwd_path, &query).await;
+        }
         if let Ok(Some(memory_store_section)) = tokio::time::timeout(
             std::time::Duration::from_millis(1500),
             sdk_memory_store_prompt_section(),
