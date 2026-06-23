@@ -20,6 +20,7 @@
 //! reads it yet (that's Phase 2).
 
 pub mod error;
+pub mod import;
 pub mod project;
 pub mod query;
 pub mod record;
@@ -27,9 +28,10 @@ mod schema;
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub use error::{KnowledgeError, Result};
+pub use import::{ImportReport, ImportableMemory};
 pub use project::project_key;
 pub use query::RecallFilter;
 pub use record::{Kind, KnowledgeRecord, Scope};
@@ -79,6 +81,55 @@ impl KnowledgeStore {
     /// Insert a record (validated at the boundary).
     pub fn insert(&self, rec: &KnowledgeRecord) -> Result<()> {
         query::insert(&self.conn, rec)
+    }
+
+    /// Whether a record id already exists (live or superseded).
+    pub fn contains(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT 1 FROM knowledge WHERE id = ?1 LIMIT 1",
+            [id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+    }
+
+    /// Idempotently import legacy `.md` memories. Each item gets a deterministic
+    /// id (uuid-v5 over its normalized content), so re-running is a no-op: items
+    /// already present are skipped, not duplicated. Never deletes any source.
+    /// Per-item failures are collected into the report rather than aborting.
+    pub fn import_memories(&self, items: &[ImportableMemory]) -> Result<ImportReport> {
+        let mut report = ImportReport::default();
+        for item in items {
+            let id = import::deterministic_id(item);
+            match self.contains(&id) {
+                Ok(true) => {
+                    report.skipped += 1;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    report.errors.push(format!("{}: {e}", item.title));
+                    continue;
+                }
+            }
+            let mut rec = KnowledgeRecord::new(
+                item.kind,
+                item.scope,
+                item.project_key.clone(),
+                item.title.clone(),
+                item.body.clone(),
+            );
+            rec.id = id;
+            if let Some(src) = &item.source_path {
+                rec.source = Some(format!("import:{}", src.display()));
+            }
+            match self.insert(&rec) {
+                Ok(()) => report.imported += 1,
+                Err(e) => report.errors.push(format!("{}: {e}", item.title)),
+            }
+        }
+        Ok(report)
     }
 
     /// Mark `old_id` superseded by `new_id` (immutable revision).
@@ -268,6 +319,43 @@ mod tests {
         }
         let hits = store.recall("apple", &RecallFilter::default()).unwrap();
         assert_eq!(hits.first().map(|h| h.id.as_str()), Some(a.id.as_str()));
+    }
+
+    // SAFETY INVARIANT (PLAN §F3): import is idempotent — re-running adds rows
+    // once. Mirrors the legacy `.md` → DB migration's no-deletion contract.
+    #[test]
+    fn import_memories_is_idempotent_regression() {
+        use crate::import::ImportableMemory;
+        let store = KnowledgeStore::open_in_memory().unwrap();
+        let items = vec![
+            ImportableMemory {
+                source_path: None,
+                kind: Kind::Preference,
+                scope: Scope::User,
+                project_key: None,
+                title: "prefers ripgrep".into(),
+                body: "Use ripgrep over grep for code search.".into(),
+            },
+            ImportableMemory {
+                source_path: None,
+                kind: Kind::Fact,
+                scope: Scope::Project,
+                project_key: Some("P".into()),
+                title: "stack".into(),
+                body: "This repo is edition 2024.".into(),
+            },
+        ];
+
+        let r1 = store.import_memories(&items).unwrap();
+        assert_eq!(r1.imported, 2);
+        assert_eq!(r1.skipped, 0);
+        assert_eq!(store.live_count().unwrap(), 2);
+
+        // Second run: same content → all skipped, no duplicates.
+        let r2 = store.import_memories(&items).unwrap();
+        assert_eq!(r2.imported, 0);
+        assert_eq!(r2.skipped, 2);
+        assert_eq!(store.live_count().unwrap(), 2, "re-import must not duplicate");
     }
 
     #[test]

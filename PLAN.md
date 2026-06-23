@@ -55,6 +55,55 @@ The memory-based-RSI literature gives a clear recipe for what makes such a loop
 Net design consequences folded into the TODOs: rank by **importance/salience**
 (not just recency), **verifier-gate** what gets written, run an **offline
 consolidation/forgetting** pass, and **screen recalled memory as untrusted data**.
+
+### Session mining — learn from the user's own history (grounded in real data)
+
+The richest training corpus is already on disk: `~/.config/jfc/sessions/` holds
+**364 saved sessions (~639 MB)**. Verified schema: each session is
+`{id, created_at, cwd, model, first_prompt, messages[]}` where every message has
+`role` + `parts[]`, and each part is one of `type:"tool"`
+(`{kind, status:complete|failed, input, output}`), `type:"text"`,
+`type:"reasoning"`, or `type:"task_status"`. Real signal counts in a 20-session
+sample: **10,948 complete / 364 FAILED tool parts** — e.g.
+`kind:"Edit", status:"failed", output:"old_string not found"` (exactly the
+failure class the SearchReplace gutter-tier already fixed). So we can mine, per
+the goal, (1) **repetitive user inputs/preferences**, and (2) **recurring model
+errors** — failed Edit/Bash *and* reasoning/text turns the user then corrected.
+
+The mining→consolidation→promotion pipeline is designed (council, intent=plan) so
+the loop **compounds, not poisons**. Load-bearing decisions adopted:
+
+- **Three-tier quarantine, evidence-as-data-never-instruction**:
+  `raw evidence (redacted) → candidate lessons (project-scoped) → promoted
+  lessons (cross-project, human-gated)`. The live agent reads only *structured
+  lessons*, never raw transcript text — which is the structural defense against
+  prompt-injection laundered through mined sessions.
+- **Redaction first**, before any text is stored or shown to any extractor
+  (deterministic high-recall: key formats, JWTs, high-entropy tokens, `password=`,
+  emails, home-path normalization; redact tool `output` harder than `input`).
+- **Verifier-gate error-lessons via recovery pairs**: only store "model made
+  error X" when the *same transcript* shows a later failed→succeeded recovery
+  (the fix actually worked). This also kills stale-mistake overfitting.
+- **Tiered extraction by cost**: deterministic harvest for the structured cases
+  (the 364 failed calls, repeated commands/flags, correction turns); reserve an
+  LLM/council extractor for the semantic residue, gated on redaction recall.
+- **Compounding via a `norm_key`**: identical lessons from many sessions
+  increment `support_count` on one row instead of duplicating; `last_seen` decay
+  and `contradiction_count` retire stale/contradicted lessons.
+
+### Obsidian parity — the missing link-graph (grounded in the decompiled bundles)
+
+Indexed the deobfuscated Obsidian bundles (`research/.codegraph`, 440 files).
+What JFC's flat FTS store is missing vs Obsidian is **a link-graph between
+records**: Obsidian's value isn't the notes, it's `resolvedLinks` /
+`unresolvedLinks` / backlinks / tags / `properties` (frontmatter) that make the
+vault a *traversable graph*. Two concrete borrows:
+- **Typed links between knowledge rows** (`relates-to`, `supersedes`,
+  `caused-by`, `fixed-by`) → recall can expand along edges (a lesson pulls in its
+  linked fix), the backlink view shows "what depends on this lesson".
+- **Unresolved links as knowledge gaps**: an Obsidian unresolved `[[link]]` is a
+  note that *should* exist; the analog is a referenced-but-absent lesson/skill —
+  a concrete signal of what to learn next.
 - **Phase 1 (DONE, committed `8a3e6cd6`)**: new `jfc-knowledge` crate, rusqlite
   (bundled SQLite), versioned migrations, FTS5 lexical recall, recency/usage
   ranking, immutable supersede, bounded-growth `decay`, stable cross-machine
@@ -82,6 +131,12 @@ consolidation/forgetting** pass, and **screen recalled memory as untrusted data*
   salience + verified-outcome, screen recalled memory as untrusted data, and run
   offline consolidation/forgetting — the research-backed levers for durable
   cross-project continual learning.
+- **Mine the user's own session history** (`~/.config/jfc/sessions/`) offline for
+  repetitive preferences and recurring model errors (failed tools + corrected
+  reasoning), through a redaction-first, evidence-as-data, verifier-gated,
+  human-promoted quarantine pipeline.
+- Borrow Obsidian's **link-graph**: typed links between knowledge rows (so recall
+  traverses, not just matches) and unresolved-link **knowledge-gap** detection.
 
 ## Verification Strategy
 
@@ -116,12 +171,12 @@ truth for memory.
   block. Gate behind a `cross_project_recall_enabled` config flag (default off)
   so the default prompt is unchanged. Tests: flag-off = no block; flag-on =
   block; project scope isolation end-to-end.
-- [ ] 3. **Phase 2.5 — migration importer.** Add `jfc-knowledge::import` that maps
-  `jfc-memory::load_all_memories` entries → KnowledgeRecords with a **deterministic
-  id** (uuid-v5 over normalized content) so re-import is idempotent. Map
-  MemoryType→Kind, MemoryLevel→Scope (User→User, Project→Project with the current
-  `project_key`). **Import only — never deletes the source `.md` files.** Tests:
-  round-trip + double-import yields no duplicates.
+- [x] 3. **Phase 2.5 — migration importer.** `jfc-knowledge::import` parses `.md`
+  memory files (self-contained frontmatter parser, no `jfc-memory` dep), maps
+  type→Kind and level→Scope, and `KnowledgeStore::import_memories` inserts with a
+  **deterministic id** (uuid-v5 over normalized content) so re-import is a no-op.
+  **Import only — never deletes the source `.md` files.** 7 tests incl.
+  `import_memories_is_idempotent_regression`. (DONE.)
 - [ ] 4. **Phase 3 — `/knowledge` command surface.** `/knowledge import` (drive the
   importer), `list`, `show <id>`, `forget <id>`, `promote <id>` (the human gate),
   `demote <id>`. Mirror the existing slash-command registry pattern. A one-line
@@ -158,6 +213,44 @@ truth for memory.
   decay/forget low-importance never-recently-used rows, and recompute usage
   stats. Bounded, logged, reversible. Mirrors Sleep-Consolidated Memory /
   Auto-Dreamer.
+- [ ] 11. **Session-mining: redaction + evidence harvest (Stage 0+1).** New
+  `jfc-knowledge::session_mine`. (a) **Redact first**: a deterministic high-recall
+  scrubber (key formats, JWTs, high-entropy tokens, `password=`/connection
+  strings, emails, home-path normalization; tool `output` scrubbed harder than
+  `input`) run before any text is stored. (b) **Harvest**: parse
+  `~/.config/jfc/sessions/*.json` into a `raw_evidence` table (redacted_text,
+  session_id, msg/part idx, kind, ts, content_hash) — quarantine only, never read
+  by the live agent. Tests on a synthetic session fixture (no real user data in
+  tests).
+- [ ] 12. **Session-mining: deterministic lesson extraction (Stage 1 lessons).**
+  From `raw_evidence` derive `candidate_lessons` (project-scoped): (a) **error
+  patterns** — index `status:"failed"` tool parts, normalize by kind+message
+  class (Edit `old_string not found`, bash exit/stderr classes), and find the
+  **recovery window** (same tool kind succeeding within N parts on a diffed
+  input); a failed→succeeded pair is **verifier-gated** and stored `verified=1`.
+  (b) **preferences** — frequency-mine repeated user directives and *correction
+  turns* (a user reply negating the preceding model text/reasoning). Compounding
+  via `norm_key` (`support_count++`, not duplicate); `injection_flag` on
+  instruction-shaped candidates. Tests: failed→succeeded pair yields one verified
+  lesson; an unrecovered failure does not.
+- [ ] 13. **Session-mining: ranking, decay, human-gated promotion (Stage 2/3).**
+  Score `score = log(1+support_count) * verified_boost * recency_falloff -
+  penalty*contradiction_count`; retire when score floors or `contradiction_count
+  > support_count`. **Auto-promotable to cross-project = nothing**: candidates may
+  only *queue* for review (`review_state: pending`) above a support+verified
+  threshold; actual `Scope::Global` still requires the human `/knowledge promote`
+  gate. `/knowledge mine` (run offline), `/knowledge review` (approve/reject the
+  queue). Optional LLM/council extractor for the semantic residue, gated on
+  redaction recall — off by default.
+- [ ] 14. **Obsidian-style typed links between records.** Add a `knowledge_links`
+  table (`from_id, to_id, rel`) with `relates-to | supersedes | caused-by |
+  fixed-by | refines`. Recall may expand one hop along edges (a surfaced error
+  pulls in its `fixed-by` lesson); a backlink query answers "what depends on this
+  lesson". Migration + tests; recall expansion behind the same default-off flag.
+- [ ] 15. **Obsidian-style knowledge-gap detection (unresolved links).** Track
+  referenced-but-absent lessons/skills (the analog of an Obsidian unresolved
+  `[[link]]`) as `knowledge_gaps`, surfaced via `/knowledge gaps` — a concrete,
+  ranked "what to learn next" list that feeds the mining/consolidation priorities.
 
 ## Final Verification Wave
 
@@ -173,6 +266,11 @@ truth for memory.
   poisoned-memory test: a row containing injection markers is recalled as inert
   reference data (screened/escaped), never as an instruction or tool call; an
   `unverified` lesson never outranks a `verified` one on equal relevance.
+- [ ] F5. Session-mining safety: redaction runs before storage (a fixture with a
+  fake key/JWT/`password=` is scrubbed in `raw_evidence`); mined evidence is never
+  surfaced to the live agent (only structured lessons are); an error-lesson is
+  stored only when the transcript shows a verified failed→succeeded recovery; and
+  no mined lesson reaches `Scope::Global` without passing the human review gate.
 
 ## Success Criteria
 
@@ -190,3 +288,10 @@ truth for memory.
   an offline pass consolidates and forgets — so `~/`-level cross-project recall
   becomes durable continual learning, within the bounded/human-gated safety
   envelope (no autonomous promotion, no self-trigger, kill switch intact).
+- The agent **learns from its own past sessions**: the user's 364-session history
+  is mined offline into verified, redacted, human-promotable lessons about their
+  preferences and the model's recurring mistakes — never by feeding raw transcript
+  text back to the live agent.
+- Knowledge is a **traversable graph** (Obsidian-style typed links + backlinks),
+  and the store can name its own **gaps** (unresolved references) as a "what to
+  learn next" signal.
