@@ -14,7 +14,7 @@ use super::compaction::{
     extract_first_prompt, persistent_session_messages, repair_loaded_messages,
 };
 use super::deserialize::deserialize_message;
-use super::serialization::SerializedSession;
+use super::serialization::{SerializedMessage, SerializedSession};
 use super::serialize::serialize_message;
 
 #[tracing::instrument(target = "jfc::session", skip(messages), fields(n = messages.len()))]
@@ -218,16 +218,70 @@ fn scrub_loaded_thinking_poison(messages: &mut [ChatMessage]) -> usize {
     removed
 }
 
+/// Load a session's messages from the DB transcript store (PLAN TODO 24). Each
+/// `meta` column holds the verbatim `SerializedMessage` JSON, so we deserialize
+/// it and run the SAME `deserialize_message` path as the JSON loader — identical
+/// `ChatMessage`s. Returns `None` (caller falls back to JSON) if the source flag
+/// isn't "db", the store is unavailable, or the session has no transcript rows.
+async fn load_session_from_db(session_id_str: &str) -> Option<Vec<SerializedMessage>> {
+    if !crate::config::load_arc().session_source.eq_ignore_ascii_case("db") {
+        return None;
+    }
+    let id = session_id_str.to_owned();
+    let rows = tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+        let msgs = store.load_transcript(&id).ok()?;
+        if msgs.is_empty() {
+            return None;
+        }
+        Some(msgs)
+    })
+    .await
+    .ok()
+    .flatten()?;
+
+    // Reconstruct SerializedMessage from each row's verbatim `meta` JSON.
+    let mut serialized = Vec::with_capacity(rows.len());
+    for row in rows {
+        let meta = row.meta?; // a row without meta means a non-lossless write — bail to JSON
+        match serde_json::from_str::<SerializedMessage>(&meta) {
+            Ok(m) => serialized.push(m),
+            Err(_) => return None, // any decode failure → fall back to canonical JSON
+        }
+    }
+    Some(serialized)
+}
+
 pub async fn load_session(session_id: &SessionId) -> Option<Vec<ChatMessage>> {
     let session_id_str = session_id.as_str();
     debug!(target: "jfc::session", session_id = session_id_str, "loading session");
-    let path = sessions_dir().join(format!("{session_id_str}.json"));
-    let content = tokio::fs::read_to_string(&path).await.ok()?;
-    let session: SerializedSession = match serde_json::from_str(&content) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(target: "jfc::session", session_id = session_id_str, error = %e, "failed to parse session file");
-            return None;
+
+    // PLAN TODO 24: DB-first read when `session_source = "db"` (after the parity
+    // gate is green). Falls through to the canonical JSON on any miss, and the
+    // JSON writer keeps running, so this is fully reversible.
+    let session: SerializedSession = if let Some(db_messages) =
+        load_session_from_db(session_id_str).await
+    {
+        debug!(target: "jfc::session", session_id = session_id_str, count = db_messages.len(), "loaded session from DB transcript");
+        SerializedSession {
+            id: session_id_str.to_owned(),
+            created_at: String::new(),
+            updated_at: None,
+            first_prompt: None,
+            model: None,
+            cwd: None,
+            title: None,
+            messages: db_messages,
+        }
+    } else {
+        let path = sessions_dir().join(format!("{session_id_str}.json"));
+        let content = tokio::fs::read_to_string(&path).await.ok()?;
+        match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(target: "jfc::session", session_id = session_id_str, error = %e, "failed to parse session file");
+                return None;
+            }
         }
     };
     let message_count = session.messages.len();
@@ -284,6 +338,38 @@ pub async fn load_session_with_model(
     session_id: &SessionId,
 ) -> Option<(Vec<ChatMessage>, Option<String>)> {
     let session_id_str = session_id.as_str();
+
+    // PLAN TODO 24: DB-first when flagged. Messages come from the transcript
+    // store; the model is read from the session-index row (which stores it).
+    // Falls through to canonical JSON on any miss; JSON writer keeps running.
+    if let Some(db_messages) = load_session_from_db(session_id_str).await {
+        let id = session_id_str.to_owned();
+        let model = tokio::task::spawn_blocking(move || {
+            jfc_knowledge::KnowledgeStore::open_default()
+                .ok()
+                .and_then(|s| s.get_session(&id).ok().flatten())
+                .and_then(|row| row.model)
+        })
+        .await
+        .ok()
+        .flatten();
+        let session = SerializedSession {
+            id: session_id_str.to_owned(),
+            created_at: String::new(),
+            updated_at: None,
+            first_prompt: None,
+            model: model.clone(),
+            cwd: None,
+            title: None,
+            messages: db_messages,
+        };
+        let messages: Vec<ChatMessage> =
+            session.messages.into_iter().map(deserialize_message).collect();
+        let mut messages = repair_loaded_messages(messages);
+        let _ = scrub_loaded_thinking_poison(&mut messages);
+        return Some((messages, model));
+    }
+
     let path = sessions_dir().join(format!("{session_id_str}.json"));
     let content = tokio::fs::read_to_string(&path).await.ok()?;
     let session: SerializedSession = serde_json::from_str(&content).ok()?;

@@ -400,31 +400,23 @@ pub fn backfill_and_verify_sessions(sessions_dir: &std::path::Path) -> SessionPa
             title: session.title.clone(),
             message_count: session.messages.len() as i64,
         };
-        // Expected canonicalized stream from the JSON.
-        let expected: Vec<(String, String)> = session
+        // FULL-TREE parity (not just text): the DB stores each message's verbatim
+        // serialized JSON in `meta`, so the expected stream is (role, full message
+        // JSON) per message — this covers tool parts, diff hunks, usage, and
+        // created_at, not only Text. A future resume rebuilds messages by
+        // deserializing `meta`, so meta-equality is exactly the fidelity the read
+        // flip needs.
+        let expected: Vec<(String, Option<String>)> = session
             .messages
             .iter()
-            .map(|m| {
-                let text = m
-                    .parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        crate::session::serialization::SerializedPart::Text { content } => {
-                            Some(content.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                (m.role.clone(), text)
-            })
+            .map(|m| (m.role.clone(), serde_json::to_string(m).ok()))
             .collect();
 
         shadow_session_transcript(row, to_session_messages(&session.messages));
 
-        // Reload from the DB and compare the canonicalized stream.
-        let actual: Vec<(String, String)> = match store.load_transcript(&session.id) {
-            Ok(msgs) => msgs.into_iter().map(|m| (m.role, m.content)).collect(),
+        // Reload from the DB and compare the full per-message JSON stream.
+        let actual: Vec<(String, Option<String>)> = match store.load_transcript(&session.id) {
+            Ok(msgs) => msgs.into_iter().map(|m| (m.role, m.meta)).collect(),
             Err(_) => {
                 report.mismatched.push(id);
                 continue;

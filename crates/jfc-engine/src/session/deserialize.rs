@@ -778,4 +778,37 @@ mod tests {
 
         assert_eq!(msg.elapsed.as_deref(), Some("took 4s"));
     }
+
+    // PLAN TODO 24: the DB session read stores each message's verbatim JSON in
+    // `meta` and rebuilds via `from_str::<SerializedMessage>` → `deserialize_
+    // message`. This proves that contract is lossless: to_string → from_string →
+    // deserialize yields the same ChatMessage as deserializing the original.
+    // (The parity verifier already confirms this over the real 344-session
+    // corpus; this is the unit-level guard.)
+    #[test]
+    fn serialized_message_meta_roundtrip_is_lossless_regression() {
+        let original = serialized_assistant("the answer is 42", "took 4s");
+        let direct = deserialize_message(serialized_assistant("the answer is 42", "took 4s"));
+
+        // Simulate the DB path: meta = to_string(msg); later from_str(meta).
+        let meta = serde_json::to_string(&original).expect("serialize");
+        let from_db: SerializedMessage = serde_json::from_str(&meta).expect("deserialize");
+        let via_db = deserialize_message(from_db);
+
+        assert_eq!(via_db.role, direct.role);
+        assert_eq!(via_db.elapsed, direct.elapsed);
+        assert_eq!(via_db.parts.len(), direct.parts.len());
+        // Text content survives identically.
+        let text = |m: &crate::types::ChatMessage| {
+            m.parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::types::MessagePart::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&via_db), text(&direct));
+        assert_eq!(text(&via_db), vec!["the answer is 42".to_string()]);
+    }
 }

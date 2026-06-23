@@ -100,6 +100,12 @@ pub struct Config {
     /// lessons across projects automatically. Set to `false` to disable.
     #[serde(default = "default_cross_project_recall_enabled")]
     pub cross_project_recall_enabled: bool,
+    /// Where session resume/load reads from: "json" (canonical files, default) or
+    /// "db" (the jfc-knowledge transcript store, after the parity gate is green).
+    /// The JSON writer keeps running regardless, so flipping to "db" is fully
+    /// reversible (set back to "json") during the rollback window. PLAN TODO 24.
+    #[serde(default = "default_session_source")]
+    pub session_source: String,
     #[serde(default)]
     pub session_cost_budget_usd: Option<f64>,
     #[serde(default = "default_auto_compact_enabled")]
@@ -479,6 +485,12 @@ fn default_memory_recall_enabled() -> bool {
     true
 }
 
+fn default_session_source() -> String {
+    // JSON stays canonical by default; flip to "db" only after a green parity
+    // window. The DB transcript is shadow-written on every save regardless.
+    "json".to_owned()
+}
+
 fn default_cross_project_recall_enabled() -> bool {
     true
 }
@@ -645,6 +657,7 @@ impl Default for Config {
             memory_recall_enabled: default_memory_recall_enabled(),
             plan_recall_enabled: default_plan_recall_enabled(),
             cross_project_recall_enabled: default_cross_project_recall_enabled(),
+            session_source: default_session_source(),
             session_cost_budget_usd: None,
             auto_compact_enabled: default_auto_compact_enabled(),
             auto_compact_window: None,
@@ -717,6 +730,7 @@ impl Config {
             memory_recall_enabled: local_wins!(memory_recall_enabled),
             plan_recall_enabled: local_wins!(plan_recall_enabled),
             cross_project_recall_enabled: local_wins!(cross_project_recall_enabled),
+            session_source: local_wins!(session_source),
             auto_compact_enabled: local_wins!(auto_compact_enabled),
             auto_compact_threshold_pct: local_wins!(auto_compact_threshold_pct),
             always_show_thinking: local_wins!(always_show_thinking),

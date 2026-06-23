@@ -332,11 +332,20 @@ any removal — never a blind `rm`.
   `/knowledge migrate` run the parity gate. **Verified on the real corpus: 344
   checked, 344 passed, 0 mismatch, 0 undeserializable → flip_safe=true.** Reads
   still come from JSON; the flip is TODO 24.
-- [ ] 24. **Read sessions from the DB + retire JSON (cutover, `--confirm`).** Flip
-  `load_session`/resume/`/continue`/search to read the DB; keep a
-  `session_source = "db" | "json"` escape hatch. Only after a green parity window,
-  `/knowledge gc-legacy --confirm` archives the `ses_*.json` files (move, not
-  delete). The JSON writer can be disabled by config but not removed in this step.
+- [~] 24. **Read sessions from the DB (read-flip wired; archive still gated).**
+  `load_session` and `load_session_with_model` now read DB-first when
+  `session_source = "db"` (default "json"), deserializing each transcript row's
+  verbatim `meta` JSON through the SAME `deserialize_message` + repair pipeline as
+  the JSON loader; any miss falls through to the canonical JSON, and the JSON
+  writer keeps running — so the flip is reversible by flipping the flag back.
+  Parity strengthened to FULL message-tree (role + verbatim per-message JSON, not
+  just text) and re-verified: 344/344, 0 mismatch. Unit guard
+  `serialized_message_meta_roundtrip_is_lossless_regression`. STILL TODO before
+  retiring JSON: flip `jfc-session` search/catalog to the DB, run a rollback
+  window with `session_source=db`, then `/knowledge gc-legacy --confirm` to
+  archive (move, never rm) `ses_*.json`. Memory `.md` migrated for all projects
+  (19 rows / 5 project keys); recall stays `.md`-authoritative with DB shadow per
+  council decision 3 until its own A/B.
 
 ## Hard Non-Goals (will NOT be built — recorded so the boundary is durable)
 
