@@ -39,3 +39,10 @@ crates/**/.jfc/
 
 # Agent runtime state (exec-call captures)
 .code/
+
+# Local agent skills and runtime config (machine-specific, not project config)
+.agents/skills/jfc-design/
+.agents/skills/js-bundle-audit/
+.agents/skills/source-command-feature-development/
+.agents/skills/source-command-refactoring/
+.agents/skills/source-command-submodule-update-wgpui/
