@@ -758,47 +758,61 @@ pub(crate) async fn run(
         });
     }
 
-    // Self-driving cross-project knowledge maintenance (jfc-knowledge). Fires
-    // once in the background at startup so the user never has to run
-    // `/knowledge`: it imports legacy .md memories, mines session history into
-    // verified lessons, consolidates duplicates, and auto-promotes proven
-    // lessons across projects — growing the store unbounded. Gated off by
-    // `cross_project_recall_enabled=false` or `JFC_DISABLE_KNOWLEDGE_MAINTAIN=1`.
-    // Best-effort and fully isolated: a failure here never affects the session.
+    // Self-driving cross-project knowledge maintenance (jfc-knowledge). Runs in
+    // the background so the user never has to touch `/knowledge`: it imports
+    // legacy .md memories, mines session history into verified lessons,
+    // consolidates duplicates, and auto-promotes proven generalizable lessons
+    // across projects — growing the store unbounded. Fires once at startup, then
+    // on a recurring tick so a long-lived session keeps learning from sessions
+    // saved after launch; each pass is internally throttled (6h per project,
+    // `maintain_state`), so the tick is cheap and idempotent between windows.
+    // Gated off by `cross_project_recall_enabled=false` or
+    // `JFC_DISABLE_KNOWLEDGE_MAINTAIN=1`. Best-effort and fully isolated: a
+    // failure here never affects the session.
     if !matches!(
         std::env::var("JFC_DISABLE_KNOWLEDGE_MAINTAIN").as_deref(),
         Ok("1") | Ok("true")
     ) && jfc_engine::config::load_arc().cross_project_recall_enabled
     {
+        // Recurring interval between maintenance ticks (override for tests/tuning).
+        let tick = std::env::var("JFC_KNOWLEDGE_MAINTAIN_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(30 * 60);
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
         tokio::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || {
-                let sessions = dirs::config_dir().map(|c| c.join("jfc").join("sessions"));
-                let user_mem = dirs::config_dir().map(|c| c.join("jfc").join("memory"));
-                let project_mem = cwd.join(".jfc").join("memory");
-                match jfc_engine::knowledge_maintain(
-                    &cwd,
-                    sessions.as_deref(),
-                    user_mem.as_deref(),
-                    Some(project_mem.as_path()),
-                ) {
-                    Ok(report) => tracing::info!(
-                        target: "jfc::knowledge",
-                        imported = report.imported,
-                        mined = report.mined_inserted,
-                        compounded = report.mined_compounded,
-                        consolidated = report.consolidated,
-                        auto_promoted = report.auto_promoted,
-                        "cross-project knowledge maintenance complete"
-                    ),
-                    Err(e) => tracing::debug!(
-                        target: "jfc::knowledge",
-                        error = %e,
-                        "knowledge maintenance skipped"
-                    ),
-                }
-            })
-            .await;
+            loop {
+                let cwd = cwd.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let sessions = dirs::config_dir().map(|c| c.join("jfc").join("sessions"));
+                    let user_mem = dirs::config_dir().map(|c| c.join("jfc").join("memory"));
+                    let project_mem = cwd.join(".jfc").join("memory");
+                    match jfc_engine::knowledge_maintain(
+                        &cwd,
+                        sessions.as_deref(),
+                        user_mem.as_deref(),
+                        Some(project_mem.as_path()),
+                    ) {
+                        Ok(report) => tracing::info!(
+                            target: "jfc::knowledge",
+                            imported = report.imported,
+                            mined = report.mined_inserted,
+                            compounded = report.mined_compounded,
+                            consolidated = report.consolidated,
+                            auto_promoted = report.auto_promoted,
+                            "cross-project knowledge maintenance pass"
+                        ),
+                        Err(e) => tracing::debug!(
+                            target: "jfc::knowledge",
+                            error = %e,
+                            "knowledge maintenance skipped"
+                        ),
+                    }
+                })
+                .await;
+                tokio::time::sleep(std::time::Duration::from_secs(tick)).await;
+            }
         });
     }
 

@@ -4,10 +4,20 @@ use crate::runtime::StreamRequestOverrides;
 use jfc_provider::{ModelId, Provider, ProviderMessage};
 
 use super::memory::{
-    append_cross_project_knowledge, append_memory_recall_context, fast_recall_model,
-    sdk_memory_store_prompt_section,
+    append_cross_project_knowledge, append_memory_recall_context,
+    append_session_start_knowledge_brief, fast_recall_model, sdk_memory_store_prompt_section,
 };
 use super::messages::last_user_text;
+
+/// First agent turn ⇔ at most one user message in the transcript so far. Used to
+/// emit the session-start knowledge brief exactly once, at the opening.
+fn is_first_turn(messages: &[ProviderMessage]) -> bool {
+    messages
+        .iter()
+        .filter(|m| matches!(m.role, jfc_provider::ProviderRole::User))
+        .count()
+        <= 1
+}
 
 pub(super) async fn append_project_context(
     system_prompt: &mut String,
@@ -127,6 +137,13 @@ pub(super) async fn append_project_context(
 
         // Cross-project knowledge recall (jfc-knowledge). Gated off by default;
         // screened as reference data. Appended after the per-project memory block.
+        // On the FIRST turn, also emit a session-start "knowledge brief" so the
+        // agent opens with its accumulated cross-project memory (the diagram's
+        // MEMORY BANK read at session start — "never starts blind again").
+        if is_first_turn(messages) {
+            recalled_memory_chars +=
+                append_session_start_knowledge_brief(system_prompt, &cwd_path).await;
+        }
         if let Some(query) = last_user_text(messages) {
             recalled_memory_chars +=
                 append_cross_project_knowledge(system_prompt, &cwd_path, &query).await;

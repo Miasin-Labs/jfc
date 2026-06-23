@@ -272,20 +272,65 @@ truth for memory.
   uses vite") must NOT auto-leak into other projects' recall, since redaction
   guards secrets, not wrong-context truth. The human `/knowledge promote` override
   still works for any kind.
-- [ ] 17. **Pre-Search task enrichment (Layer 2, default-off).** Before a task,
-  optionally run a *bounded, authenticated* enrichment pass (cross-project recall
-  — already wired — plus an opt-in research/web pass over sources the user is
-  already authenticated to) and fold the result into the prompt as screened
-  reference context. Default-off; per-call budget cap; reuses the existing
-  `Research`/recall paths. Never an action, only context.
-- [ ] 18. **Sessions→DB (SHADOW only, deferred — genuine fork).** Sessions are
-  `~/.config/jfc/sessions/ses_*.json`, read by resume/continue, the catalog index
-  (`jfc-session::catalog`), and search — wide blast radius, several writers with
-  no covering tests. Migration must be **dual-write/shadow** (write the DB
-  alongside JSON, read from JSON, compare) before any read cutover; a direct
-  cutover risks orphaning sessions and breaking resume. Requires explicit user
-  sign-off on the shadow-vs-cutover approach before implementation — do NOT start
-  blind.
+- [x] 17. **Pre-Search / session-start knowledge brief (Layer 2).** On the first
+  turn, `append_session_start_knowledge_brief` recalls the top generalizable
+  lessons for the project (no query needed) under a "never starts blind" header;
+  per-turn `append_cross_project_knowledge` continues lexical recall. The
+  maintenance pass is now a **recurring background tick** (not startup-only),
+  internally throttled. Gate is an explicit param ⇒ F2 testable. Done +
+  `recall_disabled_appends_nothing_regression`, `session_start_brief_*`.
+
+### Full cutover — DB becomes the single source of truth (TODOs 18–24)
+
+The goal of this block: **stop reading `.md` memory and `ses_*.json` at runtime;
+serve both from the DB.** Sequenced so every step is reversible and no step both
+changes the write format *and* the read path at once. The destructive deletes
+(retiring the files) come last, are `--confirm`-gated, and archive (move) before
+any removal — never a blind `rm`.
+
+#### Memory `.md` → DB cutover
+
+- [ ] 18. **Unify recall on the DB (memory read path).** Make
+  `append_memory_recall_context` / the recall builder query `jfc-knowledge`
+  (which already holds the imported `.md` rows) as the primary source, behind a
+  `memory_source = "db" | "md" | "both"` config (default `both`: DB + md, deduped)
+  so behavior is additive first. Then flip default to `db`. Test: a memory
+  written as `.md`, imported, recalls identically from the DB path.
+- [ ] 19. **Write new memories to the DB (memory write path).** Route memory
+  *creation* (the `remember`/memory-save tool + `/memory` command) to
+  `KnowledgeStore::insert` instead of writing a new `.md`. Keep reading legacy
+  `.md` via the import shim until TODO 21. Test: a newly-saved memory is a DB row,
+  recalled next turn, with no new `.md` file created.
+- [ ] 20. **Continuous `.md` import (no manual step).** The recurring maintenance
+  tick already imports `.md`; ensure it covers user + project + team dirs and runs
+  before recall on a cold store, so a user dropping a `.md` in still works during
+  the transition.
+- [ ] 21. **Retire the `.md` read path (cutover, `--confirm`).** With default
+  source = `db` and writes going to the DB, `/knowledge gc-legacy --confirm`
+  archives the `.md` memory dirs (move to `memory.archived-<ts>`, reversible). The
+  `md`/`both` config values remain as an escape hatch; nothing is deleted without
+  `--confirm`.
+
+#### Sessions JSON → DB
+
+- [ ] 22. **Session-index table (ADDITIVE — safe half, no read change).** Add a
+  `sessions` table (id, cwd, model, created_at, updated_at, first_prompt,
+  message_count, title) to `jfc-knowledge`. Have `save_session` (the one
+  chokepoint, `session/core.rs:21`) **dual-write**: keep the JSON exactly as-is
+  AND upsert the index row. The catalog/picker can then read the index instead of
+  byte-scanning 364 JSON headers — a pure speedup with the JSON still canonical.
+  Test: saving a session upserts an index row matching the JSON header.
+- [ ] 23. **Full transcript in the DB (shadow-write).** Extend the table (or a
+  `session_messages` table) to hold the serialized messages; `save_session`
+  shadow-writes the full transcript alongside the JSON. Reads still come from
+  JSON. Add a `verify` that DB-loaded == JSON-loaded for every existing session
+  (round-trip parity gate). **This is the genuine fork** — needs the parity gate
+  green before TODO 24.
+- [ ] 24. **Read sessions from the DB + retire JSON (cutover, `--confirm`).** Flip
+  `load_session`/resume/`/continue`/search to read the DB; keep a
+  `session_source = "db" | "json"` escape hatch. Only after a green parity window,
+  `/knowledge gc-legacy --confirm` archives the `ses_*.json` files (move, not
+  delete). The JSON writer can be disabled by config but not removed in this step.
 
 ## Hard Non-Goals (will NOT be built — recorded so the boundary is durable)
 
@@ -315,8 +360,9 @@ deliberately **not** the takeover Layer 3 the scenario exists to warn about.
 
 - [x] F1. `cargo test -p jfc-knowledge` (37) and `cargo test -p jfc-engine` pass;
   `cargo build --workspace` clean; `cargo clippy --workspace` clean.
-- [ ] F2. Flag-off proof: with `cross_project_recall_enabled=false`, the assembled
-  system prompt is byte-identical to pre-Phase-2 (regression test).
+- [x] F2. Flag-off proof: `recall_disabled_appends_nothing_regression` shows the
+  recall append writes nothing (prompt byte-identical) when the gate is off; the
+  gate is an explicit parameter, not a config read inside the blocking closure.
 - [x] F3. Import idempotency + scope isolation: covered by
   `import_memories_is_idempotent_regression`, `recall_scope_isolation_normal`,
   `project_record_is_not_global_until_promoted_regression`, and
@@ -335,6 +381,13 @@ deliberately **not** the takeover Layer 3 the scenario exists to warn about.
   `maintain_throttle_blocks_rapid_repeat_normal` proves startup maintenance is
   throttled per project. NG1–NG4 are honored: no external-propagation code path
   exists, guards are intact, and recall remains advisory-only.
+- [ ] F7. Memory cutover parity (TODO 18–21): a memory saved as `.md` and imported
+  recalls identically from the DB path; a newly-saved memory creates a DB row and
+  no `.md`; `gc-legacy --confirm` archives (moves) the `.md` dirs reversibly.
+- [ ] F8. Session cutover parity (TODO 22–24): saving a session upserts a matching
+  index row (JSON still canonical); for every existing session, DB-loaded ==
+  JSON-loaded (round-trip parity) before any read flip; JSON files are only
+  archived (moved) under `--confirm` after a green parity window.
 
 ## Success Criteria
 
