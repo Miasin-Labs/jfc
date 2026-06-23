@@ -80,12 +80,24 @@ async fn run_list(cwd: &std::path::Path) -> String {
             },
         )?;
         if hits.is_empty() {
-            return Ok("No knowledge stored yet. Try `/knowledge import` or `/knowledge mine`.".to_owned());
+            return Ok(
+                "No knowledge stored yet. Try `/knowledge import` or `/knowledge mine`.".to_owned(),
+            );
         }
         let mut out = String::from("Recent knowledge (top-ranked):\n");
         for h in hits {
-            let v = if h.outcome == jfc_knowledge::Outcome::Verified { " ✓" } else { "" };
-            out.push_str(&format!("- [{}] {} ({}){v}\n  id: {}\n", h.scope.slug(), h.title, h.kind.slug(), h.id));
+            let v = if h.outcome == jfc_knowledge::Outcome::Verified {
+                " ✓"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "- [{}] {} ({}){v}\n  id: {}\n",
+                h.scope.slug(),
+                h.title,
+                h.kind.slug(),
+                h.id
+            ));
         }
         Ok(out)
     })
@@ -119,11 +131,19 @@ async fn run_import(cwd: &std::path::Path) -> String {
         // User-level memories.
         if let Some(cfg) = dirs::config_dir() {
             let user_dir = cfg.join("jfc").join("memory");
-            items.extend(jfc_knowledge::import::scan_markdown_dir(&user_dir, Scope::User, None));
+            items.extend(jfc_knowledge::import::scan_markdown_dir(
+                &user_dir,
+                Scope::User,
+                None,
+            ));
         }
         // Project-level memories.
         let proj_dir = cwd.join(".jfc").join("memory");
-        items.extend(jfc_knowledge::import::scan_markdown_dir(&proj_dir, Scope::Project, Some(project)));
+        items.extend(jfc_knowledge::import::scan_markdown_dir(
+            &proj_dir,
+            Scope::Project,
+            Some(project),
+        ));
 
         let report = store.import_memories(&items)?;
         Ok(format!(
@@ -169,11 +189,10 @@ async fn run_migrate() -> String {
     let Some(sessions_dir) = dirs::config_dir().map(|c| c.join("jfc").join("sessions")) else {
         return "Could not locate ~/.config/jfc/sessions.".to_owned();
     };
-    let report = tokio::task::spawn_blocking(move || {
-        crate::backfill_and_verify_sessions(&sessions_dir)
-    })
-    .await
-    .unwrap_or_default();
+    let report =
+        tokio::task::spawn_blocking(move || crate::backfill_and_verify_sessions(&sessions_dir))
+            .await
+            .unwrap_or_default();
     let flip = if report.flip_safe() {
         "PARITY OK — safe to flip session reads to the DB (no mismatches)."
     } else if report.checked == 0 {
@@ -198,8 +217,13 @@ async fn run_consolidate(cwd: &std::path::Path) -> String {
         let _ = cwd;
         let mut store = KnowledgeStore::open_default()?;
         let superseded = store.consolidate()?;
-        let removed = store.decay(jfc_knowledge::DEFAULT_MAX_AGE_MS, jfc_knowledge::DEFAULT_MAX_ROWS_PER_SCOPE)?;
-        Ok(format!("Consolidated: {superseded} duplicate(s) superseded, {removed} stale row(s) pruned."))
+        let removed = store.decay(
+            jfc_knowledge::DEFAULT_MAX_AGE_MS,
+            jfc_knowledge::DEFAULT_MAX_ROWS_PER_SCOPE,
+        )?;
+        Ok(format!(
+            "Consolidated: {superseded} duplicate(s) superseded, {removed} stale row(s) pruned."
+        ))
     })
     .await
 }
@@ -259,14 +283,16 @@ async fn run_gc_legacy(cwd: &std::path::Path, confirmed: bool) -> String {
         let proj_mem = cwd.join(".jfc").join("memory");
         if proj_mem.is_dir() {
             let dest = cwd.join(".jfc").join(format!("memory.archived-{ts}"));
-            std::fs::rename(&proj_mem, &dest)
-                .map_err(jfc_knowledge::KnowledgeError::from)?;
+            std::fs::rename(&proj_mem, &dest).map_err(jfc_knowledge::KnowledgeError::from)?;
             moved.push(dest.display().to_string());
         }
         if moved.is_empty() {
             Ok("No legacy project .md memory dir to archive.".to_owned())
         } else {
-            Ok(format!("Archived (moved, not deleted): {}. Move it back to restore.", moved.join(", ")))
+            Ok(format!(
+                "Archived (moved, not deleted): {}. Move it back to restore.",
+                moved.join(", ")
+            ))
         }
     })
     .await

@@ -135,6 +135,18 @@ const MIGRATIONS: &[&str] = &[
         VALUES ('delete', old.rowid, old.content);
     END;
     "#,
+    // v6 — memory backing (MD→DB cutover). `mem_level` distinguishes the four
+    // memory levels (user|project|team|external) that the old .md layout encoded
+    // by directory; the knowledge `scope` axis (user/project/global) is coarser.
+    // `mem_meta` holds the serialized MemoryFrontmatter JSON so a `MemoryEntry`
+    // synthesized from a row is lossless (source_session_id, seen_count,
+    // verification_status, expires_at, …). Both nullable: rows that aren't
+    // memories (mined lessons, etc.) leave them NULL.
+    r#"
+    ALTER TABLE knowledge ADD COLUMN mem_level TEXT;
+    ALTER TABLE knowledge ADD COLUMN mem_meta TEXT;
+    CREATE INDEX idx_knowledge_mem_level ON knowledge(mem_level);
+    "#,
 ];
 
 /// The schema version this build expects (== number of migrations).
@@ -159,14 +171,14 @@ pub fn apply_pragmas(conn: &Connection) -> Result<()> {
 
 /// Run all pending migrations. Idempotent: a fully-migrated DB is a no-op.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);",
-    )?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);")?;
 
     let applied: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
         .unwrap_or(0);
 
     if applied > CURRENT_VERSION {
@@ -183,7 +195,10 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
         let tx = conn.transaction()?;
         tx.execute_batch(ddl)?;
-        tx.execute("INSERT INTO schema_version (version) VALUES (?1)", [version])?;
+        tx.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [version],
+        )?;
         tx.commit()?;
         tracing::debug!(target: "jfc::knowledge", version, "applied knowledge migration");
     }

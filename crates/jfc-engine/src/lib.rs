@@ -188,9 +188,9 @@ pub mod hooks {
 pub mod idle_prefetch;
 pub mod ids;
 pub mod inline_tools;
-pub mod interaction_mode;
 #[cfg(feature = "intent-gate")]
 pub mod intent;
+pub mod interaction_mode;
 pub mod keywords;
 pub mod learn_lifecycle;
 pub mod lsp_client;
@@ -440,7 +440,12 @@ pub fn knowledge_maintain(
     user_memory_dir: Option<&std::path::Path>,
     project_memory_dir: Option<&std::path::Path>,
 ) -> jfc_knowledge::Result<jfc_knowledge::MaintainReport> {
-    jfc_knowledge::auto_maintain(project_root, sessions_dir, user_memory_dir, project_memory_dir)
+    jfc_knowledge::auto_maintain(
+        project_root,
+        sessions_dir,
+        user_memory_dir,
+        project_memory_dir,
+    )
 }
 pub use runtime::{
     ControlEvent, EngineEvent, EventReceiver, EventSender, FrontendDirective, FrontendEvent,

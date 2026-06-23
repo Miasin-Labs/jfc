@@ -47,14 +47,12 @@ pub(super) async fn handle_dump_context_command(state: &mut EngineState) {
     let memories = crate::memory::load_all_memories(&cwd);
     report.push_str(&format!("### Memories ({})\n\n", memories.len()));
     for mem in &memories {
-        let name = mem
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("(unknown)");
         report.push_str(&format!(
             "- **{}** ({:?}, {:?}/{:?})\n",
-            name, mem.level, mem.frontmatter.memory_type, mem.frontmatter.scope,
+            mem.source_name(),
+            mem.level,
+            mem.frontmatter.memory_type,
+            mem.frontmatter.scope,
         ));
     }
     if memories.is_empty() {
@@ -62,7 +60,7 @@ pub(super) async fn handle_dump_context_command(state: &mut EngineState) {
     }
     report.push('\n');
 
-    let tools = crate::tools::all_tool_defs();
+    let tools = crate::tools::model_tool_defs();
     report.push_str(&format!(
         "### Tool definitions sent to API ({})\n\n",
         tools.len()

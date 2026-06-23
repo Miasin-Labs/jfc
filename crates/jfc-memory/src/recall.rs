@@ -321,12 +321,7 @@ pub async fn select_relevant_memories(
     // filenames; drop anything we can't actually load.
     let known: std::collections::HashSet<String> = available
         .iter()
-        .filter_map(|m| {
-            m.path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(str::to_owned)
-        })
+        .map(|m| m.source_name().into_owned())
         .collect();
 
     let filtered: Vec<String> = selected
@@ -347,11 +342,7 @@ pub async fn select_relevant_memories(
 fn render_memory_listing(memories: &[MemoryEntry]) -> String {
     let mut out = String::new();
     for mem in memories {
-        let filename = mem
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown.md");
+        let filename = mem.source_name();
         let preview = mem.body.lines().next().unwrap_or("(empty)").trim();
         let preview = if preview.len() > 200 {
             format!("{}…", &preview[..preview.floor_char_boundary(200)])
@@ -448,11 +439,7 @@ pub async fn synthesize_memories(
 fn render_memory_bodies(memories: &[MemoryEntry]) -> String {
     let mut out = String::new();
     for mem in memories {
-        let filename = mem
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown.md");
+        let filename = mem.source_name();
         out.push_str(&format!("## {filename}\n\n{}\n\n", mem.body.trim()));
     }
     out
@@ -691,13 +678,7 @@ pub async fn run_recall_excluding_visible(
 
     let selected: Vec<MemoryEntry> = available
         .iter()
-        .filter(|m| {
-            m.path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .map(|f| selected_names.iter().any(|n| n == f))
-                .unwrap_or(false)
-        })
+        .filter(|m| selected_names.iter().any(|n| n == m.source_name().as_ref()))
         .cloned()
         .collect();
 
@@ -815,7 +796,8 @@ mod tests {
 
     fn make_entry(filename: &str, body: &str) -> MemoryEntry {
         MemoryEntry {
-            path: PathBuf::from(format!("/fake/memory/{filename}")),
+            id: Some(format!("test:{filename}")),
+            path: Some(PathBuf::from(format!("/fake/memory/{filename}"))),
             level: MemoryLevel::Project,
             frontmatter: MemoryFrontmatter::new(MemoryType::Context, MemoryScope::Private),
             body: body.to_owned(),
@@ -844,7 +826,7 @@ mod tests {
         let kept = filter_visible(&entries, visible);
         assert_eq!(kept.len(), 1);
         assert!(
-            kept[0].path.ends_with("b.md"),
+            kept[0].source_name() == "b.md",
             "only the not-yet-visible memory survives"
         );
     }
@@ -865,7 +847,7 @@ mod tests {
         // Short body (<24 chars) is kept even if present.
         let kept = filter_visible(&entries, "x use serde for config");
         assert!(
-            kept.iter().any(|m| m.path.ends_with("a.md")),
+            kept.iter().any(|m| m.source_name() == "a.md"),
             "short body never pruned"
         );
     }

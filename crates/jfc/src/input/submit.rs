@@ -35,12 +35,7 @@ pub(super) async fn handle_submit(
                 fact,
                 &root,
             ) {
-                Ok(path) => format!(
-                    "remembered → {}",
-                    path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("memory")
-                ),
+                Ok(id) => format!("remembered -> {id}"),
                 Err(e) => format!("memory save failed: {e}"),
             };
             jfc_engine::toast::push_with_cap(

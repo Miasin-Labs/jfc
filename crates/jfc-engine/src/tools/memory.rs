@@ -36,28 +36,21 @@ pub fn execute_memory_create(
     }
 
     match memory::create_memory(mem_level, mem_type, mem_scope, body.trim(), project_root) {
-        Ok(path) => ExecutionResult::success(format!(
-            "Memory saved to: {}\n\nThis memory will be included in future conversations.",
-            path.display()
+        Ok(id) => ExecutionResult::success(format!(
+            "Memory saved with id: {id}\n\nThis memory will be included in future conversations."
         )),
         Err(e) => ExecutionResult::failure(format!("Failed to create memory: {e}")),
     }
 }
 
-pub fn execute_memory_delete(path_str: &str) -> ExecutionResult {
+/// Delete a memory by its DB id (post MD→DB cutover — memories are rows, not
+/// files). Accepts the id the create/list surface reports.
+pub fn execute_memory_delete(id: &str) -> ExecutionResult {
     use crate::memory;
-    use std::path::PathBuf;
 
-    let path = PathBuf::from(path_str);
-
-    if !path.exists() {
-        return ExecutionResult::failure(format!("File not found: {}", path.display()));
-    }
-
-    match memory::delete_memory(&path) {
+    match memory::delete_memory(id.trim()) {
         Ok(()) => ExecutionResult::success(format!(
-            "Memory deleted: {}\n\nThis memory will no longer be included in future conversations.",
-            path.display()
+            "Memory deleted: {id}\n\nThis memory will no longer be included in future conversations."
         )),
         Err(e) => ExecutionResult::failure(format!("Failed to delete memory: {e}")),
     }

@@ -18,6 +18,7 @@
 //!
 //! Memories are immutable — to update, delete the old file and create a new one.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -237,14 +238,43 @@ impl MemoryFrontmatter {
 /// A fully-loaded memory entry.
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
-    /// Absolute path to the .md file.
-    pub path: PathBuf,
+    /// DB row id (the delete-by-id key). `None` only for legacy in-memory test
+    /// entries. The canonical store is now the jfc-knowledge DB, not files.
+    pub id: Option<String>,
+    /// Former absolute path to the `.md` file. `None` for DB-backed entries
+    /// (there is no file). Kept as `Option` so legacy display/test code that
+    /// referenced a path still type-checks during the cutover.
+    pub path: Option<PathBuf>,
     /// Which directory level this lives in.
     pub level: MemoryLevel,
     /// Parsed frontmatter.
     pub frontmatter: MemoryFrontmatter,
     /// The body content (everything after the `---` block).
     pub body: String,
+}
+
+impl MemoryEntry {
+    pub fn source_name(&self) -> Cow<'_, str> {
+        if let Some(path) = &self.path
+            && let Some(name) = path.file_name().and_then(|f| f.to_str())
+        {
+            return Cow::Borrowed(name);
+        }
+        if let Some(id) = &self.id {
+            return Cow::Borrowed(id.as_str());
+        }
+        Cow::Borrowed("unknown")
+    }
+
+    pub fn source_display(&self) -> Cow<'_, str> {
+        if let Some(path) = &self.path {
+            return Cow::Owned(path.display().to_string());
+        }
+        if let Some(id) = &self.id {
+            return Cow::Borrowed(id.as_str());
+        }
+        Cow::Borrowed("unknown")
+    }
 }
 
 /// Summary of a local team-memory sync between `<project>/.jfc/memory/team`
@@ -325,36 +355,66 @@ pub fn is_memory_path(path: &Path) -> bool {
 // ─── Read / Write / Delete ───────────────────────────────────────────────────
 
 /// Load all memory entries from both user and project directories.
+/// Load all memories visible to `project_root` from the jfc-knowledge DB (the
+/// canonical store after the MD→DB cutover). Synthesizes `MemoryEntry` from each
+/// row, restoring rich frontmatter from the verbatim `mem_meta` JSON. TTL-expired
+/// entries are filtered (same rule the `.md` loader applied).
 pub fn load_all_memories(project_root: &Path) -> Vec<MemoryEntry> {
-    let mut entries = Vec::new();
-    load_from_dir(&user_memory_dir(), MemoryLevel::User, &mut entries);
-    load_from_dir(
-        &project_memory_dir(project_root),
-        MemoryLevel::Project,
-        &mut entries,
-    );
-    // Team memory lives under `<project>/.jfc/memory/team/` and is
-    // shared across everyone working in the repo. Loaded after the
-    // project root so the simple flat scan above doesn't pick up
-    // team files twice (project_memory_dir reads only `.md` files
-    // directly in `.jfc/memory/`, not subdirs).
-    load_from_dir(
-        &team_memory_dir(project_root),
-        MemoryLevel::Team,
-        &mut entries,
-    );
-    for dir in extra_memory_dirs() {
-        load_from_dir(&dir, MemoryLevel::External, &mut entries);
+    let project_key = jfc_knowledge::project_key(project_root);
+    let rows = match jfc_knowledge::KnowledgeStore::open_default() {
+        Ok(store) => store.load_memories(Some(&project_key)).unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(target: "jfc::memory", error = %e, "knowledge store open failed; no memories loaded");
+            return Vec::new();
+        }
+    };
+    let now = now_ms();
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let level = mem_level_to_memory_level(row.level);
+        let frontmatter = row
+            .meta
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<MemoryFrontmatter>(m).ok())
+            .unwrap_or_else(|| MemoryFrontmatter::new(MemoryType::Context, MemoryScope::Private));
+        if let Some(expires) = frontmatter.expires_at
+            && expires <= now
+        {
+            continue; // TTL-expired
+        }
+        entries.push(MemoryEntry {
+            id: Some(row.id),
+            path: None,
+            level,
+            frontmatter,
+            body: row.body,
+        });
     }
     tracing::info!(
         target: "jfc::memory",
-        user_dir = %user_memory_dir().display(),
-        project_dir = %project_memory_dir(project_root).display(),
-        extra_dirs = extra_memory_dirs().len(),
+        project_key = %project_key,
         total_entries = entries.len(),
-        "loaded all memories"
+        "loaded all memories (db)"
     );
     entries
+}
+
+fn mem_level_to_memory_level(l: jfc_knowledge::MemLevel) -> MemoryLevel {
+    match l {
+        jfc_knowledge::MemLevel::User => MemoryLevel::User,
+        jfc_knowledge::MemLevel::Project => MemoryLevel::Project,
+        jfc_knowledge::MemLevel::Team => MemoryLevel::Team,
+        jfc_knowledge::MemLevel::External => MemoryLevel::External,
+    }
+}
+
+fn memory_level_to_mem_level(l: MemoryLevel) -> jfc_knowledge::MemLevel {
+    match l {
+        MemoryLevel::User => jfc_knowledge::MemLevel::User,
+        MemoryLevel::Project => jfc_knowledge::MemLevel::Project,
+        MemoryLevel::Team => jfc_knowledge::MemLevel::Team,
+        MemoryLevel::External => jfc_knowledge::MemLevel::External,
+    }
 }
 
 fn extra_memory_dirs() -> Vec<PathBuf> {
@@ -418,7 +478,8 @@ fn parse_memory_file(path: &Path, level: MemoryLevel) -> Result<MemoryEntry, Str
     let (frontmatter, body) = parse_frontmatter_and_body(&content)?;
 
     Ok(MemoryEntry {
-        path: path.to_path_buf(),
+        id: Some(format!("legacy:{}", path.display())),
+        path: Some(path.to_path_buf()),
         level,
         frontmatter,
         body,
@@ -455,18 +516,53 @@ fn parse_frontmatter_and_body(content: &str) -> Result<(MemoryFrontmatter, Strin
 /// Result of attempting to create a memory, including optional conflict info.
 #[derive(Debug, Clone)]
 pub struct CreateMemoryResult {
-    /// Path of the newly-created memory file.
-    pub path: PathBuf,
-    /// A conflicting (near-duplicate) memory file found before saving, if any.
+    /// DB id of the newly-created memory row (the delete-by-id key). Was a file
+    /// path before the MD→DB cutover.
+    pub id: String,
+    /// A conflicting (near-duplicate) memory's id found before saving, if any.
     /// Mirrors CC 2.1.167's `conflicting_memory_id` field.
-    pub conflicting_memory_id: Option<PathBuf>,
+    pub conflicting_memory_id: Option<String>,
 }
 
-/// Create a memory and return conflict info alongside the new path.
+/// Serialize a fresh `MemoryFrontmatter` for a new memory, stamping `created`
+/// and the dedup `normalized_hash`. Stored verbatim in the DB `mem_meta` column.
+fn new_frontmatter_json(
+    memory_type: MemoryType,
+    scope: MemoryScope,
+    hash: &str,
+) -> (MemoryFrontmatter, String) {
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let mut fm = MemoryFrontmatter::new(memory_type, scope);
+    fm.created = Some(now.format("%Y-%m-%d").to_string());
+    fm.normalized_hash = Some(hash.to_owned());
+    fm.first_seen_at = Some(now_ms());
+    let json = serde_json::to_string(&fm).unwrap_or_else(|_| "{}".to_owned());
+    (fm, json)
+}
+
+/// Content-dedup hash: lowercase, whitespace-collapsed body.
+fn content_hash(body: &str) -> String {
+    let norm = body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    // uuid-v5 over the normalized body is a stable, dependency-free digest.
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, norm.as_bytes())
+        .simple()
+        .to_string()
+}
+
+fn open_store_or_err() -> Result<jfc_knowledge::KnowledgeStore, String> {
+    jfc_knowledge::KnowledgeStore::open_default().map_err(|e| format!("knowledge store: {e}"))
+}
+
+/// Create a memory in the DB and return conflict info alongside the new id.
 ///
-/// Checks existing memories in the same directory for near-duplicate content
-/// (>50% word overlap) before writing. Returns `conflicting_memory_id` so the
-/// caller can decide whether to delete the old file or merge content.
+/// Dedups on the normalized-content hash (replacing the old >50%-word-overlap
+/// file scan with an exact-normalized-content check). Returns
+/// `conflicting_memory_id` so the caller can decide whether to delete the old
+/// row or merge.
 pub fn create_memory_checked(
     level: MemoryLevel,
     memory_type: MemoryType,
@@ -474,54 +570,82 @@ pub fn create_memory_checked(
     body: &str,
     project_root: &Path,
 ) -> Result<CreateMemoryResult, String> {
-    let dir = memory_dir_for(level, project_root);
-    let conflicting = find_conflicting_memory(&dir, body);
-    let path = write_memory_file(&dir, memory_type, scope, body)?;
+    let store = open_store_or_err()?;
+    let hash = content_hash(body);
+    let conflicting = store
+        .find_memory_by_hash(&hash)
+        .map_err(|e| e.to_string())?;
+    let id = write_memory_row(&store, level, memory_type, scope, body, project_root, &hash)?;
     tracing::info!(
         target: "jfc::memory",
-        path = %path.display(),
-        conflicting = ?conflicting.as_ref().map(|p: &PathBuf| p.display().to_string()),
+        id = %id,
+        conflicting = ?conflicting,
         level = %level,
         memory_type = %memory_type,
         scope = %scope,
-        "created memory (with conflict check)"
+        "created memory (db, with conflict check)"
     );
     Ok(CreateMemoryResult {
-        path,
+        id,
         conflicting_memory_id: conflicting,
     })
 }
 
-/// Create a new memory file. Returns the path of the created file.
+/// Create a new memory row in the DB. Returns the row id.
 pub fn create_memory(
     level: MemoryLevel,
     memory_type: MemoryType,
     scope: MemoryScope,
     body: &str,
     project_root: &Path,
-) -> Result<PathBuf, String> {
-    let dir = memory_dir_for(level, project_root);
-    let path = write_memory_file(&dir, memory_type, scope, body)?;
+) -> Result<String, String> {
+    let store = open_store_or_err()?;
+    let hash = content_hash(body);
+    let id = write_memory_row(&store, level, memory_type, scope, body, project_root, &hash)?;
     tracing::info!(
         target: "jfc::memory",
-        path = %path.display(),
+        id = %id,
         level = %level,
         memory_type = %memory_type,
         scope = %scope,
-        "created memory"
+        "created memory (db)"
     );
-    // Keep the project MEMORY.md index fresh automatically. Previously this was
-    // prompt-guidance only ("after writing, add a one-line pointer to
-    // MEMORY.md") with no code path, so the index went stale whenever the model
-    // forgot. User-level memories have no project index, so they're skipped.
-    if !matches!(level, MemoryLevel::User) {
-        if let Err(e) = append_memory_index_pointer(project_root, &path, body) {
-            // Index maintenance is best-effort: a failed append must never lose
-            // the just-written memory file.
-            tracing::warn!(target: "jfc::memory", error = %e, "failed to update MEMORY.md index");
-        }
-    }
-    Ok(path)
+    Ok(id)
+}
+
+/// Insert one memory row, mapping level→project_key + serializing frontmatter.
+fn write_memory_row(
+    store: &jfc_knowledge::KnowledgeStore,
+    level: MemoryLevel,
+    memory_type: MemoryType,
+    scope: MemoryScope,
+    body: &str,
+    project_root: &Path,
+    hash: &str,
+) -> Result<String, String> {
+    let mem_level = memory_level_to_mem_level(level);
+    let project_key = jfc_knowledge::project_key(project_root);
+    let project_key_opt = matches!(level, MemoryLevel::Project).then_some(project_key.as_str());
+    let id = jfc_knowledge::memory_id(mem_level, project_key_opt, body);
+    let (_fm, meta_json) = new_frontmatter_json(memory_type, scope, hash);
+    let title: String = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(80).collect())
+        .unwrap_or_else(|| "memory".to_owned());
+    store
+        .insert_memory(&jfc_knowledge::NewMemory {
+            id: id.clone(),
+            level: mem_level,
+            project_key: project_key_opt,
+            title: &title,
+            body,
+            hash,
+            meta_json: &meta_json,
+        })
+        .map_err(|e| format!("failed to insert memory: {e}"))?;
+    Ok(id)
 }
 
 /// Append a one-line pointer for a freshly-created memory to `<root>/MEMORY.md`,
@@ -695,19 +819,17 @@ fn word_set(text: &str) -> std::collections::HashSet<String> {
 }
 
 /// Delete a memory file by path.
-pub fn delete_memory(path: &Path) -> Result<(), String> {
-    if !is_memory_path(path) {
-        return Err(format!(
-            "refusing to delete {}: not inside a memory directory",
-            path.display()
-        ));
+/// Delete a memory by its DB id (the delete-by-id contract after the MD→DB
+/// cutover). Returns an error if no such memory row exists.
+pub fn delete_memory(id: &str) -> Result<(), String> {
+    let store = open_store_or_err()?;
+    let removed = store
+        .delete_memory_by_id(id)
+        .map_err(|e| format!("failed to delete memory: {e}"))?;
+    if removed == 0 {
+        return Err(format!("no memory with id {id}"));
     }
-    std::fs::remove_file(path).map_err(|e| format!("failed to delete memory: {e}"))?;
-    tracing::info!(
-        target: "jfc::memory",
-        path = %path.display(),
-        "deleted memory"
-    );
+    tracing::info!(target: "jfc::memory", id, "deleted memory (db)");
     Ok(())
 }
 
@@ -957,11 +1079,7 @@ A memory that names a specific function, file, or flag is a claim that it existe
 - These exclusions apply even when the user asks you to save them. If they ask you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.\n";
 
 fn render_memory_entry(mem: &MemoryEntry, out: &mut String) {
-    let filename = mem
-        .path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("unknown");
+    let filename = mem.source_name();
     out.push_str(&format!(
         "- **[{}|{}]** {}\n",
         mem.frontmatter.memory_type,
@@ -989,7 +1107,7 @@ pub fn format_existing_memories(memories: &[MemoryEntry]) -> String {
     for mem in memories {
         out.push_str(&format!(
             "- `{}` [{}|{}]: {}\n",
-            mem.path.display(),
+            mem.source_display(),
             mem.frontmatter.memory_type,
             mem.frontmatter.scope,
             mem.body.lines().next().unwrap_or("(empty)")
@@ -1111,11 +1229,41 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let prev = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn use_temp_knowledge_db(tmp: &TempDir) -> EnvGuard {
+        EnvGuard::set("JFC_KNOWLEDGE_DB", &tmp.path().join("knowledge.db"))
+    }
+
     #[test]
-    fn create_project_memory_auto_appends_index_pointer_normal() {
+    #[serial_test::serial]
+    fn create_project_memory_persists_db_row_normal() {
         let tmp = TempDir::new().unwrap();
+        let _guard = use_temp_knowledge_db(&tmp);
         let root = tmp.path();
-        let path = create_memory(
+        let id = create_memory(
             MemoryLevel::Project,
             MemoryType::Context,
             MemoryScope::Team,
@@ -1124,17 +1272,18 @@ mod tests {
         )
         .unwrap();
 
-        let index = fs::read_to_string(root.join("MEMORY.md")).expect("MEMORY.md created");
-        assert!(index.contains("# Project Memory Index"), "{index}");
-        // The pointer links the relative path and carries the title/hook.
-        let rel = path.strip_prefix(root).unwrap().to_string_lossy();
+        let memories = load_all_memories(root);
+        let created = memories
+            .iter()
+            .find(|mem| mem.id.as_deref() == Some(id.as_str()))
+            .expect("created memory should be loaded from DB");
+        assert!(created.path.is_none());
+        assert_eq!(created.frontmatter.memory_type, MemoryType::Context);
+        assert_eq!(created.frontmatter.scope, MemoryScope::Team);
         assert!(
-            index.contains(&format!("({rel})")),
-            "index links file: {index}"
-        );
-        assert!(
-            index.contains("Build runs from the workspace root"),
-            "{index}"
+            created
+                .body
+                .contains("Build runs from the workspace root via cargo build.")
         );
     }
 
@@ -1142,15 +1291,9 @@ mod tests {
     fn create_memory_index_append_is_idempotent_robust() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let p = create_memory(
-            MemoryLevel::Project,
-            MemoryType::Context,
-            MemoryScope::Team,
-            "Same note body.",
-            root,
-        )
-        .unwrap();
+        let p = root.join(".jfc").join("memory").join("same-note.md");
         // Manually append the SAME file's pointer again — must not duplicate.
+        append_memory_index_pointer(root, &p, "Same note body.").unwrap();
         append_memory_index_pointer(root, &p, "Same note body.").unwrap();
         let index = fs::read_to_string(root.join("MEMORY.md")).unwrap();
         let rel = p.strip_prefix(root).unwrap().to_string_lossy();
@@ -1159,8 +1302,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn create_user_memory_does_not_write_project_index_robust() {
         let tmp = TempDir::new().unwrap();
+        let _guard = use_temp_knowledge_db(&tmp);
         let root = tmp.path();
         // User memories live in the global config dir and have no project index.
         let _ = create_memory(
@@ -1203,12 +1348,14 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn create_and_load_memory() {
         let tmp = TempDir::new().unwrap();
+        let _guard = use_temp_knowledge_db(&tmp);
         let project = tmp.path().to_path_buf();
 
         // Create a project-level memory
-        let path = create_memory(
+        let id = create_memory(
             MemoryLevel::Project,
             MemoryType::Feedback,
             MemoryScope::Team,
@@ -1217,15 +1364,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(path.exists());
-        assert!(path.starts_with(project_memory_dir(&project)));
-
         // Load it back
         let memories = load_all_memories(&project);
         let created = memories
             .iter()
-            .find(|mem| mem.path == path)
+            .find(|mem| mem.id.as_deref() == Some(id.as_str()))
             .expect("created memory should be loaded");
+        assert!(created.path.is_none());
         assert_eq!(created.frontmatter.memory_type, MemoryType::Feedback);
         assert_eq!(created.frontmatter.scope, MemoryScope::Team);
         assert!(created.body.contains("Always run tests before committing."));
@@ -1261,7 +1406,8 @@ mod tests {
     #[test]
     fn render_memories_section_has_content() {
         let entries = vec![MemoryEntry {
-            path: PathBuf::from("/home/user/.config/jfc/memory/test.md"),
+            id: Some("test:user:test".to_owned()),
+            path: Some(PathBuf::from("/home/user/.config/jfc/memory/test.md")),
             level: MemoryLevel::User,
             frontmatter: MemoryFrontmatter::new(MemoryType::Preference, MemoryScope::Private),
             body: "Prefer concise responses.".to_string(),
@@ -1370,7 +1516,8 @@ mod tests {
     #[test]
     fn render_memories_section_includes_v132_guidance_normal() {
         let entries = vec![MemoryEntry {
-            path: PathBuf::from("/home/user/.config/jfc/memory/test.md"),
+            id: Some("test:user:test".to_owned()),
+            path: Some(PathBuf::from("/home/user/.config/jfc/memory/test.md")),
             level: MemoryLevel::User,
             frontmatter: MemoryFrontmatter::new(MemoryType::Preference, MemoryScope::Private),
             body: "Prefer concise responses.".to_string(),
@@ -1385,7 +1532,8 @@ mod tests {
     #[test]
     fn render_memories_section_renders_team_scope_normal() {
         let entries = vec![MemoryEntry {
-            path: PathBuf::from(".jfc/memory/team/team-rule.md"),
+            id: Some("test:team:team-rule".to_owned()),
+            path: Some(PathBuf::from(".jfc/memory/team/team-rule.md")),
             level: MemoryLevel::Team,
             frontmatter: MemoryFrontmatter::new(MemoryType::Feedback, MemoryScope::Team),
             body: "All PRs require two reviewers.".to_string(),
@@ -1399,7 +1547,8 @@ mod tests {
     #[test]
     fn render_memories_section_skips_empty_team_scope_robust() {
         let entries = vec![MemoryEntry {
-            path: PathBuf::from("/u/.config/jfc/memory/u.md"),
+            id: Some("test:user:u".to_owned()),
+            path: Some(PathBuf::from("/u/.config/jfc/memory/u.md")),
             level: MemoryLevel::User,
             frontmatter: MemoryFrontmatter::new(MemoryType::Preference, MemoryScope::Private),
             body: "X".to_string(),

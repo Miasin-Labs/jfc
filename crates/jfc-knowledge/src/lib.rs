@@ -21,6 +21,7 @@
 
 pub mod error;
 pub mod import;
+pub mod memory;
 pub mod project;
 pub mod query;
 pub mod record;
@@ -34,6 +35,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 pub use error::{KnowledgeError, Result};
 pub use import::{ImportReport, ImportableMemory};
+pub use memory::{MemLevel, MemoryRow, NewMemory, memory_id};
 pub use project::project_key;
 pub use query::{Gap, LinkedRecord, RecallFilter};
 pub use record::{Kind, KnowledgeRecord, Outcome, RelKind, Scope};
@@ -63,6 +65,12 @@ pub struct KnowledgeStore {
 }
 
 impl KnowledgeStore {
+    /// Crate-internal connection accessor, so the split-out `memory` module can
+    /// add `impl KnowledgeStore` methods without the field being `pub`.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Open (creating if needed) and migrate the store at the default path
     /// `~/.local/share/jfc/knowledge.db`.
     pub fn open_default() -> Result<Self> {
@@ -148,13 +156,15 @@ impl KnowledgeStore {
 
     /// Whether a record id already exists (live or superseded).
     pub fn contains(&self, id: &str) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT 1 FROM knowledge WHERE id = ?1 LIMIT 1",
-            [id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM knowledge WHERE id = ?1 LIMIT 1",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Idempotently import legacy `.md` memories. Each item gets a deterministic
@@ -365,7 +375,11 @@ impl KnowledgeStore {
     /// rather than diff because the engine coalesces messages on save, so seq
     /// numbers can shift; the FTS mirror stays consistent via triggers. Shadow
     /// write — JSON remains canonical until the parity gate passes.
-    pub fn replace_transcript(&mut self, row: &SessionRow, messages: &[SessionMessage]) -> Result<()> {
+    pub fn replace_transcript(
+        &mut self,
+        row: &SessionRow,
+        messages: &[SessionMessage],
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO sessions \
@@ -376,11 +390,20 @@ impl KnowledgeStore {
                 updated_at=excluded.updated_at, first_prompt=excluded.first_prompt, \
                 title=excluded.title, message_count=excluded.message_count",
             rusqlite::params![
-                row.id, row.cwd, row.model, row.created_at, row.updated_at,
-                row.first_prompt, row.title, row.message_count,
+                row.id,
+                row.cwd,
+                row.model,
+                row.created_at,
+                row.updated_at,
+                row.first_prompt,
+                row.title,
+                row.message_count,
             ],
         )?;
-        tx.execute("DELETE FROM session_messages WHERE session_id = ?1", [&row.id])?;
+        tx.execute(
+            "DELETE FROM session_messages WHERE session_id = ?1",
+            [&row.id],
+        )?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO session_messages (session_id, seq, role, content, meta) \
@@ -417,13 +440,15 @@ impl KnowledgeStore {
 
     /// Whether a session has any transcript rows (parity bookkeeping).
     pub fn has_transcript(&self, session_id: &str) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT 1 FROM session_messages WHERE session_id = ?1 LIMIT 1",
-            [session_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM session_messages WHERE session_id = ?1 LIMIT 1",
+                [session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Session ids whose transcript matches an FTS query (substring search path).
@@ -442,7 +467,9 @@ impl KnowledgeStore {
              JOIN session_messages m ON m.rowid = f.rowid \
              WHERE session_messages_fts MATCH ?1 LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![terms, limit as i64], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(rusqlite::params![terms, limit as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -585,7 +612,13 @@ pub fn auto_maintain(
     user_memory_dir: Option<&Path>,
     project_memory_dir: Option<&Path>,
 ) -> Result<MaintainReport> {
-    auto_maintain_inner(project_root, sessions_dir, user_memory_dir, project_memory_dir, false)
+    auto_maintain_inner(
+        project_root,
+        sessions_dir,
+        user_memory_dir,
+        project_memory_dir,
+        false,
+    )
 }
 
 /// Like [`auto_maintain`] but `force` bypasses the throttle (manual `/knowledge
@@ -596,7 +629,13 @@ pub fn auto_maintain_forced(
     user_memory_dir: Option<&Path>,
     project_memory_dir: Option<&Path>,
 ) -> Result<MaintainReport> {
-    auto_maintain_inner(project_root, sessions_dir, user_memory_dir, project_memory_dir, true)
+    auto_maintain_inner(
+        project_root,
+        sessions_dir,
+        user_memory_dir,
+        project_memory_dir,
+        true,
+    )
 }
 
 fn auto_maintain_inner(
@@ -622,7 +661,11 @@ fn auto_maintain_inner(
         items.extend(import::scan_markdown_dir(dir, Scope::User, None));
     }
     if let Some(dir) = project_memory_dir {
-        items.extend(import::scan_markdown_dir(dir, Scope::Project, Some(project.clone())));
+        items.extend(import::scan_markdown_dir(
+            dir,
+            Scope::Project,
+            Some(project.clone()),
+        ));
     }
     if !items.is_empty() {
         report.imported = store.import_memories(&items)?.imported;
@@ -651,25 +694,22 @@ mod tests {
     use super::*;
 
     fn rec(scope: Scope, project: Option<&str>, title: &str, body: &str) -> KnowledgeRecord {
-        KnowledgeRecord::new(
-            Kind::Fact,
-            scope,
-            project.map(str::to_owned),
-            title,
-            body,
-        )
+        KnowledgeRecord::new(Kind::Fact, scope, project.map(str::to_owned), title, body)
     }
 
     #[test]
     fn insert_and_recall_round_trip_normal() {
         let store = KnowledgeStore::open_in_memory().unwrap();
-        let r = rec(Scope::Global, None, "Rust edition", "This workspace uses edition 2024")
-            .with_confidence(0.9);
+        let r = rec(
+            Scope::Global,
+            None,
+            "Rust edition",
+            "This workspace uses edition 2024",
+        )
+        .with_confidence(0.9);
         store.insert(&r).unwrap();
 
-        let hits = store
-            .recall("edition", &RecallFilter::default())
-            .unwrap();
+        let hits = store.recall("edition", &RecallFilter::default()).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, r.id);
         assert_eq!(hits[0].title, "Rust edition");
@@ -680,7 +720,12 @@ mod tests {
     #[test]
     fn project_record_is_not_global_until_promoted_regression() {
         let store = KnowledgeStore::open_in_memory().unwrap();
-        let r = rec(Scope::Project, Some("projA"), "local lesson", "use ripgrep here");
+        let r = rec(
+            Scope::Project,
+            Some("projA"),
+            "local lesson",
+            "use ripgrep here",
+        );
         store.insert(&r).unwrap();
 
         // From a DIFFERENT project, the project-scoped row must NOT be recalled.
@@ -700,16 +745,28 @@ mod tests {
     #[test]
     fn recall_scope_isolation_normal() {
         let store = KnowledgeStore::open_in_memory().unwrap();
-        store.insert(&rec(Scope::Project, Some("A"), "a-only", "alpha secret")).unwrap();
-        store.insert(&rec(Scope::Project, Some("B"), "b-only", "beta secret")).unwrap();
-        store.insert(&rec(Scope::User, None, "user-pref", "alpha beta gamma")).unwrap();
+        store
+            .insert(&rec(Scope::Project, Some("A"), "a-only", "alpha secret"))
+            .unwrap();
+        store
+            .insert(&rec(Scope::Project, Some("B"), "b-only", "beta secret"))
+            .unwrap();
+        store
+            .insert(&rec(Scope::User, None, "user-pref", "alpha beta gamma"))
+            .unwrap();
 
-        let from_a = RecallFilter { project_key: Some("A"), limit: 8 };
+        let from_a = RecallFilter {
+            project_key: Some("A"),
+            limit: 8,
+        };
         let hits = store.recall("alpha", &from_a).unwrap();
         let titles: Vec<_> = hits.iter().map(|h| h.title.as_str()).collect();
         assert!(titles.contains(&"a-only"), "{titles:?}");
         assert!(titles.contains(&"user-pref"), "{titles:?}");
-        assert!(!titles.contains(&"b-only"), "B's row leaked into A: {titles:?}");
+        assert!(
+            !titles.contains(&"b-only"),
+            "B's row leaked into A: {titles:?}"
+        );
     }
 
     #[test]
@@ -734,7 +791,11 @@ mod tests {
         // Project scope without a key.
         assert!(store.insert(&rec(Scope::Project, None, "t", "b")).is_err());
         // Global scope WITH a key.
-        assert!(store.insert(&rec(Scope::Global, Some("x"), "t", "b")).is_err());
+        assert!(
+            store
+                .insert(&rec(Scope::Global, Some("x"), "t", "b"))
+                .is_err()
+        );
         // Out-of-range confidence (constructed directly, bypassing the clamp).
         let mut bad = rec(Scope::Global, None, "t", "b");
         bad.confidence = 5.0;
@@ -752,13 +813,21 @@ mod tests {
 
         for i in 0..50 {
             store
-                .insert(&rec(Scope::Project, Some("P"), &format!("row {i}"), "filler body"))
+                .insert(&rec(
+                    Scope::Project,
+                    Some("P"),
+                    &format!("row {i}"),
+                    "filler body",
+                ))
                 .unwrap();
         }
         assert_eq!(store.live_count().unwrap(), 51);
 
         let removed = store.decay(DEFAULT_MAX_AGE_MS, 10).unwrap();
-        assert!(removed >= 40, "decay should prune project rows over the cap; removed={removed}");
+        assert!(
+            removed >= 40,
+            "decay should prune project rows over the cap; removed={removed}"
+        );
         // Project rows capped at 10; the global keeper is exempt → <= 11 live.
         assert!(store.live_count().unwrap() <= 11);
 
@@ -816,7 +885,11 @@ mod tests {
         let r2 = store.import_memories(&items).unwrap();
         assert_eq!(r2.imported, 0);
         assert_eq!(r2.skipped, 2);
-        assert_eq!(store.live_count().unwrap(), 2, "re-import must not duplicate");
+        assert_eq!(
+            store.live_count().unwrap(),
+            2,
+            "re-import must not duplicate"
+        );
     }
 
     // TODO 7+8: a verified, salient lesson outranks an unverified one on equal
@@ -846,7 +919,12 @@ mod tests {
     fn typed_links_and_backlinks_normal() {
         let store = KnowledgeStore::open_in_memory().unwrap();
         let err = rec(Scope::Global, None, "error", "old_string not found");
-        let fix = rec(Scope::Global, None, "fix", "strip the line-number gutter first");
+        let fix = rec(
+            Scope::Global,
+            None,
+            "fix",
+            "strip the line-number gutter first",
+        );
         store.insert(&err).unwrap();
         store.insert(&fix).unwrap();
         store.link(&err.id, &fix.id, RelKind::FixedBy).unwrap();
@@ -866,8 +944,12 @@ mod tests {
     #[test]
     fn knowledge_gaps_rank_by_ref_count_normal() {
         let store = KnowledgeStore::open_in_memory().unwrap();
-        store.note_gap("how to mock the network layer", "referenced, no lesson").unwrap();
-        store.note_gap("how to mock the network layer", "again").unwrap();
+        store
+            .note_gap("how to mock the network layer", "referenced, no lesson")
+            .unwrap();
+        store
+            .note_gap("how to mock the network layer", "again")
+            .unwrap();
         store.note_gap("CI cache config", "once").unwrap();
         let gaps = store.gaps(10).unwrap();
         assert_eq!(gaps.len(), 2);
@@ -880,8 +962,7 @@ mod tests {
     #[test]
     fn consolidate_collapses_duplicates_regression() {
         let mut store = KnowledgeStore::open_in_memory().unwrap();
-        let weak = rec(Scope::Project, Some("P"), "dup", "use ripgrep here")
-            .with_confidence(0.3);
+        let weak = rec(Scope::Project, Some("P"), "dup", "use ripgrep here").with_confidence(0.3);
         let strong = rec(Scope::Project, Some("P"), "dup", "use   ripgrep here")
             .with_confidence(0.9)
             .with_outcome(Outcome::Verified);
@@ -894,7 +975,13 @@ mod tests {
         assert_eq!(store.live_count().unwrap(), 1);
         // The verified/stronger one survives.
         let hits = store
-            .recall("ripgrep", &crate::query::RecallFilter { project_key: Some("P"), limit: 8 })
+            .recall(
+                "ripgrep",
+                &crate::query::RecallFilter {
+                    project_key: Some("P"),
+                    limit: 8,
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, strong.id);
@@ -929,15 +1016,31 @@ mod tests {
         assert_eq!(store.live_count().unwrap(), 1);
 
         let hits = store
-            .recall("retry", &crate::query::RecallFilter { project_key: Some("P"), limit: 8 })
+            .recall(
+                "retry",
+                &crate::query::RecallFilter {
+                    project_key: Some("P"),
+                    limit: 8,
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].outcome, Outcome::Verified, "outcome upgraded by new evidence");
+        assert_eq!(
+            hits[0].outcome,
+            Outcome::Verified,
+            "outcome upgraded by new evidence"
+        );
         assert!(hits[0].use_count >= 1, "support compounded");
 
         // A DIFFERENT project must not see P's mined lesson.
         let other = store
-            .recall("retry", &crate::query::RecallFilter { project_key: Some("Q"), limit: 8 })
+            .recall(
+                "retry",
+                &crate::query::RecallFilter {
+                    project_key: Some("Q"),
+                    limit: 8,
+                },
+            )
             .unwrap();
         assert!(other.is_empty());
     }
@@ -965,31 +1068,47 @@ mod tests {
         store.insert(&noisy).unwrap();
         // A project-specific FACT, verified + well-supported, must NOT auto-promote
         // (it would poison other projects with wrong-context truth).
-        let mut fact = mk(Kind::Fact, "stack", "this repo uses vite").with_outcome(Outcome::Verified);
+        let mut fact =
+            mk(Kind::Fact, "stack", "this repo uses vite").with_outcome(Outcome::Verified);
         fact.use_count = 9;
         store.insert(&fact).unwrap();
 
         let promoted = store.auto_promote(3).unwrap();
-        assert_eq!(promoted, 1, "only the verified, well-supported, generalizable lesson promotes");
+        assert_eq!(
+            promoted, 1,
+            "only the verified, well-supported, generalizable lesson promotes"
+        );
 
         // The promoted one is now recalled from a DIFFERENT project.
-        let other = crate::query::RecallFilter { project_key: Some("Q"), limit: 8 };
+        let other = crate::query::RecallFilter {
+            project_key: Some("Q"),
+            limit: 8,
+        };
         let hits = store.recall("ripgrep", &other).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, hot.id);
         // The unverified/rare/fact ones did not leak across projects.
         assert!(store.recall("niche", &other).unwrap().is_empty());
         assert!(store.recall("unconfirmed", &other).unwrap().is_empty());
-        assert!(store.recall("vite", &other).unwrap().is_empty(), "project-specific fact must not leak");
+        assert!(
+            store.recall("vite", &other).unwrap().is_empty(),
+            "project-specific fact must not leak"
+        );
     }
 
     // The throttle prevents re-processing on a second startup within the window.
     #[test]
     fn maintain_throttle_blocks_rapid_repeat_normal() {
         let store = KnowledgeStore::open_in_memory().unwrap();
-        assert!(store.maintain_due("P", MAINTAIN_THROTTLE_MS).unwrap(), "first run is due");
+        assert!(
+            store.maintain_due("P", MAINTAIN_THROTTLE_MS).unwrap(),
+            "first run is due"
+        );
         store.stamp_maintain("P").unwrap();
-        assert!(!store.maintain_due("P", MAINTAIN_THROTTLE_MS).unwrap(), "just-stamped is not due");
+        assert!(
+            !store.maintain_due("P", MAINTAIN_THROTTLE_MS).unwrap(),
+            "just-stamped is not due"
+        );
         // A different project is independently due.
         assert!(store.maintain_due("Q", MAINTAIN_THROTTLE_MS).unwrap());
         // With a zero window, it's due again immediately.
@@ -1003,7 +1122,11 @@ mod tests {
         let dbpath = dir.path().join("k.db");
         let user_mem = dir.path().join("umem");
         std::fs::create_dir_all(&user_mem).unwrap();
-        std::fs::write(user_mem.join("p.md"), "---\ntype: preference\n---\nuse spaces not tabs").unwrap();
+        std::fs::write(
+            user_mem.join("p.md"),
+            "---\ntype: preference\n---\nuse spaces not tabs",
+        )
+        .unwrap();
         let sessions = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         std::fs::write(
@@ -1017,13 +1140,7 @@ mod tests {
 
         // Isolate the global store path for this test.
         let _guard = EnvGuard::set("JFC_KNOWLEDGE_DB", dbpath.to_str().unwrap());
-        let report = auto_maintain(
-            dir.path(),
-            Some(&sessions),
-            Some(&user_mem),
-            None,
-        )
-        .unwrap();
+        let report = auto_maintain(dir.path(), Some(&sessions), Some(&user_mem), None).unwrap();
         assert_eq!(report.imported, 1, "imported the .md preference");
         assert_eq!(report.sessions_scanned, 1);
         assert!(report.mined_inserted >= 1, "mined the recovered Edit error");
@@ -1073,8 +1190,18 @@ mod tests {
             message_count: 2,
         };
         let msgs = vec![
-            SessionMessage { seq: 0, role: "user".into(), content: "fix the ripgrep gutter bug".into(), meta: None },
-            SessionMessage { seq: 1, role: "assistant".into(), content: "done, edited bash.rs".into(), meta: Some("{\"k\":1}".into()) },
+            SessionMessage {
+                seq: 0,
+                role: "user".into(),
+                content: "fix the ripgrep gutter bug".into(),
+                meta: None,
+            },
+            SessionMessage {
+                seq: 1,
+                role: "assistant".into(),
+                content: "done, edited bash.rs".into(),
+                meta: Some("{\"k\":1}".into()),
+            },
         ];
         store.replace_transcript(&hdr, &msgs).unwrap();
 
@@ -1082,17 +1209,45 @@ mod tests {
         let loaded = store.load_transcript("ses_x").unwrap();
         assert_eq!(loaded, msgs);
         assert!(store.has_transcript("ses_x").unwrap());
-        assert_eq!(store.session_count().unwrap(), 1, "header upserted in same txn");
+        assert_eq!(
+            store.session_count().unwrap(),
+            1,
+            "header upserted in same txn"
+        );
 
         // FTS search finds the session by a content term.
-        assert_eq!(store.search_transcripts("ripgrep", 10).unwrap(), vec!["ses_x".to_string()]);
-        assert!(store.search_transcripts("nonexistentterm", 10).unwrap().is_empty());
+        assert_eq!(
+            store.search_transcripts("ripgrep", 10).unwrap(),
+            vec!["ses_x".to_string()]
+        );
+        assert!(
+            store
+                .search_transcripts("nonexistentterm", 10)
+                .unwrap()
+                .is_empty()
+        );
 
         // Replace with a coalesced (shorter) transcript — no stale rows, FTS updated.
-        let shorter = vec![SessionMessage { seq: 0, role: "user".into(), content: "different now".into(), meta: None }];
-        store.replace_transcript(&SessionRow { message_count: 1, ..hdr.clone() }, &shorter).unwrap();
+        let shorter = vec![SessionMessage {
+            seq: 0,
+            role: "user".into(),
+            content: "different now".into(),
+            meta: None,
+        }];
+        store
+            .replace_transcript(
+                &SessionRow {
+                    message_count: 1,
+                    ..hdr.clone()
+                },
+                &shorter,
+            )
+            .unwrap();
         assert_eq!(store.load_transcript("ses_x").unwrap(), shorter);
-        assert!(store.search_transcripts("ripgrep", 10).unwrap().is_empty(), "old content gone from FTS");
+        assert!(
+            store.search_transcripts("ripgrep", 10).unwrap().is_empty(),
+            "old content gone from FTS"
+        );
 
         // Backup writes a consistent, openable copy.
         let dir = tempfile::tempdir().unwrap();
@@ -1115,19 +1270,30 @@ mod tests {
             title: None,
             message_count: n,
         };
-        store.upsert_session(&row("s1", "/a", "2026-01-01T01:00:00Z", 2)).unwrap();
-        store.upsert_session(&row("s2", "/a", "2026-01-01T03:00:00Z", 4)).unwrap();
-        store.upsert_session(&row("s3", "/b", "2026-01-01T02:00:00Z", 6)).unwrap();
+        store
+            .upsert_session(&row("s1", "/a", "2026-01-01T01:00:00Z", 2))
+            .unwrap();
+        store
+            .upsert_session(&row("s2", "/a", "2026-01-01T03:00:00Z", 4))
+            .unwrap();
+        store
+            .upsert_session(&row("s3", "/b", "2026-01-01T02:00:00Z", 6))
+            .unwrap();
         assert_eq!(store.session_count().unwrap(), 3);
 
         // Re-upsert s1 with a new message_count → updates, not duplicates.
-        store.upsert_session(&row("s1", "/a", "2026-01-01T05:00:00Z", 9)).unwrap();
+        store
+            .upsert_session(&row("s1", "/a", "2026-01-01T05:00:00Z", 9))
+            .unwrap();
         assert_eq!(store.session_count().unwrap(), 3);
         assert_eq!(store.get_session("s1").unwrap().unwrap().message_count, 9);
 
         // List for /a, most-recently-updated first (s1 now newest after re-upsert).
         let a = store.list_sessions(Some("/a"), 10).unwrap();
-        assert_eq!(a.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
+        assert_eq!(
+            a.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["s1", "s2"]
+        );
         // Global list includes all three.
         assert_eq!(store.list_sessions(None, 10).unwrap().len(), 3);
         // Unknown cwd → empty.

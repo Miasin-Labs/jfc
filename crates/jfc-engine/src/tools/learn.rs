@@ -259,7 +259,7 @@ pub fn execute_learn_dream() -> ExecutionResult {
     let mut records: Vec<MemoryRecord> = entries
         .iter()
         .map(|e| MemoryRecord {
-            path: e.path.display().to_string(),
+            path: e.source_display().into_owned(),
             category: Some(e.frontmatter.memory_type.to_string()),
             normalized_hash: e.frontmatter.normalized_hash.clone(),
             content: e.body.clone(),
