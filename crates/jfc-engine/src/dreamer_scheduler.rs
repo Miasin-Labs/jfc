@@ -78,7 +78,7 @@ pub struct RealDreamers {
 impl RealDreamers {
     /// Build a `RealDreamers` rooted at `project_root`. The plan store is
     /// opened at `<project_root>/.jfc/plans/` and the learn lease at
-    /// `<project_root>/.jfc/memory/.dreamer.lock`.
+    /// a stable project-scoped lease key.
     pub fn open(project_root: PathBuf) -> anyhow::Result<Self> {
         let plan_store = PlanStore::open_project(Some(&project_root))?;
         let learn_lease_path = project_root
@@ -97,7 +97,7 @@ impl DreamerCycle for RealDreamers {
     fn run_once(&self) -> Result<String, String> {
         let mut summary = String::new();
 
-        // 1. PlanDreamer — owns its own lease at .jfc/plans/.dreamer.lock.
+        // 1. PlanDreamer owns its own DB lease row.
         let plan_dreamer = PlanDreamer::new(Arc::clone(&self.plan_store));
         match plan_dreamer.run_cycle() {
             Ok(report) => summary.push_str(&format!(
@@ -184,9 +184,13 @@ fn run_learn_dreamer(
     ))
 }
 
-/// Build the memory Digest brief + knowledge Wiki from `records` and write them
-/// to `<project_root>/.jfc/{DIGEST.md,WIKI.md}`. Returns a short status suffix
-/// for the dream report (empty on a write failure — best-effort).
+const DREAMER_ARTIFACT_KIND: &str = "dreamer_docs";
+const DREAMER_DIGEST_KEY: &str = "digest";
+const DREAMER_WIKI_KEY: &str = "wiki";
+
+/// Build the memory Digest brief + knowledge Wiki from `records` and store
+/// them as project DB artifacts. Returns a short status suffix for the dream
+/// report (empty on a write failure — best-effort).
 fn write_digest_and_wiki(
     project_root: &std::path::Path,
     records: &[jfc_learn::dreamer::MemoryRecord],
@@ -207,15 +211,46 @@ fn write_digest_and_wiki(
     let digest = build_digest(records, &settings, now);
     let wiki = build_wiki(records);
 
-    let dir = project_root.join(".jfc");
-    if std::fs::create_dir_all(&dir).is_err() {
+    let Ok(store) = jfc_knowledge::KnowledgeStore::open_default() else {
         return String::new();
-    }
+    };
+    let session_id = format!("project:{}", jfc_knowledge::project_key(project_root));
+    let digest_md = digest.to_markdown();
+    let wiki_md = wiki.to_markdown();
+
     let mut wrote = Vec::new();
-    if std::fs::write(dir.join("DIGEST.md"), digest.to_markdown()).is_ok() {
+    if store
+        .upsert_session_artifact(
+            &session_id,
+            DREAMER_ARTIFACT_KIND,
+            DREAMER_DIGEST_KEY,
+            &serde_json::json!({
+                "schema_version": 1,
+                "format": "markdown",
+                "body": digest_md,
+                "item_count": digest.items.len(),
+            })
+            .to_string(),
+        )
+        .is_ok()
+    {
         wrote.push(format!("digest:{}", digest.items.len()));
     }
-    if std::fs::write(dir.join("WIKI.md"), wiki.to_markdown()).is_ok() {
+    if store
+        .upsert_session_artifact(
+            &session_id,
+            DREAMER_ARTIFACT_KIND,
+            DREAMER_WIKI_KEY,
+            &serde_json::json!({
+                "schema_version": 1,
+                "format": "markdown",
+                "body": wiki_md,
+                "page_count": wiki.pages.len(),
+            })
+            .to_string(),
+        )
+        .is_ok()
+    {
         wrote.push(format!("wiki:{}", wiki.pages.len()));
     }
     if wrote.is_empty() {
@@ -350,10 +385,22 @@ mod tests {
         assert!(suffix.contains("digest"), "suffix: {suffix}");
         assert!(suffix.contains("wiki"), "suffix: {suffix}");
 
-        let digest_md = std::fs::read_to_string(dir.path().join(".jfc/DIGEST.md")).unwrap();
+        let store = jfc_knowledge::KnowledgeStore::open_default().unwrap();
+        let session_id = format!("project:{}", jfc_knowledge::project_key(dir.path()));
+        let digest_row = store
+            .get_session_artifact(&session_id, DREAMER_ARTIFACT_KIND, DREAMER_DIGEST_KEY)
+            .unwrap()
+            .unwrap();
+        let digest_value: serde_json::Value = serde_json::from_str(&digest_row.value_json).unwrap();
+        let digest_md = digest_value["body"].as_str().unwrap();
         assert!(digest_md.contains("Memory Digest"));
         assert!(digest_md.contains("Prefer traits"));
-        let wiki_md = std::fs::read_to_string(dir.path().join(".jfc/WIKI.md")).unwrap();
+        let wiki_row = store
+            .get_session_artifact(&session_id, DREAMER_ARTIFACT_KIND, DREAMER_WIKI_KEY)
+            .unwrap()
+            .unwrap();
+        let wiki_value: serde_json::Value = serde_json::from_str(&wiki_row.value_json).unwrap();
+        let wiki_md = wiki_value["body"].as_str().unwrap();
         assert!(wiki_md.contains("Knowledge Wiki"));
         assert!(wiki_md.contains("# Architecture"));
         assert!(wiki_md.contains("# Testing"));
@@ -362,11 +409,18 @@ mod tests {
     #[test]
     fn write_digest_and_wiki_empty_records_robust() {
         let dir = tempfile::TempDir::new().unwrap();
-        // No records → digest is empty (0 items) but files still write.
+        // No records -> digest is empty (0 items) but artifacts still write.
         let suffix = write_digest_and_wiki(dir.path(), &[]);
-        // wiki has 0 pages, digest 0 items → both still wrote.
+        // wiki has 0 pages, digest 0 items -> both still wrote.
         assert!(suffix.contains("digest:0"));
-        assert!(dir.path().join(".jfc/DIGEST.md").exists());
+        let store = jfc_knowledge::KnowledgeStore::open_default().unwrap();
+        let session_id = format!("project:{}", jfc_knowledge::project_key(dir.path()));
+        assert!(
+            store
+                .get_session_artifact(&session_id, DREAMER_ARTIFACT_KIND, DREAMER_DIGEST_KEY)
+                .unwrap()
+                .is_some()
+        );
     }
 
     // Env-var tests must not race. Tokio runs tests on multiple threads

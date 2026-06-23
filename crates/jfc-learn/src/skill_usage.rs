@@ -1,9 +1,9 @@
-//! Skill-usage telemetry sidecar — the foundation for a skill curator.
+//! Skill-usage telemetry — the foundation for a skill curator.
 //!
 //! Ported in spirit from Hermes Agent's `tools/skill_usage.py`
-//! (`~/.hermes/skills/.usage.json`): a small JSON sidecar tracking, per skill,
-//! how often it's invoked/viewed/patched, when it was last active, who created
-//! it (`user` vs `agent`), whether it's pinned, and its lifecycle state. A
+//! (`~/.hermes/skills/.usage.json`): a small DB-backed ledger tracking, per
+//! skill, how often it's invoked/viewed/patched, when it was last active, who
+//! created it (`user` vs `agent`), whether it's pinned, and its lifecycle state. A
 //! background curator (a later, separate change) reads this to decide which
 //! *agent-created* skills to archive/consolidate — but the telemetry layer is
 //! useful on its own and ships first, per the architecture rule "foundation
@@ -13,12 +13,15 @@
 //!   * Provenance is explicit (`created_by`) — a curator must only ever touch
 //!     `Agent` skills; user-authored skills are off-limits.
 //!   * `pinned` exempts a skill from any automatic lifecycle transition.
-//!   * The sidecar is *additive* telemetry — losing/ignoring it never breaks
+//!   * The ledger is *additive* telemetry — losing/ignoring it never breaks
 //!     skill invocation (recording errors are logged, not propagated).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+const SKILL_USAGE_SESSION_ID: &str = "__learn__";
+const SKILL_USAGE_KIND: &str = "skill_usage";
 
 /// Who authored a skill. A curator may only auto-transition [`CreatedBy::Agent`]
 /// skills; [`CreatedBy::User`] skills are never touched automatically.
@@ -69,8 +72,7 @@ pub struct SkillUsage {
     pub state: SkillState,
 }
 
-/// The whole sidecar: a map of skill name -> usage. Round-trips as a single
-/// JSON object so it stays human-diffable.
+/// The whole usage ledger: a map of skill name -> usage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillUsageStore {
     #[serde(default)]
@@ -80,18 +82,24 @@ pub struct SkillUsageStore {
 }
 
 impl SkillUsageStore {
-    /// The sidecar path for a project: `<project>/.jfc/skills/.usage.json`,
-    /// matching the `.jfc/` convention used by memory + dreamer.
+    /// Legacy import path for a project: `<project>/.jfc/skills/.usage.json`,
+    /// matching the `.jfc/` convention used by earlier memory + dreamer code.
     pub fn path_for(project_root: &Path) -> PathBuf {
         project_root.join(".jfc").join("skills").join(".usage.json")
     }
 
-    /// Load (or create an empty) store at the given sidecar path.
+    /// Load (or create an empty) store for the given legacy path.
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let skills = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<BTreeMap<String, SkillUsage>>(&b).ok())
+        let skills = load_usage_from_db(&path)
+            .or_else(|| {
+                std::fs::read(&path)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<BTreeMap<String, SkillUsage>>(&b).ok())
+                    .inspect(|skills| {
+                        let _ = save_usage_to_db(&path, skills);
+                    })
+            })
             .unwrap_or_default();
         Self { skills, path }
     }
@@ -101,15 +109,11 @@ impl SkillUsageStore {
         Self::load(Self::path_for(project_root))
     }
 
-    /// Persist the store to its sidecar path (creates parent dirs). Errors are
+    /// Persist the store to the DB artifact. Errors are
     /// returned so a curator can surface them, but the recording helpers below
     /// log-and-swallow so telemetry never breaks skill invocation.
     pub fn save(&self) -> std::io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let json = serde_json::to_vec_pretty(&self.skills)?;
-        std::fs::write(&self.path, json)
+        save_usage_to_db(&self.path, &self.skills)
     }
 
     pub fn get(&self, name: &str) -> Option<&SkillUsage> {
@@ -203,6 +207,33 @@ impl SkillUsageStore {
     }
 }
 
+fn usage_key(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn load_usage_from_db(path: &Path) -> Option<BTreeMap<String, SkillUsage>> {
+    let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+    let row = store
+        .get_session_artifact(SKILL_USAGE_SESSION_ID, SKILL_USAGE_KIND, &usage_key(path))
+        .ok()
+        .flatten()?;
+    serde_json::from_str(&row.value_json).ok()
+}
+
+fn save_usage_to_db(path: &Path, skills: &BTreeMap<String, SkillUsage>) -> std::io::Result<()> {
+    let json = serde_json::to_string(skills).map_err(std::io::Error::other)?;
+    jfc_knowledge::KnowledgeStore::open_default()
+        .and_then(|store| {
+            store.upsert_session_artifact(
+                SKILL_USAGE_SESSION_ID,
+                SKILL_USAGE_KIND,
+                &usage_key(path),
+                &json,
+            )
+        })
+        .map_err(std::io::Error::other)
+}
+
 /// Best-effort: record a skill invocation for a project without the caller
 /// holding a store. Loads, bumps, saves; logs on error (never panics/propagates
 /// — telemetry must not break skill execution).
@@ -210,7 +241,7 @@ pub fn record_skill_use(project_root: &Path, name: &str) {
     let mut store = SkillUsageStore::open(project_root);
     store.record_use(name);
     if let Err(e) = store.save() {
-        tracing::debug!(target: "jfc::skill_usage", skill = name, error = %e, "could not persist skill-usage sidecar");
+        tracing::debug!(target: "jfc::skill_usage", skill = name, error = %e, "could not persist skill-usage ledger");
     }
 }
 
@@ -240,9 +271,9 @@ mod tests {
         assert_eq!(u.state, SkillState::Active);
     }
 
-    // Normal: the sidecar round-trips through disk.
+    // Normal: the usage ledger round-trips through the DB.
     #[test]
-    fn sidecar_roundtrips_to_disk_normal() {
+    fn usage_ledger_roundtrips_to_db_normal() {
         let dir = tempfile::tempdir().unwrap();
         let path = SkillUsageStore::path_for(dir.path());
         {

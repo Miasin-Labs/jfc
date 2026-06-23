@@ -40,7 +40,9 @@ pub struct WorkflowRunConfig {
     pub args: serde_json::Value,
     pub provider: Arc<dyn Provider>,
     pub model: ModelId,
-    /// Session directory for the resume journal.
+    /// Session id for the DB-backed resume journal.
+    pub session_id: Option<String>,
+    /// Session directory for temporary workflow files.
     pub session_dir: std::path::PathBuf,
     /// When set, completed agent() calls from this prior run are replayed.
     pub resume_from_run_id: Option<String>,
@@ -295,6 +297,7 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
         args,
         provider,
         model,
+        session_id,
         session_dir,
         resume_from_run_id,
         cancel,
@@ -308,7 +311,7 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
     // Resume cache: load the prior run's journal if requested.
     let cache: Option<JournalCache> = match &resume_from_run_id {
         Some(prev) => {
-            let c = journal::load_journal(&session_dir, prev).await;
+            let c = journal::load_journal(session_id.as_deref(), prev).await;
             // Warn about agents that were started but never completed in the
             // prior run — their results won't be in the cache and will re-run.
             let incomplete: Vec<&String> = c
@@ -328,10 +331,10 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
         }
         None => None,
     };
-    let journal_writer = JournalWriter::new(&session_dir, &run_id);
+    let journal_writer = JournalWriter::new(session_id.as_deref(), &run_id);
     tracing::debug!(
         target: "jfc::workflow",
-        path = %journal_writer.path().display(),
+        journal = %journal_writer.label(),
         "workflow journal opened"
     );
 
@@ -460,6 +463,7 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
                         args: sub_req.args,
                         provider: orch.provider.clone(),
                         model: orch.model.clone(),
+                        session_id: session_id.clone(),
                         session_dir: session_dir.clone(),
                         resume_from_run_id: None,
                         cancel: orch.cancel.clone(),
@@ -1149,6 +1153,7 @@ mod tests {
             args,
             provider,
             model: jfc_provider::ModelId::new("claude-opus-4-7"),
+            session_id: None,
             session_dir: dir.to_path_buf(),
             resume_from_run_id: None,
             cancel: CancellationToken::new(),

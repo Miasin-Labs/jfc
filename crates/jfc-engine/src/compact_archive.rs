@@ -1,4 +1,3 @@
-use crate::atomic_write::write_atomic_sync;
 use crate::session::{SerializedMessage, deserialize_message, serialize_message};
 use crate::types::{ChatMessage, Role};
 use serde::{Deserialize, Serialize};
@@ -7,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const ARCHIVE_SCHEMA_VERSION: u32 = 1;
-const ARCHIVE_DIR: &str = ".jfc/compact-archive";
+const COMPACT_ARCHIVE_KIND: &str = "compact_archive";
 const MAX_RENDER_MESSAGE_CHARS: usize = 2_000;
 const MAX_RENDER_TOTAL_CHARS: usize = 16_000;
 
@@ -58,9 +57,6 @@ fn archive_compacted_range(
         return Ok(None);
     }
 
-    let dir = archive_dir(root);
-    std::fs::create_dir_all(&dir)?;
-
     let serialized: Vec<SerializedMessage> = messages.iter().map(serialize_message).collect();
     let created_at = chrono::Utc::now().to_rfc3339();
     let id = archive_id(&created_at, &serialized);
@@ -72,13 +68,16 @@ fn archive_compacted_range(
         summary: summary.to_owned(),
         messages: serialized,
     };
-    let bytes = serde_json::to_vec_pretty(&archive).map_err(std::io::Error::other)?;
-    let path = dir.join(format!("{id}.json"));
-    write_atomic_sync(&path, bytes)?;
+    let store = jfc_knowledge::KnowledgeStore::open_default().map_err(std::io::Error::other)?;
+    let session_id = project_artifact_session_id(root);
+    let json = serde_json::to_string(&archive).map_err(std::io::Error::other)?;
+    store
+        .upsert_session_artifact(&session_id, COMPACT_ARCHIVE_KIND, &id, &json)
+        .map_err(std::io::Error::other)?;
 
     Ok(Some(CompactArchiveMeta {
         id,
-        path,
+        path: PathBuf::from(session_id),
         message_count: archive.messages.len(),
     }))
 }
@@ -155,10 +154,6 @@ pub fn search_archives(query: &str, limit: usize) -> Vec<CompactArchiveHit> {
     soft.into_iter().map(|(_, h)| h).take(limit).collect()
 }
 
-fn archive_dir(root: &Path) -> PathBuf {
-    root.join(ARCHIVE_DIR)
-}
-
 fn archive_id(created_at: &str, messages: &[SerializedMessage]) -> String {
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let mut hasher = Sha256::new();
@@ -193,24 +188,32 @@ fn safe_archive_id(id: &str) -> Option<&str> {
 
 fn load_archive(root: &Path, id: &str) -> Option<CompactArchive> {
     let id = safe_archive_id(id)?;
-    let path = archive_dir(root).join(format!("{id}.json"));
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+    let row = store
+        .get_session_artifact(&project_artifact_session_id(root), COMPACT_ARCHIVE_KIND, id)
+        .ok()
+        .flatten()?;
+    serde_json::from_str(&row.value_json).ok()
 }
 
 fn load_archives(root: &Path) -> Vec<CompactArchive> {
-    let dir = archive_dir(root);
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(store) = jfc_knowledge::KnowledgeStore::open_default() else {
         return Vec::new();
     };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|e| {
-            let bytes = std::fs::read(e.path()).ok()?;
-            serde_json::from_slice::<CompactArchive>(&bytes).ok()
-        })
+    let Ok(rows) = store.list_session_artifacts(
+        &project_artifact_session_id(root),
+        COMPACT_ARCHIVE_KIND,
+        500,
+    ) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter_map(|row| serde_json::from_str::<CompactArchive>(&row.value_json).ok())
         .collect()
+}
+
+fn project_artifact_session_id(root: &Path) -> String {
+    format!("project:{}", jfc_knowledge::project_key(root))
 }
 
 fn render_archive(archive: &CompactArchive) -> String {
@@ -361,7 +364,7 @@ fn score_text(text_lc: &str, terms: &[String]) -> usize {
         .map(|s| stem(s.trim()))
         .filter(|s| s.len() >= 3)
     {
-        if terms.iter().any(|term| token == *term) {
+        if terms.contains(&token) {
             score += 1;
         }
     }

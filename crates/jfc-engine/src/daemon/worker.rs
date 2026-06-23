@@ -6,9 +6,9 @@
 //!   `JFC_WORKER_BIN` → `current_exe` → workspace `target/{release,debug}`
 //!   → `PATH` → `cargo build` rebuild. Shell aliases are intentionally
 //!   ignored: `Command::spawn` cannot see them.
-//! - Spawn (`spawn_background_agent_worker_with_paths`): writes the launch
-//!   spec, records a roster entry, forks a detached `jfc daemon worker
-//!   --launch <path>` process (setsid on Unix), captures its PID.
+//! - Spawn (`spawn_background_agent_worker_with_paths`): stores the launch
+//!   spec in the DB, records a roster entry, forks a detached `jfc daemon
+//!   worker --launch <handle>` process (setsid on Unix), captures its PID.
 //! - Entry (`run_background_agent_worker`): the worker process re-enters
 //!   here, rebuilds providers, prepares a worktree if requested, drives
 //!   `tools::execute_task`, and writes terminal state to the daemon roster.
@@ -81,11 +81,9 @@ pub fn record_background_agent_launch_path(
 /// Worker-side entry: re-enter from `jfc daemon worker --launch <path>`,
 /// rebuild providers, drive `execute_task`, and write terminal state.
 pub async fn run_background_agent_worker(launch_path: PathBuf) -> std::io::Result<()> {
-    let launch_json = std::fs::read_to_string(&launch_path)?;
-    let launch: BackgroundAgentLaunch =
-        serde_json::from_str(&launch_json).map_err(std::io::Error::other)?;
     let paths = DaemonPaths::default_user();
     paths.ensure_dirs()?;
+    let launch = jfc_daemon::worker::load_background_agent_launch(&paths, &launch_path)?;
 
     if let Err(e) = std::env::set_current_dir(&launch.cwd) {
         let msg = format!("worker failed to enter cwd {}: {e}", launch.cwd.display());

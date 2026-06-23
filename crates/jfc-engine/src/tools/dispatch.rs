@@ -84,6 +84,16 @@ fn suppress_bash_output(mut result: ExecutionResult) -> ExecutionResult {
     result
 }
 
+fn neutralize_unknown_bash_output(result: ExecutionResult) -> ExecutionResult {
+    if !result.is_error() || !result.output.starts_with("Unknown Bash task id") {
+        return result;
+    }
+    ExecutionResult::success(
+        "Background Bash output is attached to the original Bash tool automatically; \
+         BashOutput polling is ignored for compatibility.",
+    )
+}
+
 fn checkpoint_before_mutation(path: &Path, tool: &str) {
     match crate::file_checkpoint::checkpoint_file(path) {
         Ok(backup) => {
@@ -115,6 +125,19 @@ pub async fn execute_tool(
     dedup: Option<Arc<Mutex<ReadDedupCache>>>,
     task_store: Option<Arc<TaskStore>>,
     active_team_name: Option<&str>,
+) -> ExecutionResult {
+    execute_tool_with_runtime_id(kind, input, cwd, dedup, task_store, active_team_name, None).await
+}
+
+#[tracing::instrument(target = "jfc::tools", skip(input, cwd, dedup, task_store), fields(kind = ?kind))]
+pub async fn execute_tool_with_runtime_id(
+    kind: ToolKind,
+    input: ToolInput,
+    cwd: std::path::PathBuf,
+    dedup: Option<Arc<Mutex<ReadDedupCache>>>,
+    task_store: Option<Arc<TaskStore>>,
+    active_team_name: Option<&str>,
+    runtime_tool_id: Option<String>,
 ) -> ExecutionResult {
     #[cfg(feature = "hooks")]
     {
@@ -179,13 +202,13 @@ pub async fn execute_tool(
 
     // For task tools in team mode, prefer the caller-supplied store if
     // one was passed (the UI keeps `app.engine.task_store` pointing at the
-    // team's `tasks.json` once team mode is active, and the event-loop
+    // team's DB-backed task store once team mode is active, and the event-loop
     // migration runs at TeammateSpawned). Only fall back to
     // `TaskStore::open_team` when the caller didn't thread a store —
     // e.g. the swarm runner's tool path. Without this guard, every
     // concurrent task tool would `open_team` its own fresh
     // `Arc<TaskStore>`, each with its own private `Mutex<TaskStoreInner>`,
-    // and last-write-wins on `tasks.json` would silently drop sibling
+    // and last-write-wins on the shared task row would silently drop sibling
     // task creates — the "unknown task id t35..t46" symptom.
     let task_store = match (active_team_name, &kind, task_store.clone()) {
         (
@@ -214,11 +237,14 @@ pub async fn execute_tool(
             },
         ) => {
             let effective_cwd = resolve_bash_workdir(&cwd, workdir.as_deref());
+            let progress = runtime_tool_id
+                .as_ref()
+                .and_then(|id| snapshot_event_sender().map(|tx| (id.clone(), tx)));
             let result = execute_bash_with_options(
                 &command,
                 timeout,
                 &effective_cwd,
-                None,
+                progress,
                 run_in_background.unwrap_or(false),
             )
             .await;
@@ -238,7 +264,11 @@ pub async fn execute_tool(
                 timeout,
                 wait_up_to,
             },
-        ) => execute_bash_output(&task_id, offset, limit, block, wait_up_to.or(timeout)).await,
+        ) => {
+            let result =
+                execute_bash_output(&task_id, offset, limit, block, wait_up_to.or(timeout)).await;
+            neutralize_unknown_bash_output(result)
+        }
         (
             ToolKind::Read,
             ToolInput::Read {

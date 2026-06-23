@@ -90,10 +90,8 @@ const MIGRATIONS: &[&str] = &[
         last_run_ms  INTEGER NOT NULL
     );
     "#,
-    // v4 — session index (PLAN TODO 22). ADDITIVE: the canonical session store is
-    // still the JSON files; this is a queryable index `save_session` dual-writes
-    // so the catalog/picker can avoid byte-scanning every JSON header. No reader
-    // depends on it yet.
+    // v4 — primary session catalog. Legacy JSON files may still be backfilled
+    // into this table, but picker/search readers should treat the DB as source.
     r#"
     CREATE TABLE sessions (
         id            TEXT PRIMARY KEY,
@@ -112,7 +110,7 @@ const MIGRATIONS: &[&str] = &[
     // message, not a blob, so search is a query and saves append deltas instead
     // of rewriting the whole session). `meta` holds serialized tool-call/parts
     // JSON so structured fidelity survives the round trip. FTS5 mirror powers
-    // substring search. Still SHADOW: JSON remains canonical; no reader switched.
+    // substring search.
     r#"
     CREATE TABLE session_messages (
         session_id TEXT NOT NULL,
@@ -146,6 +144,298 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE knowledge ADD COLUMN mem_level TEXT;
     ALTER TABLE knowledge ADD COLUMN mem_meta TEXT;
     CREATE INDEX idx_knowledge_mem_level ON knowledge(mem_level);
+    "#,
+    // v7 — session event substrate. The transcript remains the renderable view,
+    // while these tables make turns, tool runs, retrieval, compaction, and
+    // findings queryable facts for maintenance and learning.
+    r#"
+    CREATE TABLE session_events (
+        id            TEXT PRIMARY KEY,
+        session_id    TEXT NOT NULL,
+        seq           INTEGER NOT NULL,
+        kind          TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        payload       TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX idx_session_events_sid_seq ON session_events(session_id, seq);
+    CREATE INDEX idx_session_events_kind ON session_events(kind);
+
+    CREATE TABLE session_turns (
+        session_id       TEXT NOT NULL,
+        turn_index       INTEGER NOT NULL,
+        user_seq         INTEGER,
+        assistant_seq    INTEGER,
+        user_text        TEXT NOT NULL DEFAULT '',
+        assistant_text   TEXT NOT NULL DEFAULT '',
+        status           TEXT NOT NULL DEFAULT 'complete',
+        model            TEXT,
+        created_at_ms    INTEGER NOT NULL,
+        PRIMARY KEY (session_id, turn_index)
+    );
+    CREATE INDEX idx_session_turns_sid ON session_turns(session_id);
+
+    CREATE TABLE session_tool_runs (
+        id              TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        message_seq     INTEGER NOT NULL,
+        part_index      INTEGER NOT NULL,
+        tool_call_id    TEXT,
+        runtime_id      TEXT,
+        kind            TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        input_json      TEXT,
+        output_json     TEXT,
+        duration_ms     INTEGER,
+        created_at_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX idx_session_tool_runs_sid ON session_tool_runs(session_id);
+    CREATE INDEX idx_session_tool_runs_status ON session_tool_runs(status);
+
+    CREATE TABLE session_retrieval_events (
+        id              TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        query           TEXT NOT NULL,
+        source          TEXT NOT NULL,
+        result_count    INTEGER NOT NULL DEFAULT 0,
+        payload         TEXT NOT NULL DEFAULT '{}',
+        created_at_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX idx_session_retrieval_events_sid ON session_retrieval_events(session_id);
+
+    CREATE TABLE session_compactions (
+        id              TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        before_tokens   INTEGER,
+        after_tokens    INTEGER,
+        summary         TEXT NOT NULL DEFAULT '',
+        payload         TEXT NOT NULL DEFAULT '{}',
+        created_at_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX idx_session_compactions_sid ON session_compactions(session_id);
+
+    CREATE TABLE session_findings (
+        id              TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        kind            TEXT NOT NULL,
+        summary         TEXT NOT NULL,
+        evidence        TEXT NOT NULL DEFAULT '',
+        status          TEXT NOT NULL DEFAULT 'open',
+        created_at_ms   INTEGER NOT NULL,
+        resolved_at_ms  INTEGER
+    );
+    CREATE INDEX idx_session_findings_sid ON session_findings(session_id);
+    CREATE INDEX idx_session_findings_status ON session_findings(status);
+    "#,
+    // v8 — session artifact/event substrate for the remaining legacy sidecars.
+    // `session_artifacts` stores latest state (goal, task snapshot, compact
+    // archive body), while `session_artifact_events` stores append-only streams
+    // (inbox, prompt rewrite exemplars, workflow journal entries).
+    r#"
+    CREATE TABLE session_artifacts (
+        session_id    TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        key           TEXT NOT NULL,
+        value_json    TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (session_id, kind, key)
+    );
+    CREATE INDEX idx_session_artifacts_sid_kind ON session_artifacts(session_id, kind);
+
+    CREATE TABLE session_artifact_events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        key           TEXT NOT NULL,
+        value_json    TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX idx_session_artifact_events_sid_kind
+        ON session_artifact_events(session_id, kind, key, id);
+    "#,
+    // v9 — unified agent/context/learning substrate. This is the shared
+    // persistence layer for advisor, council, bounty, teams, hidden historian
+    // workers, and Magic-Context-style diagnostics. User-facing concepts stay
+    // distinct; their runtime state lands in one event model.
+    r#"
+    CREATE TABLE agent_sessions (
+        id                 TEXT PRIMARY KEY,
+        parent_session_id  TEXT,
+        role               TEXT NOT NULL,
+        model              TEXT,
+        status             TEXT NOT NULL,
+        budget_tokens      INTEGER,
+        task_id            TEXT,
+        team_id            TEXT,
+        created_at_ms      INTEGER NOT NULL,
+        updated_at_ms      INTEGER NOT NULL
+    );
+    CREATE INDEX idx_agent_sessions_parent ON agent_sessions(parent_session_id);
+    CREATE INDEX idx_agent_sessions_team ON agent_sessions(team_id);
+    CREATE INDEX idx_agent_sessions_status ON agent_sessions(status);
+
+    CREATE TABLE agent_events (
+        id                TEXT PRIMARY KEY,
+        session_id         TEXT NOT NULL,
+        from_agent         TEXT,
+        to_agent           TEXT,
+        kind               TEXT NOT NULL,
+        content            TEXT NOT NULL DEFAULT '',
+        turn_id            TEXT,
+        causal_parent_id   TEXT,
+        created_at_ms      INTEGER NOT NULL
+    );
+    CREATE INDEX idx_agent_events_session ON agent_events(session_id, created_at_ms);
+    CREATE INDEX idx_agent_events_to_agent ON agent_events(to_agent, created_at_ms);
+
+    CREATE TABLE agent_mailbox (
+        id                TEXT PRIMARY KEY,
+        to_agent           TEXT NOT NULL,
+        from_agent         TEXT,
+        thread_id          TEXT,
+        task_id            TEXT,
+        priority           INTEGER NOT NULL DEFAULT 0,
+        content            TEXT NOT NULL DEFAULT '',
+        read_at_ms         INTEGER,
+        summarized_at_ms   INTEGER,
+        created_at_ms      INTEGER NOT NULL
+    );
+    CREATE INDEX idx_agent_mailbox_to_agent ON agent_mailbox(to_agent, read_at_ms, priority, created_at_ms);
+    CREATE INDEX idx_agent_mailbox_thread ON agent_mailbox(thread_id);
+
+    CREATE TABLE tool_runs (
+        id                TEXT PRIMARY KEY,
+        agent_id           TEXT,
+        session_id         TEXT,
+        runtime_id         TEXT,
+        kind               TEXT NOT NULL,
+        command            TEXT,
+        input_json         TEXT,
+        output_ref         TEXT,
+        status             TEXT NOT NULL,
+        duration_ms        INTEGER,
+        background         INTEGER NOT NULL DEFAULT 0,
+        created_at_ms      INTEGER NOT NULL,
+        updated_at_ms      INTEGER NOT NULL
+    );
+    CREATE INDEX idx_tool_runs_session ON tool_runs(session_id, created_at_ms);
+    CREATE INDEX idx_tool_runs_runtime ON tool_runs(runtime_id);
+    CREATE INDEX idx_tool_runs_status ON tool_runs(status);
+
+    CREATE TABLE learning_events (
+        id                  TEXT PRIMARY KEY,
+        source_session_id   TEXT,
+        source_turn_id      TEXT,
+        source_tool_run_id  TEXT,
+        candidate_rule      TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        verifier_evidence   TEXT NOT NULL DEFAULT '',
+        recurrence_count    INTEGER NOT NULL DEFAULT 0,
+        created_at_ms       INTEGER NOT NULL,
+        updated_at_ms       INTEGER NOT NULL
+    );
+    CREATE INDEX idx_learning_events_status ON learning_events(status, updated_at_ms);
+    CREATE INDEX idx_learning_events_source_session ON learning_events(source_session_id);
+
+    CREATE TABLE context_events (
+        id                  TEXT PRIMARY KEY,
+        session_id           TEXT NOT NULL,
+        turn_id              TEXT,
+        agent_id             TEXT,
+        subagent_id          TEXT,
+        model                TEXT NOT NULL,
+        input_tokens         INTEGER NOT NULL DEFAULT 0,
+        output_tokens        INTEGER NOT NULL DEFAULT 0,
+        thinking_tokens      INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens    INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens   INTEGER NOT NULL DEFAULT 0,
+        context_limit        INTEGER,
+        bust_cause           TEXT,
+        drop_cause           TEXT,
+        payload              TEXT NOT NULL DEFAULT '{}',
+        created_at_ms        INTEGER NOT NULL
+    );
+    CREATE INDEX idx_context_events_session ON context_events(session_id, created_at_ms);
+    CREATE INDEX idx_context_events_model ON context_events(model, created_at_ms);
+    CREATE INDEX idx_context_events_agent ON context_events(agent_id, created_at_ms);
+    "#,
+    // v10 — runtime definition store. Prompt text, skills, agents, slash
+    // commands, and tool-schema snapshots are durable editable definitions now;
+    // legacy Markdown files are import sources, not the canonical runtime state.
+    r#"
+    CREATE TABLE definitions (
+        id              TEXT PRIMARY KEY,
+        kind            TEXT NOT NULL,
+        scope           TEXT NOT NULL,
+        project_key     TEXT,
+        namespace       TEXT,
+        name            TEXT NOT NULL,
+        title           TEXT,
+        description     TEXT,
+        body            TEXT NOT NULL,
+        metadata_json   TEXT NOT NULL DEFAULT '{}',
+        source_path     TEXT,
+        source_hash     TEXT,
+        status          TEXT NOT NULL DEFAULT 'active',
+        version         INTEGER NOT NULL DEFAULT 1,
+        created_by      TEXT NOT NULL DEFAULT 'import',
+        created_at_ms   INTEGER NOT NULL,
+        updated_at_ms   INTEGER NOT NULL,
+        superseded_by   TEXT
+    );
+    CREATE INDEX idx_definitions_kind_name ON definitions(kind, name);
+    CREATE INDEX idx_definitions_project ON definitions(project_key, kind);
+    CREATE INDEX idx_definitions_status ON definitions(status, updated_at_ms);
+    CREATE INDEX idx_definitions_source_hash ON definitions(source_hash);
+
+    CREATE VIRTUAL TABLE definitions_fts USING fts5(
+        name, description, body, metadata_json,
+        content='definitions', content_rowid='rowid'
+    );
+    CREATE TRIGGER definitions_ai AFTER INSERT ON definitions BEGIN
+        INSERT INTO definitions_fts(rowid, name, description, body, metadata_json)
+        VALUES (
+            new.rowid,
+            new.name,
+            COALESCE(new.description, ''),
+            new.body,
+            new.metadata_json
+        );
+    END;
+    CREATE TRIGGER definitions_ad AFTER DELETE ON definitions BEGIN
+        INSERT INTO definitions_fts(
+            definitions_fts, rowid, name, description, body, metadata_json
+        )
+        VALUES (
+            'delete',
+            old.rowid,
+            old.name,
+            COALESCE(old.description, ''),
+            old.body,
+            old.metadata_json
+        );
+    END;
+    CREATE TRIGGER definitions_au AFTER UPDATE ON definitions BEGIN
+        INSERT INTO definitions_fts(
+            definitions_fts, rowid, name, description, body, metadata_json
+        )
+        VALUES (
+            'delete',
+            old.rowid,
+            old.name,
+            COALESCE(old.description, ''),
+            old.body,
+            old.metadata_json
+        );
+        INSERT INTO definitions_fts(rowid, name, description, body, metadata_json)
+        VALUES (
+            new.rowid,
+            new.name,
+            COALESCE(new.description, ''),
+            new.body,
+            new.metadata_json
+        );
+    END;
     "#,
 ];
 

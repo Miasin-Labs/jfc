@@ -268,6 +268,9 @@ fn handle_theme_picker_key(app: &mut App, key: event::KeyEvent) -> bool {
             // Cancel: revert to the theme that was active before previewing.
             if let Some(orig) = app.theme_preview_original.take() {
                 app.theme = orig;
+                if let Some(name) = app.theme_preview_original_name.take() {
+                    app.active_theme_name = name;
+                }
                 app.render_cache.borrow_mut().clear();
                 app.height_index.borrow_mut().clear();
                 crate::markdown::clear_highlight_cache();

@@ -8,27 +8,34 @@ use crate::{
 use super::agent_log_parser::parse_agent_log_to_chat_messages;
 use crate::app::EngineState;
 
+const BACKGROUND_RESULT_SESSION_ID: &str = "__daemon__";
+const BACKGROUND_RESULT_KIND: &str = "background_result";
+
 pub fn sync_detached_background_tasks_from_daemon(state: &mut EngineState) -> bool {
     sync_detached_background_tasks_from_daemon_with_paths(state, &DaemonPaths::default_user())
 }
 
 /// Persist a background agent's full result to a retrievable artifact so the
 /// parent can read the complete report even when the inline completion reminder
-/// is truncated. Returns the written path, or `None` if it could not be written
+/// is truncated. Returns the DB artifact handle, or `None` if it could not be written
 /// (best-effort — never blocks the reminder).
 pub fn persist_background_result(task_id: &str, body: &str) -> Option<std::path::PathBuf> {
-    let dir = DaemonPaths::default_user()
-        .base_dir
-        .join("background-results");
-    std::fs::create_dir_all(&dir).ok()?;
-    // Sanitise the task id for use as a filename.
     let safe: String = task_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    let path = dir.join(format!("{safe}.md"));
-    std::fs::write(&path, body).ok()?;
-    Some(path)
+    jfc_knowledge::KnowledgeStore::open_default()
+        .ok()?
+        .upsert_session_artifact(
+            BACKGROUND_RESULT_SESSION_ID,
+            BACKGROUND_RESULT_KIND,
+            &safe,
+            body,
+        )
+        .ok()?;
+    Some(std::path::PathBuf::from(format!(
+        "db:background-result:{safe}"
+    )))
 }
 
 fn sync_detached_background_tasks_from_daemon_with_paths(

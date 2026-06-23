@@ -310,8 +310,8 @@ mod tests {
     // the `JFC_POST_EDIT_DIAGNOSTICS` env flag — so they run under one mutex and
     // restore both on exit. Distinct per-test basenames keep the snapshot filter
     // from cross-matching.
-    use std::sync::Mutex as StdMutex;
-    static DIAG_GUARD_LOCK: StdMutex<()> = StdMutex::new(());
+    use tokio::sync::Mutex as AsyncMutex;
+    static DIAG_GUARD_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
     fn diag_entry(file: &str, line: u32, msg: &str) -> crate::diagnostics::DiagnosticEntry {
         crate::diagnostics::DiagnosticEntry {
@@ -333,7 +333,7 @@ mod tests {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let _g = DIAG_GUARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = DIAG_GUARD_LOCK.lock().await;
         let prev_flag = std::env::var("JFC_POST_EDIT_DIAGNOSTICS").ok();
         let prev_snapshot = crate::diagnostics::global_snapshot();
         // SAFETY: env mutation is serialized by DIAG_GUARD_LOCK and restored below.
@@ -413,7 +413,7 @@ mod tests {
     // byte-identical to pre-feature behavior.
     #[tokio::test]
     async fn diagnostics_guard_disabled_by_default_regression() {
-        let _g = DIAG_GUARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = DIAG_GUARD_LOCK.lock().await;
         let prev_flag = std::env::var("JFC_POST_EDIT_DIAGNOSTICS").ok();
         let prev_snapshot = crate::diagnostics::global_snapshot();
         let cwd = std::env::temp_dir();

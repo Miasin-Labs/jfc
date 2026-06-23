@@ -446,72 +446,67 @@ pub fn format_exhaustion_banner(goal: &ActiveGoal) -> String {
     )
 }
 
-/// Path to the goal sidecar JSON for a given session id. Lives next
-/// to the session file under `~/.config/jfc/sessions/`. A sidecar
-/// (rather than a new field on `SerializedSession`) keeps the
-/// 28+ `save_session` call sites untouched and lets the goal layer
-/// own its own persistence lifecycle. Missing file = no active goal.
-pub fn sidecar_path(session_id: &str) -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("jfc")
-        .join("sessions")
-        .join(format!("{session_id}.goal.json"))
-}
+const GOAL_ARTIFACT_KIND: &str = "goal";
+const GOAL_ARTIFACT_KEY: &str = "active";
 
-/// Persist the active goal beside the session journal so resume can
-/// rebuild it. `None` deletes any prior sidecar (the goal cleared,
-/// or completed, or exhausted — we don't want resume to revive a
-/// stale one). Best-effort: failures are logged, never propagated.
+/// Persist the active goal in the session DB so resume can rebuild it.
+/// `None` deletes any prior record.
 pub fn save_sidecar(session_id: &str, goal: Option<&ActiveGoal>) {
-    let path = sidecar_path(session_id);
-    match goal {
-        Some(g) => {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match serde_json::to_string_pretty(g) {
-                Ok(json) => {
-                    let tmp = path.with_extension("tmp");
-                    if std::fs::write(&tmp, json).is_ok() {
-                        let _ = std::fs::rename(&tmp, &path);
-                        tracing::debug!(
-                            target: "jfc::goal",
-                            session_id,
-                            iterations = g.iterations,
-                            "goal sidecar saved"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "jfc::goal",
-                        session_id,
-                        error = %e,
-                        "failed to serialize goal sidecar"
-                    );
-                }
-            }
+    let store = match jfc_knowledge::KnowledgeStore::open_default() {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(target: "jfc::goal", session_id, error = %e, "failed to open goal store");
+            return;
         }
+    };
+    match goal {
+        Some(g) => match serde_json::to_string(g) {
+            Ok(json) => {
+                if let Err(e) = store.upsert_session_artifact(
+                    session_id,
+                    GOAL_ARTIFACT_KIND,
+                    GOAL_ARTIFACT_KEY,
+                    &json,
+                ) {
+                    tracing::warn!(target: "jfc::goal", session_id, error = %e, "failed to persist goal");
+                    return;
+                }
+                tracing::debug!(
+                    target: "jfc::goal",
+                    session_id,
+                    iterations = g.iterations,
+                    "goal saved"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "jfc::goal",
+                    session_id,
+                    error = %e,
+                    "failed to serialize goal"
+                );
+            }
+        },
         None => {
-            let _ = std::fs::remove_file(&path);
+            let _ =
+                store.delete_session_artifact(session_id, GOAL_ARTIFACT_KIND, GOAL_ARTIFACT_KEY);
             tracing::debug!(
                 target: "jfc::goal",
                 session_id,
-                "goal sidecar removed"
+                "goal removed"
             );
         }
     }
 }
 
-/// Load any persisted goal for `session_id`. Returns `None` when the
-/// sidecar is absent, unreadable, or malformed — those all read as
-/// "no active goal." We don't surface load errors to the user
-/// because a corrupted sidecar shouldn't block session resume.
+/// Load any persisted goal for `session_id`.
 pub fn load_sidecar(session_id: &str) -> Option<ActiveGoal> {
-    let path = sidecar_path(session_id);
-    let raw = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str::<ActiveGoal>(&raw).ok()
+    let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+    let row = store
+        .get_session_artifact(session_id, GOAL_ARTIFACT_KIND, GOAL_ARTIFACT_KEY)
+        .ok()
+        .flatten()?;
+    serde_json::from_str::<ActiveGoal>(&row.value_json).ok()
 }
 
 /// System-reminder body injected into the user-side of the conversation
@@ -665,26 +660,25 @@ mod tests {
         assert!(snap.contains("transcript truncated"));
     }
 
-    /// Test-local guard that restores `XDG_CONFIG_HOME` on drop.
-    /// Avoids leaking a tmp path into the next test in the same
-    /// process. `serial_test::serial` ensures these tests don't race
-    /// each other, since env vars are process-global.
-    struct XdgGuard {
+    /// Test-local guard that restores `JFC_KNOWLEDGE_DB` on drop.
+    struct KnowledgeDbGuard {
+        _dir: tempfile::TempDir,
         prev: Option<String>,
     }
-    impl XdgGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let prev = std::env::var("XDG_CONFIG_HOME").ok();
-            unsafe { std::env::set_var("XDG_CONFIG_HOME", path) };
-            Self { prev }
+    impl KnowledgeDbGuard {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let prev = std::env::var("JFC_KNOWLEDGE_DB").ok();
+            unsafe { std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("knowledge.db")) };
+            Self { _dir: dir, prev }
         }
     }
-    impl Drop for XdgGuard {
+    impl Drop for KnowledgeDbGuard {
         fn drop(&mut self) {
             unsafe {
                 match self.prev.take() {
-                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                    Some(v) => std::env::set_var("JFC_KNOWLEDGE_DB", v),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
                 }
             }
         }
@@ -696,8 +690,7 @@ mod tests {
     #[test]
     fn sidecar_round_trips_goal_normal() {
         let session_id = format!("ses_goal_sidecar_test_{}", std::process::id());
-        let tmp = tempfile::tempdir().unwrap();
-        let _guard = XdgGuard::set(tmp.path());
+        let _guard = KnowledgeDbGuard::new();
 
         let mut goal = ActiveGoal::new("ship it".into());
         goal.iterations = 7;
@@ -721,17 +714,22 @@ mod tests {
     // rather than panicking — a busted sidecar shouldn't block resume.
     #[serial_test::serial]
     #[test]
-    fn sidecar_corrupt_file_loads_as_none_robust() {
+    fn sidecar_corrupt_db_record_loads_as_none_robust() {
         let session_id = format!("ses_goal_corrupt_test_{}", std::process::id());
-        let tmp = tempfile::tempdir().unwrap();
-        let _guard = XdgGuard::set(tmp.path());
+        let _guard = KnowledgeDbGuard::new();
 
-        let path = sidecar_path(&session_id);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "{ not valid json at all").unwrap();
+        let store = jfc_knowledge::KnowledgeStore::open_default().unwrap();
+        store
+            .upsert_session_artifact(
+                &session_id,
+                GOAL_ARTIFACT_KIND,
+                GOAL_ARTIFACT_KEY,
+                "{ not valid json at all",
+            )
+            .unwrap();
         assert!(
             load_sidecar(&session_id).is_none(),
-            "corrupt sidecar must not panic, must read as None"
+            "corrupt persisted goal must not panic, must read as None"
         );
     }
 

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 jfc-core = { path = "../jfc-core" }
+jfc-knowledge = { path = "../jfc-knowledge" }
 jfc-provider = { path = "../jfc-provider" }
 
 async-trait = { workspace = true }

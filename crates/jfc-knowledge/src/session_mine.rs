@@ -1,8 +1,8 @@
 //! Stage 1 — mine the user's own session history into candidate lessons.
 //!
-//! Reads `~/.config/jfc/sessions/*.json` (verified shape:
-//! `{id, cwd, messages:[{role, parts:[{type:"tool", kind, status, input,
-//! output} | {type:"text"|"reasoning", content}]}]}`) and extracts two lesson
+//! Reads DB-backed session transcripts from the knowledge store. The mined shape is
+//! `{id, messages:[{role, parts:[{type:"tool", kind, status, input, output} |
+//! {type:"text"|"reasoning", content}]}]}` and extracts two lesson
 //! kinds, **deterministically** (no LLM):
 //!
 //! 1. **Error patterns** — a `status:"failed"` tool part followed by a later
@@ -18,14 +18,14 @@
 //! All extracted text is redacted (Stage 0) first. Lessons are project-scoped
 //! candidates keyed by a `norm_key`, so the same lesson seen across many sessions
 //! **compounds** (`support_count`) rather than duplicating. Nothing here promotes
-//! to cross-project scope — that stays human-gated.
-
-use std::path::Path;
+//! to cross-project scope directly; maintenance promotes proven generalizable
+//! rows after enough verified support.
 
 use serde::Deserialize;
 
 use crate::record::{Kind, Outcome};
 use crate::redact::redact;
+use crate::{KnowledgeStore, SessionMessage as StoredSessionMessage};
 
 /// A mined lesson, ready to be folded into the candidate store.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +115,65 @@ pub fn mine_session_json(raw: &str) -> Vec<MinedLesson> {
     lessons
 }
 
+pub fn mine_store(store: &KnowledgeStore, limit: usize) -> (Vec<MinedLesson>, MineReport) {
+    let mut lessons = Vec::new();
+    let mut report = MineReport::default();
+    let Ok(sessions) = store.list_sessions(None, limit) else {
+        return (lessons, report);
+    };
+    for session in sessions {
+        let Ok(messages) = store.load_transcript(&session.id) else {
+            continue;
+        };
+        if messages.is_empty() {
+            continue;
+        }
+        report.sessions_scanned += 1;
+        for lesson in mine_db_transcript(&session.id, &messages) {
+            match lesson.kind {
+                Kind::Preference => report.preference_lessons += 1,
+                _ => report.error_lessons += 1,
+            }
+            if lesson.outcome == Outcome::Verified {
+                report.verified += 1;
+            }
+            lessons.push(lesson);
+        }
+    }
+    (lessons, report)
+}
+
+fn mine_db_transcript(session_id: &str, messages: &[StoredSessionMessage]) -> Vec<MinedLesson> {
+    let raw_messages = messages
+        .iter()
+        .map(|message| {
+            let parts = message
+                .meta
+                .as_deref()
+                .and_then(|meta| serde_json::from_str::<serde_json::Value>(meta).ok())
+                .and_then(|value| value.get("parts").cloned())
+                .unwrap_or_else(|| {
+                    serde_json::json!([{
+                        "type": "text",
+                        "content": message.content.as_str(),
+                    }])
+                });
+            serde_json::json!({
+                "role": message.role,
+                "parts": parts,
+            })
+        })
+        .collect::<Vec<_>>();
+    let raw = serde_json::json!({
+        "id": session_id,
+        "messages": raw_messages,
+    });
+    serde_json::to_string(&raw)
+        .ok()
+        .map(|raw| mine_session_json(&raw))
+        .unwrap_or_default()
+}
+
 /// Error patterns: each failed tool part, verified if a later same-kind part
 /// succeeded (recovery window). Flatten parts in order so "later" is well-defined.
 fn mine_errors(session: &Session, out: &mut Vec<MinedLesson>) {
@@ -198,6 +257,8 @@ fn classify_error(output: &str) -> String {
     let o = output.to_lowercase();
     const CLASSES: &[(&str, &str)] = &[
         ("old_string not found", "old_string-not-found"),
+        ("unknown bash task id", "unknown-background-task-id"),
+        ("no such background task", "unknown-background-task-id"),
         ("no such file", "no-such-file"),
         ("command not found", "command-not-found"),
         ("permission denied", "permission-denied"),
@@ -222,6 +283,9 @@ fn recovery_claim(kind: &str, class: &str, recovered: bool) -> String {
              bytes (including indentation/line-number gutters) before retrying."
         }
         "no-such-file" => "Verify the path exists (and the cwd) before operating on a file.",
+        "unknown-background-task-id" => {
+            "Use only exact background task ids emitted by the shell tool; do not invent, trim, or rewrite ids before requesting output."
+        }
         "command-not-found" => "Check the tool is installed / on PATH before invoking it.",
         "module-not-found" => "Install/declare the dependency before importing it.",
         "no-match" | "parse-error" => "Confirm the target text exactly before a search/replace.",
@@ -268,38 +332,6 @@ fn normalize_claim(s: &str) -> String {
         .join(" ")
 }
 
-/// Mine every `ses_*.json` in a directory. Sidecar files (`.goal.json`, `.bak`)
-/// are skipped. Pure parse+extract — the caller folds the results into the store.
-pub fn mine_dir(dir: &Path) -> (Vec<MinedLesson>, MineReport) {
-    let mut lessons = Vec::new();
-    let mut report = MineReport::default();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (lessons, report);
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if !name.starts_with("ses_") || !name.ends_with(".json") || name.contains("goal") {
-            continue;
-        }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        report.sessions_scanned += 1;
-        for l in mine_session_json(&raw) {
-            match l.kind {
-                Kind::Preference => report.preference_lessons += 1,
-                _ => report.error_lessons += 1,
-            }
-            if l.outcome == Outcome::Verified {
-                report.verified += 1;
-            }
-            lessons.push(l);
-        }
-    }
-    (lessons, report)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +369,98 @@ mod tests {
         let lessons = mine_session_json(raw);
         assert_eq!(lessons.len(), 1);
         assert_eq!(lessons[0].outcome, Outcome::Unverified);
+    }
+
+    #[test]
+    fn unknown_bash_task_id_yields_shell_id_lesson_normal() {
+        let raw = r#"{
+          "id":"s",
+          "messages":[
+            {"role":"assistant","parts":[
+              {"type":"tool","kind":"BashOutput","status":"failed","output":{"type":"text","content":"Unknown Bash task id 'bash_7f49': no such background task"}}
+            ]},
+            {"role":"assistant","parts":[
+              {"type":"tool","kind":"BashOutput","status":"complete","output":{"type":"text","content":"exit 0"}}
+            ]}
+          ]
+        }"#;
+        let lessons = mine_session_json(raw);
+
+        assert_eq!(lessons.len(), 1);
+        assert_eq!(lessons[0].outcome, Outcome::Verified);
+        assert_eq!(
+            lessons[0].norm_key,
+            "err:bashoutput:unknown-background-task-id"
+        );
+        assert!(lessons[0].claim.contains("exact background task ids"));
+    }
+
+    #[test]
+    fn mine_store_reads_lossless_db_meta_normal() {
+        let mut store = KnowledgeStore::open_in_memory().unwrap();
+        let row = crate::SessionRow {
+            id: "ses_db".into(),
+            cwd: Some("/repo".into()),
+            model: Some("claude".into()),
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some("2026-01-01T01:00:00Z".into()),
+            first_prompt: Some("debug bash output".into()),
+            title: None,
+            message_count: 2,
+        };
+        let messages = vec![
+            StoredSessionMessage {
+                seq: 0,
+                role: "assistant".into(),
+                content: "visible text alone is not enough".into(),
+                meta: Some(
+                    serde_json::json!({
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool",
+                            "kind": "BashOutput",
+                            "status": "failed",
+                            "output": {
+                                "type": "text",
+                                "content": "Unknown Bash task id 'bash_bad': no such background task"
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ),
+            },
+            StoredSessionMessage {
+                seq: 1,
+                role: "assistant".into(),
+                content: "later output succeeded".into(),
+                meta: Some(
+                    serde_json::json!({
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool",
+                            "kind": "BashOutput",
+                            "status": "complete",
+                            "output": {
+                                "type": "text",
+                                "content": "exit 0"
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ),
+            },
+        ];
+        store.replace_transcript(&row, &messages).unwrap();
+
+        let (lessons, report) = mine_store(&store, 10);
+
+        assert_eq!(report.sessions_scanned, 1);
+        assert_eq!(report.verified, 1);
+        assert_eq!(lessons.len(), 1);
+        assert_eq!(
+            lessons[0].norm_key,
+            "err:bashoutput:unknown-background-task-id"
+        );
     }
 
     // A user negation after an assistant turn → a preference lesson.

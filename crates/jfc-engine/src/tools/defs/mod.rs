@@ -11,6 +11,8 @@ mod tasks;
 
 use jfc_provider::ToolDef;
 
+const DEF_KIND_TOOL: &str = "tool_definition";
+
 pub fn all_tool_defs() -> Vec<ToolDef> {
     let mut defs = Vec::with_capacity(64);
     defs.extend(filesystem::filesystem_tool_defs());
@@ -35,4 +37,71 @@ pub fn model_tool_defs() -> Vec<ToolDef> {
 
 pub fn is_model_hidden_builtin_tool_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("BashOutput")
+}
+
+pub fn sync_tool_definitions_to_db(tools: &[ToolDef]) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Some(store) = open_definition_store(&cwd) else {
+        return;
+    };
+    for tool in tools {
+        let body = serde_json::to_string_pretty(&serde_json::json!({
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+        }))
+        .unwrap_or_else(|_| tool.description.clone());
+        let def = jfc_knowledge::NewDefinition {
+            kind: DEF_KIND_TOOL.to_owned(),
+            scope: jfc_knowledge::DefinitionScope::Builtin,
+            project_key: None,
+            namespace: None,
+            name: tool.name.clone(),
+            title: Some(tool.name.clone()),
+            description: Some(tool.description.clone()),
+            body: body.clone(),
+            metadata_json: serde_json::json!({
+                "source": "runtime_tool_catalog",
+                "executable_owner": "rust",
+            })
+            .to_string(),
+            source_path: Some(format!("rust:tool:{}", tool.name)),
+            source_hash: Some(content_hash(&body)),
+            status: jfc_knowledge::DefinitionStatus::Active,
+            created_by: "runtime_catalog".to_owned(),
+        };
+        if let Err(err) = store.upsert_definition(&def) {
+            tracing::warn!(
+                target: "jfc::tools",
+                tool = %tool.name,
+                error = %err,
+                "failed to sync tool definition"
+            );
+        }
+    }
+}
+
+fn open_definition_store(project_root: &std::path::Path) -> Option<jfc_knowledge::KnowledgeStore> {
+    #[cfg(test)]
+    {
+        let path = project_root.join(".jfc").join("definition-test.db");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        jfc_knowledge::KnowledgeStore::open(&path).ok()
+    }
+    #[cfg(not(test))]
+    {
+        let _ = project_root;
+        jfc_knowledge::KnowledgeStore::open_default().ok()
+    }
+}
+
+fn content_hash(raw: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }

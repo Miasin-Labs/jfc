@@ -23,8 +23,8 @@ use super::state::{
     load_state_for_update, save_state, with_state_lock,
 };
 use super::worker::{
-    arm_worker_launch_epoch, mark_background_agent_spawn_failed, reap_worker_process,
-    record_background_agent_worker_pid, spawn_worker_process,
+    arm_worker_launch_epoch, load_background_agent_launch, mark_background_agent_spawn_failed,
+    reap_worker_process, record_background_agent_worker_pid, spawn_worker_process,
 };
 
 pub(crate) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Result<DaemonState> {
@@ -49,9 +49,7 @@ pub(crate) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Resul
                         && agent.respawn_count < worker_respawn_limit()
                         && !low_memory_respawn_blocked()
                         && let Some(launch_path) = agent.launch_path.clone()
-                        && let Ok(launch_json) = std::fs::read_to_string(&launch_path)
-                        && let Ok(launch) =
-                            serde_json::from_str::<BackgroundAgentLaunch>(&launch_json)
+                        && let Ok(launch) = load_background_agent_launch(paths, &launch_path)
                     {
                         agent.respawn_count = agent.respawn_count.saturating_add(1);
                         agent.updated_at = now;
@@ -72,8 +70,7 @@ pub(crate) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Resul
                     && agent.respawn_count < worker_respawn_limit()
                     && !low_memory_respawn_blocked()
                     && let Some(launch_path) = agent.launch_path.clone()
-                    && let Ok(launch_json) = std::fs::read_to_string(&launch_path)
-                    && let Ok(launch) = serde_json::from_str::<BackgroundAgentLaunch>(&launch_json)
+                    && let Ok(launch) = load_background_agent_launch(paths, &launch_path)
                 {
                     agent.respawn_count = agent.respawn_count.saturating_add(1);
                     agent.updated_at = now;

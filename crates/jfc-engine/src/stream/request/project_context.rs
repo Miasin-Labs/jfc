@@ -145,12 +145,17 @@ pub(super) async fn append_project_context(
         stats.memory_context_chars += memory_stats.prompt_chars;
         stats.fresh_recall_chars += memory_stats.fresh_recall_chars;
 
-        // Cross-project knowledge recall (jfc-knowledge). Gated off by default;
-        // screened as reference data. Appended after the per-project memory block.
+        // Cross-project knowledge recall (jfc-knowledge). Screened as reference
+        // data. Appended after the per-project memory block.
         // On the FIRST turn, also emit a session-start "knowledge brief" so the
         // agent opens with its accumulated cross-project memory (the diagram's
         // MEMORY BANK read at session start — "never starts blind again").
         if is_first_turn(messages) {
+            crate::warm_knowledge_before_prompt(
+                cwd_path.clone(),
+                std::time::Duration::from_millis(750),
+            )
+            .await;
             stats.memory_context_chars +=
                 append_session_start_knowledge_brief(system_prompt, &cwd_path).await;
         }

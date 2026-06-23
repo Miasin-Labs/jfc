@@ -1,4 +1,4 @@
-//! JSONL append-only journal for workflow resume.
+//! DB-backed append-only journal for workflow resume.
 //!
 //! Each `agent()` call produces a chain-hash key:
 //!   key = "v2:" + sha256(running_hash + "\0" + prompt + "\0" + opts_json)
@@ -8,9 +8,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
+
+const GLOBAL_WORKFLOW_SESSION_ID: &str = "__workflow_global__";
+const WORKFLOW_JOURNAL_KIND: &str = "workflow_journal";
 
 /// A single journal entry (one line in the JSONL file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,55 +34,72 @@ pub struct JournalCache {
 
 /// Append-only journal writer.
 pub struct JournalWriter {
-    path: PathBuf,
+    session_id: String,
+    run_id: String,
 }
 
 impl JournalWriter {
-    pub fn new(session_dir: &Path, run_id: &str) -> Self {
+    pub fn new(session_id: Option<&str>, run_id: &str) -> Self {
         Self {
-            path: session_dir.join(format!("workflow_journal_{run_id}.jsonl")),
+            session_id: session_id
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(GLOBAL_WORKFLOW_SESSION_ID)
+                .to_owned(),
+            run_id: run_id.to_owned(),
         }
     }
 
     pub async fn append(&self, entry: &JournalEntry) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-        let mut line = serde_json::to_string(entry).unwrap_or_default();
-        line.push('\n');
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
-        file.flush().await?;
-        Ok(())
+        let session_id = self.session_id.clone();
+        let run_id = self.run_id.clone();
+        let json = serde_json::to_string(entry).map_err(io_invalid)?;
+        tokio::task::spawn_blocking(move || {
+            let store = jfc_knowledge::KnowledgeStore::open_default().map_err(io_other)?;
+            store
+                .append_session_artifact_event(&session_id, WORKFLOW_JOURNAL_KIND, &run_id, &json)
+                .map_err(io_other)?;
+            Ok(())
+        })
+        .await
+        .map_err(io_other)?
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn label(&self) -> String {
+        format!("db:{}/{}", self.session_id, self.run_id)
     }
 }
 
-/// Load a journal file into a cache for resume lookups.
-pub async fn load_journal(session_dir: &Path, run_id: &str) -> JournalCache {
-    let path = session_dir.join(format!("workflow_journal_{run_id}.jsonl"));
+/// Load a journal into a cache for resume lookups.
+pub async fn load_journal(session_id: Option<&str>, run_id: &str) -> JournalCache {
+    let session_id = session_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(GLOBAL_WORKFLOW_SESSION_ID)
+        .to_owned();
+    let run_id = run_id.to_owned();
+    let entries = tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+        let rows = store
+            .list_session_artifact_events(
+                &session_id,
+                WORKFLOW_JOURNAL_KIND,
+                Some(&run_id),
+                100_000,
+            )
+            .ok()?;
+        Some(
+            rows.into_iter()
+                .filter_map(|row| serde_json::from_str::<JournalEntry>(&row.value_json).ok())
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+
     let mut results = HashMap::new();
     let mut started: HashMap<String, Vec<String>> = HashMap::new();
-
-    let content = match fs::read_to_string(&path).await {
-        Ok(c) => c,
-        Err(_) => return JournalCache { results, started },
-    };
-
-    for line in content.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
-            continue;
-        };
+    for entry in entries {
         match entry {
             JournalEntry::Started { key, agent_id } => {
                 started.entry(key).or_default().push(agent_id);
@@ -98,6 +115,14 @@ pub async fn load_journal(session_dir: &Path, run_id: &str) -> JournalCache {
     }
 
     JournalCache { results, started }
+}
+
+fn io_invalid(error: impl std::error::Error + Send + Sync + 'static) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+}
+
+fn io_other(error: impl std::error::Error + Send + Sync + 'static) -> std::io::Error {
+    std::io::Error::other(error)
 }
 
 /// Compute the chain-hash key for an agent() call.
@@ -145,7 +170,23 @@ mod tests {
     #[tokio::test]
     async fn journal_round_trip_normal() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let writer = JournalWriter::new(tmp.path(), "wf_test123");
+        let prior = std::env::var("JFC_KNOWLEDGE_DB").ok();
+        unsafe {
+            std::env::set_var("JFC_KNOWLEDGE_DB", tmp.path().join("knowledge.db"));
+        }
+        struct Guard(Option<String>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(prev) => std::env::set_var("JFC_KNOWLEDGE_DB", prev),
+                        None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                    }
+                }
+            }
+        }
+        let _guard = Guard(prior);
+        let writer = JournalWriter::new(Some("ses_wf_test"), "wf_test123");
 
         writer
             .append(&JournalEntry::Started {
@@ -164,7 +205,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cache = load_journal(tmp.path(), "wf_test123").await;
+        let cache = load_journal(Some("ses_wf_test"), "wf_test123").await;
         assert_eq!(cache.results.len(), 1);
         assert_eq!(cache.results["v2:abc"], serde_json::json!("hello world"));
         assert_eq!(cache.started["v2:abc"].len(), 1);

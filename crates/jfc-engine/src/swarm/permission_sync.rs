@@ -5,11 +5,10 @@
 //! request to the user, collects approval/rejection, and sends a response
 //! back to the worker's mailbox.
 //!
-//! File layout:
+//! Storage layout:
 //! ```text
-//! ~/.claude/teams/{team}/permissions/
-//!   pending/    — requests awaiting leader decision
-//!   resolved/   — completed decisions (worker polls these)
+//! session_artifacts("__swarm__", "permission_pending", "{team}:{id}")
+//! session_artifacts("__swarm__", "permission_resolved", "{team}:{id}")
 //! ```
 
 use std::path::PathBuf;
@@ -20,6 +19,10 @@ use tracing::debug;
 
 use super::mailbox;
 use super::types::*;
+
+const PERMISSION_SESSION_ID: &str = "__swarm__";
+const PERMISSION_PENDING_KIND: &str = "permission_pending";
+const PERMISSION_RESOLVED_KIND: &str = "permission_resolved";
 
 // ─── Path helpers ────────────────────────────────────────────────────────────
 
@@ -38,6 +41,69 @@ fn resolved_dir(team_name: &str) -> PathBuf {
 async fn ensure_permission_dirs(team_name: &str) -> anyhow::Result<()> {
     fs::create_dir_all(pending_dir(team_name)).await?;
     fs::create_dir_all(resolved_dir(team_name)).await?;
+    Ok(())
+}
+
+fn permission_key(team_name: &str, request_id: &str) -> String {
+    format!("{}:{request_id}", super::sanitize_name(team_name))
+}
+
+fn permission_key_prefix(team_name: &str) -> String {
+    format!("{}:", super::sanitize_name(team_name))
+}
+
+fn open_permission_store() -> anyhow::Result<jfc_knowledge::KnowledgeStore> {
+    if let Some(home) = mailbox::swarm_home_override() {
+        let path = home.join(".jfc").join("knowledge.db");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return Ok(jfc_knowledge::KnowledgeStore::open(&path)?);
+    }
+    Ok(jfc_knowledge::KnowledgeStore::open_default()?)
+}
+
+async fn run_permission_db<T, F>(f: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(jfc_knowledge::KnowledgeStore) -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || f(open_permission_store()?)).await?
+}
+
+fn legacy_permission_dir(kind: &str, team_name: &str) -> PathBuf {
+    match kind {
+        PERMISSION_PENDING_KIND => pending_dir(team_name),
+        PERMISSION_RESOLVED_KIND => resolved_dir(team_name),
+        _ => permission_dir(team_name),
+    }
+}
+
+fn import_legacy_permission_files(
+    store: &jfc_knowledge::KnowledgeStore,
+    kind: &str,
+    team_name: &str,
+) -> anyhow::Result<()> {
+    let dir = legacy_permission_dir(kind, team_name);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(());
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(request) = serde_json::from_str::<SwarmPermissionRequest>(&content) else {
+            continue;
+        };
+        let key = permission_key(team_name, &request.id);
+        store.upsert_session_artifact(PERMISSION_SESSION_ID, kind, &key, &content)?;
+        let _ = std::fs::remove_file(&path);
+    }
     Ok(())
 }
 
@@ -88,41 +154,50 @@ pub fn create_permission_request(
 
 // ─── Write / Read requests ───────────────────────────────────────────────────
 
-/// Write a pending permission request to disk.
+/// Write a pending permission request to the DB.
 #[tracing::instrument(target = "jfc::swarm", level = "trace", skip_all, fields(id = %request.id, team = %request.team_name, tool = %request.tool_name))]
 pub async fn write_permission_request(request: &SwarmPermissionRequest) -> anyhow::Result<()> {
     ensure_permission_dirs(&request.team_name).await?;
-    let path = pending_dir(&request.team_name).join(format!("{}.json", request.id));
-    let json = serde_json::to_string_pretty(request)?;
-    fs::write(&path, json).await?;
+    let request = request.clone();
+    let log_id = request.id.clone();
+    let log_worker_name = request.worker_name.clone();
+    let log_tool_name = request.tool_name.clone();
+    run_permission_db(move |store| {
+        let key = permission_key(&request.team_name, &request.id);
+        let json = serde_json::to_string(&request)?;
+        store.upsert_session_artifact(
+            PERMISSION_SESSION_ID,
+            PERMISSION_PENDING_KIND,
+            &key,
+            &json,
+        )?;
+        Ok(())
+    })
+    .await?;
     debug!(
         "[PermissionSync] Wrote pending request {} from {} for {}",
-        request.id, request.worker_name, request.tool_name
+        log_id, log_worker_name, log_tool_name
     );
     Ok(())
 }
 
 /// Read all pending permission requests for a team.
 pub async fn read_pending_permissions(team_name: &str) -> Vec<SwarmPermissionRequest> {
-    let dir = pending_dir(team_name);
-    let mut entries = match fs::read_dir(&dir).await {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut results = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "json")
-            && let Ok(content) = fs::read_to_string(&path).await
-            && let Ok(request) = serde_json::from_str::<SwarmPermissionRequest>(&content)
-        {
-            results.push(request);
-        }
-    }
-
-    results.sort_by_key(|r| r.created_at);
-    results
+    let team_name = team_name.to_owned();
+    run_permission_db(move |store| {
+        import_legacy_permission_files(&store, PERMISSION_PENDING_KIND, &team_name)?;
+        let prefix = permission_key_prefix(&team_name);
+        let mut results = store
+            .list_session_artifacts(PERMISSION_SESSION_ID, PERMISSION_PENDING_KIND, 10_000)?
+            .into_iter()
+            .filter(|row| row.key.starts_with(&prefix))
+            .filter_map(|row| serde_json::from_str::<SwarmPermissionRequest>(&row.value_json).ok())
+            .collect::<Vec<_>>();
+        results.sort_by_key(|r| r.created_at);
+        Ok(results)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Resolve a permission request (move from pending to resolved).
@@ -134,42 +209,45 @@ pub async fn resolve_permission(
 ) -> anyhow::Result<bool> {
     ensure_permission_dirs(team_name).await?;
 
-    let pending_path = pending_dir(team_name).join(format!("{request_id}.json"));
-    let resolved_path = resolved_dir(team_name).join(format!("{request_id}.json"));
-
-    // Read the pending request
-    let content = match fs::read_to_string(&pending_path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            debug!("[PermissionSync] Pending request not found: {request_id}");
+    let request_id_owned = request_id.to_owned();
+    let team_name_owned = team_name.to_owned();
+    let decision = resolution.decision;
+    let resolution = resolution.clone();
+    let moved = run_permission_db(move |store| {
+        import_legacy_permission_files(&store, PERMISSION_PENDING_KIND, &team_name_owned)?;
+        let key = permission_key(&team_name_owned, &request_id_owned);
+        let Some(row) =
+            store.get_session_artifact(PERMISSION_SESSION_ID, PERMISSION_PENDING_KIND, &key)?
+        else {
+            debug!("[PermissionSync] Pending request not found: {request_id_owned}");
             return Ok(false);
-        }
-        Err(e) => return Err(e.into()),
-    };
+        };
 
-    let mut request: SwarmPermissionRequest = serde_json::from_str(&content)?;
+        let mut request: SwarmPermissionRequest = serde_json::from_str(&row.value_json)?;
+        request.status = match resolution.decision {
+            PermissionDecision::Approved => PermissionRequestStatus::Approved,
+            PermissionDecision::Rejected => PermissionRequestStatus::Rejected,
+        };
+        request.resolved_by = Some(resolution.resolved_by);
+        request.resolved_at = Some(super::team_helpers::now_millis());
+        request.feedback = resolution.feedback;
+        request.updated_input = resolution.updated_input;
+        request.permission_updates = resolution.permission_updates;
 
-    // Update with resolution
-    request.status = match resolution.decision {
-        PermissionDecision::Approved => PermissionRequestStatus::Approved,
-        PermissionDecision::Rejected => PermissionRequestStatus::Rejected,
-    };
-    request.resolved_by = Some(resolution.resolved_by.clone());
-    request.resolved_at = Some(super::team_helpers::now_millis());
-    request.feedback = resolution.feedback.clone();
-    request.updated_input = resolution.updated_input.clone();
-    request.permission_updates = resolution.permission_updates.clone();
+        let json = serde_json::to_string(&request)?;
+        store.upsert_session_artifact(
+            PERMISSION_SESSION_ID,
+            PERMISSION_RESOLVED_KIND,
+            &key,
+            &json,
+        )?;
+        store.delete_session_artifact(PERMISSION_SESSION_ID, PERMISSION_PENDING_KIND, &key)?;
+        Ok(true)
+    })
+    .await?;
 
-    // Write to resolved, remove from pending
-    let json = serde_json::to_string_pretty(&request)?;
-    fs::write(&resolved_path, json).await?;
-    fs::remove_file(&pending_path).await?;
-
-    debug!(
-        "[PermissionSync] Resolved request {request_id} with {:?}",
-        resolution.decision
-    );
-    Ok(true)
+    debug!("[PermissionSync] Resolved request {request_id} with {decision:?}");
+    Ok(moved)
 }
 
 /// Read a resolved permission request (worker polls this).
@@ -177,19 +255,30 @@ pub async fn read_resolved_permission(
     request_id: &str,
     team_name: &str,
 ) -> Option<SwarmPermissionRequest> {
-    let path = resolved_dir(team_name).join(format!("{request_id}.json"));
-    let content = fs::read_to_string(&path).await.ok()?;
-    serde_json::from_str(&content).ok()
+    let request_id = request_id.to_owned();
+    let team_name = team_name.to_owned();
+    run_permission_db(move |store| {
+        import_legacy_permission_files(&store, PERMISSION_RESOLVED_KIND, &team_name)?;
+        let key = permission_key(&team_name, &request_id);
+        let row =
+            store.get_session_artifact(PERMISSION_SESSION_ID, PERMISSION_RESOLVED_KIND, &key)?;
+        Ok(row.and_then(|row| serde_json::from_str(&row.value_json).ok()))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
-/// Delete a resolved permission file after the worker processes it.
+/// Delete a resolved permission row after the worker processes it.
 pub async fn delete_resolved_permission(request_id: &str, team_name: &str) -> anyhow::Result<()> {
-    let path = resolved_dir(team_name).join(format!("{request_id}.json"));
-    match fs::remove_file(&path).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    let request_id = request_id.to_owned();
+    let team_name = team_name.to_owned();
+    run_permission_db(move |store| {
+        let key = permission_key(&team_name, &request_id);
+        store.delete_session_artifact(PERMISSION_SESSION_ID, PERMISSION_RESOLVED_KIND, &key)?;
+        Ok(())
+    })
+    .await
 }
 
 /// Poll for a permission response (worker side). Returns the decision once resolved.
@@ -201,7 +290,7 @@ pub async fn poll_for_response(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(resolved) = read_resolved_permission(request_id, team_name).await {
-            // Clean up the resolved file
+            // Clean up the resolved row.
             let _ = delete_resolved_permission(request_id, team_name).await;
             return Some(resolved);
         }
@@ -212,36 +301,38 @@ pub async fn poll_for_response(
     }
 }
 
-/// Clean up old resolved permission files (> max_age old).
+/// Clean up old resolved permission rows (> max_age old).
 pub async fn cleanup_old_resolutions(team_name: &str, max_age: Duration) -> u32 {
-    let dir = resolved_dir(team_name);
-    let mut entries = match fs::read_dir(&dir).await {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
+    let team_name = team_name.to_owned();
+    run_permission_db(move |store| {
+        import_legacy_permission_files(&store, PERMISSION_RESOLVED_KIND, &team_name)?;
+        let prefix = permission_key_prefix(&team_name);
+        let now = super::team_helpers::now_millis();
+        let max_age_ms = max_age.as_millis() as u64;
+        let mut cleaned = 0u32;
 
-    let now = super::team_helpers::now_millis();
-    let max_age_ms = max_age.as_millis() as u64;
-    let mut cleaned = 0u32;
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "json")
-            && let Ok(content) = fs::read_to_string(&path).await
-            && let Ok(req) = serde_json::from_str::<SwarmPermissionRequest>(&content)
+        for row in store
+            .list_session_artifacts(PERMISSION_SESSION_ID, PERMISSION_RESOLVED_KIND, 10_000)?
+            .into_iter()
+            .filter(|row| row.key.starts_with(&prefix))
         {
+            let Ok(req) = serde_json::from_str::<SwarmPermissionRequest>(&row.value_json) else {
+                continue;
+            };
             let resolved_at = req.resolved_at.unwrap_or(req.created_at);
             if now.saturating_sub(resolved_at) >= max_age_ms {
-                let _ = fs::remove_file(&path).await;
+                store.delete_session_artifact(
+                    PERMISSION_SESSION_ID,
+                    PERMISSION_RESOLVED_KIND,
+                    &row.key,
+                )?;
                 cleaned += 1;
             }
         }
-    }
-
-    if cleaned > 0 {
-        debug!("[PermissionSync] Cleaned up {cleaned} old resolutions");
-    }
-    cleaned
+        Ok(cleaned)
+    })
+    .await
+    .unwrap_or(0)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -356,10 +447,10 @@ mod tests {
         // Pending should be empty.
         assert!(read_pending_permissions("alpha").await.is_empty());
 
-        // Resolved file should be readable with status updated.
+        // Resolved row should be readable with status updated.
         let resolved = read_resolved_permission(&id, "alpha")
             .await
-            .expect("resolved file present");
+            .expect("resolved row present");
         assert_eq!(resolved.status, PermissionRequestStatus::Approved);
         assert_eq!(resolved.resolved_by.as_deref(), Some("user"));
         assert_eq!(resolved.feedback.as_deref(), Some("approved"));
@@ -410,12 +501,12 @@ mod tests {
     #[tokio::test]
     async fn delete_resolved_permission_is_idempotent_robust() {
         let _g = HomeOverride::new();
-        // Deleting a non-existent file should not error.
+        // Deleting a non-existent row should not error.
         delete_resolved_permission("nope", "alpha").await.unwrap();
     }
 
     #[tokio::test]
-    async fn delete_resolved_permission_removes_file_normal() {
+    async fn delete_resolved_permission_removes_row_normal() {
         let _g = HomeOverride::new();
         let req = make_request("alpha", "Bash");
         let id = req.id.clone();
@@ -477,34 +568,51 @@ mod tests {
     #[tokio::test]
     async fn cleanup_old_resolutions_removes_aged_files_normal() {
         let _g = HomeOverride::new();
-        // Write a resolved file with a very old `resolved_at`.
-        ensure_permission_dirs("alpha").await.unwrap();
         let mut req = make_request("alpha", "Bash");
         req.status = PermissionRequestStatus::Approved;
         req.resolved_at = Some(0); // unix epoch — very old
-        let path = resolved_dir("alpha").join(format!("{}.json", req.id));
-        let json = serde_json::to_string_pretty(&req).unwrap();
-        tokio::fs::write(&path, json).await.unwrap();
+        let key = permission_key("alpha", &req.id);
+        let json = serde_json::to_string(&req).unwrap();
+        run_permission_db(move |store| {
+            store.upsert_session_artifact(
+                PERMISSION_SESSION_ID,
+                PERMISSION_RESOLVED_KIND,
+                &key,
+                &json,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 
         let cleaned = cleanup_old_resolutions("alpha", Duration::from_secs(60)).await;
         assert_eq!(cleaned, 1);
-        assert!(!path.exists());
+        assert!(read_resolved_permission(&req.id, "alpha").await.is_none());
     }
 
     #[tokio::test]
     async fn cleanup_old_resolutions_keeps_fresh_files_normal() {
         let _g = HomeOverride::new();
-        ensure_permission_dirs("alpha").await.unwrap();
         let mut req = make_request("alpha", "Bash");
         req.status = PermissionRequestStatus::Approved;
         req.resolved_at = Some(super::super::team_helpers::now_millis()); // brand-new
-        let path = resolved_dir("alpha").join(format!("{}.json", req.id));
-        let json = serde_json::to_string_pretty(&req).unwrap();
-        tokio::fs::write(&path, json).await.unwrap();
+        let key = permission_key("alpha", &req.id);
+        let json = serde_json::to_string(&req).unwrap();
+        run_permission_db(move |store| {
+            store.upsert_session_artifact(
+                PERMISSION_SESSION_ID,
+                PERMISSION_RESOLVED_KIND,
+                &key,
+                &json,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 
         let cleaned = cleanup_old_resolutions("alpha", Duration::from_secs(3600)).await;
         assert_eq!(cleaned, 0);
-        assert!(path.exists());
+        assert!(read_resolved_permission(&req.id, "alpha").await.is_some());
     }
 
     #[tokio::test]

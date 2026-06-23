@@ -2,7 +2,7 @@
 //! extraction. One function, shared by every frontend.
 
 use crate::app::EngineState;
-use crate::runtime::ControlEvent;
+use crate::runtime::{ControlEvent, PromptSubmission};
 use crate::runtime::{
     EngineEvent, EventSender, FrontendEvent, GoalEvent, StreamEvent, TaskEvent, ToolEvent,
 };
@@ -14,7 +14,7 @@ use crate::runtime::{
 pub enum FrontendDirective {
     /// Submit this text as a user prompt (frontend pre-processing applies:
     /// paste-chip expansion, staged attachments, edit cursors).
-    SubmitPrompt(String),
+    SubmitPrompt(PromptSubmission),
     /// Run a slash command through the frontend's command dispatch.
     RunCommand(String),
 }
@@ -240,6 +240,11 @@ pub async fn handle_engine_event(
                 crate::runtime::event_loop::handlers::tools::handle_all_complete(state, &tx).await;
             }
         }
+        EngineEvent::Tool(ToolEvent::BackgroundResult { tool_id, result }) => {
+            crate::runtime::event_loop::handlers::tools::handle_background_tool_result(
+                state, tool_id, result,
+            );
+        }
         EngineEvent::Tool(ToolEvent::AllComplete) => {
             crate::runtime::event_loop::handlers::tools::handle_all_complete(state, &tx).await;
         }
@@ -270,7 +275,10 @@ pub async fn handle_engine_event(
             crate::runtime::event_loop::handlers::ui_actions::handle_enter_plan_mode(state, reason);
         }
         EngineEvent::Control(ControlEvent::SubmitPrompt(text)) => {
-            return Ok(Some(FrontendDirective::SubmitPrompt(text)));
+            return Ok(Some(FrontendDirective::SubmitPrompt(text.into())));
+        }
+        EngineEvent::Control(ControlEvent::SubmitPromptWithState(submission)) => {
+            return Ok(Some(FrontendDirective::SubmitPrompt(submission)));
         }
         EngineEvent::Control(ControlEvent::Notice { kind, text }) => {
             crate::runtime::event_loop::handlers::ui_actions::handle_toast(state, kind, text);

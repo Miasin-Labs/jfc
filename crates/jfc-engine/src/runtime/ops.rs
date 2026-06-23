@@ -754,6 +754,8 @@ pub async fn submit_prompt(
         let max_output_tokens = state.max_output_tokens;
         let tx_pre = tx.clone();
         let user_text = text.clone();
+        let user_attachments = attachments.clone();
+        let user_edit_at = edit_at;
         let is_blocked = matches!(level, crate::compact::CompactLevel::Blocked);
         let session_id_for_compact = session_id_for_hook.clone();
         state.compacting_started_at = Some(std::time::Instant::now());
@@ -846,7 +848,13 @@ pub async fn submit_prompt(
                     // the conversation before compaction ran.
                     let _ = tx_pre
                         .send(crate::runtime::EngineEvent::Control(
-                            crate::runtime::ControlEvent::SubmitPrompt(user_text),
+                            crate::runtime::ControlEvent::SubmitPromptWithState(
+                                crate::runtime::PromptSubmission {
+                                    text: user_text,
+                                    attachments: user_attachments,
+                                    edit_at: user_edit_at,
+                                },
+                            ),
                         ))
                         .await;
                 }
@@ -913,7 +921,13 @@ pub async fn submit_prompt(
                         );
                         let _ = tx_pre
                             .send(crate::runtime::EngineEvent::Control(
-                                crate::runtime::ControlEvent::SubmitPrompt(user_text),
+                                crate::runtime::ControlEvent::SubmitPromptWithState(
+                                    crate::runtime::PromptSubmission {
+                                        text: user_text,
+                                        attachments: user_attachments,
+                                        edit_at: user_edit_at,
+                                    },
+                                ),
                             ))
                             .await;
                     }
@@ -1507,22 +1521,21 @@ mod submit_prompt_tests {
         state.cancel_token.cancel();
     }
 
-    // Flag OFF (the default): the gate is a no-op pass-through and the prompt
-    // takes the legacy path — a user message is pushed and the turn starts.
-    // This is the byte-identical-behavior half of the architecture rule.
+    // Explicitly disabled: the gate is a no-op pass-through and the prompt takes
+    // the legacy path — a user message is pushed and the turn starts.
     //
     // Serial + tempdir XDG_CONFIG_HOME: the `Started` path fires a
     // fire-and-forget session save into `dirs::config_dir()`. Redirect it to a
     // tempdir so the test never writes the user's real config tree.
     #[serial_test::serial]
     #[tokio::test]
-    async fn flag_off_starts_turn_unchanged() {
+    async fn explicit_prompt_rewrite_opt_out_starts_turn_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("XDG_CONFIG_HOME");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
 
         let mut state = state_with(Arc::new(ScriptProvider::inert()));
-        assert!(state.prompt_rewrite.is_none(), "default config is flag-off");
+        state.prompt_rewrite = None;
         let (tx, _rx) = mpsc::channel::<EngineEvent>(64);
 
         let outcome = submit_prompt(

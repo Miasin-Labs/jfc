@@ -7,9 +7,10 @@
 //!
 //! ## Safety boundary (load-bearing — see `PLAN.md` §3)
 //!
-//! - **Cross-project leakage is human-gated.** A record is only [`Scope::Global`]
-//!   (visible to every project) after explicit [`KnowledgeStore::promote`]; the
-//!   runtime never promotes autonomously.
+//! - **Cross-project leakage is bounded.** A record becomes [`Scope::Global`]
+//!   (visible to every project) only through explicit [`KnowledgeStore::promote`]
+//!   or [`KnowledgeStore::auto_promote`], which requires verified, repeatedly
+//!   seen, generalizable lessons.
 //! - **Recall is advisory context, never an action.** [`KnowledgeStore::recall`]
 //!   returns rows to fold into a prompt; nothing here executes anything.
 //! - **Bounded growth.** [`KnowledgeStore::decay`] caps rows and prunes
@@ -19,6 +20,8 @@
 //! Phase 1 ships dormant: the crate compiles and is tested, but no other crate
 //! reads it yet (that's Phase 2).
 
+mod agent_events;
+pub mod definitions;
 pub mod error;
 pub mod import;
 pub mod memory;
@@ -33,6 +36,11 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
 
+pub use agent_events::{
+    AgentEventRow, AgentMailboxRow, AgentSessionRow, ContextEventRow, LearningEventRow,
+    ToolRunLedgerRow,
+};
+pub use definitions::{DefinitionRecord, DefinitionScope, DefinitionStatus, NewDefinition};
 pub use error::{KnowledgeError, Result};
 pub use import::{ImportReport, ImportableMemory};
 pub use memory::{MemLevel, MemoryRow, NewMemory, memory_id};
@@ -106,7 +114,8 @@ impl KnowledgeStore {
     /// candidate records. Compounding: a lesson whose `norm_key` already exists
     /// bumps that row's `use_count` (support) and upgrades it to `Verified` if
     /// the new evidence is verified — instead of inserting a duplicate. Never
-    /// promotes to global scope (that stays human-gated). Returns
+    /// promotes directly; callers run [`Self::auto_promote`] after compounding
+    /// enough verified evidence. Returns
     /// `(inserted, compounded)`.
     pub fn ingest_mined(
         &self,
@@ -211,19 +220,14 @@ impl KnowledgeStore {
     }
 
     /// Promote a record to global (cross-project) scope. Returns `true` if a
-    /// live record was promoted. Used by both the `/knowledge promote` command
-    /// and the autonomous [`Self::auto_promote`] pass.
+    /// live record was promoted. Used by the explicit `/knowledge promote`
+    /// command or an approved proposal.
     pub fn promote(&self, id: &str) -> Result<bool> {
         query::promote_to_global(&self.conn, id)
     }
 
-    /// Autonomously promote project lessons that have *proven themselves* to
-    /// global (cross-project) scope: a row is promoted when it is `Verified`
-    /// AND has accumulated at least `min_support` independent observations
-    /// (`use_count`, bumped each time mining re-sees the same `norm_key`, or each
-    /// time recall surfaces it). This is the self-driving replacement for the
-    /// manual gate — the store grows its own cross-project knowledge from
-    /// evidence, not from a human clicking promote. Returns the number promoted.
+    /// Promote project lessons that have *proven themselves* to global
+    /// (cross-project) scope.
     ///
     /// **Only *generalizable* kinds auto-promote.** A `Fact` is by definition
     /// project-specific ("this repo uses vite", a path, a quirk) — promoting it
@@ -231,7 +235,7 @@ impl KnowledgeStore {
     /// redaction can't catch (it guards secrets, not context). So auto-promotion
     /// is restricted to `Finding`/`Skill`/`Convention`/`Preference` — lessons
     /// whose value transfers. A project-specific fact can still be promoted
-    /// deliberately via `/knowledge promote <id>` (the human override stays).
+    /// deliberately via `/knowledge promote <id>`.
     pub fn auto_promote(&self, min_support: i64) -> Result<usize> {
         let n = self.conn.execute(
             "UPDATE knowledge SET scope = 'global', project_key = NULL, promoted = 1 \
@@ -297,9 +301,8 @@ impl KnowledgeStore {
             .execute("DELETE FROM knowledge WHERE id = ?1", [id])?)
     }
 
-    /// Upsert a session-index row (PLAN TODO 22). Additive: the JSON file stays
-    /// canonical; this mirrors its header into a queryable index so the picker
-    /// doesn't byte-scan every file. Idempotent on `id`.
+    /// Upsert a session-index row. The SQLite session catalog is the primary
+    /// picker/search surface.
     pub fn upsert_session(&self, row: &SessionRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO sessions \
@@ -362,6 +365,44 @@ impl KnowledgeStore {
         Ok(out)
     }
 
+    /// Delete one session row and its transcript. Returns the number of DB rows
+    /// removed across session-owned tables.
+    pub fn delete_session(&mut self, id: &str) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let agent_scoped = agent_events::delete_session_scoped_rows(&tx, id)?;
+        let artifact_events = tx.execute(
+            "DELETE FROM session_artifact_events WHERE session_id = ?1",
+            [id],
+        )?;
+        let artifacts = tx.execute("DELETE FROM session_artifacts WHERE session_id = ?1", [id])?;
+        let findings = tx.execute("DELETE FROM session_findings WHERE session_id = ?1", [id])?;
+        let compactions = tx.execute(
+            "DELETE FROM session_compactions WHERE session_id = ?1",
+            [id],
+        )?;
+        let retrievals = tx.execute(
+            "DELETE FROM session_retrieval_events WHERE session_id = ?1",
+            [id],
+        )?;
+        let tools = tx.execute("DELETE FROM session_tool_runs WHERE session_id = ?1", [id])?;
+        let turns = tx.execute("DELETE FROM session_turns WHERE session_id = ?1", [id])?;
+        let events = tx.execute("DELETE FROM session_events WHERE session_id = ?1", [id])?;
+        let messages = tx.execute("DELETE FROM session_messages WHERE session_id = ?1", [id])?;
+        let session = tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(agent_scoped
+            + artifact_events
+            + artifacts
+            + findings
+            + compactions
+            + retrievals
+            + tools
+            + turns
+            + events
+            + messages
+            + session)
+    }
+
     /// Count of indexed sessions — for tests/metrics.
     pub fn session_count(&self) -> Result<i64> {
         Ok(self
@@ -369,12 +410,11 @@ impl KnowledgeStore {
             .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?)
     }
 
-    /// Replace a session's full transcript (PLAN TODO 23). The header upsert and
+    /// Replace a session's full transcript. The header upsert and
     /// all message rows commit in ONE transaction (council decision 1+5:
     /// cross-row atomicity the per-file rename never gave us). We delete+reinsert
     /// rather than diff because the engine coalesces messages on save, so seq
-    /// numbers can shift; the FTS mirror stays consistent via triggers. Shadow
-    /// write — JSON remains canonical until the parity gate passes.
+    /// numbers can shift; the FTS mirror stays consistent via triggers.
     pub fn replace_transcript(
         &mut self,
         row: &SessionRow,
@@ -404,6 +444,16 @@ impl KnowledgeStore {
             "DELETE FROM session_messages WHERE session_id = ?1",
             [&row.id],
         )?;
+        tx.execute(
+            "DELETE FROM session_events WHERE session_id = ?1",
+            [&row.id],
+        )?;
+        tx.execute("DELETE FROM session_turns WHERE session_id = ?1", [&row.id])?;
+        tx.execute(
+            "DELETE FROM session_tool_runs WHERE session_id = ?1",
+            [&row.id],
+        )?;
+        agent_events::clear_derived_context_events(&tx, &row.id)?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO session_messages (session_id, seq, role, content, meta) \
@@ -413,6 +463,8 @@ impl KnowledgeStore {
                 stmt.execute(rusqlite::params![row.id, m.seq, m.role, m.content, m.meta])?;
             }
         }
+        insert_derived_session_rows(&tx, row, messages)?;
+        agent_events::insert_context_events_from_messages(&tx, row, messages, record::now_ms())?;
         tx.commit()?;
         Ok(())
     }
@@ -449,6 +501,315 @@ impl KnowledgeStore {
             )
             .optional()?
             .is_some())
+    }
+
+    pub fn list_session_events(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionEventRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, seq, kind, created_at_ms, payload \
+             FROM session_events WHERE session_id = ?1 ORDER BY seq ASC, created_at_ms ASC \
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit as i64], |r| {
+            Ok(SessionEventRow {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                seq: r.get(2)?,
+                kind: r.get(3)?,
+                created_at_ms: r.get(4)?,
+                payload: r.get(5)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    pub fn list_session_turns(&self, session_id: &str) -> Result<Vec<SessionTurnRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, turn_index, user_seq, assistant_seq, user_text, assistant_text, \
+                    status, model, created_at_ms \
+             FROM session_turns WHERE session_id = ?1 ORDER BY turn_index ASC",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok(SessionTurnRow {
+                session_id: r.get(0)?,
+                turn_index: r.get(1)?,
+                user_seq: r.get(2)?,
+                assistant_seq: r.get(3)?,
+                user_text: r.get(4)?,
+                assistant_text: r.get(5)?,
+                status: r.get(6)?,
+                model: r.get(7)?,
+                created_at_ms: r.get(8)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    pub fn list_session_tool_runs(&self, session_id: &str) -> Result<Vec<SessionToolRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, message_seq, part_index, tool_call_id, runtime_id, kind, \
+                    status, input_json, output_json, duration_ms, created_at_ms \
+             FROM session_tool_runs WHERE session_id = ?1 \
+             ORDER BY message_seq ASC, part_index ASC",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok(SessionToolRunRow {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                message_seq: r.get(2)?,
+                part_index: r.get(3)?,
+                tool_call_id: r.get(4)?,
+                runtime_id: r.get(5)?,
+                kind: r.get(6)?,
+                status: r.get(7)?,
+                input_json: r.get(8)?,
+                output_json: r.get(9)?,
+                duration_ms: r.get(10)?,
+                created_at_ms: r.get(11)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    pub fn record_retrieval_event(&self, event: &SessionRetrievalEvent) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_retrieval_events \
+             (id, session_id, query, source, result_count, payload, created_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                event.id,
+                event.session_id,
+                event.query,
+                event.source,
+                event.result_count,
+                event.payload,
+                event.created_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_compaction(&self, compaction: &SessionCompactionRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_compactions \
+             (id, session_id, before_tokens, after_tokens, summary, payload, created_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                compaction.id,
+                compaction.session_id,
+                compaction.before_tokens,
+                compaction.after_tokens,
+                compaction.summary,
+                compaction.payload,
+                compaction.created_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_session_finding(&self, finding: &SessionFindingRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_findings \
+             (id, session_id, kind, summary, evidence, status, created_at_ms, resolved_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                finding.id,
+                finding.session_id,
+                finding.kind,
+                finding.summary,
+                finding.evidence,
+                finding.status,
+                finding.created_at_ms,
+                finding.resolved_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_session_artifact(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: &str,
+        value_json: &str,
+    ) -> Result<()> {
+        let now = record::now_ms();
+        self.conn.execute(
+            "INSERT INTO session_artifacts \
+             (session_id, kind, key, value_json, created_at_ms, updated_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?5) \
+             ON CONFLICT(session_id, kind, key) DO UPDATE SET \
+                value_json=excluded.value_json, updated_at_ms=excluded.updated_at_ms",
+            rusqlite::params![session_id, kind, key, value_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session_artifact(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: &str,
+    ) -> Result<Option<SessionArtifactRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT session_id, kind, key, value_json, created_at_ms, updated_at_ms \
+                 FROM session_artifacts WHERE session_id = ?1 AND kind = ?2 AND key = ?3",
+                rusqlite::params![session_id, kind, key],
+                session_artifact_from,
+            )
+            .optional()?)
+    }
+
+    pub fn list_session_artifacts(
+        &self,
+        session_id: &str,
+        kind: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionArtifactRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, kind, key, value_json, created_at_ms, updated_at_ms \
+             FROM session_artifacts WHERE session_id = ?1 AND kind = ?2 \
+             ORDER BY updated_at_ms DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, kind, limit as i64],
+            session_artifact_from,
+        )?;
+        collect_rows(rows)
+    }
+
+    pub fn delete_session_artifact(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: &str,
+    ) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM session_artifacts WHERE session_id = ?1 AND kind = ?2 AND key = ?3",
+            rusqlite::params![session_id, kind, key],
+        )?)
+    }
+
+    pub fn append_session_artifact_event(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: &str,
+        value_json: &str,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO session_artifact_events (session_id, kind, key, value_json, created_at_ms) \
+             VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![session_id, kind, key, value_json, record::now_ms()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_session_artifact_events(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SessionArtifactEventRow>> {
+        let limit = limit as i64;
+        let mut out = Vec::new();
+        if let Some(key) = key {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, session_id, kind, key, value_json, created_at_ms \
+                 FROM session_artifact_events \
+                 WHERE session_id = ?1 AND kind = ?2 AND key = ?3 \
+                 ORDER BY id ASC LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![session_id, kind, key, limit],
+                session_artifact_event_from,
+            )?;
+            for row in rows {
+                out.push(row?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, session_id, kind, key, value_json, created_at_ms \
+                 FROM session_artifact_events \
+                 WHERE session_id = ?1 AND kind = ?2 \
+                 ORDER BY id ASC LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![session_id, kind, limit],
+                session_artifact_event_from,
+            )?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn list_recent_session_artifact_events(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SessionArtifactEventRow>> {
+        let limit = limit as i64;
+        let mut out = Vec::new();
+        if let Some(key) = key {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, session_id, kind, key, value_json, created_at_ms \
+                 FROM session_artifact_events \
+                 WHERE session_id = ?1 AND kind = ?2 AND key = ?3 \
+                 ORDER BY id DESC LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![session_id, kind, key, limit],
+                session_artifact_event_from,
+            )?;
+            for row in rows {
+                out.push(row?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, session_id, kind, key, value_json, created_at_ms \
+                 FROM session_artifact_events \
+                 WHERE session_id = ?1 AND kind = ?2 \
+                 ORDER BY id DESC LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![session_id, kind, limit],
+                session_artifact_event_from,
+            )?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    pub fn clear_session_artifact_events(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: Option<&str>,
+    ) -> Result<usize> {
+        if let Some(key) = key {
+            return Ok(self.conn.execute(
+                "DELETE FROM session_artifact_events \
+                 WHERE session_id = ?1 AND kind = ?2 AND key = ?3",
+                rusqlite::params![session_id, kind, key],
+            )?);
+        }
+        Ok(self.conn.execute(
+            "DELETE FROM session_artifact_events WHERE session_id = ?1 AND kind = ?2",
+            rusqlite::params![session_id, kind],
+        )?)
     }
 
     /// Session ids whose transcript matches an FTS query (substring search path).
@@ -537,8 +898,7 @@ pub fn default_db_path() -> PathBuf {
     base.join("jfc").join("knowledge.db")
 }
 
-/// One row of the session index (PLAN TODO 22) — mirrors a session JSON header.
-/// The JSON file remains the canonical transcript; this is a queryable index.
+/// One row of the primary session catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub id: String,
@@ -575,6 +935,374 @@ pub struct SessionMessage {
     pub meta: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEventRow {
+    pub id: String,
+    pub session_id: String,
+    pub seq: i64,
+    pub kind: String,
+    pub created_at_ms: i64,
+    pub payload: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTurnRow {
+    pub session_id: String,
+    pub turn_index: i64,
+    pub user_seq: Option<i64>,
+    pub assistant_seq: Option<i64>,
+    pub user_text: String,
+    pub assistant_text: String,
+    pub status: String,
+    pub model: Option<String>,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionToolRunRow {
+    pub id: String,
+    pub session_id: String,
+    pub message_seq: i64,
+    pub part_index: i64,
+    pub tool_call_id: Option<String>,
+    pub runtime_id: Option<String>,
+    pub kind: String,
+    pub status: String,
+    pub input_json: Option<String>,
+    pub output_json: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRetrievalEvent {
+    pub id: String,
+    pub session_id: String,
+    pub query: String,
+    pub source: String,
+    pub result_count: i64,
+    pub payload: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCompactionRow {
+    pub id: String,
+    pub session_id: String,
+    pub before_tokens: Option<i64>,
+    pub after_tokens: Option<i64>,
+    pub summary: String,
+    pub payload: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFindingRow {
+    pub id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub summary: String,
+    pub evidence: String,
+    pub status: String,
+    pub created_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionArtifactRow {
+    pub session_id: String,
+    pub kind: String,
+    pub key: String,
+    pub value_json: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionArtifactEventRow {
+    pub id: i64,
+    pub session_id: String,
+    pub kind: String,
+    pub key: String,
+    pub value_json: String,
+    pub created_at_ms: i64,
+}
+
+fn session_artifact_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionArtifactRow> {
+    Ok(SessionArtifactRow {
+        session_id: row.get(0)?,
+        kind: row.get(1)?,
+        key: row.get(2)?,
+        value_json: row.get(3)?,
+        created_at_ms: row.get(4)?,
+        updated_at_ms: row.get(5)?,
+    })
+}
+
+fn session_artifact_event_from(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SessionArtifactEventRow> {
+    Ok(SessionArtifactEventRow {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        kind: row.get(2)?,
+        key: row.get(3)?,
+        value_json: row.get(4)?,
+        created_at_ms: row.get(5)?,
+    })
+}
+
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn insert_derived_session_rows(
+    tx: &rusqlite::Transaction<'_>,
+    row: &SessionRow,
+    messages: &[SessionMessage],
+) -> Result<()> {
+    let created_at_ms = record::now_ms();
+    insert_session_events(tx, row, messages, created_at_ms)?;
+    insert_session_turns(tx, row, messages, created_at_ms)?;
+    insert_session_tool_runs(tx, row, messages, created_at_ms)?;
+    Ok(())
+}
+
+fn insert_session_events(
+    tx: &rusqlite::Transaction<'_>,
+    row: &SessionRow,
+    messages: &[SessionMessage],
+    created_at_ms: i64,
+) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO session_events (id, session_id, seq, kind, created_at_ms, payload) \
+         VALUES (?1,?2,?3,?4,?5,?6)",
+    )?;
+    for message in messages {
+        let id = deterministic_session_row_id("message", &row.id, message.seq, 0);
+        let kind = format!("message:{}", message.role);
+        let payload = session_event_payload(message);
+        stmt.execute(rusqlite::params![
+            id,
+            row.id,
+            message.seq,
+            kind,
+            created_at_ms,
+            payload
+        ])?;
+    }
+    Ok(())
+}
+
+fn insert_session_turns(
+    tx: &rusqlite::Transaction<'_>,
+    row: &SessionRow,
+    messages: &[SessionMessage],
+    created_at_ms: i64,
+) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO session_turns \
+         (session_id, turn_index, user_seq, assistant_seq, user_text, assistant_text, status, \
+          model, created_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+    )?;
+    let mut pending_user: Option<(i64, String)> = None;
+    let mut turn_index = 0_i64;
+    for message in messages {
+        match message.role.as_str() {
+            "user" => {
+                if let Some((seq, text)) = pending_user.take() {
+                    stmt.execute(rusqlite::params![
+                        row.id,
+                        turn_index,
+                        seq,
+                        Option::<i64>::None,
+                        text,
+                        "",
+                        "open",
+                        row.model,
+                        created_at_ms,
+                    ])?;
+                    turn_index += 1;
+                }
+                pending_user = Some((message.seq, message.content.clone()));
+            }
+            "assistant" => {
+                if let Some((seq, text)) = pending_user.take() {
+                    stmt.execute(rusqlite::params![
+                        row.id,
+                        turn_index,
+                        seq,
+                        message.seq,
+                        text,
+                        message.content,
+                        "complete",
+                        row.model,
+                        created_at_ms,
+                    ])?;
+                    turn_index += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some((seq, text)) = pending_user.take() {
+        stmt.execute(rusqlite::params![
+            row.id,
+            turn_index,
+            seq,
+            Option::<i64>::None,
+            text,
+            "",
+            "open",
+            row.model,
+            created_at_ms,
+        ])?;
+    }
+    Ok(())
+}
+
+fn insert_session_tool_runs(
+    tx: &rusqlite::Transaction<'_>,
+    row: &SessionRow,
+    messages: &[SessionMessage],
+    created_at_ms: i64,
+) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO session_tool_runs \
+         (id, session_id, message_seq, part_index, tool_call_id, runtime_id, kind, status, \
+          input_json, output_json, duration_ms, created_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+    )?;
+    let mut event_stmt = tx.prepare(
+        "INSERT INTO session_events (id, session_id, seq, kind, created_at_ms, payload) \
+         VALUES (?1,?2,?3,?4,?5,?6)",
+    )?;
+    for message in messages {
+        let Some(meta) = message.meta.as_deref().and_then(parse_json) else {
+            continue;
+        };
+        for (part_index, part) in tool_parts(&meta).into_iter().enumerate() {
+            let Some(tool) = tool_value(part) else {
+                continue;
+            };
+            let part_index = part_index as i64;
+            let id = deterministic_session_row_id("tool", &row.id, message.seq, part_index);
+            let kind = tool_string(tool, "kind").unwrap_or_else(|| "unknown".to_owned());
+            let status = tool_string(tool, "status").unwrap_or_else(|| "unknown".to_owned());
+            let input = tool.get("input");
+            let output = tool.get("output");
+            let input_json = input.map(serde_json::Value::to_string);
+            let output_json = output.map(serde_json::Value::to_string);
+            let tool_call_id = tool_string(tool, "id");
+            let runtime_id = runtime_id_from_tool(tool);
+            let duration_ms = tool
+                .get("elapsed_ms")
+                .or_else(|| output.and_then(|v| v.get("elapsed_ms")))
+                .and_then(serde_json::Value::as_i64);
+            stmt.execute(rusqlite::params![
+                id,
+                row.id,
+                message.seq,
+                part_index,
+                tool_call_id,
+                runtime_id,
+                kind,
+                status,
+                input_json,
+                output_json,
+                duration_ms,
+                created_at_ms,
+            ])?;
+            let event_id =
+                deterministic_session_row_id("tool_event", &row.id, message.seq, part_index);
+            event_stmt.execute(rusqlite::params![
+                event_id,
+                row.id,
+                message.seq,
+                "tool_run",
+                created_at_ms,
+                tool.to_string(),
+            ])?;
+        }
+    }
+    Ok(())
+}
+
+fn deterministic_session_row_id(prefix: &str, session_id: &str, seq: i64, index: i64) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{prefix}:{session_id}:{seq}:{index}").as_bytes(),
+    )
+    .simple()
+    .to_string()
+}
+
+fn session_event_payload(message: &SessionMessage) -> String {
+    let meta = message.meta.as_deref().and_then(parse_json);
+    let payload = serde_json::json!({
+        "role": message.role,
+        "content": message.content,
+        "meta": meta,
+    });
+    payload.to_string()
+}
+
+fn parse_json(raw: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(raw).ok()
+}
+
+fn tool_parts(meta: &serde_json::Value) -> Vec<&serde_json::Value> {
+    if let Some(parts) = meta.get("parts").and_then(serde_json::Value::as_array) {
+        return parts.iter().collect();
+    }
+    if meta.get("type").and_then(serde_json::Value::as_str) == Some("tool")
+        || meta.get("tool").is_some()
+    {
+        return vec![meta];
+    }
+    Vec::new()
+}
+
+fn tool_value(part: &serde_json::Value) -> Option<&serde_json::Value> {
+    if part.get("type").and_then(serde_json::Value::as_str) == Some("tool") {
+        return Some(part.get("tool").unwrap_or(part));
+    }
+    part.get("tool")
+}
+
+fn tool_string(tool: &serde_json::Value, key: &str) -> Option<String> {
+    tool.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn runtime_id_from_tool(tool: &serde_json::Value) -> Option<String> {
+    ["runtime_id", "task_id", "taskId"]
+        .into_iter()
+        .find_map(|key| tool_string(tool, key))
+        .or_else(|| {
+            tool.get("input").and_then(|input| {
+                ["runtime_id", "task_id", "taskId"]
+                    .into_iter()
+                    .find_map(|key| tool_string(input, key))
+            })
+        })
+        .or_else(|| {
+            tool.get("output").and_then(|output| {
+                ["runtime_id", "task_id", "taskId"]
+                    .into_iter()
+                    .find_map(|key| tool_string(output, key))
+            })
+        })
+}
+
 /// Summary of one autonomous maintenance pass.
 #[derive(Debug, Default, Clone)]
 pub struct MaintainReport {
@@ -594,9 +1322,9 @@ pub const MAINTAIN_THROTTLE_MS: i64 = 6 * 3600 * 1000;
 /// engine fires in the background so the user never has to run `/knowledge`.
 ///
 /// It (1) imports legacy `.md` memories for `project_root`, (2) mines the user's
-/// session history into project lessons, (3) consolidates duplicates, and
-/// (4) auto-promotes verified, repeatedly-seen *generalizable* lessons to
-/// cross-project scope. Growth is **unbounded** — no decay/forget here.
+/// session history into project lessons, (3) consolidates duplicates, and (4)
+/// auto-promotes verified, repeated, generalizable lessons. Growth is
+/// **unbounded** — no decay/forget here.
 /// Redaction (in mining) and the recall-time injection screen still apply; those
 /// protect the user's secrets and can't be "expansion", so they stay.
 ///
@@ -604,8 +1332,8 @@ pub const MAINTAIN_THROTTLE_MS: i64 = 6 * 3600 * 1000;
 /// (returns a zero report) so startup never re-processes the whole corpus. Pass
 /// `force = true` (the `/knowledge mine` command) to bypass.
 ///
-/// `sessions_dir` and `user_memory_dir`/`project_memory_dir` are passed in so
-/// the caller owns path policy (and tests stay hermetic).
+/// `sessions_dir` is kept for caller compatibility with the old migration
+/// surface; DB-only mining ignores it.
 pub fn auto_maintain(
     project_root: &Path,
     sessions_dir: Option<&Path>,
@@ -640,7 +1368,7 @@ pub fn auto_maintain_forced(
 
 fn auto_maintain_inner(
     project_root: &Path,
-    sessions_dir: Option<&Path>,
+    _sessions_dir: Option<&Path>,
     user_memory_dir: Option<&Path>,
     project_memory_dir: Option<&Path>,
     force: bool,
@@ -671,19 +1399,15 @@ fn auto_maintain_inner(
         report.imported = store.import_memories(&items)?.imported;
     }
 
-    // 2. Mine session history into project-scoped lessons (redacted).
-    if let Some(dir) = sessions_dir {
-        let (lessons, mine_report) = session_mine::mine_dir(dir);
-        report.sessions_scanned = mine_report.sessions_scanned;
-        let (ins, comp) = store.ingest_mined(&project, &lessons)?;
-        report.mined_inserted = ins;
-        report.mined_compounded = comp;
-    }
+    // 2. Mine DB-backed session history.
+    let (lessons, mine_report) = session_mine::mine_store(&store, 10_000);
+    report.sessions_scanned = mine_report.sessions_scanned;
+    let (ins, comp) = store.ingest_mined(&project, &lessons)?;
+    report.mined_inserted = ins;
+    report.mined_compounded = comp;
 
     // 3. Consolidate duplicates (dedup only — no decay; the store grows).
     report.consolidated = store.consolidate()?;
-
-    // 4. Auto-promote verified, repeatedly-seen lessons across projects.
     report.auto_promoted = store.auto_promote(DEFAULT_AUTO_PROMOTE_SUPPORT)?;
 
     Ok(report)
@@ -692,6 +1416,7 @@ fn auto_maintain_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn rec(scope: Scope, project: Option<&str>, title: &str, body: &str) -> KnowledgeRecord {
         KnowledgeRecord::new(Kind::Fact, scope, project.map(str::to_owned), title, body)
@@ -786,20 +1511,30 @@ mod tests {
     #[test]
     fn insert_rejects_invalid_records_robust() {
         let store = KnowledgeStore::open_in_memory().unwrap();
-        // Empty body.
         assert!(store.insert(&rec(Scope::Global, None, "t", "  ")).is_err());
-        // Project scope without a key.
         assert!(store.insert(&rec(Scope::Project, None, "t", "b")).is_err());
-        // Global scope WITH a key.
         assert!(
             store
                 .insert(&rec(Scope::Global, Some("x"), "t", "b"))
                 .is_err()
         );
-        // Out-of-range confidence (constructed directly, bypassing the clamp).
         let mut bad = rec(Scope::Global, None, "t", "b");
         bad.confidence = 5.0;
         assert!(store.insert(&bad).is_err());
+    }
+
+    #[test]
+    fn insert_rejects_unredacted_secrets_before_sqlite_regression() {
+        let store = KnowledgeStore::open_in_memory().unwrap();
+        let raw_secret = rec(
+            Scope::User,
+            None,
+            "credential",
+            "token=ghp_0123456789abcdefghij",
+        );
+
+        assert!(store.insert(&raw_secret).is_err());
+        assert_eq!(store.live_count().unwrap(), 0);
     }
 
     // SAFETY INVARIANT (PLAN §3.4): bounded growth. Insert well past the cap and
@@ -808,7 +1543,8 @@ mod tests {
     #[test]
     fn decay_enforces_row_cap_and_spares_promoted_regression() {
         let mut store = KnowledgeStore::open_in_memory().unwrap();
-        let keep = rec(Scope::Global, None, "promoted keeper", "must survive decay");
+        let mut keep = rec(Scope::Global, None, "promoted keeper", "must survive decay");
+        keep.promoted = true;
         store.insert(&keep).unwrap();
 
         for i in 0..50 {
@@ -821,17 +1557,25 @@ mod tests {
                 ))
                 .unwrap();
         }
-        assert_eq!(store.live_count().unwrap(), 51);
+        for i in 0..50 {
+            store
+                .insert(&rec(
+                    Scope::Global,
+                    None,
+                    &format!("global row {i}"),
+                    "global filler body",
+                ))
+                .unwrap();
+        }
+        assert_eq!(store.live_count().unwrap(), 101);
 
         let removed = store.decay(DEFAULT_MAX_AGE_MS, 10).unwrap();
         assert!(
-            removed >= 40,
-            "decay should prune project rows over the cap; removed={removed}"
+            removed >= 80,
+            "decay should prune project/global rows over the cap; removed={removed}"
         );
-        // Project rows capped at 10; the global keeper is exempt → <= 11 live.
-        assert!(store.live_count().unwrap() <= 11);
+        assert!(store.live_count().unwrap() <= 21);
 
-        // The promoted/global row survived.
         let hits = store.recall("keeper", &RecallFilter::default()).unwrap();
         assert_eq!(hits.len(), 1);
     }
@@ -845,7 +1589,7 @@ mod tests {
         store.insert(&b).unwrap();
         // Use `a` repeatedly → it should rank first on the next recall.
         for _ in 0..5 {
-            store.mark_used(&[a.id.clone()]).unwrap();
+            store.mark_used(std::slice::from_ref(&a.id)).unwrap();
         }
         let hits = store.recall("apple", &RecallFilter::default()).unwrap();
         assert_eq!(hits.first().map(|h| h.id.as_str()), Some(a.id.as_str()));
@@ -1003,12 +1747,14 @@ mod tests {
             norm_key: "err:edit:old_string-not-found".into(),
             session_id: "s1".into(),
         };
-        let (ins, comp) = store.ingest_mined("P", &[unverified.clone()]).unwrap();
+        let (ins, comp) = store
+            .ingest_mined("P", std::slice::from_ref(&unverified))
+            .unwrap();
         assert_eq!((ins, comp), (1, 0));
         assert_eq!(store.live_count().unwrap(), 1);
 
         // Same norm_key, now VERIFIED → compounds onto the existing row + upgrades.
-        let mut verified = unverified.clone();
+        let mut verified = unverified;
         verified.outcome = Outcome::Verified;
         verified.session_id = "s2".into();
         let (ins2, comp2) = store.ingest_mined("P", &[verified]).unwrap();
@@ -1127,20 +1873,68 @@ mod tests {
             "---\ntype: preference\n---\nuse spaces not tabs",
         )
         .unwrap();
-        let sessions = dir.path().join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::write(
-            sessions.join("ses_1.json"),
-            r#"{"id":"ses_1","messages":[
-                {"role":"assistant","parts":[{"type":"tool","kind":"Edit","status":"failed","output":{"type":"text","content":"old_string not found"}}]},
-                {"role":"assistant","parts":[{"type":"tool","kind":"Edit","status":"complete","output":{"type":"text","content":"ok"}}]}
-            ]}"#,
-        )
-        .unwrap();
-
         // Isolate the global store path for this test.
         let _guard = EnvGuard::set("JFC_KNOWLEDGE_DB", dbpath.to_str().unwrap());
-        let report = auto_maintain(dir.path(), Some(&sessions), Some(&user_mem), None).unwrap();
+        let mut store = KnowledgeStore::open(&dbpath).unwrap();
+        store
+            .replace_transcript(
+                &SessionRow {
+                    id: "ses_1".into(),
+                    cwd: Some(dir.path().to_string_lossy().into_owned()),
+                    model: Some("claude".into()),
+                    created_at: Some("2026-01-01T00:00:00Z".into()),
+                    updated_at: Some("2026-01-01T01:00:00Z".into()),
+                    first_prompt: Some("fix edit".into()),
+                    title: None,
+                    message_count: 2,
+                },
+                &[
+                    SessionMessage {
+                        seq: 0,
+                        role: "assistant".into(),
+                        content: "edit failed".into(),
+                        meta: Some(
+                            serde_json::json!({
+                                "role": "assistant",
+                                "parts": [{
+                                    "type": "tool",
+                                    "kind": "Edit",
+                                    "status": "failed",
+                                    "output": {
+                                        "type": "text",
+                                        "content": "old_string not found"
+                                    }
+                                }]
+                            })
+                            .to_string(),
+                        ),
+                    },
+                    SessionMessage {
+                        seq: 1,
+                        role: "assistant".into(),
+                        content: "edit succeeded".into(),
+                        meta: Some(
+                            serde_json::json!({
+                                "role": "assistant",
+                                "parts": [{
+                                    "type": "tool",
+                                    "kind": "Edit",
+                                    "status": "complete",
+                                    "output": {
+                                        "type": "text",
+                                        "content": "ok"
+                                    }
+                                }]
+                            })
+                            .to_string(),
+                        ),
+                    },
+                ],
+            )
+            .unwrap();
+        drop(store);
+
+        let report = auto_maintain(dir.path(), None, Some(&user_mem), None).unwrap();
         assert_eq!(report.imported, 1, "imported the .md preference");
         assert_eq!(report.sessions_scanned, 1);
         assert!(report.mined_inserted >= 1, "mined the recovered Edit error");
@@ -1150,22 +1944,76 @@ mod tests {
         assert!(store.live_count().unwrap() >= 2);
     }
 
-    /// Minimal scoped env setter for the hermetic maintain test.
-    struct EnvGuard(&'static str, Option<std::ffi::OsString>);
+    #[test]
+    fn auto_maintain_promotes_proven_generalizable_lessons_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbpath = dir.path().join("k.db");
+        let _guard = EnvGuard::set("JFC_KNOWLEDGE_DB", dbpath.to_str().unwrap());
+        let project = project::project_key(dir.path());
+        let store = KnowledgeStore::open(&dbpath).unwrap();
+        let mut lesson = KnowledgeRecord::new(
+            Kind::Finding,
+            Scope::Project,
+            Some(project),
+            "Prefer rg",
+            "use ripgrep for repository searches",
+        )
+        .with_outcome(Outcome::Verified);
+        lesson.use_count = DEFAULT_AUTO_PROMOTE_SUPPORT;
+        let id = lesson.id.clone();
+        store.insert(&lesson).unwrap();
+        drop(store);
+
+        let report = auto_maintain(dir.path(), None, None, None).unwrap();
+
+        assert_eq!(report.auto_promoted, 1);
+        let store = KnowledgeStore::open(&dbpath).unwrap();
+        let hits = store
+            .recall(
+                "ripgrep",
+                &RecallFilter {
+                    project_key: Some("other-project"),
+                    limit: 8,
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+        assert_eq!(hits[0].scope, Scope::Global);
+    }
+
+    fn env_guard_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Minimal scoped env setter for hermetic tests that share process env.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
     impl EnvGuard {
         fn set(key: &'static str, val: &str) -> Self {
+            let lock = env_guard_lock();
             let prev = std::env::var_os(key);
-            // SAFETY: test-only, restored on drop; these tests don't run env-mutating peers concurrently on this key.
+            // SAFETY: test-only, serialized by env_guard_lock(), and restored on drop.
             unsafe { std::env::set_var(key, val) };
-            Self(key, prev)
+            Self {
+                key,
+                prev,
+                _lock: lock,
+            }
         }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             unsafe {
-                match &self.1 {
-                    Some(v) => std::env::set_var(self.0, v),
-                    None => std::env::remove_var(self.0),
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
                 }
             }
         }
@@ -1173,7 +2021,7 @@ mod tests {
 
     // TODO 22: the session index upserts (idempotent), lists most-recent-first,
     // and filters by cwd — additive, no JSON involved.
-    // TODO 23: full-transcript shadow store — replace/load round-trips in seq
+    // TODO 23: full-transcript store — replace/load round-trips in seq
     // order, FTS search finds the right session, replace is idempotent (coalesce-
     // safe), and backup writes a consistent copy.
     #[test]
@@ -1249,12 +2097,233 @@ mod tests {
             "old content gone from FTS"
         );
 
+        let deleted = store.delete_session("ses_x").unwrap();
+        assert!(deleted >= 2);
+        assert_eq!(store.session_count().unwrap(), 0);
+        assert!(store.load_transcript("ses_x").unwrap().is_empty());
+
+        store
+            .replace_transcript(
+                &SessionRow {
+                    message_count: 1,
+                    ..hdr.clone()
+                },
+                &shorter,
+            )
+            .unwrap();
+
         // Backup writes a consistent, openable copy.
         let dir = tempfile::tempdir().unwrap();
         let bpath = dir.path().join("backup.db");
         store.backup_to(&bpath).unwrap();
         let restored = KnowledgeStore::open(&bpath).unwrap();
         assert_eq!(restored.load_transcript("ses_x").unwrap(), shorter);
+    }
+
+    #[test]
+    fn session_event_substrate_is_derived_from_transcript_normal() {
+        let mut store = KnowledgeStore::open_in_memory().unwrap();
+        let hdr = SessionRow {
+            id: "ses_events".into(),
+            cwd: Some("/proj".into()),
+            model: Some("claude-sonnet-4".into()),
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some("2026-01-01T01:00:00Z".into()),
+            first_prompt: Some("run tests".into()),
+            title: None,
+            message_count: 2,
+        };
+        let assistant_meta = serde_json::json!({
+            "role": "assistant",
+            "model_name": "anthropic/claude-opus-4-7",
+            "usage": {
+                "input_tokens": 12000,
+                "output_tokens": 600,
+                "thinking_tokens": 42,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0
+            },
+            "parts": [
+                {"type": "reasoning", "content": "checking"},
+                {
+                    "type": "tool",
+                    "id": "toolu_1",
+                    "kind": "Bash",
+                    "status": "success",
+                    "input": {
+                        "type": "bash",
+                        "command": "cargo test",
+                        "task_id": "bash_123"
+                    },
+                    "output": {
+                        "content": "ok",
+                        "elapsed_ms": 742
+                    }
+                },
+                {"type": "text", "content": "done"}
+            ]
+        });
+        let msgs = vec![
+            SessionMessage {
+                seq: 0,
+                role: "user".into(),
+                content: "run tests".into(),
+                meta: None,
+            },
+            SessionMessage {
+                seq: 1,
+                role: "assistant".into(),
+                content: "done".into(),
+                meta: Some(assistant_meta.to_string()),
+            },
+        ];
+
+        store.replace_transcript(&hdr, &msgs).unwrap();
+
+        let events = store.list_session_events("ses_events", 20).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().any(|event| event.kind == "message:user"));
+        assert!(events.iter().any(|event| event.kind == "tool_run"));
+
+        let turns = store.list_session_turns("ses_events").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user_text, "run tests");
+        assert_eq!(turns[0].assistant_text, "done");
+        assert_eq!(turns[0].status, "complete");
+        assert_eq!(turns[0].model.as_deref(), Some("claude-sonnet-4"));
+
+        let tools = store.list_session_tool_runs("ses_events").unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_call_id.as_deref(), Some("toolu_1"));
+        assert_eq!(tools[0].runtime_id.as_deref(), Some("bash_123"));
+        assert_eq!(tools[0].kind, "Bash");
+        assert_eq!(tools[0].status, "success");
+        assert_eq!(tools[0].duration_ms, Some(742));
+
+        let context = store.list_context_events(Some("ses_events"), 20).unwrap();
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].turn_id.as_deref(), Some("ses_events:1"));
+        assert_eq!(context[0].model, "anthropic/claude-opus-4-7");
+        assert_eq!(context[0].input_tokens, 12000);
+        assert_eq!(context[0].output_tokens, 600);
+        assert_eq!(context[0].thinking_tokens, 42);
+        assert_eq!(context[0].bust_cause.as_deref(), Some("cache_miss"));
+    }
+
+    #[test]
+    fn agent_learning_substrate_roundtrips_normal() {
+        let mut store = KnowledgeStore::open_in_memory().unwrap();
+        let now = record::now_ms();
+        let agent = AgentSessionRow {
+            id: "agent_advisor_1".into(),
+            parent_session_id: Some("ses_parent".into()),
+            role: "advisor".into(),
+            model: Some("claude-sonnet-4".into()),
+            status: "running".into(),
+            budget_tokens: Some(50_000),
+            task_id: Some("task_1".into()),
+            team_id: Some("team_alpha".into()),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        store.upsert_agent_session(&agent).unwrap();
+
+        let event = AgentEventRow {
+            id: "evt_1".into(),
+            session_id: "ses_parent".into(),
+            from_agent: Some("main".into()),
+            to_agent: Some("agent_advisor_1".into()),
+            kind: "delegate".into(),
+            content: "review the context plan".into(),
+            turn_id: Some("turn_1".into()),
+            causal_parent_id: None,
+            created_at_ms: now,
+        };
+        store.record_agent_event(&event).unwrap();
+
+        let mail = AgentMailboxRow {
+            id: "mail_1".into(),
+            to_agent: "agent_advisor_1".into(),
+            from_agent: Some("main".into()),
+            thread_id: Some("thread_1".into()),
+            task_id: Some("task_1".into()),
+            priority: 3,
+            content: "send synthesis when done".into(),
+            read_at_ms: None,
+            summarized_at_ms: None,
+            created_at_ms: now,
+        };
+        store.enqueue_agent_mailbox(&mail).unwrap();
+
+        let run = ToolRunLedgerRow {
+            id: "tool_1".into(),
+            agent_id: Some("agent_advisor_1".into()),
+            session_id: Some("ses_parent".into()),
+            runtime_id: Some("bash_1".into()),
+            kind: "Bash".into(),
+            command: Some("cargo test".into()),
+            input_json: Some("{\"command\":\"cargo test\"}".into()),
+            output_ref: Some("artifact:tool_1".into()),
+            status: "success".into(),
+            duration_ms: Some(1234),
+            background: false,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        store.record_tool_run(&run).unwrap();
+
+        let learning = LearningEventRow {
+            id: "learn_1".into(),
+            source_session_id: Some("ses_parent".into()),
+            source_turn_id: Some("turn_1".into()),
+            source_tool_run_id: Some("tool_1".into()),
+            candidate_rule: "Run focused tests before workspace tests.".into(),
+            status: "candidate".into(),
+            verifier_evidence: "tool_1 passed".into(),
+            recurrence_count: 1,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        store.record_learning_event(&learning).unwrap();
+
+        assert_eq!(
+            store.get_agent_session("agent_advisor_1").unwrap(),
+            Some(agent)
+        );
+        assert_eq!(
+            store.list_agent_events("ses_parent", 10).unwrap(),
+            vec![event]
+        );
+        assert_eq!(
+            store.list_agent_mailbox("agent_advisor_1", true).unwrap(),
+            vec![mail.clone()]
+        );
+        assert_eq!(store.mark_agent_mailbox_read("mail_1").unwrap(), 1);
+        assert!(
+            store
+                .list_agent_mailbox("agent_advisor_1", true)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.list_learning_events(Some("candidate"), 10).unwrap(),
+            vec![learning]
+        );
+
+        let deleted = store.delete_session("ses_parent").unwrap();
+        assert!(deleted >= 3);
+        assert!(
+            store
+                .list_agent_events("ses_parent", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_learning_events(Some("candidate"), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

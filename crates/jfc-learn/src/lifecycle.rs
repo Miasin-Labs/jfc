@@ -7,34 +7,37 @@ use tracing::{debug, warn};
 
 use jfc_core::ChatMessage;
 
+const LEARN_PENDING_TRANSCRIPT_KIND: &str = "learn_pending_transcript";
+
+fn project_session_id(cwd: &str) -> String {
+    format!(
+        "project:{}",
+        jfc_knowledge::project_key(std::path::Path::new(cwd))
+    )
+}
+
 /// Called on session start to process any pending historian transcripts
 /// from previous sessions. Runs the dreamer cycle (consolidation, archival).
 /// Best-effort: failures are logged.
 pub fn on_session_start(cwd: &str) {
-    let pending_dir = std::path::Path::new(cwd)
-        .join(".jfc")
-        .join("learn")
-        .join("pending");
+    let pending_count = jfc_knowledge::KnowledgeStore::open_default()
+        .and_then(|store| {
+            store.list_session_artifacts(
+                &project_session_id(cwd),
+                LEARN_PENDING_TRANSCRIPT_KIND,
+                10_000,
+            )
+        })
+        .map(|rows| rows.len())
+        .unwrap_or(0);
 
-    if !pending_dir.exists() {
-        return;
-    }
-
-    let entries: Vec<_> = match std::fs::read_dir(&pending_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .collect(),
-        Err(_) => return,
-    };
-
-    if entries.is_empty() {
+    if pending_count == 0 {
         return;
     }
 
     debug!(
         target: "jfc::learn",
-        pending_count = entries.len(),
+        pending_count,
         "on_session_start: found pending transcripts"
     );
 
@@ -65,25 +68,23 @@ pub fn on_session_end(messages: &[ChatMessage], cwd: &str) {
         "on_session_end: queuing transcript for historian"
     );
 
-    let pending_dir = std::path::Path::new(cwd)
-        .join(".jfc")
-        .join("learn")
-        .join("pending");
-
-    if let Err(e) = std::fs::create_dir_all(&pending_dir) {
-        warn!(target: "jfc::learn", error = %e, "on_session_end: failed to create pending dir");
-        return;
-    }
-
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let pending_path = pending_dir.join(format!("{timestamp}.json"));
 
     match serde_json::to_string(&transcript) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&pending_path, json) {
-                warn!(target: "jfc::learn", error = %e, path = %pending_path.display(), "on_session_end: failed to write pending transcript");
+            let key = format!("{timestamp}-{}", uuid::Uuid::new_v4());
+            let session_id = project_session_id(cwd);
+            if let Err(e) = jfc_knowledge::KnowledgeStore::open_default().and_then(|store| {
+                store.upsert_session_artifact(
+                    &session_id,
+                    LEARN_PENDING_TRANSCRIPT_KIND,
+                    &key,
+                    &json,
+                )
+            }) {
+                warn!(target: "jfc::learn", error = %e, key, "on_session_end: failed to persist pending transcript");
             } else {
-                debug!(target: "jfc::learn", path = %pending_path.display(), "on_session_end: queued transcript for historian");
+                debug!(target: "jfc::learn", key, "on_session_end: queued transcript for historian");
             }
         }
         Err(e) => {

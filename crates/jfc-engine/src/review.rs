@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewOutputEvent {
@@ -258,30 +257,39 @@ pub fn validate_review_comment(
 }
 
 pub async fn persist_review_output(cwd: &Path, review: &ReviewOutputEvent) -> std::io::Result<()> {
-    let dir = reviews_dir(cwd);
-    tokio::fs::create_dir_all(&dir).await?;
-    append_jsonl(&dir.join("review_events.jsonl"), review).await
+    append_review_artifact(cwd, "review_events", &review.run_id, review).await
 }
 
 pub async fn persist_review_comment(cwd: &Path, comment: &ReviewComment) -> std::io::Result<()> {
-    let dir = reviews_dir(cwd);
-    tokio::fs::create_dir_all(&dir).await?;
-    append_jsonl(&dir.join("comments.jsonl"), comment).await
+    append_review_artifact(
+        cwd,
+        "comments",
+        &format!(
+            "{}:{}:{}",
+            comment.file_path.display(),
+            comment.start_line,
+            comment.created_at_ms
+        ),
+        comment,
+    )
+    .await
 }
 
 pub async fn persist_submitted_plan(cwd: &Path, plan: &SubmittedPlan) -> std::io::Result<()> {
-    let dir = cwd.join(".jfc").join("plans");
-    tokio::fs::create_dir_all(&dir).await?;
-    append_jsonl(&dir.join("submitted_plans.jsonl"), plan).await
+    append_review_artifact(cwd, "submitted_plans", &plan.short_name, plan).await
 }
 
 pub async fn persist_commit_message_suggestion(
     cwd: &Path,
     suggestion: &CommitMessageSuggestion,
 ) -> std::io::Result<()> {
-    let dir = cwd.join(".jfc").join("git");
-    tokio::fs::create_dir_all(&dir).await?;
-    append_jsonl(&dir.join("commit_messages.jsonl"), suggestion).await
+    append_review_artifact(
+        cwd,
+        "commit_messages",
+        &suggestion.created_at_ms.to_string(),
+        suggestion,
+    )
+    .await
 }
 
 pub fn submitted_plan(short_name: String, summary: String, plan: String) -> SubmittedPlan {
@@ -408,19 +416,32 @@ fn tool_name_matches(candidate: &str, expected: &str) -> bool {
     candidate == expected || candidate.contains(expected)
 }
 
-fn reviews_dir(cwd: &Path) -> PathBuf {
-    cwd.join(".jfc").join("reviews")
-}
+pub const REVIEW_ARTIFACT_SESSION_ID: &str = "__review__";
+pub const REVIEW_ARTIFACT_KIND: &str = "review";
 
-async fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await?;
-    let line = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned());
-    file.write_all(line.as_bytes()).await?;
-    file.write_all(b"\n").await
+async fn append_review_artifact<T: Serialize>(
+    cwd: &Path,
+    stream: &str,
+    key: &str,
+    value: &T,
+) -> std::io::Result<()> {
+    let project_key = jfc_knowledge::project_key(cwd);
+    let artifact_key = format!("{project_key}:{stream}:{key}");
+    let value_json = serde_json::to_string(value).map_err(std::io::Error::other)?;
+    tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default().map_err(std::io::Error::other)?;
+        store
+            .append_session_artifact_event(
+                REVIEW_ARTIFACT_SESSION_ID,
+                REVIEW_ARTIFACT_KIND,
+                &artifact_key,
+                &value_json,
+            )
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn normalize_path(cwd: &Path, path: &str) -> PathBuf {
@@ -468,6 +489,8 @@ pub fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn normalize_codex_style_finding_normal() {
@@ -528,5 +551,82 @@ mod tests {
         assert!(rendered.contains("Review comments"));
         assert!(rendered.contains("CodeGraph priority"));
         assert!(!rendered.contains("Commit messages"));
+    }
+
+    #[tokio::test]
+    async fn review_artifacts_persist_to_db_normal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = db_env_guard(tmp.path());
+        let cwd = tmp.path().join("repo");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let review = ReviewOutputEvent {
+            schema_version: 1,
+            run_id: "run_1".to_owned(),
+            created_at_ms: 1,
+            source: "test".to_owned(),
+            target: Some("diff".to_owned()),
+            files: vec!["src/lib.rs".to_owned()],
+            findings: Vec::new(),
+            overall_correctness: "patch is correct".to_owned(),
+            overall_explanation: "ok".to_owned(),
+            overall_confidence_score: 0.9,
+        };
+        persist_review_output(&cwd, &review).await.unwrap();
+        let comment_path = cwd.join("src/lib.rs");
+        tokio::fs::create_dir_all(comment_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&comment_path, "fn main() {}\n")
+            .await
+            .unwrap();
+        let comment = validate_review_comment(&cwd, "src/lib.rs", 1, 1, "tighten this").unwrap();
+        persist_review_comment(&cwd, &comment).await.unwrap();
+
+        let project_key = jfc_knowledge::project_key(&cwd);
+        let rows = jfc_knowledge::KnowledgeStore::open_default()
+            .unwrap()
+            .list_recent_session_artifact_events(
+                REVIEW_ARTIFACT_SESSION_ID,
+                REVIEW_ARTIFACT_KIND,
+                None,
+                10,
+            )
+            .unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.key == format!("{project_key}:review_events:run_1"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.key.starts_with(&format!("{project_key}:comments:")))
+        );
+    }
+
+    fn db_env_guard(root: &Path) -> DbEnvGuard {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let prior = std::env::var("JFC_KNOWLEDGE_DB").ok();
+        unsafe {
+            std::env::set_var("JFC_KNOWLEDGE_DB", root.join("knowledge.db"));
+        }
+        DbEnvGuard {
+            prior,
+            _guard: guard,
+        }
+    }
+
+    struct DbEnvGuard {
+        prior: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for DbEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prior.take() {
+                    Some(prior) => std::env::set_var("JFC_KNOWLEDGE_DB", prior),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                }
+            }
+        }
     }
 }

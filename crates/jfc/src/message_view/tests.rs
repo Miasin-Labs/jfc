@@ -2156,6 +2156,35 @@ mod helper_tests {
     }
 
     #[test]
+    fn folded_bash_output_text_hides_model_metadata_regression() {
+        let raw = concat!(
+            "retrieval_status: success\n",
+            "task_id: bash_fe28c4f9154a\n",
+            "status: completed exit=0\n",
+            "\n",
+            "hello\n",
+            "world\n",
+        );
+        let tool = dummy_tool(
+            ToolInput::Bash {
+                command: "echo hello && echo world".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: Some(true),
+                suppress_output: None,
+            },
+            ToolOutput::Text(raw.into()),
+            ToolKind::Bash,
+        );
+
+        let lines = tool_body_lines_themed(&tool, 120, Theme::dark(), None);
+        let rendered = lines_to_plain(&lines);
+        assert_eq!(rendered, "hello\nworld");
+        assert!(!rendered.contains("retrieval_status"));
+        assert!(!rendered.contains("task_id:"));
+    }
+
+    #[test]
     fn build_header_inner_spans_notebook_tools_format_normal() {
         let t = Theme::dark();
         let read = dummy_tool(

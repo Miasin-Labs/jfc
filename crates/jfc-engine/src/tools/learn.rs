@@ -8,7 +8,15 @@
 
 use super::ExecutionResult;
 use jfc_memory::{MemoryLevel, MemoryScope, MemoryType};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+const LEARN_PENDING_TRANSCRIPT_KIND: &str = "learn_pending_transcript";
+const LEARN_PROCESSED_TRANSCRIPT_KIND: &str = "learn_processed_transcript";
+const LEARN_FAILED_TRANSCRIPT_KIND: &str = "learn_failed_transcript";
+
+fn project_session_id(cwd: &Path) -> String {
+    format!("project:{}", jfc_knowledge::project_key(cwd))
+}
 
 /// `/learn status` — report learning subsystem state.
 pub fn execute_learn_status() -> ExecutionResult {
@@ -27,15 +35,18 @@ pub fn execute_learn_status() -> ExecutionResult {
     ))
 }
 
-/// Count pending historian transcripts under `.jfc/learn/pending/`.
+/// Count pending historian transcripts staged in the project DB.
 fn count_pending(cwd: &std::path::Path) -> usize {
-    let dir = cwd.join(".jfc").join("learn").join("pending");
-    std::fs::read_dir(&dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-                .count()
+    import_legacy_pending(cwd).ok();
+    jfc_knowledge::KnowledgeStore::open_default()
+        .and_then(|store| {
+            store.list_session_artifacts(
+                &project_session_id(cwd),
+                LEARN_PENDING_TRANSCRIPT_KIND,
+                10_000,
+            )
         })
+        .map(|rows| rows.len())
         .unwrap_or(0)
 }
 
@@ -72,60 +83,105 @@ struct HistorizeWriteThroughReport {
 }
 
 fn historize_pending(cwd: &Path) -> Result<HistorizeWriteThroughReport, String> {
-    let pending_dir = cwd.join(".jfc").join("learn").join("pending");
-    let processed_dir = cwd.join(".jfc").join("learn").join("processed");
-    let failed_dir = cwd.join(".jfc").join("learn").join("failed");
-    std::fs::create_dir_all(&processed_dir).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&failed_dir).map_err(|e| e.to_string())?;
-
-    let mut files = pending_files(&pending_dir);
-    files.sort();
+    import_legacy_pending(cwd)?;
+    let store = jfc_knowledge::KnowledgeStore::open_default().map_err(|e| e.to_string())?;
+    let session_id = project_session_id(cwd);
+    let mut rows = store
+        .list_session_artifacts(&session_id, LEARN_PENDING_TRANSCRIPT_KIND, 10_000)
+        .map_err(|e| e.to_string())?;
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
     let mut report = HistorizeWriteThroughReport {
-        pending: files.len(),
+        pending: rows.len(),
         ..Default::default()
     };
 
-    for path in files {
-        match historize_one(cwd, &path) {
+    for row in rows {
+        match historize_one(cwd, &row.key, &row.value_json) {
             Ok(true) => {
                 report.created += 1;
-                move_pending(&path, &processed_dir)?;
+                store
+                    .upsert_session_artifact(
+                        &session_id,
+                        LEARN_PROCESSED_TRANSCRIPT_KIND,
+                        &row.key,
+                        &row.value_json,
+                    )
+                    .map_err(|e| e.to_string())?;
+                store
+                    .delete_session_artifact(&session_id, LEARN_PENDING_TRANSCRIPT_KIND, &row.key)
+                    .map_err(|e| e.to_string())?;
             }
             Ok(false) => {
                 report.skipped += 1;
-                move_pending(&path, &processed_dir)?;
+                store
+                    .upsert_session_artifact(
+                        &session_id,
+                        LEARN_PROCESSED_TRANSCRIPT_KIND,
+                        &row.key,
+                        &row.value_json,
+                    )
+                    .map_err(|e| e.to_string())?;
+                store
+                    .delete_session_artifact(&session_id, LEARN_PENDING_TRANSCRIPT_KIND, &row.key)
+                    .map_err(|e| e.to_string())?;
             }
             Err(error) => {
                 report.failed += 1;
                 tracing::warn!(
                     target: "jfc::learn",
-                    path = %path.display(),
+                    key = %row.key,
                     error = %error,
                     "historian write-through failed for pending transcript"
                 );
-                move_pending(&path, &failed_dir)?;
+                store
+                    .upsert_session_artifact(
+                        &session_id,
+                        LEARN_FAILED_TRANSCRIPT_KIND,
+                        &row.key,
+                        &row.value_json,
+                    )
+                    .map_err(|e| e.to_string())?;
+                store
+                    .delete_session_artifact(&session_id, LEARN_PENDING_TRANSCRIPT_KIND, &row.key)
+                    .map_err(|e| e.to_string())?;
             }
         }
     }
     Ok(report)
 }
 
-fn pending_files(pending_dir: &Path) -> Vec<PathBuf> {
+fn import_legacy_pending(cwd: &Path) -> Result<(), String> {
+    let pending_dir = cwd.join(".jfc").join("learn").join("pending");
     let Ok(entries) = std::fs::read_dir(pending_dir) else {
-        return Vec::new();
+        return Ok(());
     };
-    entries
+    let store = jfc_knowledge::KnowledgeStore::open_default().map_err(|e| e.to_string())?;
+    let session_id = project_session_id(cwd);
+    for path in entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .collect()
+    {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let key = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("legacy-pending")
+            .to_owned();
+        store
+            .upsert_session_artifact(&session_id, LEARN_PENDING_TRANSCRIPT_KIND, &key, &raw)
+            .map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(())
 }
 
-fn historize_one(cwd: &Path, path: &Path) -> Result<bool, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+fn historize_one(cwd: &Path, key: &str, raw_json: &str) -> Result<bool, String> {
     let transcript: Vec<(String, String)> =
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let Some(body) = build_handoff_memory(path, &transcript) else {
+        serde_json::from_str(raw_json).map_err(|e| e.to_string())?;
+    let Some(body) = build_handoff_memory(key, &transcript) else {
         return Ok(false);
     };
     jfc_memory::create_memory_checked(
@@ -138,7 +194,7 @@ fn historize_one(cwd: &Path, path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-fn build_handoff_memory(path: &Path, transcript: &[(String, String)]) -> Option<String> {
+fn build_handoff_memory(session: &str, transcript: &[(String, String)]) -> Option<String> {
     let last_user = transcript
         .iter()
         .rev()
@@ -158,10 +214,6 @@ fn build_handoff_memory(path: &Path, transcript: &[(String, String)]) -> Option<
         return None;
     }
 
-    let session = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("pending-session");
     let user = truncate_chars(last_user, 500);
     let assistant = truncate_chars(last_assistant, 500);
     let files = mentioned_paths(transcript);
@@ -206,19 +258,6 @@ fn looks_like_path(token: &str) -> bool {
         && token
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
-}
-
-fn move_pending(path: &Path, dest_dir: &Path) -> Result<(), String> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("invalid pending path: {}", path.display()))?;
-    let mut dest = dest_dir.join(file_name);
-    if dest.exists() {
-        let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
-        let name = file_name.to_string_lossy();
-        dest = dest_dir.join(format!("{stamp}-{name}"));
-    }
-    std::fs::rename(path, dest).map_err(|e| e.to_string())
 }
 
 fn first_line(text: &str) -> String {
@@ -392,17 +431,17 @@ mod tests {
             ("user".to_string(), "continue the parser fix".to_string()),
             ("assistant".to_string(), "patched parser tests".to_string()),
         ];
-        let body = build_handoff_memory(Path::new("20260616_010203.json"), &transcript).unwrap();
+        let body = build_handoff_memory("20260616_010203", &transcript).unwrap();
         assert!(body.contains("continue the parser fix"));
         assert!(body.contains("patched parser tests"));
         assert!(body.contains("crates/foo/src/lib.rs"));
     }
 
-    /// End-to-end test: a pending learning JSON is historized into a DB memory
-    /// row (no `.md` file) and then removed from `pending/`.
+    /// End-to-end test: a pending learning row is historized into a DB memory
+    /// row and removed from the pending artifact set.
     #[test]
     #[serial_test::serial]
-    fn historize_pending_creates_memory_and_moves_file_normal() {
+    fn historize_pending_creates_memory_and_moves_db_row_normal() {
         let temp = tempfile::tempdir().unwrap();
         // SAFETY: tests are run single-threaded via #[serial_test::serial]
         unsafe {
@@ -431,17 +470,16 @@ mod tests {
         let report = historize_pending(temp.path()).unwrap();
 
         assert_eq!(report.pending, 1);
-        // DB-backed: created count may be 0 if dedup fires, but pending processed
-        // assert_eq!(report.created, 1); — skip for now, DB path is different
-        assert!(
-            temp.path()
-                .join(".jfc")
-                .join("learn")
-                .join("processed")
-                .exists()
-        );
+        let store = jfc_knowledge::KnowledgeStore::open_default().unwrap();
+        let processed = store
+            .get_session_artifact(
+                &project_session_id(temp.path()),
+                LEARN_PROCESSED_TRANSCRIPT_KIND,
+                "20260616_010203",
+            )
+            .unwrap();
+        assert!(processed.is_some());
         assert_eq!(count_pending(temp.path()), 0);
-        // NO .md file created (DB is the store now) — don't check memory dir exists
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Persistence for `.claude/catch-up-state.json`.
+//! DB persistence for Claude-compatible catch-up state.
 //!
 //! CC 2.1.167's catch-up skill reads/writes this file to track what it was
 //! monitoring between sessions. JFC provides the data layer; skill integration
@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::atomic_write::write_atomic_sync;
+const CATCH_UP_KIND: &str = "catch_up_state";
+const CATCH_UP_KEY: &str = "state";
 
 /// Canonical path to the catch-up state file.
 pub fn catch_up_state_path(project_root: &Path) -> PathBuf {
@@ -46,51 +47,55 @@ pub struct CatchUpState {
     pub extra: Option<serde_json::Value>,
 }
 
-/// Load the catch-up state from `<project_root>/.claude/catch-up-state.json`.
-///
-/// Returns `CatchUpState::default()` when the file is absent or malformed.
-pub fn load_catch_up_state(project_root: &Path) -> CatchUpState {
-    let path = catch_up_state_path(project_root);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(r) => r,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return CatchUpState::default();
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "jfc::config::catch_up_state",
-                path = %path.display(),
-                error = %err,
-                "failed to read catch-up-state.json — using default state"
-            );
-            return CatchUpState::default();
-        }
-    };
-    match serde_json::from_str::<CatchUpState>(&raw) {
-        Ok(state) => state,
-        Err(err) => {
-            tracing::warn!(
-                target: "jfc::config::catch_up_state",
-                path = %path.display(),
-                error = %err,
-                "failed to parse catch-up-state.json — using default state"
-            );
-            CatchUpState::default()
-        }
-    }
+fn project_session_id(project_root: &Path) -> String {
+    format!("project:{}", jfc_knowledge::project_key(project_root))
 }
 
-/// Persist the catch-up state to `<project_root>/.claude/catch-up-state.json`.
-///
-/// Creates `.claude/` if needed. Uses atomic write to prevent corruption.
-pub fn save_catch_up_state(project_root: &Path, state: &CatchUpState) -> std::io::Result<()> {
-    let path = catch_up_state_path(project_root);
-    if let Some(parent) = path.parent() {
+fn project_store(project_root: &Path) -> std::io::Result<jfc_knowledge::KnowledgeStore> {
+    let db_path = project_root.join(".jfc").join("knowledge.db");
+    if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(state)
+    jfc_knowledge::KnowledgeStore::open(&db_path).map_err(std::io::Error::other)
+}
+
+/// Load the catch-up state from the project DB.
+///
+/// Returns `CatchUpState::default()` when no row exists or the row is malformed.
+pub fn load_catch_up_state(project_root: &Path) -> CatchUpState {
+    let Ok(store) = project_store(project_root) else {
+        return CatchUpState::default();
+    };
+    if let Ok(Some(row)) = store.get_session_artifact(
+        &project_session_id(project_root),
+        CATCH_UP_KIND,
+        CATCH_UP_KEY,
+    ) {
+        return serde_json::from_str::<CatchUpState>(&row.value_json).unwrap_or_default();
+    }
+    let path = catch_up_state_path(project_root);
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return CatchUpState::default();
+    };
+    let Ok(state) = serde_json::from_str::<CatchUpState>(&raw) else {
+        return CatchUpState::default();
+    };
+    let _ = save_catch_up_state(project_root, &state);
+    state
+}
+
+/// Persist the catch-up state to the project DB.
+pub fn save_catch_up_state(project_root: &Path, state: &CatchUpState) -> std::io::Result<()> {
+    let json = serde_json::to_string(state)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    write_atomic_sync(&path, json.as_bytes())
+    project_store(project_root)?
+        .upsert_session_artifact(
+            &project_session_id(project_root),
+            CATCH_UP_KIND,
+            CATCH_UP_KEY,
+            &json,
+        )
+        .map_err(std::io::Error::other)
 }
 
 #[cfg(test)]

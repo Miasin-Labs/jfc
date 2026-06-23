@@ -36,7 +36,7 @@ pub use crate::runtime::{ExecutionResult, ToolProvenance, ToolSource};
 
 // main dispatcher
 pub use bash::execute_bash_inner;
-pub use dispatch::execute_tool;
+pub use dispatch::{execute_tool, execute_tool_with_runtime_id};
 
 // plan↔task linkage hook, shared by the manual TaskDone path and the
 // subagent parent_task_id completion path so both advance linked plans.
@@ -45,7 +45,9 @@ pub use dispatch::advance_linked_plans;
 // tool definitions (for advertised tool list)
 pub(crate) use catalog::is_code_navigation_tool_name;
 pub use catalog::progressive_tool_defs;
-pub use defs::{all_tool_defs, is_model_hidden_builtin_tool_name, model_tool_defs};
+pub use defs::{
+    all_tool_defs, is_model_hidden_builtin_tool_name, model_tool_defs, sync_tool_definitions_to_db,
+};
 pub use hcom::{
     hcom_available, is_hcom_tool_name, system_prompt_section as hcom_system_prompt_section,
 };

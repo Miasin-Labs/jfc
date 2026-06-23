@@ -125,7 +125,7 @@ pub fn search(repo_root: &Path, query: &str, limit: usize, max_commits: usize) -
     if !exact_hits.is_empty() {
         return exact_hits;
     }
-    soft_hits.sort_by(|a, b| b.0.cmp(&a.0));
+    soft_hits.sort_by_key(|hit| std::cmp::Reverse(hit.0));
     soft_hits.into_iter().map(|(_, h)| h).take(limit).collect()
 }
 

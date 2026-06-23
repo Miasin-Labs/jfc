@@ -117,11 +117,9 @@ pub fn timestamps_non_decreasing(timestamps: &[u64]) -> bool {
 
 pub fn compressed(mut size: u64, branch_factor: u64, overhead: u64, levels: usize) -> u64 {
     for _ in 0..levels {
-        size = if branch_factor == 0 {
-            overhead
-        } else {
-            size / branch_factor + overhead
-        };
+        size = size
+            .checked_div(branch_factor)
+            .map_or(overhead, |compressed| compressed + overhead);
     }
     size
 }

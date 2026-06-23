@@ -258,8 +258,9 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
         jfc_voice::VoiceState::Idle => {
             // Also show interim transcript if available
             if let Some(ref interim) = app.voice_interim {
-                let preview = if interim.len() > 40 {
-                    format!("{}…", &interim[..37])
+                let preview = if interim.chars().count() > 40 {
+                    let prefix: String = interim.chars().take(37).collect();
+                    format!("{prefix}...")
                 } else {
                     interim.clone()
                 };
@@ -330,7 +331,11 @@ fn shell_activity_count(messages: &[ChatMessage]) -> usize {
                         active += 1;
                     }
                     if let Some(task_id) = background_task_id_from_output(&tool.output) {
-                        backgrounded.insert(task_id);
+                        if bash_output_finished_task(&tool.output) {
+                            finished.insert(task_id);
+                        } else {
+                            backgrounded.insert(task_id);
+                        }
                     }
                 }
                 ToolInput::BashOutput { task_id, .. } => {
@@ -622,6 +627,32 @@ mod tests {
             },
             ToolStatus::Completed,
             ToolOutput::Text("retrieval_status: success\nstatus: completed exit=0\n\nok".into()),
+        ));
+
+        assert_eq!(shell_activity_badge(&[msg]), None);
+    }
+
+    #[test]
+    fn shell_activity_badge_clears_after_output_folded_into_bash_regression() {
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(tool(
+            ToolInput::Bash {
+                command: "sleep 0.1".into(),
+                timeout: Some(120_000),
+                workdir: None,
+                run_in_background: Some(true),
+                suppress_output: None,
+            },
+            ToolStatus::Completed,
+            ToolOutput::Text(
+                "retrieval_status: success\n\
+                 task_id: bash_done\n\
+                 status: completed exit=0\n\
+                 \n\
+                 ok"
+                .into(),
+            ),
         ));
 
         assert_eq!(shell_activity_badge(&[msg]), None);

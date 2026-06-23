@@ -27,6 +27,7 @@ pub fn handle_stream_usage(
         output_tokens == 0 && cache_read_tokens == 0 && cache_write_tokens == 0;
     if !partial_input_only {
         state.stream_lifecycle = None;
+        state.streaming_last_token_at = Some(std::time::Instant::now());
     }
     // Floor the `responseLengthRef` accumulator up to the wire-truth output
     // count so the spinner's `bytes/4` token estimate is corrected upward and
@@ -259,10 +260,12 @@ mod tests {
             crate::runtime::StreamLifecyclePhase::StreamOpened,
             Some("waiting for first event".to_owned()),
         ));
+        state.streaming_last_token_at = None;
 
         handle_stream_usage(&mut state, 42, 3, None, 0, 0);
 
         assert!(state.stream_lifecycle.is_none());
+        assert!(state.streaming_last_token_at.is_some());
     }
 
     #[test]

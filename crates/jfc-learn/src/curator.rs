@@ -137,9 +137,9 @@ mod tests {
     use chrono::{Duration, Utc};
     use std::collections::BTreeMap;
 
-    /// Build a store with one record backdated by `idle_days`. The on-disk
-    /// format is a bare `name -> SkillUsage` map, so we construct that JSON
-    /// directly and load it — exercising the real deserialize path.
+    /// Build a store with one record backdated by `idle_days`. This writes the
+    /// legacy `name -> SkillUsage` JSON map and loads it through the import
+    /// path so DB-backed callers keep old telemetry.
     fn store_with(name: &str, by: CreatedBy, idle_days: i64, pinned: bool) -> SkillUsageStore {
         let ts = (Utc::now() - Duration::days(idle_days)).to_rfc3339();
         let rec = SkillUsage {

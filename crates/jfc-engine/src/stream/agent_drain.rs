@@ -184,6 +184,7 @@ async fn apply_event(
         // path had this; the teammate silently lost such turns.
         StreamEvent::TextDone { text, .. } => {
             if turn.text.is_empty() {
+                sink(AgentDrainEvent::TextDelta(text.clone())).await;
                 turn.text = text;
             }
         }
@@ -351,13 +352,21 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
             },
         ];
-        let mut sink = noop_sink();
+        let deltas = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let d2 = deltas.clone();
+        let mut sink = move |ev: AgentDrainEvent| -> futures::future::BoxFuture<'static, ()> {
+            if let AgentDrainEvent::TextDelta(d) = ev {
+                d2.lock().unwrap().push_str(&d);
+            }
+            Box::pin(async {})
+        };
         let outcome =
             drain_agent_stream(scripted(events), DrainCancel::Poll(&no_cancel), &mut sink).await;
         let AgentDrainOutcome::Completed(turn) = outcome else {
             panic!("expected Completed, got {outcome:?}");
         };
         assert_eq!(turn.text, "only terminal");
+        assert_eq!(*deltas.lock().unwrap(), "only terminal");
     }
 
     // A retryable in-stream error surfaces as Retryable; a plain one as Fatal.

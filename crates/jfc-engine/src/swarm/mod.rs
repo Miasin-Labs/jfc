@@ -5,24 +5,17 @@
 //! - **Teams**: Named groups with a leader and multiple teammates
 //! - **Teammates**: Long-lived named agents that persist between turns, communicate
 //!   via mailbox messaging, and coordinate via a shared task list
-//! - **Mailbox**: File-based message delivery with JSON inbox files and file locking
+//! - **Mailbox**: DB-backed message delivery keyed by team and agent
 //! - **Permission sync**: Workers forward permission prompts to the team leader
 //! - **In-process runner**: Agent loop for teammates running in the same process
 //!
 //! Architecture mirrors v126 `src/utils/swarm/`:
 //!
 //! ```text
-//! ~/.claude/teams/{team-name}/
-//!   config.json          — team file (members, lead, metadata)
-//!   inboxes/             — per-agent mailbox files
-//!     researcher.json
-//!     team-lead.json
-//!   permissions/
-//!     pending/           — permission requests awaiting leader approval
-//!     resolved/          — completed permission decisions
-//!
-//! ~/.claude/tasks/{team-name}/
-//!   tasks.json           — shared task list all teammates can access
+//! session_artifacts("__swarm__", "team_file", team) — team roster metadata
+//! agent_mailbox rows keyed by team + agent — teammate communication
+//! session_artifacts("__swarm__", "permission_*", team/request) — approvals
+//! session_artifacts("__task_store__:*", "task_store", "root") — shared tasks
 //! ```
 
 pub mod constants;

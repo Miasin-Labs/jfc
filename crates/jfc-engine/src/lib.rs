@@ -249,11 +249,9 @@ pub mod worktrees;
 pub use app::{EngineEffect, EngineState, PendingApproval, PendingQuestion, PermissionMode};
 pub use engine::{Engine, channel};
 
-/// Mirror a session header into the `jfc-knowledge` session index (PLAN TODO 22).
-/// ADDITIVE dual-write: the JSON file stays the canonical transcript; this only
-/// updates a queryable index. Best-effort and silent on error — a failed index
-/// write must never affect session saving. Runs the blocking SQLite work inline
-/// (callers already invoke it off the hot path / after the atomic JSON write).
+/// Mirror a session header into the `jfc-knowledge` session index.
+/// Best-effort and silent on error: failed indexing must never block a session
+/// compatibility save.
 #[allow(clippy::too_many_arguments)]
 pub fn index_session(
     id: &str,
@@ -281,48 +279,89 @@ pub fn index_session(
             target: "jfc::knowledge",
             session_id = id,
             error = %e,
-            "session index upsert skipped (JSON remains canonical)"
+            "session index upsert skipped"
         ),
     }
 }
 
-/// Map serialized session messages → the knowledge crate's `SessionMessage`
-/// (text flattened for FTS, full message JSON kept verbatim in `meta` for a
-/// lossless round trip). Borrowing, so no `Clone` on the serialized type tree.
+/// Map serialized session messages to DB transcript rows. `content` is the
+/// searchable learning surface; `meta` is the lossless resume payload.
 pub(crate) fn to_session_messages(
     serialized_messages: &[crate::session::serialization::SerializedMessage],
 ) -> Vec<jfc_knowledge::SessionMessage> {
     serialized_messages
         .iter()
         .enumerate()
-        .map(|(i, m)| {
-            let content = m
-                .parts
-                .iter()
-                .filter_map(|p| match p {
-                    crate::session::serialization::SerializedPart::Text { content } => {
-                        Some(content.as_str())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            jfc_knowledge::SessionMessage {
-                seq: i as i64,
-                role: m.role.clone(),
-                content,
-                meta: serde_json::to_string(m).ok(),
-            }
+        .map(|(i, m)| jfc_knowledge::SessionMessage {
+            seq: i as i64,
+            role: m.role.clone(),
+            content: serialized_message_search_text(m),
+            meta: serde_json::to_string(m).ok(),
         })
         .collect()
 }
 
-/// Shadow-write a session's full transcript into the DB (PLAN TODO 23). ADDITIVE:
-/// the JSON file stays canonical; this mirrors the messages into the
-/// `session_messages` table so a future read-flip (gated on the parity verifier)
-/// can serve resume/search from the DB. Best-effort and silent on error — never
-/// affects the save.
-pub fn shadow_session_transcript(
+fn serialized_message_search_text(
+    message: &crate::session::serialization::SerializedMessage,
+) -> String {
+    use crate::session::serialization::SerializedPart;
+
+    let mut parts = Vec::new();
+    for part in &message.parts {
+        match part {
+            SerializedPart::Text { content }
+            | SerializedPart::Reasoning { content }
+            | SerializedPart::Advisor { content } => parts.push(content.trim().to_owned()),
+            SerializedPart::Tool { tool } => {
+                parts.push(tool.kind.clone());
+                parts.push(tool.status.clone());
+                if let Some(input) = &tool.input
+                    && let Ok(text) = serde_json::to_string(input)
+                {
+                    parts.push(text);
+                }
+                if let Some(output) = &tool.output
+                    && let Ok(text) = serde_json::to_string(output)
+                {
+                    parts.push(text);
+                }
+            }
+            SerializedPart::TaskStatus {
+                description,
+                status,
+                summary,
+                error,
+                ..
+            } => {
+                parts.push(description.clone());
+                parts.push(status.clone());
+                if let Some(summary) = summary {
+                    parts.push(summary.clone());
+                }
+                if let Some(error) = error {
+                    parts.push(error.clone());
+                }
+            }
+            SerializedPart::CompactBoundary { pre_tokens } => {
+                parts.push(format!("compact boundary {pre_tokens} tokens"));
+            }
+            SerializedPart::RedactedThinking { data } => {
+                parts.push(data.clone());
+            }
+        }
+    }
+    parts
+        .into_iter()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Write a session's full transcript into the DB. Best-effort and silent on
+/// error because the caller should keep the chat loop alive, but the DB is the
+/// only runtime transcript store.
+pub fn save_session_transcript_to_db(
     row: jfc_knowledge::SessionRow,
     messages: Vec<jfc_knowledge::SessionMessage>,
 ) {
@@ -335,7 +374,7 @@ pub fn shadow_session_transcript(
             target: "jfc::knowledge",
             session_id = id,
             error = %e,
-            "session transcript shadow-write skipped (JSON remains canonical)"
+            "session transcript DB write skipped"
         ),
     }
 }
@@ -358,13 +397,11 @@ impl SessionParityReport {
     }
 }
 
-/// Backfill the DB transcript store from the canonical JSON sessions AND verify
-/// parity (council decision 2). Reads every `ses_*.json`, shadow-writes its
-/// transcript, then reloads from the DB and asserts the canonicalized message
-/// stream (role + text per seq, message count) matches. Sessions whose JSON the
-/// current reader can't deserialize are bucketed as `undeserializable` (already
-/// dead — excluded from the mismatch denominator), never silently dropped.
-/// READ-ONLY w.r.t. the JSON files; report-only — performs no read flip.
+/// Backfill the DB transcript store from legacy JSON sessions and verify
+/// parity. Reads every `ses_*.json`, writes its transcript, then reloads from
+/// the DB and asserts the canonicalized message stream matches. Sessions whose
+/// JSON the current reader can't deserialize are bucketed as `undeserializable`.
+/// READ-ONLY w.r.t. the JSON files.
 pub fn backfill_and_verify_sessions(sessions_dir: &std::path::Path) -> SessionParityReport {
     use crate::session::serialization::SerializedSession;
     let mut report = SessionParityReport::default();
@@ -412,7 +449,7 @@ pub fn backfill_and_verify_sessions(sessions_dir: &std::path::Path) -> SessionPa
             .map(|m| (m.role.clone(), serde_json::to_string(m).ok()))
             .collect();
 
-        shadow_session_transcript(row, to_session_messages(&session.messages));
+        save_session_transcript_to_db(row, to_session_messages(&session.messages));
 
         // Reload from the DB and compare the full per-message JSON stream.
         let actual: Vec<(String, Option<String>)> = match store.load_transcript(&session.id) {
@@ -447,6 +484,138 @@ pub fn knowledge_maintain(
         project_memory_dir,
     )
 }
+
+fn knowledge_maintain_disabled_by_env() -> bool {
+    matches!(
+        std::env::var("JFC_DISABLE_KNOWLEDGE_MAINTAIN").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+fn knowledge_maintain_interval_secs() -> u64 {
+    std::env::var("JFC_KNOWLEDGE_MAINTAIN_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(30 * 60)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KnowledgeMaintenancePaths {
+    sessions: Option<std::path::PathBuf>,
+    user_mem: Option<std::path::PathBuf>,
+    project_mem: std::path::PathBuf,
+}
+
+fn knowledge_maintenance_paths(project_root: &std::path::Path) -> KnowledgeMaintenancePaths {
+    knowledge_maintenance_paths_with_config(project_root, dirs::config_dir())
+}
+
+fn knowledge_maintenance_paths_with_config(
+    project_root: &std::path::Path,
+    config_dir: Option<std::path::PathBuf>,
+) -> KnowledgeMaintenancePaths {
+    KnowledgeMaintenancePaths {
+        sessions: config_dir.as_ref().map(|c| c.join("jfc").join("sessions")),
+        user_mem: config_dir.as_ref().map(|c| c.join("jfc").join("memory")),
+        project_mem: project_root.join(".jfc").join("memory"),
+    }
+}
+
+fn run_knowledge_maintenance_pass(
+    project_root: &std::path::Path,
+) -> Option<jfc_knowledge::MaintainReport> {
+    let paths = knowledge_maintenance_paths(project_root);
+    match knowledge_maintain(
+        project_root,
+        paths.sessions.as_deref(),
+        paths.user_mem.as_deref(),
+        Some(paths.project_mem.as_path()),
+    ) {
+        Ok(report) => {
+            tracing::info!(
+                target: "jfc::knowledge",
+                imported = report.imported,
+                mined = report.mined_inserted,
+                compounded = report.mined_compounded,
+                consolidated = report.consolidated,
+                auto_promoted = report.auto_promoted,
+                "cross-project knowledge maintenance pass"
+            );
+            Some(report)
+        }
+        Err(e) => {
+            tracing::debug!(
+                target: "jfc::knowledge",
+                error = %e,
+                "knowledge maintenance skipped"
+            );
+            None
+        }
+    }
+}
+
+/// Run a bounded maintenance pass before session-start recall. This closes the
+/// loop between observing old results and reading updated memory before acting,
+/// without letting slow session mining stall the user's first turn.
+pub async fn warm_knowledge_before_prompt(
+    project_root: std::path::PathBuf,
+    deadline: std::time::Duration,
+) {
+    if knowledge_maintain_disabled_by_env() {
+        return;
+    }
+    let maintenance =
+        tokio::task::spawn_blocking(move || run_knowledge_maintenance_pass(&project_root));
+    match tokio::time::timeout(deadline, maintenance).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::debug!(
+            target: "jfc::knowledge",
+            error = %e,
+            "prompt-start knowledge maintenance task failed"
+        ),
+        Err(_) => tracing::debug!(
+            target: "jfc::knowledge",
+            deadline_ms = deadline.as_millis() as u64,
+            "prompt-start knowledge maintenance exceeded deadline; using existing knowledge"
+        ),
+    }
+}
+
+/// Start the self-driving knowledge/RSI maintenance loop. Prompt recall can be
+/// disabled separately with `cross_project_recall_enabled=false`; this loop is
+/// intentionally tied only to the explicit maintenance kill switch so JFC keeps
+/// importing, mining, consolidating, and auto-promoting in the background.
+pub fn spawn_knowledge_maintenance_loop(project_root: std::path::PathBuf) {
+    if knowledge_maintain_disabled_by_env() {
+        return;
+    }
+    let tick = knowledge_maintain_interval_secs();
+    tokio::spawn(async move {
+        loop {
+            let project_root = project_root.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                run_knowledge_maintenance_pass(&project_root);
+            })
+            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(tick)).await;
+        }
+    });
+}
+
+/// Kick one background maintenance pass. Used by short-lived frontends such as
+/// `--print`, where a recurring loop may not live long enough to matter.
+pub fn spawn_knowledge_maintenance_once(project_root: std::path::PathBuf) {
+    if knowledge_maintain_disabled_by_env() {
+        return;
+    }
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            run_knowledge_maintenance_pass(&project_root);
+        })
+        .await;
+    });
+}
 pub use runtime::{
     ControlEvent, EngineEvent, EventReceiver, EventSender, FrontendDirective, FrontendEvent,
     handle_engine_event, ops,
@@ -475,4 +644,99 @@ pub mod types {
         TurnInvariantError, merge_consecutive_text_parts, sample_tool_harness_message,
         validate_turn_invariants, validate_turn_invariants_inner,
     };
+}
+
+#[cfg(test)]
+mod knowledge_maintenance_tests {
+    use super::*;
+
+    #[test]
+    fn session_db_rows_include_reasoning_and_tool_io_normal() {
+        use crate::session::serialization::{
+            SerializedMessage, SerializedPart, SerializedToolInput, SerializedToolOutput,
+            SerializedToolPart,
+        };
+
+        let message = SerializedMessage {
+            role: "assistant".into(),
+            agent_name: None,
+            model_name: None,
+            cost_tier: None,
+            elapsed: None,
+            usage: None,
+            created_at: 0,
+            parts: vec![
+                SerializedPart::Reasoning {
+                    content: "thinking through sqlite migration".into(),
+                },
+                SerializedPart::Tool {
+                    tool: Box::new(SerializedToolPart {
+                        id: "tool_1".into(),
+                        kind: "BashOutput".into(),
+                        status: "failed".into(),
+                        is_collapsed: false,
+                        input: Some(SerializedToolInput::BashOutput {
+                            task_id: "bash_bad".into(),
+                            offset: None,
+                            limit: None,
+                            block: None,
+                            timeout: None,
+                            wait_up_to: None,
+                        }),
+                        output: Some(SerializedToolOutput::Text {
+                            content: "Unknown Bash task id".into(),
+                        }),
+                        thought_signature: None,
+                    }),
+                },
+            ],
+        };
+
+        let rows = to_session_messages(&[message]);
+
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0]
+                .content
+                .contains("thinking through sqlite migration")
+        );
+        assert!(rows[0].content.contains("bash_bad"));
+        assert!(rows[0].content.contains("Unknown Bash task id"));
+        assert!(rows[0].meta.is_some());
+    }
+
+    #[test]
+    fn knowledge_maintenance_paths_respect_config_and_project_roots_normal() {
+        let project = std::path::PathBuf::from("/repo");
+        let config = std::path::PathBuf::from("/cfg");
+
+        let paths = knowledge_maintenance_paths_with_config(&project, Some(config));
+
+        assert_eq!(
+            paths.sessions,
+            Some(std::path::PathBuf::from("/cfg/jfc/sessions"))
+        );
+        assert_eq!(
+            paths.user_mem,
+            Some(std::path::PathBuf::from("/cfg/jfc/memory"))
+        );
+        assert_eq!(
+            paths.project_mem,
+            std::path::PathBuf::from("/repo/.jfc/memory")
+        );
+    }
+
+    #[test]
+    fn knowledge_maintenance_paths_tolerate_missing_config_robust() {
+        let project = std::path::PathBuf::from("/repo");
+
+        let paths = knowledge_maintenance_paths_with_config(&project, None);
+
+        assert!(paths.sessions.is_none());
+        assert!(paths.user_mem.is_none());
+        assert_eq!(
+            paths.project_mem,
+            std::path::PathBuf::from("/repo/.jfc/memory")
+        );
+    }
 }

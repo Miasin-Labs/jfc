@@ -75,7 +75,9 @@ pub fn similarity(left: &[u64], right: &[u64]) -> usize {
     if total == 0 {
         100
     } else {
-        lcs_length(left, right) * 200 / total
+        (lcs_length(left, right) * 200)
+            .checked_div(total)
+            .unwrap_or(100)
     }
 }
 

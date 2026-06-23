@@ -38,6 +38,16 @@ fn trim_front_to_cap(s: &mut String, cap: usize) {
     s.drain(..split);
 }
 
+fn execution_result_output(result: &crate::runtime::ExecutionResult) -> ToolOutput {
+    if let Some(diff) = result.diff.clone() {
+        ToolOutput::Diff(diff)
+    } else if LargeText::should_collapse(&result.output) {
+        ToolOutput::LargeText(LargeText::new(result.output.clone()))
+    } else {
+        ToolOutput::Text(result.output.clone())
+    }
+}
+
 /// Handle `ToolEvent::OutputChunk { tool_id, chunk }`.
 pub fn handle_output_chunk(state: &mut EngineState, tool_id: crate::ids::ToolId, chunk: String) {
     // Append streaming output to the tool's live preview.
@@ -106,6 +116,7 @@ pub fn handle_tool_result(
         .record_tool_result(result.is_error());
     let mut found = false;
     let mut tool_output_arrived = false;
+    let mut bash_output_to_fold: Option<(crate::ids::ToolId, String, ToolOutput)> = None;
     for msg in &mut state.messages {
         for part in &mut msg.parts {
             if let MessagePart::Tool(tc) = part
@@ -150,21 +161,18 @@ pub fn handle_tool_result(
                 // DiffView (Edit, Write-overwrite) so
                 // the renderer shows colorized hunks
                 // instead of a flat success string.
-                tc.output = if let Some(diff) = result.diff.clone() {
-                    ToolOutput::Diff(diff)
-                } else if LargeText::should_collapse(&result.output) {
-                    ToolOutput::LargeText(LargeText::new(result.output.clone()))
-                } else {
-                    ToolOutput::Text(result.output.clone())
-                };
+                tc.output = execution_result_output(&result);
                 if matches!(tc.output, ToolOutput::LargeText(_)) {
                     tc.display.collapse();
+                }
+                if let ToolInput::BashOutput { task_id, .. } = &tc.input {
+                    bash_output_to_fold = Some((tc.id.clone(), task_id.clone(), tc.output.clone()));
                 }
                 // Fresh tool output → the frontend resets its path-yank
                 // cursor so the next `Ctrl+L` starts from the newest ref
                 // (effect pushed after the loop — borrowck).
                 tool_output_arrived = true;
-                if result.is_error() {
+                if result.is_error() && !matches!(tc.kind, ToolKind::BashOutput) {
                     crate::notifications::notify_tool_failed(tc.kind.label(), &result.output);
                 }
                 let new_status = tc.status;
@@ -227,6 +235,20 @@ pub fn handle_tool_result(
             break;
         }
     }
+    if let Some((source_tool_id, task_id, output)) = bash_output_to_fold
+        && fold_bash_output_into_originating_bash(
+            &mut state.messages,
+            &source_tool_id,
+            &task_id,
+            output,
+        )
+    {
+        tracing::debug!(
+            target: "jfc::event_loop",
+            task_id = %task_id,
+            "folded BashOutput result into originating Bash tool",
+        );
+    }
     if tool_output_arrived {
         state.push_effect(crate::app::EngineEffect::ToolOutputArrived);
     }
@@ -242,6 +264,110 @@ pub fn handle_tool_result(
     // Session save is deferred to AllToolsComplete so we write
     // once per batch, not once per tool result. This eliminates
     // the 650+ disk writes per agentic run observed in profiling.
+}
+
+/// Handle a late completion from a tool that had already returned a
+/// background-started result. This updates the existing visible block in place
+/// instead of creating a model-visible BashOutput/TaskOutput exchange.
+pub fn handle_background_tool_result(
+    state: &mut EngineState,
+    tool_id: crate::ids::ToolId,
+    result: crate::runtime::ExecutionResult,
+) {
+    tracing::info!(
+        target: "jfc::stream",
+        tool_id = %tool_id,
+        is_error = result.is_error(),
+        output_len = result.output.len(),
+        "background tool_result update received"
+    );
+    let mut found = false;
+    for msg in &mut state.messages {
+        for part in &mut msg.parts {
+            let MessagePart::Tool(tc) = part else {
+                continue;
+            };
+            if tc.id != tool_id {
+                continue;
+            }
+            if !matches!(tc.input, ToolInput::Bash { .. }) {
+                tracing::warn!(
+                    target: "jfc::event_loop",
+                    tool_id = %tool_id,
+                    kind = %tc.kind.label(),
+                    "background result targeted a non-Bash tool; ignoring"
+                );
+                return;
+            }
+            if result.is_error() {
+                tc.status = ToolStatus::Failed;
+            } else {
+                tc.status = ToolStatus::Completed;
+            }
+            if let Some(start) = tc.started_at {
+                tc.elapsed_ms = Some(start.elapsed().as_millis() as u64);
+            }
+            tc.output = execution_result_output(&result);
+            if matches!(tc.output, ToolOutput::LargeText(_)) {
+                tc.display.collapse();
+            }
+            found = true;
+            break;
+        }
+        if found {
+            break;
+        }
+    }
+    if found {
+        state.push_effect(crate::app::EngineEffect::ToolOutputArrived);
+        if result.is_error() {
+            crate::notifications::notify_tool_failed(ToolKind::Bash.label(), &result.output);
+        }
+    } else {
+        tracing::warn!(
+            target: "jfc::event_loop",
+            tool_id = %tool_id,
+            is_error = result.is_error(),
+            output_len = result.output.len(),
+            "BackgroundResult did not match any assistant Bash tool block",
+        );
+    }
+}
+
+fn fold_bash_output_into_originating_bash(
+    messages: &mut [ChatMessage],
+    source_tool_id: &crate::ids::ToolId,
+    task_id: &str,
+    output: ToolOutput,
+) -> bool {
+    for msg in messages.iter_mut().rev() {
+        for part in msg.parts.iter_mut().rev() {
+            let MessagePart::Tool(tool) = part else {
+                continue;
+            };
+            if &tool.id == source_tool_id || !matches!(tool.input, ToolInput::Bash { .. }) {
+                continue;
+            }
+            if background_task_id_from_output(&tool.output).as_deref() == Some(task_id) {
+                tool.output = output;
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn background_task_id_from_output(output: &ToolOutput) -> Option<String> {
+    let text = match output {
+        ToolOutput::Text(text) => text.as_str(),
+        ToolOutput::LargeText(text) => text.content.as_str(),
+        _ => return None,
+    };
+    text.lines()
+        .find_map(|line| line.strip_prefix("task_id: "))
+        .map(str::trim)
+        .filter(|task_id| task_id.starts_with("bash_"))
+        .map(ToOwned::to_owned)
 }
 
 pub fn handle_set_in_progress_tool_use_ids(
@@ -1035,6 +1161,131 @@ mod tests {
         );
 
         assert!(state.turn_edited_files.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn bash_output_result_mutates_originating_bash_tool_regression() {
+        let task_id = "bash_fe28c4f9154a";
+        let bash_id = crate::ids::ToolId::from("bash-tool");
+        let bash_output_id = crate::ids::ToolId::from("bash-output-tool");
+        let mut bash = ToolCall::new_pending(
+            bash_id,
+            ToolKind::Bash,
+            ToolInput::Bash {
+                command: "echo hello".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: Some(true),
+                suppress_output: None,
+            },
+        );
+        bash.status = ToolStatus::Completed;
+        bash.output = ToolOutput::Text(format!(
+            "Command running in background.\ntask_id: {task_id}\nstatus: running"
+        ));
+        let bash_output = ToolCall::new_pending(
+            bash_output_id.clone(),
+            ToolKind::BashOutput,
+            ToolInput::BashOutput {
+                task_id: task_id.into(),
+                offset: None,
+                limit: None,
+                block: None,
+                timeout: None,
+                wait_up_to: None,
+            },
+        );
+        let mut state = EngineState::new(Arc::new(TestProvider), "test-model");
+        state.task_store = jfc_session::TaskStore::in_memory();
+        state.messages.push(ChatMessage::assistant_parts(vec![
+            MessagePart::tool(bash),
+            MessagePart::tool(bash_output),
+        ]));
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let result = concat!(
+            "retrieval_status: success\n",
+            "task_id: bash_fe28c4f9154a\n",
+            "status: completed exit=0\n",
+            "\n",
+            "hello\n",
+        );
+
+        handle_tool_result(
+            &mut state,
+            &tx,
+            bash_output_id,
+            crate::runtime::ExecutionResult::success(result),
+        );
+
+        let assistant = state.messages.last().expect("assistant message");
+        let mut tools = assistant.parts.iter().filter_map(|part| match part {
+            MessagePart::Tool(tool) => Some(tool.as_ref()),
+            _ => None,
+        });
+        let bash = tools.next().expect("bash tool");
+        let bash_output = tools.next().expect("bash output tool");
+        assert!(
+            matches!(&bash.output, ToolOutput::Text(text) if text.contains("retrieval_status: success") && text.contains("hello")),
+            "Bash tool should own folded output, got {:?}",
+            bash.output
+        );
+        assert!(
+            matches!(&bash_output.output, ToolOutput::Text(text) if text.contains("retrieval_status: success") && text.contains("hello")),
+            "BashOutput tool should still preserve model-facing result, got {:?}",
+            bash_output.output
+        );
+    }
+
+    #[test]
+    fn background_bash_result_updates_original_tool_without_taskoutput_regression() {
+        let bash_id = crate::ids::ToolId::from("bash-tool");
+        let mut bash = ToolCall::new_pending(
+            bash_id.clone(),
+            ToolKind::Bash,
+            ToolInput::Bash {
+                command: "printf done".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: Some(true),
+                suppress_output: None,
+            },
+        );
+        bash.status = ToolStatus::Completed;
+        bash.output = ToolOutput::Text(
+            "Command running in background.\ntask_id: bash_1177aa44beef\nstatus: running".into(),
+        );
+        let mut state = EngineState::new(Arc::new(TestProvider), "test-model");
+        state.task_store = jfc_session::TaskStore::in_memory();
+        state
+            .messages
+            .push(ChatMessage::assistant_parts(vec![MessagePart::tool(bash)]));
+
+        handle_background_tool_result(
+            &mut state,
+            bash_id,
+            crate::runtime::ExecutionResult::success("background-done"),
+        );
+
+        let assistant = state.messages.last().expect("assistant message");
+        let tools: Vec<_> = assistant
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Tool(tool) => Some(tool.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tools.len(),
+            1,
+            "must not create a TaskOutput/BashOutput block"
+        );
+        assert_eq!(tools[0].status, ToolStatus::Completed);
+        assert!(
+            matches!(&tools[0].output, ToolOutput::Text(text) if text == "background-done"),
+            "Bash tool should own final output, got {:?}",
+            tools[0].output
+        );
     }
 
     #[tokio::test]

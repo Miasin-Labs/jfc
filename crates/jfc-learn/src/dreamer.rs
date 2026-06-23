@@ -19,6 +19,8 @@ const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
 
 /// Default lease duration in milliseconds (5 minutes).
 const DEFAULT_LEASE_DURATION_MS: u64 = 5 * 60 * 1000;
+const DREAMER_LEASE_SESSION_ID: &str = "__learn__";
+const DREAMER_LEASE_KIND: &str = "dreamer_lease";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -440,70 +442,50 @@ pub fn acquire_lease(lease_path: &Path) -> Result<DreamerLease, LearnError> {
         expiry_ms: now_ms() + DEFAULT_LEASE_DURATION_MS,
     };
 
-    if let Some(parent) = lease_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string(&lease)?;
-
-    // `create_new` (O_EXCL) makes creation atomic: exactly one of N racing
-    // processes wins. A plain exists()-then-write check would let two
-    // processes both believe they hold the lease.
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(lease_path)
+    let store = jfc_knowledge::KnowledgeStore::open_default().map_err(|e| LearnError::Io {
+        source: std::io::Error::other(e),
+    })?;
+    let key = dreamer_lease_key(lease_path);
+    if let Some(row) = store
+        .get_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?
+        && let Ok(existing) = serde_json::from_str::<DreamerLease>(&row.value_json)
+        && existing.expiry_ms > now_ms()
     {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(json.as_bytes())?;
-            Ok(lease)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let content = fs::read_to_string(lease_path)?;
-            if let Ok(existing) = serde_json::from_str::<DreamerLease>(&content)
-                && existing.expiry_ms > now_ms()
-            {
-                return Err(LearnError::LeaseConflict {
-                    message: format!(
-                        "Lease held by {} until {}",
-                        existing.holder_id, existing.expiry_ms
-                    ),
-                });
-            }
-            // Expired or corrupt lease: remove it and retry the exclusive
-            // create once. If another process beats us to the recreate, treat
-            // that as a conflict rather than clobbering its lease.
-            let _ = fs::remove_file(lease_path);
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(lease_path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(json.as_bytes())?;
-                    Ok(lease)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    Err(LearnError::LeaseConflict {
-                        message: "lease re-acquired by another process".to_owned(),
-                    })
-                }
-                Err(e) => Err(e.into()),
-            }
-        }
-        Err(e) => Err(e.into()),
+        return Err(LearnError::LeaseConflict {
+            message: format!(
+                "Lease held by {} until {}",
+                existing.holder_id, existing.expiry_ms
+            ),
+        });
     }
+
+    let json = serde_json::to_string(&lease)?;
+    store
+        .upsert_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key, &json)
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?;
+    Ok(lease)
 }
 
 /// Release a lease (only the holder can release).
 pub fn release_lease(lease_path: &Path, holder_id: &str) -> Result<(), LearnError> {
-    if !lease_path.exists() {
+    let store = jfc_knowledge::KnowledgeStore::open_default().map_err(|e| LearnError::Io {
+        source: std::io::Error::other(e),
+    })?;
+    let key = dreamer_lease_key(lease_path);
+    let Some(row) = store
+        .get_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?
+    else {
         return Ok(());
-    }
-
-    let content = fs::read_to_string(lease_path)?;
-    let existing: DreamerLease = serde_json::from_str(&content)?;
+    };
+    let existing: DreamerLease = serde_json::from_str(&row.value_json)?;
 
     if existing.holder_id != holder_id {
         return Err(LearnError::LeaseConflict {
@@ -514,20 +496,31 @@ pub fn release_lease(lease_path: &Path, holder_id: &str) -> Result<(), LearnErro
         });
     }
 
-    fs::remove_file(lease_path)?;
+    store
+        .delete_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?;
     Ok(())
 }
 
 /// Renew a lease (extend expiry).
 pub fn renew_lease(lease_path: &Path, holder_id: &str) -> Result<(), LearnError> {
-    if !lease_path.exists() {
+    let store = jfc_knowledge::KnowledgeStore::open_default().map_err(|e| LearnError::Io {
+        source: std::io::Error::other(e),
+    })?;
+    let key = dreamer_lease_key(lease_path);
+    let Some(row) = store
+        .get_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?
+    else {
         return Err(LearnError::LeaseConflict {
             message: "No lease to renew".to_string(),
         });
-    }
-
-    let content = fs::read_to_string(lease_path)?;
-    let mut existing: DreamerLease = serde_json::from_str(&content)?;
+    };
+    let mut existing: DreamerLease = serde_json::from_str(&row.value_json)?;
 
     if existing.holder_id != holder_id {
         return Err(LearnError::LeaseConflict {
@@ -540,12 +533,20 @@ pub fn renew_lease(lease_path: &Path, holder_id: &str) -> Result<(), LearnError>
 
     existing.expiry_ms = now_ms() + DEFAULT_LEASE_DURATION_MS;
     let json = serde_json::to_string(&existing)?;
-    fs::write(lease_path, json)?;
+    store
+        .upsert_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key, &json)
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?;
 
     Ok(())
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn dreamer_lease_key(lease_path: &Path) -> String {
+    lease_path.display().to_string()
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -587,12 +588,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let lease_path = tmp.path().join("dreamer.lock");
 
-        // Write an expired lease directly
         let expired = DreamerLease {
             holder_id: "old-holder".to_string(),
             expiry_ms: 1, // long expired
         };
-        fs::write(&lease_path, serde_json::to_string(&expired).unwrap()).unwrap();
+        let store = jfc_knowledge::KnowledgeStore::open_default().unwrap();
+        store
+            .upsert_session_artifact(
+                DREAMER_LEASE_SESSION_ID,
+                DREAMER_LEASE_KIND,
+                &dreamer_lease_key(&lease_path),
+                &serde_json::to_string(&expired).unwrap(),
+            )
+            .unwrap();
 
         // Should be able to acquire
         let lease = acquire_lease(&lease_path).unwrap();

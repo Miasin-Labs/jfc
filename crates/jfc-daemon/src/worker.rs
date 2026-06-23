@@ -6,9 +6,9 @@
 //!   `JFC_WORKER_BIN` → `current_exe` → workspace `target/{release,debug}`
 //!   → `PATH` → `cargo build` rebuild. Shell aliases are intentionally
 //!   ignored: `Command::spawn` cannot see them.
-//! - Spawn (`spawn_background_agent_worker_with_paths`): writes the launch
-//!   spec, records a roster entry, forks a detached `jfc daemon worker
-//!   --launch <path>` process (setsid on Unix), captures its PID.
+//! - Spawn (`spawn_background_agent_worker_with_paths`): persists the launch
+//!   spec in the DB, records a roster entry, forks a detached `jfc daemon
+//!   worker --launch <handle>` process (setsid on Unix), captures its PID.
 //! - Entry (`run_background_agent_worker`): the worker process re-enters
 //!   here, rebuilds providers, prepares a worktree if requested, drives
 //!   `tools::execute_task`, and writes terminal state to the daemon roster.
@@ -25,6 +25,61 @@ use super::state::{
     BackgroundAgentInfo, BackgroundAgentLaunch, BackgroundAgentStatus, DaemonPaths,
     load_state_for_update, save_state, with_state_lock,
 };
+
+const BACKGROUND_AGENT_LAUNCH_SESSION_ID: &str = "__daemon__";
+const BACKGROUND_AGENT_LAUNCH_KIND: &str = "background_agent_launch";
+
+pub fn load_background_agent_launch(
+    paths: &DaemonPaths,
+    launch_path: &Path,
+) -> std::io::Result<BackgroundAgentLaunch> {
+    let key = launch_path.display().to_string();
+    let store = if paths.base_dir == DaemonPaths::default_user().base_dir {
+        jfc_knowledge::KnowledgeStore::open_default()
+    } else {
+        std::fs::create_dir_all(&paths.base_dir)?;
+        jfc_knowledge::KnowledgeStore::open(&paths.base_dir.join("knowledge.db"))
+    }
+    .map_err(std::io::Error::other)?;
+    let row = store
+        .get_session_artifact(
+            BACKGROUND_AGENT_LAUNCH_SESSION_ID,
+            BACKGROUND_AGENT_LAUNCH_KIND,
+            &key,
+        )
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("background agent launch spec not found: {key}"),
+            )
+        })?;
+    serde_json::from_str(&row.value_json).map_err(std::io::Error::other)
+}
+
+fn persist_background_agent_launch(
+    paths: &DaemonPaths,
+    launch_path: &Path,
+    launch: &BackgroundAgentLaunch,
+) -> std::io::Result<()> {
+    let key = launch_path.display().to_string();
+    let json = serde_json::to_string(launch).map_err(std::io::Error::other)?;
+    let store = if paths.base_dir == DaemonPaths::default_user().base_dir {
+        jfc_knowledge::KnowledgeStore::open_default()
+    } else {
+        std::fs::create_dir_all(&paths.base_dir)?;
+        jfc_knowledge::KnowledgeStore::open(&paths.base_dir.join("knowledge.db"))
+    }
+    .map_err(std::io::Error::other)?;
+    store
+        .upsert_session_artifact(
+            BACKGROUND_AGENT_LAUNCH_SESSION_ID,
+            BACKGROUND_AGENT_LAUNCH_KIND,
+            &key,
+            &json,
+        )
+        .map_err(std::io::Error::other)
+}
 
 fn path_is_executable_file(path: &Path) -> bool {
     path.is_file()
@@ -310,8 +365,7 @@ pub(super) fn arm_worker_launch_epoch(
     if let Some(worker_exe) = runtime_worker_exe {
         launch.worker_exe = Some(worker_exe);
     }
-    let json = serde_json::to_string_pretty(&launch).map_err(std::io::Error::other)?;
-    std::fs::write(launch_path, json)?;
+    persist_background_agent_launch(paths, launch_path, &launch)?;
     Ok(launch)
 }
 
@@ -436,9 +490,7 @@ pub(super) fn takeover_background_agent_worker_with_paths(
                 format!("background agent {agent_id} has no launch spec"),
             )
         })?;
-        let launch_json = std::fs::read_to_string(&launch_path)?;
-        let launch: BackgroundAgentLaunch =
-            serde_json::from_str(&launch_json).map_err(std::io::Error::other)?;
+        let launch = load_background_agent_launch(paths, &launch_path)?;
         Ok((launch_path, launch, agent.pid))
     })?;
 

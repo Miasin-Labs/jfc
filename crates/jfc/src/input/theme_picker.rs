@@ -29,10 +29,9 @@ pub(super) fn open_theme_picker(app: &mut App) {
         return;
     }
     app.theme_preview_original = Some(app.theme);
+    app.theme_preview_original_name = Some(app.active_theme_name.clone());
     app.theme_picker_input.clear();
-    let current = jfc_engine::config::load_arc().theme.clone();
-    app.theme_picker_selected = current
-        .as_deref()
+    app.theme_picker_selected = Some(app.active_theme_name.as_str())
         .and_then(Theme::choice_by_name)
         .and_then(|choice| Theme::choices().iter().position(|c| c.name == choice.name))
         .unwrap_or(0);
@@ -45,6 +44,7 @@ pub(super) fn close_theme_picker(app: &mut App) {
     app.theme_picker_input.clear();
     app.theme_picker_selected = 0;
     app.theme_preview_original = None;
+    app.theme_preview_original_name = None;
 }
 
 /// Apply a theme for LIVE PREVIEW only — swap the active theme and bust the
@@ -58,6 +58,7 @@ pub(super) fn preview_theme(app: &mut App, name: &str) {
         && let Some(theme) = Theme::by_name(choice.name)
     {
         app.theme = theme;
+        app.active_theme_name = choice.name.to_owned();
         app.render_cache.borrow_mut().clear();
         app.height_index.borrow_mut().clear();
         crate::markdown::clear_highlight_cache();
@@ -79,6 +80,7 @@ pub(super) fn apply_theme(app: &mut App, name: &str) {
         && let Some(theme) = Theme::by_name(choice.name)
     {
         app.theme = theme;
+        app.active_theme_name = choice.name.to_owned();
         app.render_cache.borrow_mut().clear();
         app.height_index.borrow_mut().clear();
         crate::markdown::clear_highlight_cache();

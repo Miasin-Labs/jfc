@@ -2871,6 +2871,20 @@ async fn slash_theme_opens_picker_when_no_arg_robust() {
     );
 }
 
+#[test]
+fn theme_picker_highlights_active_theme_regression() {
+    let mut app = test_app();
+    app.theme = crate::theme::Theme::light();
+    app.active_theme_name = "light".to_owned();
+
+    super::theme_picker::open_theme_picker(&mut app);
+
+    let selected = crate::theme::Theme::choices()
+        .get(app.theme_picker_selected)
+        .expect("theme selection should be in bounds");
+    assert_eq!(selected.name, "light");
+}
+
 #[tokio::test]
 async fn slash_theme_unknown_pushes_warning_robust() {
     let mut app = test_app();

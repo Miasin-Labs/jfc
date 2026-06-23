@@ -12,7 +12,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::app::EngineState;
 use crate::runtime::{EngineEvent, EventSender, FrontendEvent, TaskEvent};
@@ -267,8 +266,7 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
         // attach the prior content-hash map so synthesis can mark which findings
         // are *marginal* (newly introduced) vs. carried over.
         let content_hashes = content_hash_map(&cwd, &files).await;
-        let memo_dir = cwd.join(".jfc").join("reviews");
-        let prior_hashes = load_content_hashes(&memo_dir).await;
+        let prior_hashes = load_content_hashes(&cwd).await;
         let all_unchanged = !content_hashes.is_empty()
             && content_hashes
                 .iter()
@@ -311,6 +309,7 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
             args: args.clone(),
             provider,
             model,
+            session_id: session_id.clone(),
             session_dir,
             resume_from_run_id: None,
             cancel: cancel.clone(),
@@ -325,7 +324,7 @@ pub async fn maybe_spawn_after_turn(state: &mut EngineState, tx: &EventSender) {
         // Persist the content-hash snapshot so the next run can memoize against
         // it and compute the marginal finding set.
         if !outcome.cancelled {
-            save_content_hashes(&memo_dir, &content_hashes).await;
+            save_content_hashes(&cwd, &content_hashes).await;
         }
         clear_in_flight(&in_flight_slot, &cancel_handle);
 
@@ -765,29 +764,50 @@ async fn content_hash_map(
     map
 }
 
-async fn load_content_hashes(dir: &Path) -> std::collections::BTreeMap<String, String> {
-    let path = dir.join("content-hashes.json");
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => std::collections::BTreeMap::new(),
-    }
+async fn load_content_hashes(cwd: &Path) -> std::collections::BTreeMap<String, String> {
+    let artifact_key = auto_review_artifact_key(cwd, "content_hashes", "snapshot");
+    tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+        let row = store
+            .get_session_artifact(
+                REVIEW_ARTIFACT_SESSION_ID,
+                REVIEW_ARTIFACT_KIND,
+                &artifact_key,
+            )
+            .ok()??;
+        serde_json::from_str::<std::collections::BTreeMap<String, String>>(&row.value_json).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
-async fn save_content_hashes(dir: &Path, hashes: &std::collections::BTreeMap<String, String>) {
+async fn save_content_hashes(cwd: &Path, hashes: &std::collections::BTreeMap<String, String>) {
     if hashes.is_empty() {
         return;
     }
-    if tokio::fs::create_dir_all(dir).await.is_err() {
-        return;
-    }
     // Merge into any existing snapshot so unrelated files stay memoized.
-    let mut merged = load_content_hashes(dir).await;
+    let mut merged = load_content_hashes(cwd).await;
     for (k, v) in hashes {
         merged.insert(k.clone(), v.clone());
     }
-    if let Ok(json) = serde_json::to_vec_pretty(&merged) {
-        let _ = tokio::fs::write(dir.join("content-hashes.json"), json).await;
-    }
+    let Ok(value_json) = serde_json::to_string(&merged) else {
+        return;
+    };
+    let artifact_key = auto_review_artifact_key(cwd, "content_hashes", "snapshot");
+    let _ = tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default().map_err(std::io::Error::other)?;
+        store
+            .upsert_session_artifact(
+                REVIEW_ARTIFACT_SESSION_ID,
+                REVIEW_ARTIFACT_KIND,
+                &artifact_key,
+                &value_json,
+            )
+            .map_err(std::io::Error::other)
+    })
+    .await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1121,8 +1141,6 @@ async fn persist_code_review_outcome_inner(
     result: &serde_json::Value,
     error: Option<&str>,
 ) -> std::io::Result<crate::review::ReviewOutputEvent> {
-    let dir = cwd.join(".jfc").join("reviews");
-    tokio::fs::create_dir_all(&dir).await?;
     let created_at_ms = now_ms();
     // Deterministic review-output repair: parse a stringified body and
     // canonicalize review key synonyms (final_report/summary/confidence) before
@@ -1131,7 +1149,7 @@ async fn persist_code_review_outcome_inner(
     let repaired = crate::response_processor::review_repair_chain().process(result.clone());
     crate::response_processor::record_processor_findings(run_id, &repaired.findings);
     let result = &repaired.value;
-    let existing = load_existing_fingerprints(&dir).await;
+    let existing = load_existing_fingerprints(cwd).await;
     let (findings, duplicates) = extract_finding_records(run_id, created_at_ms, result, &existing);
     let finding_fingerprints = findings
         .iter()
@@ -1168,9 +1186,9 @@ async fn persist_code_review_outcome_inner(
         result: result.clone(),
     };
 
-    append_jsonl(&dir.join("runs.jsonl"), &record).await?;
+    append_review_artifact(cwd, "runs", run_id, &record).await?;
     for finding in findings {
-        append_jsonl(&dir.join("findings.jsonl"), &finding).await?;
+        append_review_artifact(cwd, "findings", &finding.fingerprint, &finding).await?;
     }
     let review_event =
         crate::review::normalize_review_output(cwd, run_id, source, args, result, &existing);
@@ -1178,58 +1196,63 @@ async fn persist_code_review_outcome_inner(
     Ok(review_event)
 }
 
-async fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await?;
-    let line = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned());
-    file.write_all(line.as_bytes()).await?;
-    file.write_all(b"\n").await
+const REVIEW_ARTIFACT_SESSION_ID: &str = "__auto_review__";
+const REVIEW_ARTIFACT_KIND: &str = "auto_review";
+const REVIEW_FINGERPRINT_LIMIT: usize = 10_000;
+
+fn auto_review_artifact_key(cwd: &Path, stream: &str, key: &str) -> String {
+    let project_key = jfc_knowledge::project_key(cwd);
+    format!("{project_key}:{stream}:{key}")
 }
 
-/// Cross-run dedup only needs to compare against *recent* findings, so we read
-/// a bounded tail of `findings.jsonl` rather than the whole file. Without this
-/// the per-run load was O(total findings ever recorded) and the file grows
-/// unbounded — re-reading megabytes on every auto-review. 64 KiB comfortably
-/// covers thousands of recent findings.
-const FINGERPRINT_TAIL_BYTES: u64 = 64 * 1024;
-
-async fn load_existing_fingerprints(dir: &Path) -> HashSet<String> {
-    let path = dir.join("findings.jsonl");
-    let body = match read_tail_string(&path, FINGERPRINT_TAIL_BYTES).await {
-        Some(body) => body,
-        None => return HashSet::new(),
-    };
-    body.lines()
-        .filter_map(|line| serde_json::from_str::<ReviewFindingRecord>(line).ok())
-        .map(|record| record.fingerprint)
-        .collect()
+async fn append_review_artifact<T: Serialize>(
+    cwd: &Path,
+    stream: &str,
+    key: &str,
+    value: &T,
+) -> std::io::Result<()> {
+    let artifact_key = auto_review_artifact_key(cwd, stream, key);
+    let value_json = serde_json::to_string(value).map_err(std::io::Error::other)?;
+    tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default().map_err(std::io::Error::other)?;
+        store
+            .append_session_artifact_event(
+                REVIEW_ARTIFACT_SESSION_ID,
+                REVIEW_ARTIFACT_KIND,
+                &artifact_key,
+                &value_json,
+            )
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
-/// Read at most the last `max_bytes` of a file as UTF-8 (lossy), dropping a
-/// leading partial line so JSONL parsing starts on a record boundary. Returns
-/// `None` if the file can't be opened.
-async fn read_tail_string(path: &Path, max_bytes: u64) -> Option<String> {
-    let mut file = tokio::fs::File::open(path).await.ok()?;
-    let len = file.metadata().await.ok()?.len();
-    let start = len.saturating_sub(max_bytes);
-    if start > 0 {
-        file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
-    }
-    let mut buf = Vec::with_capacity((len - start) as usize);
-    file.read_to_end(&mut buf).await.ok()?;
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    // Drop a partial first line when we seeked into the middle of the file so
-    // we never parse a truncated record.
-    if start > 0 {
-        if let Some(nl) = text.find('\n') {
-            return Some(text[nl + 1..].to_owned());
-        }
-        return Some(String::new());
-    }
-    Some(text)
+async fn load_existing_fingerprints(cwd: &Path) -> HashSet<String> {
+    let project_key = jfc_knowledge::project_key(cwd);
+    tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+        let rows = store
+            .list_recent_session_artifact_events(
+                REVIEW_ARTIFACT_SESSION_ID,
+                REVIEW_ARTIFACT_KIND,
+                None,
+                REVIEW_FINGERPRINT_LIMIT,
+            )
+            .ok()?;
+        Some(
+            rows.into_iter()
+                .filter(|row| row.key.starts_with(&format!("{project_key}:findings:")))
+                .filter_map(|row| serde_json::from_str::<ReviewFindingRecord>(&row.value_json).ok())
+                .map(|record| record.fingerprint)
+                .collect::<HashSet<_>>(),
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 fn extract_finding_records(
@@ -1323,6 +1346,8 @@ pub fn apply_patch_paths(patch: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn auto_review_mode_parses_known_values_normal() {
@@ -1629,6 +1654,7 @@ mod tests {
     #[tokio::test]
     async fn content_hashes_save_and_load_merge_robust() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = db_env_guard(tmp.path());
         let dir = tmp.path();
         let mut a = std::collections::BTreeMap::new();
         a.insert("src/lib.rs".to_owned(), "hash1".to_owned());
@@ -1666,54 +1692,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_tail_string_drops_partial_leading_line_robust() {
+    async fn load_existing_fingerprints_reads_matching_db_events_robust() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("findings.jsonl");
-        // Three lines; cap small enough to slice mid-first-line.
-        tokio::fs::write(&path, "AAAAAAAAAA\nBBBB\nCCCC\n")
+        let _guard = db_env_guard(tmp.path());
+        let cwd = tmp.path().join("repo");
+        let other = tmp.path().join("other");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        tokio::fs::create_dir_all(&other).await.unwrap();
+        let rec = ReviewFindingRecord {
+            schema_version: 1,
+            run_id: "r".to_owned(),
+            created_at_ms: 0,
+            fingerprint: "fp-current".to_owned(),
+            duplicate: false,
+            file: Some("src/lib.rs".to_owned()),
+            line: Some(1),
+            severity: None,
+            category: None,
+            summary: None,
+            evidence: None,
+            confidence: None,
+        };
+        let other_rec = ReviewFindingRecord {
+            fingerprint: "fp-other".to_owned(),
+            ..rec.clone()
+        };
+        append_review_artifact(&cwd, "findings", &rec.fingerprint, &rec)
             .await
             .unwrap();
-        let tail = read_tail_string(&path, 10).await.unwrap();
-        // The truncated "AAAA…" head line must be dropped; only whole lines remain.
-        assert!(!tail.contains('A'), "partial line leaked: {tail:?}");
-        assert!(tail.contains("CCCC"));
-    }
+        append_review_artifact(&other, "findings", &other_rec.fingerprint, &other_rec)
+            .await
+            .unwrap();
 
-    #[tokio::test]
-    async fn load_existing_fingerprints_reads_bounded_tail_robust() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path();
-        // Write more findings than the tail window can hold, with a unique
-        // fingerprint per line; only recent ones should load, and the call
-        // must stay bounded regardless of total size.
-        let mut body = String::new();
-        for i in 0..5000 {
-            let rec = ReviewFindingRecord {
-                schema_version: 1,
-                run_id: "r".to_owned(),
-                created_at_ms: 0,
-                fingerprint: format!("fp{i:08}"),
-                duplicate: false,
-                file: Some("src/lib.rs".to_owned()),
-                line: Some(1),
-                severity: None,
-                category: None,
-                summary: None,
-                evidence: None,
-                confidence: None,
-            };
-            body.push_str(&serde_json::to_string(&rec).unwrap());
-            body.push('\n');
-        }
-        tokio::fs::write(dir.join("findings.jsonl"), &body)
-            .await
-            .unwrap();
-        let fps = load_existing_fingerprints(dir).await;
-        assert!(!fps.is_empty(), "should load some recent fingerprints");
-        // The most recent fingerprint must be present...
-        assert!(fps.contains("fp00004999"));
-        // ...and the oldest must have been dropped by the tail bound.
-        assert!(!fps.contains("fp00000000"));
+        let fps = load_existing_fingerprints(&cwd).await;
+        assert!(fps.contains("fp-current"));
+        assert!(!fps.contains("fp-other"));
     }
 
     #[test]
@@ -1746,6 +1759,7 @@ mod tests {
     #[tokio::test]
     async fn persist_code_review_outcome_dedups_previous_findings_normal() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = db_env_guard(tmp.path());
         let result = serde_json::json!({
             "findings": [{
                 "file": "src/lib.rs",
@@ -1769,15 +1783,50 @@ mod tests {
             .await
             .unwrap();
 
-        let findings = tokio::fs::read_to_string(tmp.path().join(".jfc/reviews/findings.jsonl"))
-            .await
-            .unwrap();
-        let parsed = findings
-            .lines()
-            .map(|line| serde_json::from_str::<ReviewFindingRecord>(line).unwrap())
+        let project_key = jfc_knowledge::project_key(tmp.path());
+        let store = jfc_knowledge::KnowledgeStore::open_default().unwrap();
+        let parsed = store
+            .list_recent_session_artifact_events(
+                REVIEW_ARTIFACT_SESSION_ID,
+                REVIEW_ARTIFACT_KIND,
+                None,
+                10,
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.key.starts_with(&format!("{project_key}:findings:")))
+            .map(|row| serde_json::from_str::<ReviewFindingRecord>(&row.value_json).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(parsed.len(), 2);
         assert!(!parsed[0].duplicate);
         assert!(parsed[1].duplicate);
+    }
+
+    fn db_env_guard(root: &Path) -> DbEnvGuard {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let prior = std::env::var("JFC_KNOWLEDGE_DB").ok();
+        unsafe {
+            std::env::set_var("JFC_KNOWLEDGE_DB", root.join("knowledge.db"));
+        }
+        DbEnvGuard {
+            prior,
+            _guard: guard,
+        }
+    }
+
+    struct DbEnvGuard {
+        prior: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for DbEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prior.take() {
+                    Some(prior) => std::env::set_var("JFC_KNOWLEDGE_DB", prior),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                }
+            }
+        }
     }
 }

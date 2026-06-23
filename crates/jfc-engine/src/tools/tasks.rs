@@ -311,11 +311,14 @@ pub fn execute_task_list(
         return ExecutionResult::success(output);
     }
 
-    // Archival memory: read back the durable "everything we've worked on" log
-    // (pruned terminal tasks) from the sibling JSONL, newest first.
-    let history_path = jfc_session::history_path_for(store.path());
-    let history =
-        jfc_session::read_task_history(&history_path, TASK_HISTORY_RETRIEVAL_LIMIT, history_query);
+    // Archival memory: read back the durable "everything we've worked on" DB
+    // stream (pruned terminal tasks), newest first.
+    let history_key = store.history_key();
+    let history = jfc_session::read_task_history(
+        history_key.as_deref(),
+        TASK_HISTORY_RETRIEVAL_LIMIT,
+        history_query,
+    );
     debug!(
         target: "jfc::tools",
         history_count = history.len(),

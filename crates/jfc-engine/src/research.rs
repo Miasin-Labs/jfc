@@ -192,6 +192,8 @@ pub struct ResearchArtifact {
     pub json_path: std::path::PathBuf,
 }
 
+const RESEARCH_ARTIFACT_KIND: &str = "research_report";
+
 impl ResearchReport {
     pub fn successful_steps(&self) -> usize {
         self.steps.iter().filter(|s| s.succeeded()).count()
@@ -264,21 +266,31 @@ impl ResearchReport {
         })
     }
 
-    /// Export the report to `dir` as `<slug>.md` + `<slug>.json`, mirroring
-    /// Perplexity's deeper-research export-asset. Returns the written paths.
+    /// Export the report as a DB artifact. The returned paths are stable
+    /// handles for UI compatibility, not filesystem paths.
     pub fn export(&self, dir: &std::path::Path) -> std::io::Result<ResearchArtifact> {
-        std::fs::create_dir_all(dir)?;
         let slug = export_slug(&self.question);
-        let markdown_path = dir.join(format!("{slug}.md"));
-        let json_path = dir.join(format!("{slug}.json"));
-        std::fs::write(&markdown_path, self.to_markdown())?;
-        std::fs::write(
-            &json_path,
-            serde_json::to_string_pretty(&self.to_json()).unwrap_or_default(),
-        )?;
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "slug": slug,
+            "markdown": self.to_markdown(),
+            "report": self.to_json(),
+        });
+        let session_id = format!("project:{}", jfc_knowledge::project_key(dir));
+        let value_json = serde_json::to_string(&payload).map_err(std::io::Error::other)?;
+        jfc_knowledge::KnowledgeStore::open_default()
+            .and_then(|store| {
+                store.upsert_session_artifact(
+                    &session_id,
+                    RESEARCH_ARTIFACT_KIND,
+                    &slug,
+                    &value_json,
+                )
+            })
+            .map_err(std::io::Error::other)?;
         Ok(ResearchArtifact {
-            markdown_path,
-            json_path,
+            markdown_path: std::path::PathBuf::from(format!("db:research:{slug}:markdown")),
+            json_path: std::path::PathBuf::from(format!("db:research:{slug}:json")),
         })
     }
 
@@ -1471,7 +1483,7 @@ mod tests {
     // ── Export ───────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn export_writes_markdown_and_json_normal() {
+    async fn export_writes_db_artifact_normal() {
         let searcher = MockSearcher::new();
         let synth = CountingSynth;
         let req = ResearchRequest::new("rust async runtimes").with_max_steps(2);
@@ -1479,16 +1491,30 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("jfc-research-test-{}", std::process::id()));
         let artifact = report.export(&dir).expect("export ok");
-        assert!(artifact.markdown_path.exists());
-        assert!(artifact.json_path.exists());
+        assert!(
+            artifact
+                .markdown_path
+                .to_string_lossy()
+                .starts_with("db:research:")
+        );
+        assert!(
+            artifact
+                .json_path
+                .to_string_lossy()
+                .starts_with("db:research:")
+        );
 
-        let md = std::fs::read_to_string(&artifact.markdown_path).unwrap();
-        assert!(md.contains("Research"));
-        let json = std::fs::read_to_string(&artifact.json_path).unwrap();
-        assert!(json.contains("\"question\""));
-        assert!(json.contains("rust async runtimes"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let row = jfc_knowledge::KnowledgeStore::open_default()
+            .unwrap()
+            .get_session_artifact(
+                &format!("project:{}", jfc_knowledge::project_key(&dir)),
+                RESEARCH_ARTIFACT_KIND,
+                "rust-async-runtimes",
+            )
+            .unwrap()
+            .expect("research artifact row");
+        assert!(row.value_json.contains("Research"));
+        assert!(row.value_json.contains("rust async runtimes"));
     }
 
     #[test]

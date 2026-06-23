@@ -130,8 +130,8 @@ pub(crate) async fn run(
     app.engine.strict_tool_schemas = cli_config.strict_tool_schemas;
     let startup_config = config::load_arc();
 
-    // Feature: session GC — remove stale session files at startup so the
-    // sessions directory doesn't grow unbounded. Fires as a background task
+    // Feature: session GC — remove stale DB sessions at startup so the
+    // transcript store doesn't grow unbounded. Fires as a background task
     // so it doesn't block the TUI from appearing. Respects `session_max_age_days`
     // (0 = disabled) and `session_min_keep`.
     {
@@ -173,16 +173,8 @@ pub(crate) async fn run(
         }
         app.engine.bash_sandbox = bash_sandbox;
     }
-    // Local prompt-rewrite / over-refusal gate: default-OFF. Only carried onto
-    // the engine when `[prompt_rewrite] enabled = true`, so absent/false config
-    // leaves `submit_prompt` on its unchanged path.
-    if let Some(pr) = startup_config.prompt_rewrite.as_ref()
-        && pr.enabled
-    {
-        app.engine.prompt_rewrite = Some(pr.clone());
-    }
-    // Opt-in refusal→rewrite→resend loop (mirrored onto engine state so the
-    // refusal handler reads it without a live config load, and stays testable).
+    let prompt_rewrite = startup_config.prompt_rewrite.clone().unwrap_or_default();
+    app.engine.prompt_rewrite = prompt_rewrite.enabled.then_some(prompt_rewrite);
     app.engine.refusal_rewrite_retry_enabled = startup_config.refusal_rewrite_retry_enabled;
     app.engine.refusal_rewrite_retry_max = startup_config.refusal_rewrite_retry_max;
 
@@ -248,12 +240,14 @@ pub(crate) async fn run(
     }
     // Apply the user's persisted theme choice from
     // ~/.config/jfc/config.toml. Unknown / missing names fall back
-    // silently to the default dark theme set by App::new.
+    // silently to the default Claude theme set by App::new.
     if let Some(name) = startup_config.theme.as_deref()
-        && let Some(theme) = crate::theme::Theme::by_name(name)
+        && let Some(choice) = crate::theme::Theme::choice_by_name(name)
+        && let Some(theme) = crate::theme::Theme::by_name(choice.name)
     {
-        tracing::info!(target: "jfc::ui::theme", theme = %name, "applied persisted theme");
+        tracing::info!(target: "jfc::ui::theme", theme = %choice.name, "applied persisted theme");
         app.theme = theme;
+        app.active_theme_name = choice.name.to_owned();
         // The render cache stores `Vec<Line<'static>>` with syntect highlight
         // colors baked in from the previous theme. Switching themes without
         // invalidating would serve stale-colored lines until each entry is
@@ -289,10 +283,7 @@ pub(crate) async fn run(
     // users). The gate flips itself off after the first successful
     // turn so the overlay doesn't repeat.
     if jfc_engine::feature_gates::is_enabled(jfc_engine::feature_gates::FeatureGate::Finch) {
-        let session_dir_empty = std::fs::read_dir(jfc_session::sessions_dir())
-            .map(|mut it| it.next().is_none())
-            .unwrap_or(true);
-        if session_dir_empty {
+        if !jfc_session::has_any_session().await {
             app.show_help = true;
             tracing::info!(
                 target: "jfc::onboarding",
@@ -758,63 +749,8 @@ pub(crate) async fn run(
         });
     }
 
-    // Self-driving cross-project knowledge maintenance (jfc-knowledge). Runs in
-    // the background so the user never has to touch `/knowledge`: it imports
-    // legacy .md memories, mines session history into verified lessons,
-    // consolidates duplicates, and auto-promotes proven generalizable lessons
-    // across projects — growing the store unbounded. Fires once at startup, then
-    // on a recurring tick so a long-lived session keeps learning from sessions
-    // saved after launch; each pass is internally throttled (6h per project,
-    // `maintain_state`), so the tick is cheap and idempotent between windows.
-    // Gated off by `cross_project_recall_enabled=false` or
-    // `JFC_DISABLE_KNOWLEDGE_MAINTAIN=1`. Best-effort and fully isolated: a
-    // failure here never affects the session.
-    if !matches!(
-        std::env::var("JFC_DISABLE_KNOWLEDGE_MAINTAIN").as_deref(),
-        Ok("1") | Ok("true")
-    ) && jfc_engine::config::load_arc().cross_project_recall_enabled
-    {
-        // Recurring interval between maintenance ticks (override for tests/tuning).
-        let tick = std::env::var("JFC_KNOWLEDGE_MAINTAIN_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|s| *s > 0)
-            .unwrap_or(30 * 60);
-        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        tokio::spawn(async move {
-            loop {
-                let cwd = cwd.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    let sessions = dirs::config_dir().map(|c| c.join("jfc").join("sessions"));
-                    let user_mem = dirs::config_dir().map(|c| c.join("jfc").join("memory"));
-                    let project_mem = cwd.join(".jfc").join("memory");
-                    match jfc_engine::knowledge_maintain(
-                        &cwd,
-                        sessions.as_deref(),
-                        user_mem.as_deref(),
-                        Some(project_mem.as_path()),
-                    ) {
-                        Ok(report) => tracing::info!(
-                            target: "jfc::knowledge",
-                            imported = report.imported,
-                            mined = report.mined_inserted,
-                            compounded = report.mined_compounded,
-                            consolidated = report.consolidated,
-                            auto_promoted = report.auto_promoted,
-                            "cross-project knowledge maintenance pass"
-                        ),
-                        Err(e) => tracing::debug!(
-                            target: "jfc::knowledge",
-                            error = %e,
-                            "knowledge maintenance skipped"
-                        ),
-                    }
-                })
-                .await;
-                tokio::time::sleep(std::time::Duration::from_secs(tick)).await;
-            }
-        });
-    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    jfc_engine::spawn_knowledge_maintenance_loop(cwd);
 
     // Real LSP client: spawns rust-analyzer (Cargo.toml present) or zls
     // (build.zig present) and routes `textDocument/publishDiagnostics`
@@ -1106,8 +1042,8 @@ pub(crate) async fn run(
                 AppEvent::Engine(ev) => {
                     let elicit_before = app.engine.pending_elicitations.len();
                     match crate::runtime::handle_engine_event(&mut app.engine, &tx, ev).await? {
-                        Some(crate::runtime::FrontendDirective::SubmitPrompt(text)) => {
-                            handlers::ui_actions::handle_submit(&mut app, text, &tx).await?;
+                        Some(crate::runtime::FrontendDirective::SubmitPrompt(submission)) => {
+                            handlers::ui_actions::handle_submit(&mut app, submission, &tx).await?;
                         }
                         Some(crate::runtime::FrontendDirective::RunCommand(text)) => {
                             crate::input::run_slash_command_with_tx(&mut app, &text, &tx).await;
@@ -1480,7 +1416,7 @@ async fn inject_voice_transcript(app: &mut App, text: &str, tx: &crate::runtime:
         // input before calling submit), which would leave the text behind.
         app.textarea.select_all();
         app.textarea.cut();
-        handlers::ui_actions::handle_submit(app, text.to_owned(), tx)
+        handlers::ui_actions::handle_submit(app, text.to_owned().into(), tx)
             .await
             .unwrap_or_else(|err| {
                 tracing::warn!(target: "jfc::voice", error = %err, "auto-submit failed");
@@ -1525,114 +1461,28 @@ thread_local! {
     static VOICE_AUTO_SUBMIT_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
-/// Extract user prompts from a parsed session JSON value (raw serde_json).
-/// Returns text strings oldest-first, capped at `max_prompts`. Skips compact
-/// boundaries, empty strings, and slash commands.
-fn extract_prompts_from_session_json(
-    session: &serde_json::Value,
-    max_prompts: usize,
-) -> Vec<String> {
-    let Some(messages) = session.get("messages").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    'msg: for msg in messages {
-        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
-            continue;
-        }
-        let Some(parts) = msg.get("parts").and_then(|p| p.as_array()) else {
-            continue;
-        };
-        // Skip compact-boundary messages.
-        for p in parts.iter() {
-            if p.get("type").and_then(|t| t.as_str()) == Some("compactBoundary")
-                || p.get("compactBoundary").is_some()
-            {
-                continue 'msg;
-            }
-        }
-        for part in parts {
-            let Some(text) = part.get("text").and_then(|t| t.as_str()) else {
-                continue;
-            };
-            let t = text.trim();
-            if t.is_empty() || t.starts_with('/') {
-                continue;
-            }
-            out.push(t.to_owned());
-            if out.len() >= max_prompts {
-                return out;
-            }
-        }
-    }
-    out
-}
-
 /// Populate `app.prior_session_prompts` from the most-recent past sessions.
 ///
-/// Reads up to `MAX_SESSIONS` session files synchronously (acceptable at
-/// startup before the TUI loop starts). Each session's user-role text parts
-/// are collected oldest-first. Compact boundary messages are skipped.
-/// Slash commands are skipped. De-duplication is caller-side (in
-/// `user_prompts` / `cmd_open_prompt_search`).
+/// Reads up to `MAX_SESSIONS` sessions from the DB transcript store.
+/// De-duplication is caller-side (in `user_prompts` / `cmd_open_prompt_search`).
 fn load_prior_session_prompts(app: &mut App) {
     const MAX_SESSIONS: usize = 10;
     const MAX_PROMPTS_PER_SESSION: usize = 50;
 
-    let dir = jfc_session::sessions_dir();
-    // Collect (mtime, path) pairs for all *.json files.
-    let mut entries: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
-        entries.push((modified, path));
-    }
-    // Sort newest-first; skip the current/continued session.
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
     let current_id = app
         .engine
         .current_session_id
         .as_ref()
         .map(|id| id.as_str().to_owned());
-
-    let mut collected: Vec<String> = Vec::new();
-    let mut loaded = 0usize;
-    for (_, path) in entries {
-        if loaded >= MAX_SESSIONS {
-            break;
-        }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if current_id.as_deref() == Some(stem) {
-                continue;
-            }
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(session) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        let prompts = extract_prompts_from_session_json(&session, MAX_PROMPTS_PER_SESSION);
-        collected.extend(prompts);
-        loaded += 1;
-    }
-    // Reverse so the combined vec is oldest-first across all loaded sessions;
-    // `user_prompts` prepends these before the current session's prompts.
-    collected.reverse();
+    let collected = jfc_session::prior_user_prompts(
+        MAX_SESSIONS,
+        MAX_PROMPTS_PER_SESSION,
+        current_id.as_deref(),
+    );
     let count = collected.len();
     app.prior_session_prompts = collected;
     tracing::debug!(
         target: "jfc::session::history",
-        sessions_loaded = loaded,
         prompt_count = count,
         "loaded cross-session prompt history"
     );

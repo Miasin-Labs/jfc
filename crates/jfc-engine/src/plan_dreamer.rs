@@ -3,9 +3,9 @@
 //! Runs periodic housekeeping: consolidating duplicate plans, archiving stale
 //! plans, and (in future) verifying, improving, and maintaining documentation.
 //!
-//! Uses a file-based lease to prevent concurrent execution.
+//! Uses a DB-backed lease to prevent concurrent execution.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -49,15 +49,17 @@ pub struct DreamerReport {
 
 // ─── Lease ───────────────────────────────────────────────────────────────────
 
+const PLAN_DREAMER_LEASE_KIND: &str = "plan_dreamer_lease";
+const PLAN_DREAMER_LEASE_KEY: &str = "lock";
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaseClaim {
     holder_id: String,
     expiry_ms: u64,
 }
 
-/// File-based lock at `.jfc/plans/.dreamer.lock`.
 struct DreamerLease {
-    path: PathBuf,
+    session_id: String,
     holder_id: String,
 }
 
@@ -72,16 +74,23 @@ impl DreamerLease {
                 .as_millis()
         );
         Self {
-            path: plans_root.join(".dreamer.lock"),
+            session_id: format!("project:{}", jfc_knowledge::project_key(plans_root)),
             holder_id,
         }
     }
 
+    fn store(&self) -> Result<jfc_knowledge::KnowledgeStore> {
+        Ok(jfc_knowledge::KnowledgeStore::open_default()?)
+    }
+
     /// Try to acquire the lease. Returns Ok(()) if acquired, Err if held.
     fn acquire(&self, ttl: Duration) -> Result<()> {
-        // Check existing lease
-        if let Ok(content) = std::fs::read_to_string(&self.path)
-            && let Ok(claim) = serde_json::from_str::<LeaseClaim>(&content)
+        let store = self.store()?;
+        if let Some(row) = store.get_session_artifact(
+            &self.session_id,
+            PLAN_DREAMER_LEASE_KIND,
+            PLAN_DREAMER_LEASE_KEY,
+        )? && let Ok(claim) = serde_json::from_str::<LeaseClaim>(&row.value_json)
         {
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -96,7 +105,6 @@ impl DreamerLease {
             }
         }
 
-        // Acquire
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -106,13 +114,24 @@ impl DreamerLease {
             expiry_ms: now_ms + ttl.as_millis() as u64,
         };
         let json = serde_json::to_string(&claim)?;
-        std::fs::write(&self.path, json)?;
+        store.upsert_session_artifact(
+            &self.session_id,
+            PLAN_DREAMER_LEASE_KIND,
+            PLAN_DREAMER_LEASE_KEY,
+            &json,
+        )?;
         Ok(())
     }
 
-    /// Release the lease (remove file).
+    /// Release the lease row.
     fn release(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        if let Ok(store) = self.store() {
+            let _ = store.delete_session_artifact(
+                &self.session_id,
+                PLAN_DREAMER_LEASE_KIND,
+                PLAN_DREAMER_LEASE_KEY,
+            );
+        }
     }
 }
 

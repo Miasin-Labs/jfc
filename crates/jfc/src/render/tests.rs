@@ -1360,7 +1360,7 @@ mod subagent_counter_tests {
 #[cfg(test)]
 mod render_snapshot_tests {
     use crate::app::{App, BackgroundTask, PermissionMode};
-    use jfc_core::TaskLifecycle;
+    use jfc_core::{MessagePart, TaskLifecycle, ToolCall, ToolInput, ToolKind, ToolOutput};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
     use std::sync::Arc;
 
@@ -1503,6 +1503,40 @@ mod render_snapshot_tests {
             !text.contains("shift+tab to cycle"),
             "cycle hint should not live in the persistent footer:\n{text}"
         );
+    }
+
+    #[test]
+    fn status_row_renders_shell_activity_badge_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        let mut msg = jfc_core::ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        let mut tool = ToolCall::new_pending(
+            "shell-1".into(),
+            ToolKind::Bash,
+            ToolInput::Bash {
+                command: "cargo test".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: None,
+                suppress_output: None,
+            },
+        );
+        tool.status = jfc_core::ToolStatus::Running;
+        tool.output = ToolOutput::Empty;
+        msg.parts.push(MessagePart::tool(tool));
+        app.engine.messages.push(msg);
+
+        let backend = TestBackend::new(80, 1);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::status::status(f, &app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(text.contains("1 shell"), "shell badge missing:\n{text}");
     }
 
     // The teammates panel renders the agent's description and the shared
@@ -1727,7 +1761,7 @@ mod render_snapshot_tests {
             .expect("mark done");
         app.engine
             .task_completion_times
-            .insert(done.id.clone(), std::time::Instant::now());
+            .insert(done.id, std::time::Instant::now());
 
         let backend = TestBackend::new(80, 5);
         let mut term = Terminal::new(backend).expect("terminal");

@@ -1,14 +1,12 @@
-//! Public async API for saving and loading session files.
+//! Public async API for saving and loading sessions.
 //!
-//! Coordinates disk I/O (atomic writes, JSON serialization) using helpers
-//! from `compaction` (message filtering) and `serialization` (data conversion).
+//! Coordinates DB persistence using helpers from `compaction` (message
+//! filtering) and `serialization` (data conversion).
 
 use tracing::{debug, info, warn};
 
 use crate::ids::SessionId;
 use crate::types::{ChatMessage, MessagePart, validate_turn_invariants};
-
-use jfc_session::sessions_dir;
 
 use super::compaction::{
     extract_first_prompt, persistent_session_messages, repair_loaded_messages,
@@ -73,32 +71,14 @@ pub async fn save_session(
             );
         }
     }
-    let dir = sessions_dir();
-    if tokio::fs::create_dir_all(&dir).await.is_err() {
-        warn!(target: "jfc::session", "failed to create sessions directory");
-        return;
-    }
-
     let now = chrono::Utc::now();
-    let path = dir.join(format!("{session_id_str}.json"));
+    let prior_db = load_session_header_from_db(session_id_str).await;
 
-    // Try to load existing session to preserve created_at + cwd + title
-    // (so resaving doesn't reset them on every turn). cwd is pinned at
-    // first save; subsequent saves don't migrate the session even if the
-    // user `cd`s elsewhere — that would conflate two projects' work into
-    // one session, and would also defeat the cwd-mismatch warning on
-    // resume (codex-rs `tui/src/session_resume.rs:99-111`).
-    let prior = tokio::fs::read_to_string(&path)
-        .await
-        .ok()
-        .and_then(|content| serde_json::from_str::<SerializedSession>(&content).ok());
-    let created_at = prior
+    let created_at = prior_db
         .as_ref()
-        .map(|s| s.created_at.clone())
+        .and_then(|s| s.created_at.clone())
         .unwrap_or_else(|| now.to_rfc3339());
-    // Precedence: prior session's cwd (immutable for session lifetime) →
-    // explicit `cwd` arg from caller → current_dir() fallback.
-    let stored_cwd = prior
+    let stored_cwd = prior_db
         .as_ref()
         .and_then(|s| s.cwd.clone())
         .or_else(|| cwd.map(str::to_owned))
@@ -107,10 +87,10 @@ pub async fn save_session(
                 .ok()
                 .map(|p| p.display().to_string())
         });
-    let title = prior.as_ref().and_then(|s| s.title.clone());
+    let title = prior_db.as_ref().and_then(|s| s.title.clone());
     let stored_model = model
         .map(str::to_owned)
-        .or_else(|| prior.as_ref().and_then(|s| s.model.clone()));
+        .or_else(|| prior_db.as_ref().and_then(|s| s.model.clone()));
 
     // Drop any queued-prompt placeholders before serializing. They're a
     // runtime-only construct used to render "⏳ I queued this" in the
@@ -142,52 +122,35 @@ pub async fn save_session(
         messages: coalesced.iter().map(serialize_message).collect(),
     };
 
-    if let Ok(json) = serde_json::to_string_pretty(&serialized) {
-        // Atomic write: a SIGKILL or power loss between writeFile()
-        // chunks would otherwise leave the session JSON truncated
-        // (e.g. half a `messages` array with no closing brace), and
-        // every subsequent load would fail to deserialize and the
-        // user would lose the whole transcript. temp + fsync + rename
-        // keeps the old contents in place until the new payload is
-        // fully on disk. See crate::atomic_write for the recipe.
-        if let Err(e) = crate::atomic_write::write_atomic(&path, json.as_bytes()).await {
-            warn!(
-                target: "jfc::session",
-                session_id = session_id_str,
-                error = %e,
-                "atomic session write failed — previous on-disk contents preserved"
-            );
-        } else {
-            info!(target: "jfc::session", session_id = session_id_str, message_count = messages.len(), path = %path.display(), "session saved");
-            // PLAN TODO 22 — additive dual-write: mirror the header into the
-            // jfc-knowledge session index. The JSON just written stays canonical;
-            // this only powers a faster catalog/picker. Best-effort: a failure is
-            // logged at debug and never affects the save. Off the hot path
-            // (blocking SQLite) via spawn_blocking.
-            // Build the index row + clone the serialized messages for the
-            // shadow transcript write (TODO 23). Both stay additive: JSON is
-            // canonical, this only mirrors into the DB for a future read-flip.
-            let row = jfc_knowledge::SessionRow {
-                id: serialized.id.clone(),
-                cwd: serialized.cwd.clone(),
-                model: serialized.model.clone(),
-                created_at: Some(serialized.created_at.clone()),
-                updated_at: serialized.updated_at.clone(),
-                first_prompt: serialized.first_prompt.clone(),
-                title: serialized.title.clone(),
-                message_count: coalesced.len() as i64,
-            };
-            // Map to the knowledge crate's message type before the spawn (avoids
-            // cloning the serialized-part tree). replace_transcript upserts the
-            // header + all messages in one transaction.
-            let shadow_msgs = crate::to_session_messages(&serialized.messages);
-            tokio::task::spawn_blocking(move || {
-                crate::shadow_session_transcript(row, shadow_msgs);
-            });
-        }
-    } else {
-        warn!(target: "jfc::session", session_id = session_id_str, "failed to serialize session");
+    let row = jfc_knowledge::SessionRow {
+        id: serialized.id.clone(),
+        cwd: serialized.cwd.clone(),
+        model: serialized.model.clone(),
+        created_at: Some(serialized.created_at.clone()),
+        updated_at: serialized.updated_at.clone(),
+        first_prompt: serialized.first_prompt.clone(),
+        title: serialized.title.clone(),
+        message_count: coalesced.len() as i64,
+    };
+    let db_messages = crate::to_session_messages(&serialized.messages);
+    if tokio::task::spawn_blocking(move || {
+        crate::save_session_transcript_to_db(row, db_messages);
+    })
+    .await
+    .is_err()
+    {
+        warn!(
+            target: "jfc::session",
+            session_id = session_id_str,
+            "session DB write task failed"
+        );
     }
+    info!(
+        target: "jfc::session",
+        session_id = session_id_str,
+        message_count = messages.len(),
+        "session saved to DB"
+    );
 
     // Frontend post-save hook (e.g. the TUI persists its highlight-height
     // cache alongside the session). Lives behind a registration so the
@@ -218,74 +181,67 @@ fn scrub_loaded_thinking_poison(messages: &mut [ChatMessage]) -> usize {
     removed
 }
 
-/// Load a session's messages from the DB transcript store (PLAN TODO 24). Each
-/// `meta` column holds the verbatim `SerializedMessage` JSON, so we deserialize
-/// it and run the SAME `deserialize_message` path as the JSON loader — identical
-/// `ChatMessage`s. Returns `None` (caller falls back to JSON) if the source flag
-/// isn't "db", the store is unavailable, or the session has no transcript rows.
-async fn load_session_from_db(session_id_str: &str) -> Option<Vec<SerializedMessage>> {
-    if !crate::config::load_arc()
-        .session_source
-        .eq_ignore_ascii_case("db")
-    {
-        return None;
-    }
+/// Load a session's messages from the DB transcript store. Each `meta` column
+/// holds the verbatim `SerializedMessage` JSON, so we deserialize it and run the
+/// same `deserialize_message` path used by legacy migration.
+async fn load_session_header_from_db(session_id_str: &str) -> Option<jfc_knowledge::SessionRow> {
     let id = session_id_str.to_owned();
-    let rows = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
+        jfc_knowledge::KnowledgeStore::open_default()
+            .ok()
+            .and_then(|store| store.get_session(&id).ok().flatten())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn load_session_from_db(session_id_str: &str) -> Option<SerializedSession> {
+    let id = session_id_str.to_owned();
+    let (header, rows) = tokio::task::spawn_blocking(move || {
         let store = jfc_knowledge::KnowledgeStore::open_default().ok()?;
+        let header = store.get_session(&id).ok().flatten()?;
         let msgs = store.load_transcript(&id).ok()?;
         if msgs.is_empty() {
             return None;
         }
-        Some(msgs)
+        Some((header, msgs))
     })
     .await
     .ok()
     .flatten()?;
 
-    // Reconstruct SerializedMessage from each row's verbatim `meta` JSON.
     let mut serialized = Vec::with_capacity(rows.len());
     for row in rows {
-        let meta = row.meta?; // a row without meta means a non-lossless write — bail to JSON
+        let meta = row.meta?;
         match serde_json::from_str::<SerializedMessage>(&meta) {
             Ok(m) => serialized.push(m),
-            Err(_) => return None, // any decode failure → fall back to canonical JSON
+            Err(_) => return None,
         }
     }
-    Some(serialized)
+    Some(SerializedSession {
+        id: header.id,
+        created_at: header.created_at.unwrap_or_default(),
+        updated_at: header.updated_at,
+        first_prompt: header.first_prompt,
+        model: header.model,
+        cwd: header.cwd,
+        title: header.title,
+        messages: serialized,
+    })
 }
 
 pub async fn load_session(session_id: &SessionId) -> Option<Vec<ChatMessage>> {
     let session_id_str = session_id.as_str();
     debug!(target: "jfc::session", session_id = session_id_str, "loading session");
 
-    // PLAN TODO 24: DB-first read when `session_source = "db"` (after the parity
-    // gate is green). Falls through to the canonical JSON on any miss, and the
-    // JSON writer keeps running, so this is fully reversible.
-    let session: SerializedSession = if let Some(db_messages) =
+    let session: SerializedSession = if let Some(session) =
         load_session_from_db(session_id_str).await
     {
-        debug!(target: "jfc::session", session_id = session_id_str, count = db_messages.len(), "loaded session from DB transcript");
-        SerializedSession {
-            id: session_id_str.to_owned(),
-            created_at: String::new(),
-            updated_at: None,
-            first_prompt: None,
-            model: None,
-            cwd: None,
-            title: None,
-            messages: db_messages,
-        }
+        debug!(target: "jfc::session", session_id = session_id_str, count = session.messages.len(), "loaded session from DB transcript");
+        session
     } else {
-        let path = sessions_dir().join(format!("{session_id_str}.json"));
-        let content = tokio::fs::read_to_string(&path).await.ok()?;
-        match serde_json::from_str(&content) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(target: "jfc::session", session_id = session_id_str, error = %e, "failed to parse session file");
-                return None;
-            }
-        }
+        return None;
     };
     let message_count = session.messages.len();
     let messages: Vec<ChatMessage> = session
@@ -342,30 +298,8 @@ pub async fn load_session_with_model(
 ) -> Option<(Vec<ChatMessage>, Option<String>)> {
     let session_id_str = session_id.as_str();
 
-    // PLAN TODO 24: DB-first when flagged. Messages come from the transcript
-    // store; the model is read from the session-index row (which stores it).
-    // Falls through to canonical JSON on any miss; JSON writer keeps running.
-    if let Some(db_messages) = load_session_from_db(session_id_str).await {
-        let id = session_id_str.to_owned();
-        let model = tokio::task::spawn_blocking(move || {
-            jfc_knowledge::KnowledgeStore::open_default()
-                .ok()
-                .and_then(|s| s.get_session(&id).ok().flatten())
-                .and_then(|row| row.model)
-        })
-        .await
-        .ok()
-        .flatten();
-        let session = SerializedSession {
-            id: session_id_str.to_owned(),
-            created_at: String::new(),
-            updated_at: None,
-            first_prompt: None,
-            model: model.clone(),
-            cwd: None,
-            title: None,
-            messages: db_messages,
-        };
+    if let Some(session) = load_session_from_db(session_id_str).await {
+        let model = session.model.clone();
         let messages: Vec<ChatMessage> = session
             .messages
             .into_iter()
@@ -375,46 +309,7 @@ pub async fn load_session_with_model(
         let _ = scrub_loaded_thinking_poison(&mut messages);
         return Some((messages, model));
     }
-
-    let path = sessions_dir().join(format!("{session_id_str}.json"));
-    let content = tokio::fs::read_to_string(&path).await.ok()?;
-    let session: SerializedSession = serde_json::from_str(&content).ok()?;
-    let model = session.model.clone();
-    let messages: Vec<ChatMessage> = session
-        .messages
-        .into_iter()
-        .map(deserialize_message)
-        .collect();
-    if let Err(err) = validate_turn_invariants(&messages) {
-        warn!(
-            target: "jfc::session::invariants",
-            session_id = session_id_str,
-            error = %err,
-            message_count = messages.len(),
-            "load_session_with_model: persisted transcript violates turn invariants — repairing"
-        );
-    }
-    let mut messages = repair_loaded_messages(messages);
-    let scrubbed_thinking_blocks = scrub_loaded_thinking_poison(&mut messages);
-    if scrubbed_thinking_blocks > 0 {
-        warn!(
-            target: "jfc::session::repair",
-            session_id = session_id_str,
-            scrubbed_thinking_blocks,
-            "load_session_with_model: stripped persisted redacted-thinking blocks before resume"
-        );
-        messages = repair_loaded_messages(messages);
-    }
-    if let Err(err) = validate_turn_invariants(&messages) {
-        warn!(
-            target: "jfc::session::invariants",
-            session_id = session_id_str,
-            error = %err,
-            message_count = messages.len(),
-            "load_session_with_model: transcript still violates turn invariants after repair"
-        );
-    }
-    Some((messages, model))
+    None
 }
 
 #[cfg(test)]
@@ -451,38 +346,40 @@ mod tests {
     }
 }
 
-/// Set the user-defined title on a session (`/rename` slash). Returns
-/// silently on I/O failures — title is cosmetic, shouldn't block the
-/// chat. Mirrors v126's `customTitle` field (cli.js:39786) which sits
-/// atop the title precedence chain.
+/// Set the user-defined title on a session (`/rename` slash). Returns silently
+/// on DB failures because title is cosmetic and should not block chat.
 pub async fn set_session_title(session_id: &SessionId, title: &str) {
     let session_id_str = session_id.as_str();
     debug!(target: "jfc::session", session_id = session_id_str, "setting session title");
-    let path = sessions_dir().join(format!("{session_id_str}.json"));
-    let Ok(content) = tokio::fs::read_to_string(&path).await else {
-        warn!(target: "jfc::session", session_id = session_id_str, "cannot read session file for title update");
-        return;
-    };
-    let Ok(mut session) = serde_json::from_str::<SerializedSession>(&content) else {
-        warn!(target: "jfc::session", session_id = session_id_str, "cannot parse session file for title update");
-        return;
-    };
-    session.title = Some(title.to_owned());
-    if let Ok(json) = serde_json::to_string_pretty(&session) {
-        // Atomic write — see save_session() above for the rationale.
-        // Title updates are cosmetic but they overwrite the entire
-        // session file, so a torn write here loses the whole transcript.
-        if let Err(e) = crate::atomic_write::write_atomic(&path, json.as_bytes()).await {
-            warn!(
-                target: "jfc::session",
-                session_id = session_id_str,
-                error = %e,
-                "atomic title write failed — previous session preserved"
-            );
-        } else {
-            info!(target: "jfc::session", session_id = session_id_str, "session title updated");
+    let db_session_id = session_id_str.to_owned();
+    let db_title = title.to_owned();
+    let db_updated = chrono::Utc::now().to_rfc3339();
+    match tokio::task::spawn_blocking(move || {
+        let store = jfc_knowledge::KnowledgeStore::open_default()?;
+        if let Some(mut row) = store.get_session(&db_session_id)? {
+            row.title = Some(db_title);
+            row.updated_at = Some(db_updated);
+            store.upsert_session(&row)?;
         }
+        Ok::<(), jfc_knowledge::KnowledgeError>(())
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(
+            target: "jfc::session",
+            session_id = session_id_str,
+            error = %err,
+            "session title DB update failed"
+        ),
+        Err(_) => warn!(
+            target: "jfc::session",
+            session_id = session_id_str,
+            "session title DB update task failed"
+        ),
     }
+
+    info!(target: "jfc::session", session_id = session_id_str, "session title updated in DB");
 }
 
 #[cfg(test)]
@@ -507,12 +404,13 @@ mod disk_io_tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// RAII guard that points `XDG_CONFIG_HOME` at a tempdir for the
-    /// lifetime of one test. Restores the previous value on drop so a
-    /// later test in the same process doesn't see a dangling override.
+    /// RAII guard that points test session state at temp storage for the
+    /// lifetime of one test. Restores previous values on drop so a later
+    /// test in the same process doesn't see a dangling override.
     struct TempConfigHome {
         _dir: TempDir,
-        prior: Option<String>,
+        prior_config: Option<String>,
+        prior_db: Option<String>,
         _guard: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -522,14 +420,18 @@ mod disk_io_tests {
             // out every subsequent disk-I/O test.
             let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let dir = TempDir::new().expect("tempdir");
-            let prior = std::env::var("XDG_CONFIG_HOME").ok();
+            let prior_config = std::env::var("XDG_CONFIG_HOME").ok();
+            let prior_db = std::env::var("JFC_KNOWLEDGE_DB").ok();
+            let db_path = dir.path().join("knowledge.db");
             // Safety: env mutation is serialized through ENV_LOCK.
             unsafe {
                 std::env::set_var("XDG_CONFIG_HOME", dir.path());
+                std::env::set_var("JFC_KNOWLEDGE_DB", db_path);
             }
             Self {
                 _dir: dir,
-                prior,
+                prior_config,
+                prior_db,
                 _guard: guard,
             }
         }
@@ -539,17 +441,21 @@ mod disk_io_tests {
         fn drop(&mut self) {
             // Safety: env mutation is serialized through the held guard.
             unsafe {
-                match self.prior.take() {
+                match self.prior_config.take() {
                     Some(prev) => std::env::set_var("XDG_CONFIG_HOME", prev),
                     None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+                match self.prior_db.take() {
+                    Some(prev) => std::env::set_var("JFC_KNOWLEDGE_DB", prev),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
                 }
             }
         }
     }
 
     // Normal: round-trip a session through save/load with a few common
-    // message variants. Verifies the file lands under sessions_dir() and
-    // load_session reconstructs the messages with the same shape.
+    // message variants. Verifies DB persistence reconstructs the messages
+    // with the same shape.
     #[serial]
     #[tokio::test]
     async fn save_load_roundtrip_normal() {
@@ -560,9 +466,6 @@ mod disk_io_tests {
         ];
         let id = SessionId::new("ses_20260506_120000");
         save_session(&id, &messages, Some("/tmp/test"), Some("test-model")).await;
-        // The file should exist on disk now.
-        let path = sessions_dir().join(format!("{}.json", id.as_str()));
-        assert!(path.exists(), "session file written");
 
         let loaded = load_session(&id).await.expect("loadable");
         assert_eq!(loaded.len(), 2);
@@ -613,18 +516,21 @@ mod disk_io_tests {
         assert_eq!(meta.cwd.as_deref(), Some("/tmp/proj"));
     }
 
-    // Robust: corrupted JSON in a session file makes load_session_metadata
-    // return None without aborting (parse errors are logged and swallowed).
+    // Robust: stray legacy JSON is ignored by DB-only metadata reads.
     #[serial]
     #[tokio::test]
-    async fn load_session_metadata_handles_corrupted_robust() {
+    async fn load_session_metadata_ignores_legacy_json_robust() {
         let _g = TempConfigHome::new();
-        let dir = sessions_dir();
+        let dir = jfc_session::sessions_dir();
         std::fs::create_dir_all(&dir).expect("dir");
-        let path = dir.join("ses_corrupted.json");
-        std::fs::write(&path, "{ this is not json").expect("write garbage");
+        let path = dir.join("ses_json_only.json");
+        std::fs::write(
+            &path,
+            r#"{"id":"ses_json_only","created_at":"2026-01-01T00:00:00Z","messages":[]}"#,
+        )
+        .expect("write legacy json");
         assert!(
-            load_session_metadata(&SessionId::new("ses_corrupted"))
+            load_session_metadata(&SessionId::new("ses_json_only"))
                 .await
                 .is_none()
         );
@@ -651,8 +557,8 @@ mod disk_io_tests {
         );
     }
 
-    // Robust: list_sessions on a non-existent sessions directory returns
-    // an empty vec rather than panicking.
+    // Robust: list_sessions with an empty DB returns an empty vec rather than
+    // panicking.
     #[serial]
     #[tokio::test]
     async fn list_sessions_missing_dir_is_empty_robust() {
@@ -662,7 +568,7 @@ mod disk_io_tests {
     }
 
     // Normal: list_sessions_filtered with a cwd filter returns only that
-    // project's sessions plus any legacy (cwd=None) entries.
+    // project's DB sessions.
     #[serial]
     #[tokio::test]
     async fn list_sessions_filtered_includes_matching_and_legacy_normal() {

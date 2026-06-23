@@ -28,7 +28,7 @@ fn should_snap_to_bottom(app: &App, visible: usize, total_lines: usize) -> bool 
 fn context_window_label(tokens: usize) -> String {
     if tokens >= 1_000_000 {
         let whole = tokens / 1_000_000;
-        if tokens % 1_000_000 == 0 {
+        if tokens.is_multiple_of(1_000_000) {
             format!("{whole}M context")
         } else {
             let tenth = (tokens % 1_000_000) / 100_000;
@@ -39,6 +39,25 @@ fn context_window_label(tokens: usize) -> String {
     } else {
         format!("{tokens} context")
     }
+}
+
+fn stream_quiet_duration(
+    phase: crate::spinner::SpinnerPhase,
+    lifecycle_visible: bool,
+    last_token_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> std::time::Duration {
+    if lifecycle_visible
+        || !matches!(
+            phase,
+            crate::spinner::SpinnerPhase::Thinking | crate::spinner::SpinnerPhase::Responding
+        )
+    {
+        return std::time::Duration::default();
+    }
+    last_token_at
+        .map(|last| now.duration_since(last))
+        .unwrap_or_default()
 }
 
 fn pretty_model_label(model: &str) -> String {
@@ -1069,11 +1088,16 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
             .map(|t| now.duration_since(t))
             .unwrap_or_default();
         let stream_is_live = app.engine.is_streaming;
+        let lifecycle = app.engine.stream_lifecycle.as_ref().filter(|_| {
+            app.engine.streaming_response_bytes == 0 && app.engine.streaming_thinking_tokens == 0
+        });
         let stall = if stream_is_live {
-            app.engine
-                .streaming_last_token_at
-                .map(|t| now.duration_since(t))
-                .unwrap_or_default()
+            stream_quiet_duration(
+                app.spinner_state.phase,
+                lifecycle.is_some(),
+                app.engine.streaming_last_token_at,
+                now,
+            )
         } else {
             std::time::Duration::default()
         };
@@ -1133,10 +1157,6 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         );
         head_glyph = segs.glyph;
         dim = segs.dim;
-        let lifecycle = app.engine.stream_lifecycle.as_ref().filter(|_| {
-            app.engine.streaming_response_bytes == 0 && app.engine.streaming_thinking_tokens == 0
-        });
-
         let label: std::borrow::Cow<'_, str> = {
             if let Some(status) = lifecycle {
                 std::borrow::Cow::Borrowed(status.phase.label())
@@ -1527,6 +1547,36 @@ pub(super) fn tasks_pinned_row(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(rendered).style(Style::default().bg(t.bg)),
         inner,
     );
+}
+
+#[cfg(test)]
+mod stream_status_tests {
+    use super::stream_quiet_duration;
+    use crate::spinner::SpinnerPhase;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn quiet_duration_only_applies_to_content_phases_regression() {
+        let now = Instant::now();
+        let last = now - Duration::from_secs(51);
+
+        assert_eq!(
+            stream_quiet_duration(SpinnerPhase::ToolUse, false, Some(last), now),
+            Duration::default()
+        );
+        assert_eq!(
+            stream_quiet_duration(SpinnerPhase::Working, false, Some(last), now),
+            Duration::default()
+        );
+        assert_eq!(
+            stream_quiet_duration(SpinnerPhase::Thinking, true, Some(last), now),
+            Duration::default()
+        );
+        assert_eq!(
+            stream_quiet_duration(SpinnerPhase::Thinking, false, Some(last), now),
+            Duration::from_secs(51)
+        );
+    }
 }
 
 fn tasks_pinned_header_line(_recent_done: usize, active_open: usize, t: &Theme) -> Line<'static> {

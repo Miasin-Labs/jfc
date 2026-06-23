@@ -1,7 +1,7 @@
-//! Team file management and directory helpers.
+//! Team roster management and directory helpers.
 //!
-//! Manages the team config file at `~/.claude/teams/{name}/config.json` and
-//! the associated task directory at `~/.claude/tasks/{name}/`.
+//! Team rosters are persisted in the DB. The Claude-style paths stay as stable
+//! compatibility handles for directory layout and one-time legacy import.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,10 +15,13 @@ use tracing::debug;
 use super::mailbox;
 use super::types::*;
 
+const TEAM_FILE_SESSION_ID: &str = "__swarm__";
+const TEAM_FILE_KIND: &str = "team_file";
+
 /// Per-team async mutex registry. Member RMW helpers (`add_member`,
 /// `remove_member_*`, `set_member_active`, `set_member_mode`) call
 /// `with_team_lock` to serialize concurrent writes against the same
-/// `config.json` — without this, two spawns racing through `add_member`
+/// the team DB row — without this, two spawns racing through `add_member`
 /// would both read the pre-spawn member list, both push their own
 /// member, and the later write would overwrite the earlier one.
 ///
@@ -38,7 +41,7 @@ fn team_lock_for(team_name: &str) -> Arc<AsyncMutex<()>> {
 }
 
 /// Run `f` while holding the per-team async mutex. Use for any helper
-/// that does read-modify-write of `config.json`.
+/// that does read-modify-write of the team roster.
 async fn with_team_lock<F, Fut, T>(team_name: &str, f: F) -> T
 where
     F: FnOnce() -> Fut,
@@ -51,7 +54,7 @@ where
 
 // ─── Path helpers ────────────────────────────────────────────────────────────
 
-/// Get the team config file path.
+/// Get the legacy team config file path used for one-time import.
 pub fn team_file_path(team_name: &str) -> PathBuf {
     mailbox::team_dir(team_name).join("config.json")
 }
@@ -70,28 +73,29 @@ pub fn tasks_dir(team_name: &str) -> PathBuf {
 
 // ─── Read / Write ────────────────────────────────────────────────────────────
 
-/// Read a team file. Returns None if it doesn't exist.
+/// Read a team file from the DB. Returns None if it doesn't exist.
 pub async fn read_team_file(team_name: &str) -> Option<TeamFile> {
-    let path = team_file_path(team_name);
-    let content = fs::read_to_string(&path).await.ok()?;
-    serde_json::from_str(&content).ok()
+    let team_name = team_name.to_owned();
+    tokio::task::spawn_blocking(move || read_team_file_db_or_legacy(&team_name))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Read a team file synchronously (for use in sync contexts).
 pub fn read_team_file_sync(team_name: &str) -> Option<TeamFile> {
-    let path = team_file_path(team_name);
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    read_team_file_db_or_legacy(team_name)
 }
 
-/// Write (create or overwrite) a team file.
+/// Write (create or overwrite) a team roster row.
 pub async fn write_team_file(team_name: &str, team_file: &TeamFile) -> anyhow::Result<()> {
     let dir = mailbox::team_dir(team_name);
     fs::create_dir_all(&dir).await?;
-    let path = dir.join("config.json");
-    let json = serde_json::to_string_pretty(team_file)?;
-    fs::write(&path, json).await?;
-    debug!("[TeamHelpers] Wrote team file: {}", path.display());
+    let team_name = team_name.to_owned();
+    let log_team_name = team_name.clone();
+    let team_file = team_file.clone();
+    tokio::task::spawn_blocking(move || write_team_file_db(&team_name, &team_file)).await??;
+    debug!("[TeamHelpers] Wrote team DB row: {}", log_team_name);
     Ok(())
 }
 
@@ -102,19 +106,12 @@ pub async fn write_team_file_exclusive(
 ) -> anyhow::Result<()> {
     let dir = mailbox::team_dir(team_name);
     fs::create_dir_all(&dir).await?;
-    let path = dir.join("config.json");
-
-    // Check if file already exists
-    if path.exists() {
-        anyhow::bail!(
-            "Team \"{team_name}\" already exists at {}. Choose a different team_name.",
-            path.display()
-        );
+    if read_team_file(team_name).await.is_some() {
+        anyhow::bail!("Team \"{team_name}\" already exists. Choose a different team_name.");
     }
 
-    let json = serde_json::to_string_pretty(team_file)?;
-    fs::write(&path, json).await?;
-    debug!("[TeamHelpers] Created team file: {}", path.display());
+    write_team_file(team_name, team_file).await?;
+    debug!("[TeamHelpers] Created team DB row: {team_name}");
     Ok(())
 }
 
@@ -171,6 +168,9 @@ pub async fn create_team(
 /// Delete a team and all its associated directories.
 #[tracing::instrument(target = "jfc::swarm", level = "trace", skip_all, fields(team = team_name))]
 pub async fn delete_team(team_name: &str) -> anyhow::Result<()> {
+    let team_name_owned = team_name.to_owned();
+    tokio::task::spawn_blocking(move || delete_team_file_db(&team_name_owned)).await??;
+
     // Remove team directory
     let team = mailbox::team_dir(team_name);
     if team.exists() {
@@ -188,6 +188,54 @@ pub async fn delete_team(team_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn team_file_key(team_name: &str) -> String {
+    sanitize_name(team_name)
+}
+
+fn open_team_store() -> jfc_knowledge::Result<jfc_knowledge::KnowledgeStore> {
+    if let Some(home) = mailbox::swarm_home_override() {
+        let path = home.join(".jfc").join("knowledge.db");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return jfc_knowledge::KnowledgeStore::open(&path);
+    }
+    jfc_knowledge::KnowledgeStore::open_default()
+}
+
+fn read_team_file_db_or_legacy(team_name: &str) -> Option<TeamFile> {
+    let store = open_team_store().ok()?;
+    let key = team_file_key(team_name);
+    if let Ok(Some(row)) = store.get_session_artifact(TEAM_FILE_SESSION_ID, TEAM_FILE_KIND, &key) {
+        return serde_json::from_str(&row.value_json).ok();
+    }
+    let path = team_file_path(team_name);
+    let content = std::fs::read_to_string(&path).ok()?;
+    let team_file = serde_json::from_str::<TeamFile>(&content).ok()?;
+    let _ = write_team_file_db(team_name, &team_file);
+    Some(team_file)
+}
+
+fn write_team_file_db(team_name: &str, team_file: &TeamFile) -> anyhow::Result<()> {
+    let json = serde_json::to_string(team_file)?;
+    open_team_store()?.upsert_session_artifact(
+        TEAM_FILE_SESSION_ID,
+        TEAM_FILE_KIND,
+        &team_file_key(team_name),
+        &json,
+    )?;
+    Ok(())
+}
+
+fn delete_team_file_db(team_name: &str) -> anyhow::Result<()> {
+    open_team_store()?.delete_session_artifact(
+        TEAM_FILE_SESSION_ID,
+        TEAM_FILE_KIND,
+        &team_file_key(team_name),
+    )?;
+    Ok(())
+}
+
 // ─── Member Operations ───────────────────────────────────────────────────────
 
 /// Add a member to the team file.
@@ -196,8 +244,8 @@ pub async fn delete_team(team_name: &str) -> anyhow::Result<()> {
 /// team via `with_team_lock`. Without the lock, two `add_member` calls
 /// racing during a multi-spawn turn would both observe the pre-spawn
 /// roster, both push their own member, and the later write would clobber
-/// the earlier one — only the last-written teammate would survive in
-/// `config.json`.
+/// the earlier one — only the last-written teammate would survive in the DB
+/// row.
 pub async fn add_member(team_name: &str, member: TeamMember) -> anyhow::Result<()> {
     with_team_lock(team_name, || async move {
         let mut team_file = read_team_file(team_name)
@@ -394,8 +442,7 @@ mod tests {
         assert_eq!(tf.members.len(), 1);
         assert_eq!(tf.members[0].name, super::super::TEAM_LEAD_NAME);
 
-        // The config.json + tasks dir + inboxes dir must all exist.
-        assert!(team_file_path("alpha").exists());
+        // The task/inbox compatibility dirs must exist; the roster itself is DB-backed.
         assert!(tasks_dir("alpha").exists());
         assert!(super::mailbox::team_dir("alpha").join("inboxes").exists());
 
@@ -421,10 +468,10 @@ mod tests {
         create_team("alpha", None, "lead@alpha", None, "/tmp")
             .await
             .unwrap();
-        assert!(team_file_path("alpha").exists());
+        assert!(read_team_file("alpha").await.is_some());
 
         delete_team("alpha").await.unwrap();
-        assert!(!team_file_path("alpha").exists());
+        assert!(read_team_file("alpha").await.is_none());
         assert!(!tasks_dir("alpha").exists());
     }
 

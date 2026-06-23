@@ -25,7 +25,6 @@
 
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
-    fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
@@ -46,6 +45,7 @@ use jfc_provider::{
 const DEFAULT_MEMBER_MAX_TOKENS: u32 = 2048;
 const DEFAULT_ARBITER_MAX_TOKENS: u32 = 3072;
 const DEFAULT_MEMBER_TIMEOUT: Duration = Duration::from_secs(120);
+const COUNCIL_ARCHIVE_KIND: &str = "council_archive";
 
 /// Default token budget for one full council run (all members + arbiter).
 /// Conservative — roughly a 3-member council with synthesis on a 200K model.
@@ -838,51 +838,27 @@ fn archive_id(question: &str) -> String {
 }
 
 fn archive_council_report(root: &Path, report: &CouncilReport) -> Result<PathBuf> {
-    let dir = root
-        .join(".jfc")
-        .join("council")
-        .join(archive_id(&report.question));
-    let member_outputs = dir.join("member-outputs");
-    fs::create_dir_all(&member_outputs)?;
-    fs::write(dir.join("prompt.md"), &report.question)?;
-    fs::write(dir.join("synthesis.md"), &report.synthesis)?;
-    fs::write(
-        dir.join("members.json"),
-        serde_json::to_vec_pretty(&report.members)?,
-    )?;
-    for member in &report.members {
-        let file_stem = sanitize_archive_name(&member.label);
-        fs::write(
-            member_outputs.join(format!("{file_stem}.json")),
-            serde_json::to_vec_pretty(member)?,
-        )?;
-    }
+    let id = archive_id(&report.question);
     let meta = serde_json::json!({
         "schema_version": 1,
+        "id": id,
         "question": &report.question,
         "intent": report.intent.map(CouncilIntent::as_str),
         "member_count": report.members.len(),
         "successful_members": report.successful_members(),
         "tokens_used": report.tokens_used,
+        "synthesis": &report.synthesis,
+        "members": &report.members,
     });
-    fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(&meta)?)?;
-    Ok(dir)
-}
-
-fn sanitize_archive_name(label: &str) -> String {
-    let mut out = String::with_capacity(label.len().min(80));
-    for ch in label.chars().take(80) {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        "member".to_owned()
-    } else {
-        out
-    }
+    let session_id = format!("project:{}", jfc_knowledge::project_key(root));
+    let value_json = serde_json::to_string(&meta)?;
+    jfc_knowledge::KnowledgeStore::open_default()?.upsert_session_artifact(
+        &session_id,
+        COUNCIL_ARCHIVE_KIND,
+        &id,
+        &value_json,
+    )?;
+    Ok(PathBuf::from(format!("db:council:{id}")))
 }
 
 /// Run the full council: fan out to members in parallel, then synthesise.
@@ -1334,18 +1310,23 @@ mod tests {
         )
         .await
         .expect("archive run succeeds");
-        let archive_dir = report.archive_dir.as_ref().expect("archive dir");
-        assert!(archive_dir.join("prompt.md").exists());
-        assert!(archive_dir.join("synthesis.md").exists());
-        assert!(archive_dir.join("members.json").exists());
-        assert!(
-            archive_dir
-                .join("member-outputs")
-                .join("model-a.json")
-                .exists()
-        );
+        let archive_handle = report.archive_dir.as_ref().expect("archive handle");
+        let archive_id = archive_handle
+            .to_string_lossy()
+            .strip_prefix("db:council:")
+            .expect("db council handle")
+            .to_owned();
+        let row = jfc_knowledge::KnowledgeStore::open_default()
+            .unwrap()
+            .get_session_artifact(
+                &format!("project:{}", jfc_knowledge::project_key(&root)),
+                COUNCIL_ARCHIVE_KIND,
+                &archive_id,
+            )
+            .unwrap()
+            .expect("db council archive");
+        assert!(row.value_json.contains("Archived answer."));
         assert!(report.to_markdown().contains("_Intent: audit_"));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

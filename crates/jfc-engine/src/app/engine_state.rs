@@ -511,8 +511,7 @@ pub struct EngineState {
     pub providers: Vec<Arc<dyn Provider>>,
     pub model: ModelId,
     /// Recently selected models (most recent first, max 5). Shown at the
-    /// top of the model picker for quick switching. Persisted to
-    /// `~/.config/jfc/recent_models.json`.
+    /// top of the model picker for quick switching. Persisted in the DB.
     pub recent_models: Vec<String>,
     pub cwd: String,
     pub pending_approval: Option<PendingApproval>,
@@ -849,13 +848,12 @@ pub struct EngineState {
     /// to once every ~60s so accounts stay "warm" (refreshed before expiry)
     /// without hammering the token endpoint.
     pub anthropic_sweep_at: Option<std::time::Instant>,
-    /// Last wall-clock time the UI re-read `daemon-state.json` to refresh
+    /// Last wall-clock time the UI re-read daemon DB state to refresh
     /// counters for detached background workers. Throttled in the Tick
-    /// handler so we don't hammer the JSON file every frame.
+    /// handler so we don't hammer SQLite every frame.
     pub last_detached_sync_at: Option<std::time::Instant>,
-    /// Cached `daemon-state.json` mtime from the last successful parse.
-    /// Used to skip the (potentially MB-sized) read+parse when the file
-    /// hasn't been touched by any background worker since last poll —
+    /// Cached daemon state update time from the last successful parse.
+    /// Used to skip the read+parse when the state row hasn't been touched —
     /// this is the primary CPU-burn fix for sessions with hundreds of
     /// historical background agents accumulated in the state file.
     pub last_detached_state_mtime: Option<std::time::SystemTime>,
@@ -1090,7 +1088,7 @@ impl EngineState {
             refusal_resend_count: 0,
             refusal_rewrite_retry_count: 0,
             refusal_rewrite_attempts: Vec::new(),
-            refusal_rewrite_retry_enabled: false,
+            refusal_rewrite_retry_enabled: true,
             refusal_rewrite_retry_max: None,
             streaming_thinking_tokens: 0,
             pending_context_hint_tokens_saved: None,
@@ -1245,7 +1243,7 @@ impl EngineState {
             active_speculation_id: None,
             speculation_stats: crate::speculation::SpeculationStats::default(),
             bash_sandbox: crate::sandbox::BashSandboxConfig::default(),
-            prompt_rewrite: None,
+            prompt_rewrite: Some(jfc_config::PromptRewriteConfig::default()),
             goal: None,
             goal_evaluator_in_flight: false,
             pinned_files: Vec::new(),
@@ -1731,8 +1729,8 @@ impl EngineState {
         self.current_session_id = Some(new_id.clone());
         self.clear_active_stream_scope();
         // Mirror the constructor's store choice: inside a git repo the
-        // project-level store (<root>/.jfc/tasks.json) survives across ALL
-        // sessions; only fall back to the per-session file without one.
+        // project-level DB store survives across ALL sessions; only fall back
+        // to the per-session store without one.
         // Re-opening per-session unconditionally here silently dropped
         // project tasks on every /clear // /continue // session load.
         self.task_store = match self.git_root.as_ref().and_then(|r| r.as_ref()) {

@@ -96,16 +96,11 @@ pub struct Config {
     #[serde(default = "default_plan_recall_enabled")]
     pub plan_recall_enabled: bool,
     /// Cross-project knowledge recall (jfc-knowledge). Default ON: the store is
-    /// self-driving — it imports, mines your session history, and recalls
-    /// lessons across projects automatically. Set to `false` to disable.
+    /// self-driving — it imports, mines your session history, promotes proven
+    /// generalizable lessons, and recalls them across projects automatically.
+    /// Set to `false` to disable prompt injection from the knowledge store.
     #[serde(default = "default_cross_project_recall_enabled")]
     pub cross_project_recall_enabled: bool,
-    /// Where session resume/load reads from: "json" (canonical files, default) or
-    /// "db" (the jfc-knowledge transcript store, after the parity gate is green).
-    /// The JSON writer keeps running regardless, so flipping to "db" is fully
-    /// reversible (set back to "json") during the rollback window. PLAN TODO 24.
-    #[serde(default = "default_session_source")]
-    pub session_source: String,
     #[serde(default)]
     pub session_cost_budget_usd: Option<f64>,
     #[serde(default = "default_auto_compact_enabled")]
@@ -153,13 +148,12 @@ pub struct Config {
     /// ⇒ no fallback (the refusal is left as-is). The user opts in by setting it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_fallback_model: Option<String>,
-    /// OPT-IN: on a provider refusal, run the prompt back through the local
-    /// over-refusal rewrite gate and, if it produces a scope-bounded
-    /// clarification (policy gate + verifier still gate it), resend the rewritten
-    /// prompt. Bounded by `refusal_rewrite_retry_max`. Off by default — this only
-    /// helps when a *legitimate* request trips a provider false-positive; a
-    /// genuinely-disallowed prompt is `Refused` by the gate and never resent.
-    #[serde(default, alias = "refusalRewriteRetryEnabled")]
+    /// On a provider refusal, run the prompt back through the local over-refusal
+    /// rewrite gate and, if it produces a scope-bounded clarification (policy
+    /// gate + verifier still gate it), resend the rewritten prompt. Bounded by
+    /// `refusal_rewrite_retry_max`. Default on; a genuinely-disallowed prompt is
+    /// `Refused` by the gate and never resent.
+    #[serde(default = "default_true", alias = "refusalRewriteRetryEnabled")]
     pub refusal_rewrite_retry_enabled: bool,
     /// Max rewrite-and-resend rounds per turn for the loop above. `None` ⇒ a small
     /// default (3); hard-clamped to 20 in the accessor regardless of value, since
@@ -181,8 +175,8 @@ pub struct Config {
     /// Seed subagent contexts with the parent's CLAUDE.md summary when spawning
     /// via the Task tool. When `true`, the spawn path attaches a compact
     /// context block as `forksParentContext` in the subagent's system prompt
-    /// so it can skip redundant codebase re-scans. Off by default (opt-in).
-    #[serde(default)]
+    /// so it can skip redundant codebase re-scans. Default on.
+    #[serde(default = "default_true")]
     pub subagent_context_inheritance: bool,
     /// Show the startup welcome/nudge banner when jfc opens (default: true).
     /// Set `show_startup_banner = false` to suppress the one-time nudge
@@ -437,8 +431,8 @@ pub struct ManagedSettingsSource {
 #[serde(default)]
 pub struct ContinuationConfig {
     /// Auto-continue when the model stalls on a permission-asking question
-    /// ("Want me to …?") or leaves queued tasks unfinished. Off by default;
-    /// factory mode (`JFC_FACTORY_MODE`) implies it.
+    /// ("Want me to …?") or leaves queued tasks unfinished. On by default;
+    /// set `JFC_AUTO_CONTINUE=0` to hard-disable it for a run.
     pub auto_continue: bool,
     /// Maximum consecutive self-continuations before stopping for the user.
     pub max_self_continuations: u32,
@@ -447,7 +441,7 @@ pub struct ContinuationConfig {
 impl Default for ContinuationConfig {
     fn default() -> Self {
         Self {
-            auto_continue: false,
+            auto_continue: true,
             max_self_continuations: 25,
         }
     }
@@ -485,12 +479,6 @@ fn default_memory_recall_enabled() -> bool {
     true
 }
 
-fn default_session_source() -> String {
-    // JSON stays canonical by default; flip to "db" only after a green parity
-    // window. The DB transcript is shadow-written on every save regardless.
-    "json".to_owned()
-}
-
 fn default_cross_project_recall_enabled() -> bool {
     true
 }
@@ -513,17 +501,12 @@ fn default_session_min_keep() -> usize {
     20
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CouncilMode {
+    #[default]
     Direct,
     Agentic,
-}
-
-impl Default for CouncilMode {
-    fn default() -> Self {
-        Self::Direct
-    }
 }
 
 fn default_council_member_timeout_ms() -> u64 {
@@ -608,7 +591,7 @@ impl Default for CouncilSessionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct CouncilMemberConfig {
     pub name: Option<String>,
@@ -616,17 +599,6 @@ pub struct CouncilMemberConfig {
     /// Reserved for providers that expose model variants/effort through config.
     pub variant: Option<String>,
     pub effort: Option<String>,
-}
-
-impl Default for CouncilMemberConfig {
-    fn default() -> Self {
-        Self {
-            name: None,
-            model: String::new(),
-            variant: None,
-            effort: None,
-        }
-    }
 }
 
 impl Default for Config {
@@ -657,7 +629,6 @@ impl Default for Config {
             memory_recall_enabled: default_memory_recall_enabled(),
             plan_recall_enabled: default_plan_recall_enabled(),
             cross_project_recall_enabled: default_cross_project_recall_enabled(),
-            session_source: default_session_source(),
             session_cost_budget_usd: None,
             auto_compact_enabled: default_auto_compact_enabled(),
             auto_compact_window: None,
@@ -676,10 +647,10 @@ impl Default for Config {
             copy_on_select: default_true(),
             refusal_fallback_enabled: default_true(),
             refusal_fallback_model: None,
-            refusal_rewrite_retry_enabled: false,
+            refusal_rewrite_retry_enabled: true,
             refusal_rewrite_retry_max: None,
             message_queue_mode: false,
-            subagent_context_inheritance: false,
+            subagent_context_inheritance: true,
             show_startup_banner: default_true(),
             bash_shell: None,
             extends: None,
@@ -730,7 +701,6 @@ impl Config {
             memory_recall_enabled: local_wins!(memory_recall_enabled),
             plan_recall_enabled: local_wins!(plan_recall_enabled),
             cross_project_recall_enabled: local_wins!(cross_project_recall_enabled),
-            session_source: local_wins!(session_source),
             auto_compact_enabled: local_wins!(auto_compact_enabled),
             auto_compact_threshold_pct: local_wins!(auto_compact_threshold_pct),
             always_show_thinking: local_wins!(always_show_thinking),
@@ -1028,14 +998,11 @@ pub struct ArgusAutoReviewConfig {
 
 /// Local prompt-rewriter / over-refusal-mitigation configuration.
 ///
-/// Default-OFF: when absent or `enabled = false` the engine must treat the
-/// rewrite pipeline as a no-op pass-through. When enabled, an outgoing prompt is
-/// screened locally and — only for ambiguous/charged prompts — sent to `model`
-/// (defaulting to the advisor/local model) for a semantic-preserving rewrite the
-/// user explicitly accepts. `constitution` overrides the built-in policy text.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// Default on for response-side refusal recovery. Set `enabled = false` for an
+/// explicit no-op pass-through. `constitution` overrides the built-in policy text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PromptRewriteConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Model used by the LLM-backed stages. Falls back to `advisor_model`.
     #[serde(default)]
@@ -1046,6 +1013,17 @@ pub struct PromptRewriteConfig {
     /// Inline natural-language constitution; overrides the built-in default.
     #[serde(default)]
     pub constitution: Option<String>,
+}
+
+impl Default for PromptRewriteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: None,
+            threshold: None,
+            constitution: None,
+        }
+    }
 }
 
 /// Controlled PAIR red-team evaluation configuration.
@@ -1219,14 +1197,22 @@ pub fn config_path() -> PathBuf {
     static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
     CONFIG_PATH
         .get_or_init(|| {
-            let path = dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("jfc")
-                .join("config.toml");
+            let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+            let path = resolve_config_path(&config_dir);
             tracing::trace!(target: "jfc::config", path = %path.display(), "resolved config path");
             path
         })
         .clone()
+}
+
+fn resolve_config_path(config_dir: &Path) -> PathBuf {
+    let canonical = config_dir.join("jfc").join("config.toml");
+    let legacy_alias = config_dir.join("kfc").join("config.toml");
+    if legacy_alias.exists() {
+        legacy_alias
+    } else {
+        canonical
+    }
 }
 
 #[derive(Clone)]
@@ -1697,6 +1683,13 @@ pub fn save_server_advisor_model_to(
 
 /// Resolve a prompt value that may be a file:// URI.
 pub fn resolve_prompt(value: &str, base_dir: Option<&std::path::Path>) -> String {
+    if let Some(name) = value
+        .strip_prefix("db://system-prompt/")
+        .or_else(|| value.strip_prefix("db://system_prompt/"))
+        && let Some(body) = load_system_prompt_definition(name, base_dir)
+    {
+        return body;
+    }
     if let Some(path_str) = value.strip_prefix("file://") {
         let path = if let Some(base) = base_dir {
             base.join(path_str)
@@ -1704,7 +1697,10 @@ pub fn resolve_prompt(value: &str, base_dir: Option<&std::path::Path>) -> String
             PathBuf::from(path_str)
         };
         match std::fs::read_to_string(&path) {
-            Ok(content) => content,
+            Ok(content) => {
+                import_system_prompt_definition(&path, &content, base_dir);
+                content
+            }
             Err(e) => {
                 tracing::warn!(
                     target: "jfc::config",
@@ -1718,6 +1714,95 @@ pub fn resolve_prompt(value: &str, base_dir: Option<&std::path::Path>) -> String
     } else {
         value.to_owned()
     }
+}
+
+fn load_system_prompt_definition(name: &str, base_dir: Option<&std::path::Path>) -> Option<String> {
+    let store = open_definition_store(base_dir)?;
+    let current_dir = std::env::current_dir().ok();
+    let project_root = base_dir.or(current_dir.as_deref())?;
+    let project_key = jfc_knowledge::project_key(project_root);
+    let project = store
+        .get_definition_by_name(
+            "system_prompt",
+            jfc_knowledge::DefinitionScope::Project,
+            Some(&project_key),
+            None,
+            name,
+        )
+        .ok()
+        .flatten();
+    project.map(|def| def.body)
+}
+
+fn import_system_prompt_definition(
+    path: &std::path::Path,
+    content: &str,
+    base_dir: Option<&std::path::Path>,
+) {
+    let Some(store) = open_definition_store(base_dir) else {
+        return;
+    };
+    let project_root = base_dir.unwrap_or_else(|| path.parent().unwrap_or_else(|| Path::new(".")));
+    let project_key = jfc_knowledge::project_key(project_root);
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("system")
+        .to_owned();
+    let def = jfc_knowledge::NewDefinition {
+        kind: "system_prompt".to_owned(),
+        scope: jfc_knowledge::DefinitionScope::Project,
+        project_key: Some(project_key),
+        namespace: None,
+        name,
+        title: None,
+        description: Some("Imported system prompt".to_owned()),
+        body: content.to_owned(),
+        metadata_json: serde_json::json!({
+            "legacy_import": true,
+        })
+        .to_string(),
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_hash: Some(definition_content_hash(content)),
+        status: jfc_knowledge::DefinitionStatus::Active,
+        created_by: "legacy_import".to_owned(),
+    };
+    if let Err(err) = store.upsert_definition(&def) {
+        tracing::warn!(
+            target: "jfc::config",
+            path = %path.display(),
+            error = %err,
+            "failed to import system prompt definition"
+        );
+    }
+}
+
+fn open_definition_store(
+    base_dir: Option<&std::path::Path>,
+) -> Option<jfc_knowledge::KnowledgeStore> {
+    #[cfg(test)]
+    {
+        let root = base_dir.unwrap_or_else(|| Path::new("."));
+        let path = root.join(".jfc").join("definition-test.db");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        jfc_knowledge::KnowledgeStore::open(&path).ok()
+    }
+    #[cfg(not(test))]
+    {
+        let _ = base_dir;
+        jfc_knowledge::KnowledgeStore::open_default().ok()
+    }
+}
+
+fn definition_content_hash(raw: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Persist the permission mode string to config.toml.
@@ -1992,15 +2077,17 @@ model = "x"
     }
 
     #[test]
-    fn prompt_rewrite_defaults_off() {
+    fn prompt_rewrite_defaults_on_regression() {
         let cfg = parse(
             r#"
 [default]
 model = "x"
 "#,
         );
-        // Absent section → None → engine treats as no-op pass-through.
         assert!(cfg.prompt_rewrite.is_none());
+        assert!(PromptRewriteConfig::default().enabled);
+        assert!(Config::default().refusal_rewrite_retry_enabled);
+        assert!(Config::default().subagent_context_inheritance);
     }
 
     #[test]
@@ -2022,6 +2109,17 @@ constitution = "PERMITTED: coding. DISALLOWED: harm."
         assert_eq!(pr.model.as_deref(), Some("local-judge"));
         assert_eq!(pr.threshold, Some(0.8));
         assert!(pr.constitution.unwrap().contains("PERMITTED"));
+    }
+
+    #[test]
+    fn prompt_rewrite_section_defaults_enabled_regression() {
+        let cfg = parse(
+            r#"
+[prompt_rewrite]
+model = "local-judge"
+"#,
+        );
+        assert!(cfg.prompt_rewrite.expect("section present").enabled);
     }
 
     #[test]
@@ -2095,6 +2193,19 @@ disallowed_tools = ["Bash", "Write"]
     }
 
     #[test]
+    fn resolve_prompt_imports_file_uri_to_db_normal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prompt_file = tmp.path().join("system.md");
+        std::fs::write(&prompt_file, "You are a helpful assistant.").unwrap();
+
+        let from_file = resolve_prompt("file://system.md", Some(tmp.path()));
+        let from_db = resolve_prompt("db://system-prompt/system", Some(tmp.path()));
+
+        assert_eq!(from_file, "You are a helpful assistant.");
+        assert_eq!(from_db, "You are a helpful assistant.");
+    }
+
+    #[test]
     fn resolve_prompt_plain_string_normal() {
         let resolved = resolve_prompt("Just a plain prompt", None);
         assert_eq!(resolved, "Just a plain prompt");
@@ -2105,6 +2216,27 @@ disallowed_tools = ["Bash", "Write"]
         let bad = "this is = = not toml [ [ [";
         let result = toml::from_str::<Config>(bad);
         assert!(result.is_err(), "garbage toml must not parse");
+    }
+
+    #[test]
+    fn resolve_config_path_uses_kfc_alias_when_present_regression() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let kfc_dir = tmp.path().join("kfc");
+        std::fs::create_dir_all(&kfc_dir).expect("mkdir");
+        std::fs::write(kfc_dir.join("config.toml"), b"theme = \"claude\"\n").expect("write");
+
+        let resolved = resolve_config_path(tmp.path());
+
+        assert_eq!(resolved, tmp.path().join("kfc").join("config.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_defaults_to_jfc_when_alias_missing_normal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let resolved = resolve_config_path(tmp.path());
+
+        assert_eq!(resolved, tmp.path().join("jfc").join("config.toml"));
     }
 
     #[test]
@@ -2296,11 +2428,9 @@ theme = "base-theme"
         .unwrap();
         std::fs::write(
             &local_path,
-            format!(
-                r#"extends = "base.toml"
+            r#"extends = "base.toml"
 theme = "local-theme"
-"#
-            ),
+"#,
         )
         .unwrap();
 
@@ -2329,6 +2459,11 @@ theme = "local-theme"
     fn auto_compact_threshold_pct_parses_from_toml_normal() {
         let cfg: Config = toml::from_str("auto_compact_threshold_pct = 70").expect("parse");
         assert_eq!(cfg.auto_compact_threshold_pct, 70);
+    }
+
+    #[test]
+    fn continuation_auto_continue_defaults_on_regression() {
+        assert!(ContinuationConfig::default().auto_continue);
     }
 
     // ── Feature 4: always_show_thinking ────────────────────────────────────

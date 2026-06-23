@@ -201,13 +201,14 @@ pub async fn execute_batches(
                     let task_kind = kind.clone();
                     let task_id = id.clone();
                     let handle = tokio::spawn(async move {
-                        let result = tools::execute_tool(
+                        let result = tools::execute_tool_with_runtime_id(
                             task_kind,
                             input,
                             cwd,
                             Some(dedup),
                             ts,
                             atn.as_deref(),
+                            Some(task_id.as_str().to_owned()),
                         )
                         .await;
                         ToolExecution {
@@ -306,14 +307,16 @@ pub async fn execute_batches(
                 let task_store_for_task = task_store.clone();
                 let active_team_name_for_task = active_team_name.clone();
                 let task_kind = kind.clone();
+                let runtime_tool_id = id.as_str().to_owned();
                 let handle = tokio::spawn(async move {
-                    tools::execute_tool(
+                    tools::execute_tool_with_runtime_id(
                         task_kind,
                         input,
                         cwd_for_task,
                         Some(dedup_for_task),
                         task_store_for_task,
                         active_team_name_for_task.as_deref(),
+                        Some(runtime_tool_id),
                     )
                     .await
                 });

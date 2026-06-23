@@ -55,6 +55,9 @@ pub fn progressive_tool_defs(
     // request can degrade into an immediate empty refusal instead of a normal
     // continuation.
     for name in historical_tool_use_names(messages) {
+        if super::defs::is_model_hidden_builtin_tool_name(&name) {
+            continue;
+        }
         selected.insert(normalize_tool_name(&name));
     }
 
@@ -468,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn progressive_catalog_keeps_hidden_runtime_tools_for_history_regression() {
+    fn progressive_catalog_hides_hidden_runtime_tools_from_history_regression() {
         let all = vec![
             tool("Bash", "run shell commands"),
             tool("BashOutput", "legacy background output retrieval"),
@@ -479,8 +482,8 @@ mod tests {
         let names: Vec<&str> = selected.iter().map(|tool| tool.name.as_str()).collect();
 
         assert!(
-            names.contains(&"BashOutput"),
-            "historical BashOutput tool_use blocks still need their ToolDef on replay"
+            !names.contains(&"BashOutput"),
+            "hidden runtime compatibility tools must not be re-advertised from replay"
         );
     }
 

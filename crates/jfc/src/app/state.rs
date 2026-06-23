@@ -160,6 +160,7 @@ pub struct App {
     /// crate in a later stage of the extraction.
     pub engine: EngineState,
     pub theme: Theme,
+    pub active_theme_name: String,
     /// Text saved by Esc-clear so Up-arrow can recall it. Single slot —
     /// each Esc-clear overwrites. None when no text has been cleared.
     pub esc_saved_text: Option<String>,
@@ -196,6 +197,7 @@ pub struct App {
     /// highlighted theme is applied live (preview); this restores it if the
     /// user cancels with Esc. `None` when the picker isn't open.
     pub theme_preview_original: Option<Theme>,
+    pub theme_preview_original_name: Option<String>,
     pub spinner_frame: usize,
     /// Hysteresis state machine for the status label — advanced once per tick
     /// so the phase ("Thinking"/"Responding"/…) can't flip per-frame. See
@@ -553,6 +555,7 @@ impl App {
             stream_pacer: crate::render::codex_stream::stream_pacer::StreamPacer::default(),
             paced_stream_key: None,
             theme: Theme::claude(),
+            active_theme_name: "claude".to_owned(),
             esc_saved_text: None,
             history_cursor: None,
             scroll_offset: 0,
@@ -567,6 +570,7 @@ impl App {
             theme_picker_input: String::new(),
             theme_picker_selected: 0,
             theme_preview_original: None,
+            theme_preview_original_name: None,
             spinner_frame: 0,
             spinner_state: crate::spinner::SpinnerState::new(std::time::Instant::now()),
             reasoning_expanded: HashMap::new(),

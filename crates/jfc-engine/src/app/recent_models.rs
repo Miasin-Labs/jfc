@@ -1,24 +1,59 @@
-/// Load recently used models from `~/.config/jfc/recent_models.json`.
-pub fn load_recent_models() -> Vec<String> {
-    let path = dirs::config_dir()
+const RECENT_MODELS_SESSION_ID: &str = "__app__";
+const RECENT_MODELS_KIND: &str = "recent_models";
+const RECENT_MODELS_KEY: &str = "global";
+
+fn legacy_recent_models_path() -> std::path::PathBuf {
+    dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("jfc")
-        .join("recent_models.json");
-    std::fs::read_to_string(&path)
+        .join("recent_models.json")
+}
+
+/// Load recently used models from the DB, importing the legacy JSON file once.
+pub fn load_recent_models() -> Vec<String> {
+    let Ok(store) = jfc_knowledge::KnowledgeStore::open_default() else {
+        return Vec::new();
+    };
+
+    if let Ok(Some(row)) = store.get_session_artifact(
+        RECENT_MODELS_SESSION_ID,
+        RECENT_MODELS_KIND,
+        RECENT_MODELS_KEY,
+    ) {
+        return serde_json::from_str(&row.value_json).unwrap_or_default();
+    }
+
+    let path = legacy_recent_models_path();
+    let models = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default();
+    if !models.is_empty()
+        && let Ok(json) = serde_json::to_string(&models)
+    {
+        let _ = store.upsert_session_artifact(
+            RECENT_MODELS_SESSION_ID,
+            RECENT_MODELS_KIND,
+            RECENT_MODELS_KEY,
+            &json,
+        );
+    }
+    models
 }
 
 /// Save recently used models (max 5, most recent first).
 pub fn save_recent_models(models: &[String]) {
-    let path = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("jfc")
-        .join("recent_models.json");
-    let capped: Vec<&String> = models.iter().take(5).collect();
-    if let Ok(json) = serde_json::to_string(&capped) {
-        let _ = std::fs::write(&path, json);
+    let capped: Vec<String> = models.iter().take(5).cloned().collect();
+    if let (Ok(store), Ok(json)) = (
+        jfc_knowledge::KnowledgeStore::open_default(),
+        serde_json::to_string(&capped),
+    ) {
+        let _ = store.upsert_session_artifact(
+            RECENT_MODELS_SESSION_ID,
+            RECENT_MODELS_KIND,
+            RECENT_MODELS_KEY,
+            &json,
+        );
     }
 }
 

@@ -9,6 +9,9 @@ use std::path::PathBuf;
 use jfc_core::SessionId;
 use tracing::debug;
 
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 mod catalog;
 mod git_commits;
 mod inbox;
@@ -19,22 +22,24 @@ mod task_store;
 
 pub use catalog::{
     SessionMetadata, cwd_mismatch_message, format_session_id_timestamp, group_by_cwd,
-    list_session_ids_only, list_sessions, list_sessions_filtered, list_sessions_with_metadata,
-    load_session_metadata, most_recent_session, most_recent_session_for_cwd, relative_time,
-    shorten_cwd,
+    has_any_session, list_session_ids_only, list_sessions, list_sessions_filtered,
+    list_sessions_with_metadata, load_session_metadata, most_recent_session,
+    most_recent_session_for_cwd, relative_time, shorten_cwd,
 };
 pub use git_commits::{CommitHit, search as search_commits};
 pub use inbox::{
     SessionInboxMessage, clear_inbox as clear_inbox_for_session,
-    read_messages as read_inbox_for_session, session_inbox_dir,
-    write_message as write_inbox_message,
+    read_messages as read_inbox_for_session, write_message as write_inbox_message,
 };
 pub use search::{
     SessionBrief, SessionHit, SessionMessage, browse as browse_sessions,
     discover as search_sessions, discover_excluding as search_sessions_excluding,
-    scroll as scroll_session,
+    prior_user_prompts, scroll as scroll_session,
 };
-pub use task_history::{TaskHistoryRecord, history_path_for, read_records as read_task_history};
+pub use task_history::{
+    TaskHistoryRecord, history_key_for_store_path, read_records as read_task_history,
+    session_history_key,
+};
 pub use task_store::{
     DeletedFilter, FactoryMetrics, FailureRecovery, Task, TaskCounts, TaskError, TaskId, TaskKind,
     TaskPatch, TaskRisk, TaskStatus, TaskStore, TaskValidation, is_transient_failure,
@@ -55,132 +60,109 @@ pub fn generate_session_id() -> SessionId {
     id
 }
 
-/// Remove sessions older than `max_age_days`. Keep at least `min_keep`
-/// most-recent sessions regardless of age. Returns the number of files
-/// deleted. Passes gracefully when the sessions directory does not exist yet.
+/// Remove DB sessions older than `max_age_days`. Keep at least `min_keep`
+/// most-recent sessions regardless of age.
 pub async fn gc_old_sessions(max_age_days: u64, min_keep: usize) -> std::io::Result<usize> {
     if max_age_days == 0 {
         return Ok(0);
     }
-    let entries = collect_session_mtimes().await;
-    if entries.is_empty() {
-        return Ok(0);
-    }
-    // Sort newest-first; entries[0..min_keep] are exempt from deletion.
-    let mut sorted = entries;
-    sorted.sort_by(|a, b| b.0.cmp(&a.0));
-    let cutoff = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(max_age_days * 86400))
-        .unwrap_or(std::time::UNIX_EPOCH);
-
-    let mut deleted = 0usize;
-    for (i, (mtime, path)) in sorted.iter().enumerate() {
-        if i < min_keep || *mtime >= cutoff {
-            continue;
+    tokio::task::spawn_blocking(move || {
+        let mut store = match jfc_knowledge::KnowledgeStore::open_default() {
+            Ok(store) => store,
+            Err(_) => return Ok(0),
+        };
+        let mut rows = store
+            .list_sessions(None, 100_000)
+            .map_err(io_other)?
+            .into_iter()
+            .map(|row| {
+                let timestamp = row.updated_at.clone().or_else(|| row.created_at.clone());
+                let parsed = timestamp
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&chrono::Utc));
+                (parsed, row.id)
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::days(i64::try_from(max_age_days).unwrap_or(i64::MAX));
+        let mut deleted = 0usize;
+        for (index, (timestamp, id)) in rows.into_iter().enumerate() {
+            if index < min_keep || timestamp.is_none_or(|value| value >= cutoff) {
+                continue;
+            }
+            if store.delete_session(&id).map_err(io_other)? > 0 {
+                deleted += 1;
+                debug!(
+                    target: "jfc::session::gc",
+                    session_id = id,
+                    "gc_old_sessions: removed stale DB session"
+                );
+            }
         }
-        if tokio::fs::remove_file(path).await.is_ok() {
-            deleted += 1;
-            debug!(
-                target: "jfc::session::gc",
-                path = %path.display(),
-                "gc_old_sessions: removed stale session"
-            );
-        }
-    }
-    Ok(deleted)
+        Ok(deleted)
+    })
+    .await
+    .unwrap_or_else(|err| Err(io_other(err)))
 }
 
-/// Collect `(mtime, path)` pairs for every `*.json` file in the sessions dir.
-async fn collect_session_mtimes() -> Vec<(std::time::SystemTime, std::path::PathBuf)> {
-    let mut out = Vec::new();
-    let mut rd = match tokio::fs::read_dir(sessions_dir()).await {
-        Ok(rd) => rd,
-        Err(_) => return out,
-    };
-    while let Ok(Some(entry)) = rd.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata().await else {
-            continue;
-        };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
-        out.push((modified, path));
-    }
-    out
-}
-
-/// Fork an existing session into a new parallel branch.
-///
-/// Copies the source session's JSON file to a fresh session ID, then patches
-/// the embedded `id` field so the new file is self-consistent. The source
-/// session is left untouched on disk.
-///
-/// Returns the new session ID, or an `io::Error` if the source session does
-/// not exist or cannot be copied.
 pub async fn fork_session(source_id: &str, description: &str) -> std::io::Result<String> {
-    let dir = sessions_dir();
-    let src_path = dir.join(format!("{source_id}.json"));
-    let content = tokio::fs::read_to_string(&src_path).await?;
-
-    // Parse and patch the `id` field so the fork is self-consistent.
-    let mut value: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
     let fork_id = generate_session_id();
     let fork_id_str = fork_id.as_str().to_owned();
 
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "id".to_owned(),
-            serde_json::Value::String(fork_id_str.clone()),
+    if fork_session_in_db(source_id, &fork_id_str, description)? {
+        debug!(
+            target: "jfc::session",
+            source_id,
+            fork_id = %fork_id_str,
+            description,
+            "fork_session: created DB fork"
         );
-        // Record when the fork was created.
-        let now = chrono::Utc::now().to_rfc3339();
-        obj.insert("updated_at".to_owned(), serde_json::Value::String(now));
-        // If a fork description is provided, stash it in the title field so
-        // the session picker can distinguish the fork from the original.
-        if !description.is_empty() {
-            obj.insert(
-                "title".to_owned(),
-                serde_json::Value::String(format!("[fork] {description}")),
-            );
-        }
+        return Ok(fork_id_str);
     }
 
-    let patched = serde_json::to_string_pretty(&value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    tokio::fs::create_dir_all(&dir).await?;
-    let dst_path = dir.join(format!("{fork_id_str}.json"));
-    tokio::fs::write(&dst_path, patched).await?;
-
-    debug!(
-        target: "jfc::session",
-        source_id,
-        fork_id = %fork_id_str,
-        description,
-        "fork_session: created fork"
-    );
-
-    Ok(fork_id_str)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("session `{source_id}` not found"),
+    ))
 }
 
-/// Delete a session file from the sessions directory.
-/// Returns `true` if the file was found and removed, `false` if it didn't exist.
-pub async fn delete_session(session_id: &str) -> std::io::Result<bool> {
-    let path = sessions_dir().join(format!("{session_id}.json"));
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => {
-            debug!(target: "jfc::session", session_id, "deleted session file");
-            Ok(true)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+fn io_other(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(error.to_string())
+}
+
+fn fork_session_in_db(source_id: &str, fork_id: &str, description: &str) -> std::io::Result<bool> {
+    let mut store = match jfc_knowledge::KnowledgeStore::open_default() {
+        Ok(store) => store,
+        Err(_) => return Ok(false),
+    };
+    let Some(mut row) = store.get_session(source_id).map_err(io_other)? else {
+        return Ok(false);
+    };
+    let transcript = store.load_transcript(source_id).map_err(io_other)?;
+    row.id = fork_id.to_owned();
+    row.updated_at = Some(chrono::Utc::now().to_rfc3339());
+    if !description.is_empty() {
+        row.title = Some(format!("[fork] {description}"));
     }
+    store
+        .replace_transcript(&row, &transcript)
+        .map_err(io_other)?;
+    Ok(true)
+}
+
+pub async fn delete_session(session_id: &str) -> std::io::Result<bool> {
+    delete_session_from_db(session_id)
+}
+
+fn delete_session_from_db(session_id: &str) -> std::io::Result<bool> {
+    let mut store = match jfc_knowledge::KnowledgeStore::open_default() {
+        Ok(store) => store,
+        Err(_) => return Ok(false),
+    };
+    let deleted = store.delete_session(session_id).map_err(io_other)?;
+    Ok(deleted > 0)
 }
 
 #[derive(Debug, Clone)]
@@ -206,96 +188,40 @@ impl SessionFsckReport {
     }
 }
 
-pub async fn fsck_sessions(quarantine: bool) -> std::io::Result<SessionFsckReport> {
-    let dir = sessions_dir();
-    let lost_found = dir.join("lost+found");
-    let mut report = SessionFsckReport::default();
-    let mut rd = match tokio::fs::read_dir(&dir).await {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(report),
-        Err(e) => return Err(e),
-    };
-
-    while let Some(entry) = rd.next_entry().await? {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        report.checked += 1;
-        let reason = match validate_session_file_shape(&path).await {
-            Ok(()) => {
-                report.ok += 1;
+pub async fn fsck_sessions(_quarantine: bool) -> std::io::Result<SessionFsckReport> {
+    tokio::task::spawn_blocking(move || {
+        let store = match jfc_knowledge::KnowledgeStore::open_default() {
+            Ok(store) => store,
+            Err(_) => return Ok(SessionFsckReport::default()),
+        };
+        let mut report = SessionFsckReport::default();
+        for row in store.list_sessions(None, 100_000).map_err(io_other)? {
+            report.checked += 1;
+            let transcript = store.load_transcript(&row.id).map_err(io_other)?;
+            if transcript.is_empty() && row.message_count > 0 {
+                report.issues.push(SessionFsckIssue {
+                    path: PathBuf::from(format!("db/{}", row.id)),
+                    reason: "session row has no transcript messages".to_owned(),
+                    quarantined_to: None,
+                });
                 continue;
             }
-            Err(reason) => reason,
-        };
-        let quarantined_to = if quarantine {
-            tokio::fs::create_dir_all(&lost_found).await?;
-            let target = lost_found.join(quarantine_file_name(&path));
-            tokio::fs::rename(&path, &target).await?;
-            Some(target)
-        } else {
-            None
-        };
-        report.issues.push(SessionFsckIssue {
-            path,
-            reason,
-            quarantined_to,
-        });
-    }
-
-    Ok(report)
-}
-
-async fn validate_session_file_shape(path: &std::path::Path) -> Result<(), String> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| format!("read failed: {e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("json parse failed: {e}"))?;
-    let obj = value
-        .as_object()
-        .ok_or_else(|| "root is not a JSON object".to_owned())?;
-    let id = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "missing non-empty id".to_owned())?;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    if stem != id {
-        return Err(format!("id `{id}` does not match filename `{stem}`"));
-    }
-    let messages = obj
-        .get("messages")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "missing messages array".to_owned())?;
-    for (idx, message) in messages.iter().enumerate() {
-        let Some(message_obj) = message.as_object() else {
-            return Err(format!("message {idx} is not an object"));
-        };
-        match message_obj.get("role").and_then(|v| v.as_str()) {
-            Some("user") | Some("assistant") => {}
-            Some(other) => return Err(format!("message {idx} has invalid role `{other}`")),
-            None => return Err(format!("message {idx} missing role")),
+            if row.message_count >= 0 && row.message_count as usize != transcript.len() {
+                report.issues.push(SessionFsckIssue {
+                    path: PathBuf::from(format!("db/{}", row.id)),
+                    reason: format!(
+                        "message_count {} does not match transcript length {}",
+                        row.message_count,
+                        transcript.len()
+                    ),
+                    quarantined_to: None,
+                });
+                continue;
+            }
+            report.ok += 1;
         }
-        if !message_obj
-            .get("parts")
-            .is_some_and(|parts| parts.as_array().is_some())
-        {
-            return Err(format!("message {idx} missing parts array"));
-        }
-    }
-    Ok(())
-}
-
-fn quarantine_file_name(path: &std::path::Path) -> String {
-    let original = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("session.json");
-    let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
-    format!("{stamp}-{original}")
+        Ok(report)
+    })
+    .await
+    .unwrap_or_else(|err| Err(io_other(err)))
 }

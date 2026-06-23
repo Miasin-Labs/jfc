@@ -1,12 +1,8 @@
 //! Cross-session full-text search over persisted session transcripts.
 //!
-//! Ported in spirit from Hermes Agent's `tools/session_search_tool.py` (its
-//! DISCOVERY / SCROLL / BROWSE modes), but **without** a SQLite/FTS5 index.
-//! jfc already persists every session as a JSON file under `sessions_dir()`;
-//! those files are the source of truth. Building a separate SQLite FTS index
-//! would introduce a second source of truth that can drift from the JSON — so
-//! this scans the JSON directly. For the working-set size (hundreds of
-//! sessions) a streamed scan is fast and adds zero dependencies.
+//! The jfc-knowledge SQLite store is the transcript substrate: session save
+//! writes a lossless `session_messages.meta` row plus searchable text, and this
+//! module queries that DB directly.
 //!
 //! Three modes, mirroring Hermes:
 //!   * [`discover`] — a query → top-N sessions, each with the best-matching
@@ -15,12 +11,12 @@
 //!     session's messages (anchored drill-down).
 //!   * [`browse`]   — no query → recent sessions chronologically.
 //!
-//! No LLM calls anywhere — every mode returns real text from disk.
+//! No LLM calls anywhere — every mode returns persisted text from the DB.
 
+use crate::SessionId;
 use crate::soft_match::{query_terms, score_text};
-use crate::{SessionId, sessions_dir};
+use jfc_knowledge::KnowledgeStore;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// One message flattened to searchable text. `index` is the 0-based position in
 /// the session's `messages` array (the anchor used by [`scroll`]).
@@ -61,118 +57,6 @@ pub struct SessionBrief {
 
 const BOOKEND: usize = 3;
 const SNIPPET_RADIUS: usize = 160;
-
-// ─── on-disk shape (a subset of the full session JSON) ──────────────────────
-
-#[derive(Deserialize)]
-struct RawSession {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    updated_at: String,
-    #[serde(default)]
-    created_at: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    first_prompt: String,
-    #[serde(default)]
-    messages: Vec<RawMessage>,
-}
-
-#[derive(Deserialize)]
-struct RawMessage {
-    #[serde(default)]
-    role: String,
-    #[serde(default)]
-    parts: Vec<RawPart>,
-}
-
-#[derive(Deserialize)]
-struct RawPart {
-    #[serde(rename = "type", default)]
-    part_type: String,
-    #[serde(default)]
-    content: String,
-    /// Bash/tool parts carry their command/input here; surface it as text.
-    #[serde(default)]
-    input: serde_json::Value,
-}
-
-impl RawMessage {
-    /// Flatten a message's parts into a single searchable string. Text and
-    /// reasoning parts contribute their content; tool parts contribute their
-    /// command/input so "that session where I ran cargo test" is findable.
-    fn flatten(&self) -> String {
-        let mut out = String::new();
-        for p in &self.parts {
-            match p.part_type.as_str() {
-                "text" | "reasoning" => {
-                    if !p.content.trim().is_empty() {
-                        out.push_str(p.content.trim());
-                        out.push(' ');
-                    }
-                }
-                "tool" => {
-                    if let Some(cmd) = p.input.get("command").and_then(|v| v.as_str()) {
-                        out.push_str(cmd.trim());
-                        out.push(' ');
-                    }
-                }
-                // Other part kinds (images, attachments, tool *results*, etc.)
-                // carry no useful free-text for recall — intentionally skipped.
-                other => {
-                    tracing::trace!(target: "jfc::session_search", part = %other, "skipping non-text part");
-                }
-            }
-        }
-        out.trim().to_string()
-    }
-}
-
-fn session_path(id: &str) -> PathBuf {
-    sessions_dir().join(format!("{id}.json"))
-}
-
-fn read_session(path: &PathBuf) -> Option<RawSession> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice::<RawSession>(&bytes).ok()
-}
-
-fn flatten_messages(raw: &RawSession) -> Vec<SessionMessage> {
-    raw.messages
-        .iter()
-        .enumerate()
-        .map(|(i, m)| SessionMessage {
-            index: i,
-            role: m.role.clone(),
-            text: m.flatten(),
-        })
-        .collect()
-}
-
-fn title_of(raw: &RawSession) -> String {
-    if !raw.title.trim().is_empty() {
-        raw.title.trim().to_string()
-    } else if !raw.first_prompt.trim().is_empty() {
-        raw.first_prompt
-            .trim()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string()
-    } else {
-        raw.id.clone()
-    }
-}
-
-fn updated_of(raw: &RawSession) -> String {
-    if raw.updated_at.is_empty() {
-        raw.created_at.clone()
-    } else {
-        raw.updated_at.clone()
-    }
-}
 
 /// Build a `SNIPPET_RADIUS`-char snippet centered on the first match of `needle`
 /// (case-insensitive) within `text`.
@@ -217,21 +101,179 @@ fn slice_messages(all: &[SessionMessage], center: usize, radius: usize) -> Vec<S
     all[start..end].to_vec()
 }
 
-/// Iterate session ids (sync sibling of [`crate::catalog::list_sessions`]).
-fn all_session_ids() -> Vec<String> {
-    let dir = sessions_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+fn open_session_db() -> Option<KnowledgeStore> {
+    KnowledgeStore::open_default().ok()
+}
+
+fn db_row_title(row: &jfc_knowledge::SessionRow) -> String {
+    row.title
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(row.first_prompt.as_deref().filter(|s| !s.trim().is_empty()))
+        .map(|s| {
+            s.trim()
+                .lines()
+                .next()
+                .unwrap_or(row.id.as_str())
+                .to_owned()
+        })
+        .unwrap_or_else(|| row.id.clone())
+}
+
+fn db_row_updated(row: &jfc_knowledge::SessionRow) -> String {
+    row.updated_at
+        .clone()
+        .or_else(|| row.created_at.clone())
+        .unwrap_or_default()
+}
+
+fn db_messages(rows: Vec<jfc_knowledge::SessionMessage>) -> Vec<SessionMessage> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(fallback_index, msg)| SessionMessage {
+            index: usize::try_from(msg.seq).unwrap_or(fallback_index),
+            role: msg.role,
+            text: msg.content,
+        })
+        .collect()
+}
+
+fn best_match(msgs: &[SessionMessage], needle: &str, terms: &[String]) -> Option<(usize, usize)> {
+    let exact_match = msgs
+        .iter()
+        .position(|m| m.text.to_lowercase().contains(needle))
+        .map(|idx| (idx, usize::MAX));
+    exact_match.or_else(|| {
+        msgs.iter()
+            .enumerate()
+            .map(|(idx, msg)| (idx, score_text(&msg.text, terms)))
+            .max_by_key(|(_, score)| *score)
+            .filter(|(_, score)| *score > 0)
+    })
+}
+
+fn discover_db(
+    query: &str,
+    limit: usize,
+    window: usize,
+    exclude_session: Option<&str>,
+) -> Vec<SessionHit> {
+    let Some(store) = open_session_db() else {
         return Vec::new();
     };
-    let mut ids: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            name.strip_suffix(".json").map(str::to_string)
-        })
-        .collect();
-    ids.sort();
-    ids
+    discover_db_from_store(&store, query, limit, window, exclude_session)
+}
+
+fn discover_db_from_store(
+    store: &KnowledgeStore,
+    query: &str,
+    limit: usize,
+    window: usize,
+    exclude_session: Option<&str>,
+) -> Vec<SessionHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let terms = query_terms(&needle);
+    let candidate_limit = limit.saturating_mul(4).max(limit).max(16);
+    let mut hits = Vec::new();
+    let Ok(ids) = store.search_transcripts(query, candidate_limit) else {
+        return Vec::new();
+    };
+    for id in ids {
+        if exclude_session == Some(id.as_str()) {
+            continue;
+        }
+        let Some(row) = store.get_session(&id).ok().flatten() else {
+            continue;
+        };
+        let Ok(loaded) = store.load_transcript(&id) else {
+            continue;
+        };
+        let msgs = db_messages(loaded);
+        let Some((match_index, score)) = best_match(&msgs, &needle, &terms) else {
+            continue;
+        };
+        let updated = db_row_updated(&row);
+        hits.push((
+            score,
+            updated.clone(),
+            SessionHit {
+                session_id: row.id.clone(),
+                title: db_row_title(&row),
+                updated_at: updated,
+                match_index,
+                snippet: if score == usize::MAX {
+                    snippet_around(&msgs[match_index].text, &needle)
+                } else {
+                    truncate_chars(&msgs[match_index].text, SNIPPET_RADIUS * 2)
+                },
+                context: slice_messages(&msgs, match_index, window),
+                bookend_start: msgs.iter().take(BOOKEND).cloned().collect(),
+                bookend_end: msgs.iter().rev().take(BOOKEND).rev().cloned().collect(),
+            },
+        ));
+        if hits.len() >= limit {
+            break;
+        }
+    }
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    hits.into_iter()
+        .map(|(_, _, hit)| hit)
+        .take(limit)
+        .collect()
+}
+
+fn scroll_db(
+    session_id: &SessionId,
+    anchor_index: usize,
+    window: usize,
+) -> Option<Vec<SessionMessage>> {
+    let store = open_session_db()?;
+    scroll_db_from_store(&store, session_id.as_str(), anchor_index, window)
+}
+
+fn scroll_db_from_store(
+    store: &KnowledgeStore,
+    session_id: &str,
+    anchor_index: usize,
+    window: usize,
+) -> Option<Vec<SessionMessage>> {
+    let msgs = db_messages(store.load_transcript(session_id).ok()?);
+    if msgs.is_empty() {
+        return None;
+    }
+    let center = anchor_index.min(msgs.len() - 1);
+    Some(slice_messages(&msgs, center, window))
+}
+
+fn browse_db(limit: usize) -> Option<Vec<SessionBrief>> {
+    let store = open_session_db()?;
+    Some(browse_db_from_store(&store, limit))
+}
+
+fn browse_db_from_store(store: &KnowledgeStore, limit: usize) -> Vec<SessionBrief> {
+    let Ok(rows) = store.list_sessions(None, limit) else {
+        return Vec::new();
+    };
+    let mut briefs = Vec::with_capacity(rows.len());
+    for row in rows {
+        let transcript = store.load_transcript(&row.id).unwrap_or_default();
+        let preview = transcript
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| truncate_chars(&m.content, 120))
+            .unwrap_or_default();
+        briefs.push(SessionBrief {
+            session_id: row.id.clone(),
+            title: db_row_title(&row),
+            updated_at: db_row_updated(&row),
+            message_count: row.message_count.max(0) as usize,
+            preview,
+        });
+    }
+    briefs
 }
 
 /// DISCOVERY: full-text search across all sessions. Returns up to `limit` hits,
@@ -252,146 +294,157 @@ pub fn discover_excluding(
     window: usize,
     exclude_session: Option<&str>,
 ) -> Vec<SessionHit> {
-    let needle = query.trim().to_lowercase();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let terms = query_terms(&needle);
-    let mut exact_hits: Vec<(String, SessionHit)> = Vec::new();
-    let mut soft_hits: Vec<(usize, String, SessionHit)> = Vec::new();
-    for id in all_session_ids() {
-        if exclude_session == Some(id.as_str()) {
-            continue;
-        }
-        let Some(raw) = read_session(&session_path(&id)) else {
-            continue;
-        };
-        let msgs = flatten_messages(&raw);
-        let exact_match = msgs
-            .iter()
-            .position(|m| m.text.to_lowercase().contains(&needle))
-            .map(|idx| (idx, usize::MAX));
-        let soft_match = exact_match.or_else(|| {
-            msgs.iter()
-                .enumerate()
-                .map(|(idx, msg)| (idx, score_text(&msg.text, &terms)))
-                .max_by_key(|(_, score)| *score)
-                .filter(|(_, score)| *score > 0)
-        });
-        let Some((match_index, score)) = soft_match else {
-            continue;
-        };
-        let updated = updated_of(&raw);
-        let hit = SessionHit {
-            session_id: raw.id.clone(),
-            title: title_of(&raw),
-            updated_at: updated.clone(),
-            match_index,
-            snippet: if score == usize::MAX {
-                snippet_around(&msgs[match_index].text, &needle)
-            } else {
-                truncate_chars(&msgs[match_index].text, SNIPPET_RADIUS * 2)
-            },
-            context: slice_messages(&msgs, match_index, window),
-            bookend_start: msgs.iter().take(BOOKEND).cloned().collect(),
-            bookend_end: msgs.iter().rev().take(BOOKEND).rev().cloned().collect(),
-        };
-        if score == usize::MAX {
-            exact_hits.push((updated, hit));
-        } else {
-            soft_hits.push((score, updated, hit));
-        }
-    }
-    if !exact_hits.is_empty() {
-        exact_hits.sort_by(|a, b| b.0.cmp(&a.0));
-        return exact_hits.into_iter().map(|(_, h)| h).take(limit).collect();
-    }
-    soft_hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    soft_hits
-        .into_iter()
-        .map(|(_, _, h)| h)
-        .take(limit)
-        .collect()
+    discover_db(query, limit, window, exclude_session)
 }
 
 /// SCROLL: anchored ±`window` slice of one session's messages.
 pub fn scroll(session_id: &SessionId, anchor_index: usize, window: usize) -> Vec<SessionMessage> {
-    let Some(raw) = read_session(&session_path(session_id.as_str())) else {
-        return Vec::new();
-    };
-    let msgs = flatten_messages(&raw);
-    if msgs.is_empty() {
-        return Vec::new();
-    }
-    let center = anchor_index.min(msgs.len() - 1);
-    slice_messages(&msgs, center, window)
+    scroll_db(session_id, anchor_index, window).unwrap_or_default()
 }
 
 /// BROWSE: recent sessions chronologically (most-recent first).
 pub fn browse(limit: usize) -> Vec<SessionBrief> {
-    let mut briefs: Vec<SessionBrief> = Vec::new();
-    for id in all_session_ids() {
-        let Some(raw) = read_session(&session_path(&id)) else {
-            continue;
-        };
-        let preview = raw
-            .messages
-            .iter()
-            .find(|m| m.role == "user")
-            .map(|m| m.flatten())
-            .unwrap_or_default()
-            .chars()
-            .take(120)
-            .collect();
-        briefs.push(SessionBrief {
-            session_id: raw.id.clone(),
-            title: title_of(&raw),
-            updated_at: updated_of(&raw),
-            message_count: raw.messages.len(),
-            preview,
-        });
+    browse_db(limit).unwrap_or_default()
+}
+
+pub fn prior_user_prompts(
+    max_sessions: usize,
+    max_prompts_per_session: usize,
+    exclude_session: Option<&str>,
+) -> Vec<String> {
+    let mut collected = Vec::new();
+    let mut loaded = 0usize;
+    if let Some(store) = open_session_db()
+        && let Ok(rows) = store.list_sessions(None, 100_000)
+    {
+        for row in rows {
+            if loaded >= max_sessions {
+                break;
+            }
+            if exclude_session == Some(row.id.as_str()) {
+                continue;
+            }
+            let Ok(messages) = store.load_transcript(&row.id) else {
+                continue;
+            };
+            collected.extend(prompts_from_db_messages(&messages, max_prompts_per_session));
+            loaded += 1;
+        }
     }
-    briefs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    briefs.truncate(limit);
-    briefs
+    collected.reverse();
+    collected
+}
+
+fn prompts_from_db_messages(
+    messages: &[jfc_knowledge::SessionMessage],
+    max_prompts: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    'message: for message in messages {
+        if message.role != "user" {
+            continue;
+        }
+        let parts = message
+            .meta
+            .as_deref()
+            .and_then(|meta| serde_json::from_str::<serde_json::Value>(meta).ok())
+            .and_then(|value| value.get("parts").cloned());
+        if let Some(serde_json::Value::Array(parts)) = parts {
+            if parts.iter().any(is_compact_boundary_part) {
+                continue 'message;
+            }
+            for part in parts {
+                let Some(text) = part_text(&part) else {
+                    continue;
+                };
+                push_prompt(&mut out, text, max_prompts);
+                if out.len() >= max_prompts {
+                    return out;
+                }
+            }
+        } else {
+            push_prompt(&mut out, &message.content, max_prompts);
+            if out.len() >= max_prompts {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn part_text(part: &serde_json::Value) -> Option<&str> {
+    part.get("content")
+        .or_else(|| part.get("text"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn is_compact_boundary_part(part: &serde_json::Value) -> bool {
+    matches!(
+        part.get("type").and_then(serde_json::Value::as_str),
+        Some("compact_boundary" | "compactBoundary")
+    ) || part.get("compactBoundary").is_some()
+}
+
+fn push_prompt(out: &mut Vec<String>, text: &str, max_prompts: usize) {
+    if out.len() >= max_prompts {
+        return;
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return;
+    }
+    out.push(trimmed.to_owned());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
 
-    fn raw(text: &str, role: &str) -> RawMessage {
-        RawMessage {
-            role: role.to_string(),
-            parts: vec![RawPart {
-                part_type: "text".into(),
-                content: text.into(),
-                input: serde_json::Value::Null,
-            }],
+    struct EnvGuard {
+        _temp: tempfile::TempDir,
+        prev_db: Option<String>,
+        prev_config: Option<String>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let lock = crate::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let temp = tempfile::tempdir().unwrap();
+            let db_path = temp.path().join("knowledge.db");
+            let config_home = temp.path().join("config");
+            std::fs::create_dir_all(&config_home).unwrap();
+            let prev_db = std::env::var("JFC_KNOWLEDGE_DB").ok();
+            let prev_config = std::env::var("XDG_CONFIG_HOME").ok();
+            unsafe {
+                std::env::set_var("JFC_KNOWLEDGE_DB", &db_path);
+                std::env::set_var("XDG_CONFIG_HOME", &config_home);
+            }
+            Self {
+                _temp: temp,
+                prev_db,
+                prev_config,
+                _lock: lock,
+            }
         }
     }
 
-    // Normal: flatten concatenates text/reasoning and tool commands.
-    #[test]
-    fn flatten_includes_text_and_tool_commands_normal() {
-        let m = RawMessage {
-            role: "assistant".into(),
-            parts: vec![
-                RawPart {
-                    part_type: "text".into(),
-                    content: "running it".into(),
-                    input: serde_json::Value::Null,
-                },
-                RawPart {
-                    part_type: "tool".into(),
-                    content: String::new(),
-                    input: serde_json::json!({ "command": "cargo test --lib" }),
-                },
-            ],
-        };
-        let flat = m.flatten();
-        assert!(flat.contains("running it"));
-        assert!(flat.contains("cargo test --lib"));
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev_db.take() {
+                    Some(value) => std::env::set_var("JFC_KNOWLEDGE_DB", value),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                }
+                match self.prev_config.take() {
+                    Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
     }
 
     // Robust: a snippet is centered on the match with ellipses, char-safe.
@@ -421,22 +474,124 @@ mod tests {
         assert_eq!(s2.last().unwrap().index, 4);
     }
 
-    // Robust: flatten on an empty/whitespace message yields empty (no panic).
-    #[test]
-    fn flatten_empty_message_robust() {
-        let m = raw("   ", "user");
-        assert_eq!(m.flatten(), "");
-    }
-
     // Normal: discover_excluding skips the excluded session id (the visible-
     // context dedup) — verified at the id-filter level without touching disk.
     #[test]
     fn discover_excluding_skips_excluded_id_normal() {
-        // all_session_ids() reads the real sessions dir; with an empty query
-        // discover returns nothing regardless, so assert the exclusion contract
-        // directly: an excluded id equal to a candidate is filtered.
         assert!(discover_excluding("", 5, 1, Some("ses_x")).is_empty());
-        // The exclusion predicate is a simple equality; documented + covered by
-        // the id check in the loop. A full on-disk test lives in the engine.
+    }
+
+    #[test]
+    fn db_discover_browse_and_scroll_use_transcript_store_normal() {
+        let mut store = KnowledgeStore::open_in_memory().unwrap();
+        let row = jfc_knowledge::SessionRow {
+            id: "ses_db".into(),
+            cwd: Some("/repo".into()),
+            model: Some("claude".into()),
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some("2026-01-01T01:00:00Z".into()),
+            first_prompt: Some("fix session database".into()),
+            title: None,
+            message_count: 2,
+        };
+        let transcript = vec![
+            jfc_knowledge::SessionMessage {
+                seq: 0,
+                role: "user".into(),
+                content: "fix session database".into(),
+                meta: None,
+            },
+            jfc_knowledge::SessionMessage {
+                seq: 1,
+                role: "assistant".into(),
+                content: "used sqlite transcript search".into(),
+                meta: None,
+            },
+        ];
+        store.replace_transcript(&row, &transcript).unwrap();
+
+        let hits = discover_db_from_store(&store, "sqlite", 5, 1, None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "ses_db");
+        assert!(hits[0].snippet.contains("sqlite"));
+
+        let briefs = browse_db_from_store(&store, 5);
+        assert_eq!(briefs.len(), 1);
+        assert_eq!(briefs[0].preview, "fix session database");
+
+        let scrolled = scroll_db_from_store(&store, "ses_db", 1, 1).unwrap();
+        assert_eq!(scrolled.len(), 2);
+        assert_eq!(scrolled[1].text, "used sqlite transcript search");
+    }
+
+    #[test]
+    fn default_search_uses_db_and_ignores_legacy_json_normal() {
+        let _env = EnvGuard::new();
+        let mut store = KnowledgeStore::open_default().unwrap();
+        let row = jfc_knowledge::SessionRow {
+            id: "ses_db_only".into(),
+            cwd: Some("/repo".into()),
+            model: Some("claude".into()),
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some("2026-01-01T02:00:00Z".into()),
+            first_prompt: Some("db prompt".into()),
+            title: None,
+            message_count: 1,
+        };
+        store
+            .replace_transcript(
+                &row,
+                &[jfc_knowledge::SessionMessage {
+                    seq: 0,
+                    role: "user".into(),
+                    content: "db prompt with citadel".into(),
+                    meta: Some(
+                        serde_json::json!({
+                            "role": "user",
+                            "parts": [{"type": "text", "content": "db prompt with citadel"}]
+                        })
+                        .to_string(),
+                    ),
+                }],
+            )
+            .unwrap();
+
+        let dir = crate::sessions_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("ses_json_only.json"),
+            serde_json::json!({
+                "id": "ses_json_only",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T01:00:00Z",
+                "first_prompt": "json prompt",
+                "messages": [{
+                    "role": "user",
+                    "parts": [{"type": "text", "content": "json prompt with citadel"}]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let hits = discover("citadel", 10, 1);
+        let ids = hits
+            .iter()
+            .map(|hit| hit.session_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"ses_db_only"), "{ids:?}");
+        assert!(!ids.contains(&"ses_json_only"), "{ids:?}");
+
+        let prompts = prior_user_prompts(10, 50, None);
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt == "db prompt with citadel")
+        );
+        assert!(
+            prompts
+                .iter()
+                .all(|prompt| prompt != "json prompt with citadel")
+        );
     }
 }

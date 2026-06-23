@@ -501,7 +501,7 @@ impl<'a> RedTeamRunner<'a> {
             last_prompt: String,
         }
 
-        let mut arms = vec![
+        let mut arms = [
             Arm {
                 strategy: "direct_refinement".to_string(),
                 pulls: 0,
@@ -1469,7 +1469,7 @@ fn soc_prompt(
 }
 
 fn hjb_control(config: &RedTeamConfig, h: f64, turn: usize, horizon: usize) -> f64 {
-    let grid = config.control_grid.max(3).min(101);
+    let grid = config.control_grid.clamp(3, 101);
     let controls = control_candidates(config);
     let remaining = horizon.saturating_sub(turn).max(1);
     let mut future = terminal_value_table(grid);
@@ -1488,7 +1488,7 @@ fn hjb_control(config: &RedTeamConfig, h: f64, turn: usize, horizon: usize) -> f
 }
 
 fn control_candidates(config: &RedTeamConfig) -> Vec<f64> {
-    let base = config.casp_drift.max(0.01).min(1.0);
+    let base = config.casp_drift.clamp(0.01, 1.0);
     let mut controls = vec![
         (base * 0.5).max(0.01),
         base,

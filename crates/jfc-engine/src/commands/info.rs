@@ -750,7 +750,7 @@ pub(super) async fn cmd_skills(
         .filter(|skill| skill.is_discoverable())
         .collect();
     let body = if visible.is_empty() {
-        "No user-invocable skills defined. Add .claude/skills/<name>/SKILL.md files.".to_owned()
+        "No user-invocable skills defined. Create or import DB-backed skill definitions.".to_owned()
     } else {
         // Compute column width for alignment
         let max_name_len = visible.iter().map(|s| s.name.len()).max().unwrap_or(10);
@@ -804,11 +804,10 @@ pub(super) async fn cmd_agents(
     let agents =
         crate::agents::load_agents(&std::env::current_dir().unwrap_or_else(|_| ".".into()));
     let body = if agents.is_empty() {
-        "No agent definitions found. Create `.claude/agents/<name>.md` files \
-                 with YAML frontmatter (`name:` required, plus optional `model`, \
-                 `permissionMode`, `allowedTools`, `disallowedTools`, `skills`, \
-                 `isolation`, `forksParentContext`) and a markdown body that becomes \
-                 the system prompt for spawned subagents/teammates."
+        "No agent definitions found. Create or import DB-backed agent definitions \
+                 with `name` plus optional `model`, `permissionMode`, `allowedTools`, \
+                 `disallowedTools`, `skills`, `isolation`, and `forksParentContext`; \
+                 the definition body becomes the system prompt for spawned subagents/teammates."
             .to_owned()
     } else {
         let mut s = format!("**{} agent(s) loaded:**\n\n", agents.len());
@@ -896,11 +895,7 @@ pub(super) async fn cmd_hooks(
                     let mut y = 1970u32;
                     let mut d = days as u32;
                     loop {
-                        let ydays = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-                            366
-                        } else {
-                            365
-                        };
+                        let ydays = if is_leap_year(y) { 366 } else { 365 };
                         if d < ydays {
                             break;
                         }
@@ -908,7 +903,7 @@ pub(super) async fn cmd_hooks(
                         y += 1;
                     }
                     let months = [31u32, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-                    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+                    let leap = is_leap_year(y);
                     let mut mo = 1u32;
                     for &dim_base in &months {
                         let dim = if mo == 2 && leap {
@@ -944,68 +939,16 @@ pub(super) async fn cmd_hooks(
     state.messages.push(ChatMessage::assistant(body));
 }
 
+fn is_leap_year(y: u32) -> bool {
+    y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400))
+}
+
 fn recall_query_text(text: &str) -> &str {
     let trimmed = text.trim();
     let Some(idx) = trimmed.find(char::is_whitespace) else {
         return "";
     };
     trimmed[idx..].trim()
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let mut out: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-fn render_session_tail(session_id: &str, messages: &[jfc_session::SessionMessage]) -> String {
-    if messages.is_empty() {
-        return format!("No session found for `{session_id}`.");
-    }
-
-    const MAX_MESSAGE_CHARS: usize = 2_000;
-    const MAX_TOTAL_CHARS: usize = 14_000;
-
-    let mut body = format!(
-        "Session `{session_id}` transcript tail \
-         (tool outputs omitted; tool command/input text only):\n"
-    );
-    let mut rendered = 0usize;
-    for msg in messages {
-        let text = msg.text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        let text = truncate_chars(text, MAX_MESSAGE_CHARS);
-        let entry = format!("\n[{} #{}]\n{}\n", msg.role, msg.index, text);
-        if body.len() + entry.len() > MAX_TOTAL_CHARS {
-            body.push_str("\n… [session recall truncated]\n");
-            break;
-        }
-        body.push_str(&entry);
-        rendered += 1;
-    }
-
-    if rendered == 0 {
-        body.push_str("\n(no searchable text in the recalled slice)\n");
-    }
-    body
-}
-
-fn try_render_session_by_id(query: &str) -> Option<String> {
-    if query.split_whitespace().count() != 1 {
-        return None;
-    }
-    let id = jfc_core::SessionId::new(query);
-    let messages = jfc_session::scroll_session(&id, usize::MAX, 12);
-    if messages.is_empty() {
-        None
-    } else {
-        Some(render_session_tail(query, &messages))
-    }
 }
 
 fn try_render_compaction_archive_by_id(query: &str) -> Option<String> {
@@ -1067,96 +1010,6 @@ pub(super) async fn cmd_expand(
     state.messages.push(ChatMessage::assistant(body));
 }
 
-/// `/recall <query>` — zero-LLM cross-session + commit search. Searches past
-/// session transcripts (and this repo's commit messages) for `query` and prints
-/// the top hits. With no query, browses the most recent sessions. With a single
-/// session id, opens that session's tail directly. Ported from Hermes'
-/// session_search + magic-context's commit source.
-pub(super) async fn cmd_recall(
-    state: &mut EngineState,
-    _parts: &[&str],
-    text: &str,
-    _tx: Option<&mpsc::Sender<EngineEvent>>,
-) {
-    state.messages.push(ChatMessage::user(text.to_owned()));
-    let query = recall_query_text(text);
-
-    let body = if query.is_empty() {
-        // BROWSE mode: most recent sessions.
-        let recent = jfc_session::browse_sessions(10);
-        if recent.is_empty() {
-            "No past sessions found.".to_owned()
-        } else {
-            let mut s = String::from("Recent sessions (use `/recall <query>` to search):\n");
-            for b in recent {
-                s.push_str(&format!(
-                    "  {}  {}  ({} msgs)\n",
-                    b.session_id,
-                    b.title.chars().take(50).collect::<String>(),
-                    b.message_count,
-                ));
-            }
-            s
-        }
-    } else if let Some(rendered) =
-        try_render_session_by_id(query).or_else(|| try_render_compaction_archive_by_id(query))
-    {
-        rendered
-    } else {
-        // Exclude the *current* session — its transcript is already live in the
-        // prompt, so returning hits from it would re-inject text the model can
-        // already see (magic-context's visible-content dedup). Past sessions are
-        // the useful recall surface.
-        let current = state.current_session_id.as_ref().map(|s| s.as_str());
-        let sessions = jfc_session::search_sessions_excluding(query, 5, 1, current);
-        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let commits = jfc_session::search_commits(&cwd, query, 5, 500);
-        let archives = crate::compact_archive::search_archives(query, 5);
-
-        if sessions.is_empty() && commits.is_empty() && archives.is_empty() {
-            format!("No sessions, commits, or compaction archives matched `{query}`.")
-        } else {
-            let mut s = String::new();
-            if !sessions.is_empty() {
-                s.push_str(&format!("Sessions matching `{query}`:\n"));
-                for h in &sessions {
-                    s.push_str(&format!(
-                        "  {}  {}\n    \u{2026}{}\n",
-                        h.session_id,
-                        h.title.chars().take(50).collect::<String>(),
-                        h.snippet.chars().take(120).collect::<String>(),
-                    ));
-                }
-            }
-            if !archives.is_empty() {
-                s.push_str(&format!("\nCompaction archives matching `{query}`:\n"));
-                for a in &archives {
-                    s.push_str(&format!(
-                        "  {}  {}  ({} msgs)\n    \u{2026}{}\n",
-                        a.id,
-                        a.created_at.chars().take(19).collect::<String>(),
-                        a.message_count,
-                        a.snippet.chars().take(120).collect::<String>(),
-                    ));
-                }
-            }
-            if !commits.is_empty() {
-                s.push_str(&format!("\nCommits matching `{query}`:\n"));
-                for c in &commits {
-                    s.push_str(&format!(
-                        "  {}  {}  {}\n",
-                        c.short_hash,
-                        c.date.chars().take(10).collect::<String>(),
-                        c.subject.chars().take(70).collect::<String>(),
-                    ));
-                }
-            }
-            s
-        }
-    };
-    state.messages.push(ChatMessage::assistant(body));
-}
-
 /// `/reloadSettings` (`/reload-settings`) — bust the config cache so the next
 /// `load_arc()` call re-reads `~/.config/jfc/config.toml` (and any project
 /// overrides) from disk. Useful after editing the config file without wanting
@@ -1189,7 +1042,7 @@ mod recall_command_tests {
     use super::*;
 
     #[test]
-    fn recall_query_preserves_spaces_normal() {
+    fn command_query_preserves_spaces_normal() {
         assert_eq!(
             recall_query_text("/recall cache and resume"),
             "cache and resume"
@@ -1198,26 +1051,5 @@ mod recall_command_tests {
             recall_query_text("  /search-sessions   claude cache  "),
             "claude cache"
         );
-    }
-
-    #[test]
-    fn render_session_tail_omits_empty_and_labels_tool_policy_normal() {
-        let messages = vec![
-            jfc_session::SessionMessage {
-                index: 7,
-                role: "user".into(),
-                text: "continue the work".into(),
-            },
-            jfc_session::SessionMessage {
-                index: 8,
-                role: "assistant".into(),
-                text: String::new(),
-            },
-        ];
-        let out = render_session_tail("ses_test", &messages);
-        assert!(out.contains("tool outputs omitted"));
-        assert!(out.contains("[user #7]"));
-        assert!(out.contains("continue the work"));
-        assert!(!out.contains("[assistant #8]"));
     }
 }

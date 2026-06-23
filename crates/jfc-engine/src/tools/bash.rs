@@ -857,6 +857,27 @@ fn format_completed_task(
     })
 }
 
+fn spawn_background_completion_update(
+    task: RunningBashTask,
+    completion: oneshot::Receiver<BashTaskCompletion>,
+    tool_id: String,
+    tx: crate::runtime::EventSender,
+) {
+    tokio::spawn(async move {
+        let result = match completion.await {
+            Ok(completion) => format_completed_task(&task, completion),
+            Err(_) => ExecutionResult::failure("Bash task ended without a completion result"),
+        };
+        crate::runtime::send_critical(
+            &tx,
+            crate::runtime::EngineEvent::Tool(crate::runtime::ToolEvent::BackgroundResult {
+                tool_id: crate::ids::ToolId::from(tool_id),
+                result,
+            }),
+        );
+    });
+}
+
 // Production callers go through `execute_bash_with_options`; this thin wrapper
 // remains the test-suite entry point.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -886,6 +907,9 @@ pub async fn execute_bash_with_options(
         user_timeout
     };
 
+    let completion_target = progress
+        .as_ref()
+        .map(|(tool_id, tx)| (tool_id.clone(), tx.clone()));
     let mut task = match start_bash_task(
         command,
         Some(effective_timeout_for_watcher),
@@ -903,10 +927,13 @@ pub async fn execute_bash_with_options(
     };
 
     if run_in_background {
-        return ExecutionResult::success(background_started_message(
-            &task,
-            "Command running in background.",
-        ));
+        let message = background_started_message(&task, "Command running in background.");
+        if let Some((tool_id, tx)) = completion_target
+            && let Some(completion) = task.completion.take()
+        {
+            spawn_background_completion_update(task, completion, tool_id, tx);
+        }
+        return ExecutionResult::success(message);
     }
 
     let mut completion = task
@@ -920,10 +947,14 @@ pub async fn execute_bash_with_options(
                 Err(_) => ExecutionResult::failure("Bash task ended without a completion result"),
             },
             _ = tokio::time::sleep(Duration::from_millis(foreground_budget)) => {
-                ExecutionResult::success(background_started_message(
+                let message = background_started_message(
                     &task,
                     &format!("Command exceeded the foreground budget ({foreground_budget}ms) and was moved to the background."),
-                ))
+                );
+                if let Some((tool_id, tx)) = completion_target {
+                    spawn_background_completion_update(task, completion, tool_id, tx);
+                }
+                ExecutionResult::success(message)
             }
         }
     } else {

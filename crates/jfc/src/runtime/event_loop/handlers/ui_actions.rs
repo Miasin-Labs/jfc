@@ -4,11 +4,12 @@
 use crate::app::App;
 use crate::input;
 use crate::runtime::EventSender;
+use jfc_engine::runtime::PromptSubmission;
 
 /// Handle `ControlEvent::SubmitPrompt(text)`.
 pub(crate) async fn handle_submit(
     app: &mut App,
-    text: String,
+    submission: PromptSubmission,
     tx: &EventSender,
 ) -> anyhow::Result<()> {
     // A fresh submit dismisses any lingering away-recap from the previous
@@ -89,9 +90,22 @@ pub(crate) async fn handle_submit(
     // streaming setup, and session save all run identically.
     tracing::debug!(
         target: "jfc::input",
-        text_len = text.len(),
+        text_len = submission.text.len(),
+        attachments = submission.attachments.len(),
+        edit_at = ?submission.edit_at,
         "ControlEvent::SubmitPrompt (re-queued after compaction)"
     );
-    input::handle_submit_text(app, text, tx).await?;
+    if submission.attachments.is_empty() && submission.edit_at.is_none() {
+        input::handle_submit_text(app, submission.text, tx).await?;
+    } else {
+        let _ = crate::runtime::ops::submit_prompt(
+            &mut app.engine,
+            tx,
+            submission.text,
+            submission.attachments,
+            submission.edit_at,
+        )
+        .await?;
+    }
     Ok(())
 }

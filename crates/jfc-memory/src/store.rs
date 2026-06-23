@@ -13,6 +13,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -322,6 +323,9 @@ pub fn team_memory_dir(project_root: &Path) -> PathBuf {
 /// row, restoring rich frontmatter from the verbatim `mem_meta` JSON. TTL-expired
 /// entries are filtered (same rule the `.md` loader applied).
 pub fn load_all_memories(project_root: &Path) -> Vec<MemoryEntry> {
+    if let Err(e) = import_legacy_memory_dirs(project_root) {
+        tracing::warn!(target: "jfc::memory", error = %e, "legacy memory import failed");
+    }
     let project_key = jfc_knowledge::project_key(project_root);
     let rows = match jfc_knowledge::KnowledgeStore::open_default() {
         Ok(store) => store.load_memories(Some(&project_key)).unwrap_or_default(),
@@ -428,6 +432,28 @@ fn content_hash(body: &str) -> String {
 
 fn open_store_or_err() -> Result<jfc_knowledge::KnowledgeStore, String> {
     jfc_knowledge::KnowledgeStore::open_default().map_err(|e| format!("knowledge store: {e}"))
+}
+
+fn import_legacy_memory_dirs(project_root: &Path) -> Result<(), String> {
+    import_memory_dir_to_db(
+        project_root,
+        &user_memory_dir(),
+        MemoryLevel::User,
+        MemoryScope::Private,
+    )?;
+    import_memory_dir_to_db(
+        project_root,
+        &project_memory_dir(project_root),
+        MemoryLevel::Project,
+        MemoryScope::Private,
+    )?;
+    import_memory_dir_to_db(
+        project_root,
+        &team_memory_dir(project_root),
+        MemoryLevel::Team,
+        MemoryScope::Team,
+    )?;
+    Ok(())
 }
 
 /// Create a memory in the DB and return conflict info alongside the new id.
@@ -551,6 +577,7 @@ pub fn sync_team_memory(
         .map_err(|e| format!("failed to create local team memory dir: {e}"))?;
     std::fs::create_dir_all(remote_dir)
         .map_err(|e| format!("failed to create remote team memory dir: {e}"))?;
+    export_team_db_memories(project_root, &local_dir)?;
 
     let mut names = std::collections::BTreeSet::new();
     collect_md_file_names(&local_dir, &mut names)?;
@@ -603,6 +630,13 @@ pub fn sync_team_memory(
         }
     }
 
+    import_memory_dir_to_db(
+        project_root,
+        &local_dir,
+        MemoryLevel::Team,
+        MemoryScope::Team,
+    )?;
+
     Ok(report)
 }
 
@@ -644,6 +678,152 @@ fn collect_md_file_names(
         }
     }
     Ok(())
+}
+
+fn export_team_db_memories(project_root: &Path, local_dir: &Path) -> Result<(), String> {
+    for mem in load_all_memories(project_root)
+        .into_iter()
+        .filter(|m| m.level == MemoryLevel::Team)
+    {
+        let name = exported_team_memory_file_name(&mem);
+        let body = memory_entry_to_markdown(&mem);
+        write_atomic_sync(&local_dir.join(name), body.as_bytes())
+            .map_err(|e| format!("failed to export team memory: {e}"))?;
+    }
+    Ok(())
+}
+
+fn import_memory_dir_to_db(
+    project_root: &Path,
+    local_dir: &Path,
+    level: MemoryLevel,
+    default_scope: MemoryScope,
+) -> Result<(), String> {
+    let Ok(entries) = std::fs::read_dir(local_dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("failed to read entry in {}: {e}", local_dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let (frontmatter, body) = parse_memory_markdown(&content, default_scope);
+        if body.trim().is_empty() {
+            continue;
+        }
+        if let Err(e) = create_memory_checked(
+            level,
+            frontmatter.memory_type,
+            frontmatter.scope,
+            body.trim(),
+            project_root,
+        ) {
+            tracing::warn!(
+                target: "jfc::memory",
+                path = %path.display(),
+                error = %e,
+                "memory import skipped"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn exported_team_memory_file_name(mem: &MemoryEntry) -> String {
+    let first_line = mem
+        .body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("team-memory");
+    let stem = slug_file_stem(first_line);
+    let suffix = mem
+        .id
+        .as_deref()
+        .map(|id| id.chars().take(8).collect::<String>())
+        .unwrap_or_else(|| content_hash(&mem.body).chars().take(8).collect());
+    format!("{stem}-{suffix}.md")
+}
+
+fn memory_entry_to_markdown(mem: &MemoryEntry) -> String {
+    let mut out = format!(
+        "---\ntype: {}\nscope: {}\n",
+        mem.frontmatter.memory_type, mem.frontmatter.scope
+    );
+    if let Some(created) = &mem.frontmatter.created {
+        out.push_str(&format!("created: {created}\n"));
+    }
+    out.push_str("---\n");
+    out.push_str(mem.body.trim());
+    out.push('\n');
+    out
+}
+
+fn parse_memory_markdown(content: &str, default_scope: MemoryScope) -> (MemoryFrontmatter, &str) {
+    let mut frontmatter = MemoryFrontmatter::new(MemoryType::Context, default_scope);
+    let Some(rest) = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))
+    else {
+        return (frontmatter, content);
+    };
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed == "---" {
+            let body = &rest[offset + line.len()..];
+            return (frontmatter, body);
+        }
+        if let Some((key, value)) = trimmed.split_once(':') {
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            match key.as_str() {
+                "type" => {
+                    if let Ok(kind) = MemoryType::from_str(value) {
+                        frontmatter.memory_type = kind;
+                    }
+                }
+                "scope" => {
+                    if let Ok(scope) = MemoryScope::from_str(value) {
+                        frontmatter.scope = scope;
+                    }
+                }
+                "created" if !value.is_empty() => frontmatter.created = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+        offset += line.len();
+    }
+    (frontmatter, content)
+}
+
+fn slug_file_stem(text: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "team-memory".to_owned()
+    } else {
+        out
+    }
 }
 
 fn conflict_path_for(local_dir: &Path, file_name: &str) -> PathBuf {

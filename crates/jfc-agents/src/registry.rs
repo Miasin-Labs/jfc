@@ -3,12 +3,19 @@
 
 use std::{
     collections::HashSet,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
 use crate::builtins;
 use crate::state::{Skill, SkillFile, parse_agent, parse_skill};
 pub use jfc_core::{AgentCost, AgentDef};
+use jfc_knowledge::{
+    DefinitionRecord, DefinitionScope, DefinitionStatus, KnowledgeStore, NewDefinition,
+};
+
+const DEF_KIND_AGENT: &str = "agent";
+const DEF_KIND_SKILL: &str = "skill";
 
 #[derive(Debug, Clone)]
 struct PluginRoot {
@@ -80,35 +87,40 @@ fn push_plugin_roots_in(plugins_dir: &Path, push_root: &mut impl FnMut(PathBuf, 
 pub fn load_skills(project_root: &Path) -> Vec<Skill> {
     tracing::info!(target: "jfc::agents", project_root = %project_root.display(), "loading skills");
     let mut out: Vec<Skill> = built_in_skills();
-    for root in skill_roots(project_root) {
-        for candidate in skill_candidates(&root.path) {
-            let SkillCandidate {
-                md_path,
-                fallback_name,
-                package_root,
-            } = candidate;
-            let Ok(raw) = std::fs::read_to_string(&md_path) else {
+    if let Some(store) = open_definition_store(project_root) {
+        let project_key = jfc_knowledge::project_key(project_root);
+        import_legacy_skill_definitions(&store, project_root, &project_key);
+        let mut defs = store
+            .list_definitions_for_project(DEF_KIND_SKILL, &project_key)
+            .unwrap_or_default();
+        defs.sort_by_key(definition_precedence);
+        for def in defs {
+            let path = definition_source_path(&def, DEF_KIND_SKILL);
+            let Some(mut skill) = parse_skill(&path, &def.body) else {
                 continue;
             };
-            let Some(mut skill) = parse_skill(&md_path, &raw) else {
-                continue;
-            };
-            if let Some(package_root) = package_root {
-                skill.package_root = package_root;
-                skill.files = collect_skill_files(&skill.package_root, &skill.source);
+            if let Some(fallback_name) =
+                definition_metadata_string(&def.metadata_json, "fallback_name")
+            {
+                let frontmatter_set_name = !skill.name.is_empty()
+                    && skill.name != "unnamed"
+                    && skill.name != "SKILL"
+                    && skill.name != "Skill"
+                    && skill.name != "skill";
+                if !frontmatter_set_name {
+                    skill.name = fallback_name;
+                }
             }
-            let frontmatter_set_name = !skill.name.is_empty()
-                && skill.name != "unnamed"
-                && skill.name != "SKILL"
-                && skill.name != "Skill"
-                && skill.name != "skill";
-            if !frontmatter_set_name {
-                skill.name = fallback_name;
-            }
-            if let Some(namespace) = &root.namespace
+            if let Some(namespace) = &def.namespace
                 && !skill.name.contains(':')
             {
                 skill.name = format!("{namespace}:{}", skill.name);
+            }
+            if let Some(package_root) =
+                definition_metadata_string(&def.metadata_json, "package_root")
+            {
+                skill.package_root = PathBuf::from(package_root);
+                skill.files = collect_skill_files(&skill.package_root, &skill.source);
             }
             out.retain(|s| s.name != skill.name);
             out.push(skill);
@@ -138,6 +150,8 @@ pub enum SkillWriteError {
     AlreadyExists(String, PathBuf),
     #[error("io error writing skill: {0}")]
     Io(#[from] std::io::Error),
+    #[error("knowledge store error writing skill: {0}")]
+    Knowledge(#[from] jfc_knowledge::KnowledgeError),
 }
 
 /// Validate a skill name: kebab-case, 1..=64 chars, no path separators. Keeps
@@ -152,11 +166,11 @@ fn valid_skill_name(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
-/// Write a new **agent-created** skill to `<project_root>/.claude/skills/<name>/
-/// SKILL.md` with `created-by: agent` provenance (so the curator owns it).
+/// Write a new **agent-created** skill definition to the knowledge DB with
+/// `created-by: agent` provenance (so the curator owns it).
 ///
 /// Refuses to overwrite an existing skill (the agent must pick a fresh name) and
-/// validates the name to a safe kebab-case slug. Returns the path written.
+/// validates the name to a safe kebab-case slug. Returns the DB definition URI.
 /// This is the write half of the skill-from-experience loop: the agent distills
 /// a reusable procedure from a successful task and persists it as a skill.
 pub fn write_agent_skill(
@@ -168,23 +182,54 @@ pub fn write_agent_skill(
     if !valid_skill_name(name) {
         return Err(SkillWriteError::InvalidName(name.to_owned()));
     }
-    let dir = project_root.join(".claude").join("skills").join(name);
-    let md_path = dir.join("SKILL.md");
-    if md_path.exists() {
-        return Err(SkillWriteError::AlreadyExists(name.to_owned(), md_path));
+    let project_key = jfc_knowledge::project_key(project_root);
+    let Some(store) = open_definition_store(project_root) else {
+        return Err(SkillWriteError::Io(std::io::Error::other(
+            "definition store unavailable",
+        )));
+    };
+    if store
+        .get_definition_by_name(
+            DEF_KIND_SKILL,
+            DefinitionScope::Project,
+            Some(&project_key),
+            None,
+            name,
+        )?
+        .is_some()
+    {
+        return Err(SkillWriteError::AlreadyExists(
+            name.to_owned(),
+            PathBuf::from(format!("db:definition:skill:{name}")),
+        ));
     }
-    std::fs::create_dir_all(&dir)?;
-
-    // YAML-escape the description (it's a single quoted scalar). Single-quote
-    // style only needs `'` doubled, which keeps colons/brackets literal.
     let desc_escaped = description.replace('\'', "''");
     let contents = format!(
         "---\nname: {name}\ndescription: '{desc_escaped}'\ncreated-by: agent\n---\n{}\n",
         body.trim()
     );
-    std::fs::write(&md_path, contents)?;
-    tracing::info!(target: "jfc::agents", skill = name, path = %md_path.display(), "wrote agent-created skill");
-    Ok(md_path)
+    let uri = format!("db:definition:skill:{name}");
+    store.upsert_definition(&NewDefinition {
+        kind: DEF_KIND_SKILL.to_owned(),
+        scope: DefinitionScope::Project,
+        project_key: Some(project_key),
+        namespace: None,
+        name: name.to_owned(),
+        title: None,
+        description: Some(description.to_owned()),
+        body: contents.clone(),
+        metadata_json: serde_json::json!({
+            "fallback_name": name,
+            "precedence": 10_000,
+        })
+        .to_string(),
+        source_path: Some(uri.clone()),
+        source_hash: Some(content_hash(&contents)),
+        status: DefinitionStatus::Active,
+        created_by: "agent".to_owned(),
+    })?;
+    tracing::info!(target: "jfc::agents", skill = name, path = %uri, "wrote agent-created skill definition");
+    Ok(PathBuf::from(uri))
 }
 
 #[derive(Debug)]
@@ -298,6 +343,134 @@ fn skill_candidates(root: &Path) -> Vec<SkillCandidate> {
     out
 }
 
+fn import_legacy_skill_definitions(store: &KnowledgeStore, project_root: &Path, project_key: &str) {
+    for (precedence, root) in skill_roots(project_root).into_iter().enumerate() {
+        let (scope, definition_project_key) = root_definition_scope(
+            project_root,
+            project_key,
+            &root.path,
+            root.namespace.as_ref(),
+        );
+        for candidate in skill_candidates(&root.path) {
+            let SkillCandidate {
+                md_path,
+                fallback_name,
+                package_root,
+            } = candidate;
+            let Ok(raw) = std::fs::read_to_string(&md_path) else {
+                continue;
+            };
+            let Some(mut skill) = parse_skill(&md_path, &raw) else {
+                continue;
+            };
+            let frontmatter_set_name = !skill.name.is_empty()
+                && skill.name != "unnamed"
+                && skill.name != "SKILL"
+                && skill.name != "Skill"
+                && skill.name != "skill";
+            if !frontmatter_set_name {
+                skill.name = fallback_name.clone();
+            }
+            if let Some(namespace) = &root.namespace
+                && !skill.name.contains(':')
+            {
+                skill.name = format!("{namespace}:{}", skill.name);
+            }
+            let metadata = serde_json::json!({
+                "fallback_name": fallback_name,
+                "package_root": package_root.as_ref().map(|path| path.to_string_lossy().to_string()),
+                "precedence": precedence,
+                "legacy_import": true,
+            });
+            let def = NewDefinition {
+                kind: DEF_KIND_SKILL.to_owned(),
+                scope,
+                project_key: definition_project_key.clone(),
+                namespace: root.namespace.clone(),
+                name: skill.name.clone(),
+                title: None,
+                description: skill.description.clone(),
+                body: raw.clone(),
+                metadata_json: metadata.to_string(),
+                source_path: Some(md_path.to_string_lossy().to_string()),
+                source_hash: Some(content_hash(&raw)),
+                status: DefinitionStatus::Active,
+                created_by: "legacy_import".to_owned(),
+            };
+            if let Err(err) = store.upsert_definition(&def) {
+                tracing::warn!(
+                    target: "jfc::agents",
+                    path = %md_path.display(),
+                    error = %err,
+                    "failed to import legacy skill definition"
+                );
+            }
+        }
+    }
+}
+
+fn root_definition_scope(
+    project_root: &Path,
+    project_key: &str,
+    root: &Path,
+    namespace: Option<&String>,
+) -> (DefinitionScope, Option<String>) {
+    let project_scoped = root.starts_with(project_root);
+    match (namespace.is_some(), project_scoped) {
+        (true, true) => (DefinitionScope::Plugin, Some(project_key.to_owned())),
+        (true, false) => (DefinitionScope::Plugin, None),
+        (false, true) => (DefinitionScope::Project, Some(project_key.to_owned())),
+        (false, false) => (DefinitionScope::User, None),
+    }
+}
+
+fn open_definition_store(project_root: &Path) -> Option<KnowledgeStore> {
+    #[cfg(test)]
+    {
+        let path = project_root.join(".jfc").join("definition-test.db");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        KnowledgeStore::open(&path).ok()
+    }
+    #[cfg(not(test))]
+    {
+        let _ = project_root;
+        KnowledgeStore::open_default().ok()
+    }
+}
+
+fn definition_source_path(def: &DefinitionRecord, kind: &str) -> PathBuf {
+    def.source_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("db:definition:{kind}:{}", def.name)))
+}
+
+fn definition_metadata_string(metadata: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|value| {
+            value
+                .get(key)
+                .and_then(|item| item.as_str())
+                .map(str::to_owned)
+        })
+}
+
+fn definition_precedence(def: &DefinitionRecord) -> i64 {
+    serde_json::from_str::<serde_json::Value>(&def.metadata_json)
+        .ok()
+        .and_then(|value| value.get("precedence").and_then(serde_json::Value::as_i64))
+        .unwrap_or(0)
+}
+
+fn content_hash(raw: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 fn collect_skill_files(package_root: &Path, skill_md_path: &Path) -> Vec<SkillFile> {
     const MAX_SCAN_DEPTH: usize = 8;
     const MAX_DIRS: usize = 512;
@@ -406,26 +579,19 @@ fn agent_roots(project_root: &Path) -> Vec<AgentRoot> {
 pub fn load_agents(project_root: &Path) -> Vec<AgentDef> {
     tracing::info!(target: "jfc::agents", project_root = %project_root.display(), "loading agents");
     let mut out: Vec<AgentDef> = Vec::new();
-    for root in agent_roots(project_root) {
-        let dir = root.path;
-        if !dir.exists() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("md") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(&path) else {
+    if let Some(store) = open_definition_store(project_root) {
+        let project_key = jfc_knowledge::project_key(project_root);
+        import_legacy_agent_definitions(&store, project_root, &project_key);
+        let mut defs = store
+            .list_definitions_for_project(DEF_KIND_AGENT, &project_key)
+            .unwrap_or_default();
+        defs.sort_by_key(definition_precedence);
+        for def in defs {
+            let path = definition_source_path(&def, DEF_KIND_AGENT);
+            let Some(mut agent) = parse_agent(&path, &def.body) else {
                 continue;
             };
-            let Some(mut agent) = parse_agent(&path, &raw) else {
-                continue;
-            };
-            if let Some(namespace) = &root.namespace
+            if let Some(namespace) = &def.namespace
                 && !agent.name.contains(':')
             {
                 agent.name = format!("{namespace}:{}", agent.name);
@@ -448,6 +614,64 @@ pub fn load_agents(project_root: &Path) -> Vec<AgentDef> {
         "agents loaded"
     );
     out
+}
+
+fn import_legacy_agent_definitions(store: &KnowledgeStore, project_root: &Path, project_key: &str) {
+    for (precedence, root) in agent_roots(project_root).into_iter().enumerate() {
+        let dir = root.path;
+        if !dir.exists() {
+            continue;
+        }
+        let (scope, definition_project_key) =
+            root_definition_scope(project_root, project_key, &dir, root.namespace.as_ref());
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(mut agent) = parse_agent(&path, &raw) else {
+                continue;
+            };
+            if let Some(namespace) = &root.namespace
+                && !agent.name.contains(':')
+            {
+                agent.name = format!("{namespace}:{}", agent.name);
+            }
+            let def = NewDefinition {
+                kind: DEF_KIND_AGENT.to_owned(),
+                scope,
+                project_key: definition_project_key.clone(),
+                namespace: root.namespace.clone(),
+                name: agent.name.clone(),
+                title: Some(agent.name),
+                description: agent.key_trigger.clone(),
+                body: raw.clone(),
+                metadata_json: serde_json::json!({
+                    "precedence": precedence,
+                    "legacy_import": true,
+                })
+                .to_string(),
+                source_path: Some(path.to_string_lossy().to_string()),
+                source_hash: Some(content_hash(&raw)),
+                status: DefinitionStatus::Active,
+                created_by: "legacy_import".to_owned(),
+            };
+            if let Err(err) = store.upsert_definition(&def) {
+                tracing::warn!(
+                    target: "jfc::agents",
+                    path = %path.display(),
+                    error = %err,
+                    "failed to import legacy agent definition"
+                );
+            }
+        }
+    }
 }
 
 /// Look up a skill by `name` in a slice. Returns the first match or `None`.
@@ -1119,8 +1343,8 @@ mod tests {
 
     // ─── write_agent_skill (skill-from-experience write path) ───────────────
 
-    // Normal: a written skill lands at .claude/skills/<name>/SKILL.md, parses
-    // back with agent provenance, and is then discoverable via load_skills.
+    // Normal: a written skill lands in the definition DB, parses back with
+    // agent provenance, and is then discoverable via load_skills.
     #[test]
     fn write_agent_skill_roundtrips_normal() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1131,16 +1355,16 @@ mod tests {
             "1. Run the dry-run.\n2. If clean, deploy.",
         )
         .expect("write should succeed");
-        assert!(path.ends_with(".claude/skills/deploy-helper/SKILL.md"));
-
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let parsed = parse_skill(&path, &raw).expect("written skill must parse");
-        assert_eq!(parsed.name, "deploy-helper");
-        assert_eq!(parsed.created_by, crate::state::SkillOrigin::Agent);
-        assert!(parsed.description.unwrap().contains("dry-run"));
+        assert_eq!(path, PathBuf::from("db:definition:skill:deploy-helper"));
 
         let loaded = load_skills(tmp.path());
-        assert!(loaded.iter().any(|s| s.name == "deploy-helper"));
+        let parsed = loaded
+            .iter()
+            .find(|skill| skill.name == "deploy-helper")
+            .expect("written skill must load");
+        assert_eq!(parsed.name, "deploy-helper");
+        assert_eq!(parsed.created_by, crate::state::SkillOrigin::Agent);
+        assert!(parsed.description.as_deref().unwrap().contains("dry-run"));
     }
 
     // Robust: invalid names and duplicate writes are rejected (no overwrite, no
@@ -1169,10 +1393,15 @@ mod tests {
     #[test]
     fn write_agent_skill_escapes_description_robust() {
         let tmp = tempfile::tempdir().unwrap();
-        let path =
-            write_agent_skill(tmp.path(), "quoter", "It's a test: don't break", "body").unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let parsed = parse_skill(&path, &raw).expect("escaped description must parse");
-        assert_eq!(parsed.description.unwrap(), "It's a test: don't break");
+        write_agent_skill(tmp.path(), "quoter", "It's a test: don't break", "body").unwrap();
+        let loaded = load_skills(tmp.path());
+        let parsed = loaded
+            .iter()
+            .find(|skill| skill.name == "quoter")
+            .expect("escaped description must load");
+        assert_eq!(
+            parsed.description.as_deref().unwrap(),
+            "It's a test: don't break"
+        );
     }
 }

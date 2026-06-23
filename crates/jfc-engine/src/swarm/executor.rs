@@ -429,6 +429,14 @@ pub async fn run_single_turn(
                 biased;
                 changed = abort_rx.changed() => {
                     if changed.is_err() || *abort_rx.borrow() {
+                        let killed = crate::bash_processes::terminate_all();
+                        if killed > 0 {
+                            warn!(
+                                target: "jfc::swarm",
+                                killed,
+                                "terminated bash subprocesses after teammate abort"
+                            );
+                        }
                         return TurnResult::Aborted;
                     }
                     // Spurious wake — finish waiting on the tool

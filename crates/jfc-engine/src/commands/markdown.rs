@@ -1,5 +1,12 @@
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+
+use jfc_knowledge::{
+    DefinitionRecord, DefinitionScope, DefinitionStatus, KnowledgeStore, NewDefinition,
+};
+
+const DEF_KIND_MARKDOWN_COMMAND: &str = "markdown_command";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkdownCommand {
@@ -24,22 +31,19 @@ struct CommandRoot {
 
 pub fn load_markdown_commands(project_root: &Path) -> Vec<MarkdownCommand> {
     let mut out = Vec::new();
-    for root in command_roots(project_root) {
-        let Ok(entries) = std::fs::read_dir(&root.path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("md") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Some(mut command) = parse_markdown_command(&path, &raw) else {
+    if let Some(store) = open_definition_store(project_root) {
+        let project_key = jfc_knowledge::project_key(project_root);
+        import_legacy_markdown_commands(&store, project_root, &project_key);
+        let mut defs = store
+            .list_definitions_for_project(DEF_KIND_MARKDOWN_COMMAND, &project_key)
+            .unwrap_or_default();
+        defs.sort_by_key(definition_precedence);
+        for def in defs {
+            let path = definition_source_path(&def);
+            let Some(mut command) = parse_markdown_command(&path, &def.body) else {
                 continue;
             };
-            if let Some(namespace) = &root.namespace
+            if let Some(namespace) = &def.namespace
                 && !command.name.contains(':')
             {
                 command.name = format!("{namespace}:{}", command.name);
@@ -165,6 +169,115 @@ fn command_roots(project_root: &Path) -> Vec<CommandRoot> {
     push_root(project_root.join(".claude/commands"), None);
 
     roots
+}
+
+fn import_legacy_markdown_commands(store: &KnowledgeStore, project_root: &Path, project_key: &str) {
+    for (precedence, root) in command_roots(project_root).into_iter().enumerate() {
+        let Ok(entries) = std::fs::read_dir(&root.path) else {
+            continue;
+        };
+        let (scope, definition_project_key) = root_definition_scope(
+            project_root,
+            project_key,
+            &root.path,
+            root.namespace.as_ref(),
+        );
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(mut command) = parse_markdown_command(&path, &raw) else {
+                continue;
+            };
+            if let Some(namespace) = &root.namespace
+                && !command.name.contains(':')
+            {
+                command.name = format!("{namespace}:{}", command.name);
+            }
+            let def = NewDefinition {
+                kind: DEF_KIND_MARKDOWN_COMMAND.to_owned(),
+                scope,
+                project_key: definition_project_key.clone(),
+                namespace: root.namespace.clone(),
+                name: command.name,
+                title: None,
+                description: command.description,
+                body: raw.clone(),
+                metadata_json: serde_json::json!({
+                    "precedence": precedence,
+                    "legacy_import": true,
+                })
+                .to_string(),
+                source_path: Some(path.to_string_lossy().to_string()),
+                source_hash: Some(content_hash(&raw)),
+                status: DefinitionStatus::Active,
+                created_by: "legacy_import".to_owned(),
+            };
+            if let Err(err) = store.upsert_definition(&def) {
+                tracing::warn!(
+                    target: "jfc::commands",
+                    path = %path.display(),
+                    error = %err,
+                    "failed to import legacy markdown command definition"
+                );
+            }
+        }
+    }
+}
+
+fn root_definition_scope(
+    project_root: &Path,
+    project_key: &str,
+    root: &Path,
+    namespace: Option<&String>,
+) -> (DefinitionScope, Option<String>) {
+    let project_scoped = root.starts_with(project_root);
+    match (namespace.is_some(), project_scoped) {
+        (true, true) => (DefinitionScope::Plugin, Some(project_key.to_owned())),
+        (true, false) => (DefinitionScope::Plugin, None),
+        (false, true) => (DefinitionScope::Project, Some(project_key.to_owned())),
+        (false, false) => (DefinitionScope::User, None),
+    }
+}
+
+fn open_definition_store(project_root: &Path) -> Option<KnowledgeStore> {
+    #[cfg(test)]
+    {
+        let path = project_root.join(".jfc").join("definition-test.db");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        KnowledgeStore::open(&path).ok()
+    }
+    #[cfg(not(test))]
+    {
+        let _ = project_root;
+        KnowledgeStore::open_default().ok()
+    }
+}
+
+fn definition_source_path(def: &DefinitionRecord) -> PathBuf {
+    def.source_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("db:definition:command:{}", def.name)))
+}
+
+fn definition_precedence(def: &DefinitionRecord) -> i64 {
+    serde_json::from_str::<serde_json::Value>(&def.metadata_json)
+        .ok()
+        .and_then(|value| value.get("precedence").and_then(serde_json::Value::as_i64))
+        .unwrap_or(0)
+}
+
+fn content_hash(raw: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn push_plugin_roots_in(

@@ -198,6 +198,7 @@ pub fn handle_tool_input_delta(state: &mut EngineState, byte_len: usize) {
 pub fn handle_redacted_thinking(state: &mut EngineState, data: String) {
     state.record_stream_activity();
     state.stream_lifecycle = None;
+    state.streaming_last_token_at = Some(std::time::Instant::now());
     if let Some(msg) = streaming_assistant_mut(state) {
         msg.parts.push(MessagePart::RedactedThinking(data));
     }
@@ -360,6 +361,16 @@ mod tests {
             "reasoning text should not be counted as visible output"
         );
         assert_eq!(state.streaming_reasoning, "thinking text");
+    }
+
+    #[test]
+    fn redacted_thinking_resets_quiet_clock_regression() {
+        let mut state = test_app();
+        state.streaming_last_token_at = None;
+
+        handle_redacted_thinking(&mut state, "opaque".to_owned());
+
+        assert!(state.streaming_last_token_at.is_some());
     }
 
     #[test]

@@ -1,11 +1,10 @@
-//! Daemon schema types + on-disk state I/O.
+//! Daemon schema types + DB-backed state I/O.
 //!
-//! - `DaemonState` is the root persistent record under
-//!   `~/.config/jfc/daemon-state.json`.
-//! - `DaemonPaths` is the filesystem layout (PID file, state file, log dir).
+//! - `DaemonState` is the root persistent record in the knowledge DB.
+//! - `DaemonPaths` is the filesystem layout (PID file, compatibility state
+//!   path, log dir).
 //! - `load_state` / `save_state` are the only blessed entry points for
-//!   touching the state file; everything else in `daemon::*` goes through
-//!   them.
+//!   touching daemon state; everything else in `daemon::*` goes through them.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use super::cron::CronJob;
 pub use jfc_core::SessionId;
+
+const DAEMON_STATE_SESSION_ID: &str = "__daemon__";
+const DAEMON_STATE_KIND: &str = "state";
+const DAEMON_STATE_KEY: &str = "root";
 
 /// Daemon state — persisted to disk for crash recovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,14 +313,37 @@ impl DaemonPaths {
 // State I/O
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Concurrent writers (UI + N detached workers) all do
-// `load_state → mutate → save_state` on the same JSON file. Without
-// locking, two writers can interleave and one's changes can vanish.
-// We take an exclusive advisory flock on a sidecar `.lock` file for the
-// duration of any read-modify-write that callers run via
-// [`with_state_lock`]. Plain `load_state`/`save_state` still work
-// individually (atomic write via tempfile + rename) for callers that
-// don't need read-modify-write atomicity.
+// Concurrent writers (UI + N detached workers) all do `load_state → mutate →
+// save_state` against the same DB row. We keep the advisory flock on a sidecar
+// compatibility lock so older multi-process call sites still serialize their
+// read-modify-write cycle while the durable payload lives in SQLite.
+
+fn daemon_state_store(paths: &DaemonPaths) -> jfc_knowledge::Result<jfc_knowledge::KnowledgeStore> {
+    let default_base = DaemonPaths::default_user().base_dir;
+    if paths.base_dir == default_base {
+        return jfc_knowledge::KnowledgeStore::open_default();
+    }
+    if let Some(parent) = paths.base_dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::create_dir_all(&paths.base_dir)?;
+    jfc_knowledge::KnowledgeStore::open(&paths.base_dir.join("knowledge.db"))
+}
+
+fn load_state_row(
+    paths: &DaemonPaths,
+) -> jfc_knowledge::Result<Option<jfc_knowledge::SessionArtifactRow>> {
+    daemon_state_store(paths)?.get_session_artifact(
+        DAEMON_STATE_SESSION_ID,
+        DAEMON_STATE_KIND,
+        DAEMON_STATE_KEY,
+    )
+}
+
+fn db_stamp_to_system_time(ms: i64) -> Option<SystemTime> {
+    let ms = u64::try_from(ms).ok()?;
+    Some(UNIX_EPOCH + std::time::Duration::from_millis(ms))
+}
 
 #[cfg(unix)]
 fn lock_state_file(lock_path: &Path) -> std::io::Result<std::fs::File> {
@@ -369,27 +395,23 @@ where
     f()
 }
 
-/// Load daemon state from disk. Returns `None` when the file is missing
+/// Load daemon state from the DB. Returns `None` when the row is missing
 /// or unparseable; callers should fall back to `DaemonState::default()`.
 pub fn load_state(paths: &DaemonPaths) -> Option<DaemonState> {
-    let data = std::fs::read_to_string(&paths.state_file).ok()?;
-    serde_json::from_str(&data).ok()
+    let row = load_state_row(paths).ok()??;
+    serde_json::from_str(&row.value_json).ok()
 }
 
-/// Load daemon state for a read-modify-write cycle. Unlike [`load_state`],
-/// this distinguishes a genuinely-absent (or empty) state file — which
-/// yields a fresh `DaemonState::default()` — from a corrupt/unreadable
-/// file, which returns `Err`. Mutating callers must use this so a
-/// transient parse failure (e.g. reading a half-written file mid-rename)
-/// does NOT silently collapse to a default that then clobbers the real
-/// roster on the subsequent `save_state`.
+/// Load daemon state for a read-modify-write cycle. Unlike [`load_state`], this
+/// distinguishes a genuinely-absent row from a corrupt/unreadable row.
 pub fn load_state_for_update(paths: &DaemonPaths) -> std::io::Result<DaemonState> {
-    match std::fs::read_to_string(&paths.state_file) {
-        Ok(data) if data.trim().is_empty() => Ok(DaemonState::default()),
-        Ok(data) => serde_json::from_str(&data).map_err(std::io::Error::other),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DaemonState::default()),
-        Err(e) => Err(e),
+    let Some(row) = load_state_row(paths).map_err(std::io::Error::other)? else {
+        return Ok(DaemonState::default());
+    };
+    if row.value_json.trim().is_empty() {
+        return Ok(DaemonState::default());
     }
+    serde_json::from_str(&row.value_json).map_err(std::io::Error::other)
 }
 
 /// Default retention for terminal (completed/failed/cancelled) background
@@ -488,27 +510,17 @@ pub fn compact_background_agents(
     initial_count.saturating_sub(state.background_agents.len())
 }
 
-/// Return the mtime of `daemon-state.json`, or `None` if the file is missing
-/// or its metadata can't be read. Callers throttle reads of the (potentially
-/// large) state file by comparing this against a cached value — when the
-/// mtime is unchanged the parse can be skipped entirely.
+/// Return the DB update stamp of daemon state, or `None` if no state row exists.
+/// Callers throttle reads by comparing this against a cached value.
 pub fn state_file_mtime(paths: &DaemonPaths) -> Option<SystemTime> {
-    let meta = std::fs::metadata(&paths.state_file).ok()?;
-    let mtime = meta.modified().ok()?;
-    // Fold the file length into the staleness token. Two writes landing
-    // within the same mtime granularity (coarse filesystem clocks, fast
-    // worker finish + reconcile) used to make the second write invisible
-    // to `load_state_if_changed` — a session could permanently miss a
-    // terminal transition. Length-perturbation makes that race practically
-    // unobservable while keeping the cheap no-parse fast path.
-    Some(mtime + std::time::Duration::from_nanos(meta.len() % 1_000))
+    let row = load_state_row(paths).ok()??;
+    db_stamp_to_system_time(row.updated_at_ms)
 }
 
-/// Load daemon state only when the file's mtime is newer than `cached`.
+/// Load daemon state only when the DB update stamp differs from `cached`.
 /// Returns `(state, new_mtime)` when a reload happened, `None` otherwise.
-/// The UI calls this once per tick so a stable file (no new background
-/// workers reporting progress) doesn't trigger a 1.4 MB JSON parse on the
-/// render thread every second.
+/// The UI calls this once per tick so stable daemon state does not trigger a
+/// large JSON parse on the render thread every second.
 pub fn load_state_if_changed(
     paths: &DaemonPaths,
     cached: Option<SystemTime>,
@@ -521,13 +533,20 @@ pub fn load_state_if_changed(
     Some((state, mtime))
 }
 
-/// Save daemon state to disk (atomic write via tempfile + rename).
+/// Save daemon state to the DB.
 pub fn save_state(paths: &DaemonPaths, state: &DaemonState) -> std::io::Result<()> {
     paths.ensure_dirs()?;
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
-    let tmp = paths.state_file.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &paths.state_file)
+    daemon_state_store(paths)
+        .and_then(|store| {
+            store.upsert_session_artifact(
+                DAEMON_STATE_SESSION_ID,
+                DAEMON_STATE_KIND,
+                DAEMON_STATE_KEY,
+                &json,
+            )
+        })
+        .map_err(std::io::Error::other)
 }
 
 #[cfg(test)]

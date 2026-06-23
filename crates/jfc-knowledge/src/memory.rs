@@ -10,8 +10,9 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::error::Result;
+use crate::error::{KnowledgeError, Result};
 use crate::record::now_ms;
+use crate::redact::redact;
 
 /// The four memory levels the `.md` layout encoded by directory. Distinct from
 /// the coarser knowledge `Scope` (user/project/global), kept in its own column.
@@ -72,6 +73,11 @@ impl super::KnowledgeStore {
     /// `knowledge` table with `kind='preference'`-agnostic semantics: we tag the
     /// row as a memory via `mem_level`/`mem_meta` being non-NULL.
     pub fn insert_memory(&self, m: &NewMemory<'_>) -> Result<()> {
+        if redact(m.title, false) != m.title || redact(m.body, false) != m.body {
+            return Err(KnowledgeError::InvalidRecord(
+                "memory contains sensitive material".into(),
+            ));
+        }
         // Map level → knowledge Scope for the recall/promotion machinery.
         let scope = match m.level {
             MemLevel::User => "user",

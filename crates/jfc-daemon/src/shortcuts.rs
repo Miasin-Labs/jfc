@@ -11,8 +11,29 @@
 //! state and is fully unit-testable.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+const SHORTCUTS_SESSION_ID: &str = "__daemon__";
+const SHORTCUTS_KIND: &str = "shortcuts";
+
+fn artifact_key(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn artifact_store(path: &Path) -> std::io::Result<jfc_knowledge::KnowledgeStore> {
+    let default_base = crate::state::DaemonPaths::default_user().base_dir;
+    if path.starts_with(&default_base) {
+        return jfc_knowledge::KnowledgeStore::open_default().map_err(std::io::Error::other);
+    }
+    let db_dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    std::fs::create_dir_all(&db_dir)?;
+    jfc_knowledge::KnowledgeStore::open(&db_dir.join("knowledge.db")).map_err(std::io::Error::other)
+}
 
 /// A saved prompt template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,24 +215,43 @@ impl ShortcutStore {
         config_dir.join("shortcuts.json")
     }
 
-    /// Load from `path`; a missing file yields an empty store.
+    /// Load from the DB row keyed by `path`; a missing row yields an empty store.
     pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),
-            Err(e) => Err(e),
+        let store = artifact_store(path)?;
+        let key = artifact_key(path);
+        if let Some(row) = store
+            .get_session_artifact(SHORTCUTS_SESSION_ID, SHORTCUTS_KIND, &key)
+            .map_err(std::io::Error::other)?
+        {
+            return serde_json::from_str(&row.value_json)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
         }
+        let legacy = match std::fs::read_to_string(path) {
+            Ok(s) => serde_json::from_str::<Self>(&s)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::new()),
+            Err(e) => return Err(e),
+        };
+        let json = serde_json::to_string(&legacy)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        store
+            .upsert_session_artifact(SHORTCUTS_SESSION_ID, SHORTCUTS_KIND, &key, &json)
+            .map_err(std::io::Error::other)?;
+        Ok(legacy)
     }
 
-    /// Persist to `path` (pretty JSON), creating parent dirs.
+    /// Persist to the DB row keyed by `path`.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)
+        let json = serde_json::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        artifact_store(path)?
+            .upsert_session_artifact(
+                SHORTCUTS_SESSION_ID,
+                SHORTCUTS_KIND,
+                &artifact_key(path),
+                &json,
+            )
+            .map_err(std::io::Error::other)
     }
 }
 

@@ -17,6 +17,23 @@ pub const APP_EVENT_BUFFER: usize = 4096;
 pub type EventSender = mpsc::Sender<EngineEvent>;
 pub type EventReceiver = mpsc::Receiver<EngineEvent>;
 
+#[derive(Debug, Clone)]
+pub struct PromptSubmission {
+    pub text: String,
+    pub attachments: Vec<jfc_core::Attachment>,
+    pub edit_at: Option<usize>,
+}
+
+impl From<String> for PromptSubmission {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            attachments: Vec::new(),
+            edit_at: None,
+        }
+    }
+}
+
 /// Send an event that must not be dropped — terminal/continuation signals
 /// such as [`ToolEvent::AllComplete`] whose loss permanently wedges the
 /// agentic loop (the next turn never fires). Tries the non-blocking path
@@ -83,6 +100,7 @@ pub enum ControlEvent {
     /// by the pre-submit compaction gate (re-fires the original prompt once
     /// compaction shrank the context), the task factory, and remote clients.
     SubmitPrompt(String),
+    SubmitPromptWithState(PromptSubmission),
     /// Interrupt the current turn: cancel streams, abort in-flight tools,
     /// deny pending approvals. Replaces the remote host's synthetic Esc.
     Interrupt,
@@ -90,10 +108,15 @@ pub enum ControlEvent {
     /// late/orphaned responses can be matched to unresolved transcript
     /// tool_use blocks instead of blindly answering whichever modal is
     /// currently focused.
-    ResolveApproval { tool_use_id: String, approved: bool },
+    ResolveApproval {
+        tool_use_id: String,
+        approved: bool,
+    },
     /// Resolve the pending plan-approval (ExitPlanMode) request. Replaces
     /// the remote host's synthetic 'y'/'n' keystrokes.
-    ResolvePlan { approved: bool },
+    ResolvePlan {
+        approved: bool,
+    },
     /// Load a session by id — async load via the same helper the sidebar's
     /// Enter handler uses. Lives on the event bus because picker handlers
     /// are sync; routing through here keeps the disk I/O on the event-loop
@@ -377,6 +400,15 @@ pub fn scoped_stream_sender(tx: EventSender, stream_id: u64) -> EventSender {
 }
 pub enum ToolEvent {
     Result {
+        tool_id: crate::ids::ToolId,
+        result: ExecutionResult,
+    },
+    /// Internal late update for a tool that returned before its real work
+    /// settled. Bash uses this when a foreground command is promoted to a
+    /// background shell task: the visible tool call keeps the same id and its
+    /// output is replaced when the child exits, without requiring the model to
+    /// call BashOutput/TaskOutput with a guessed task id.
+    BackgroundResult {
         tool_id: crate::ids::ToolId,
         result: ExecutionResult,
     },

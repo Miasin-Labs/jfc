@@ -23,7 +23,7 @@ fn usage() -> String {
      - promote <id>      promote a lesson to cross-project (global) scope\n\
      - forget <id>       delete one record\n\
      - consolidate       dedup/forget pass (offline maintenance)\n\
-     - migrate           shadow-backfill sessions into the DB + report parity\n\
+     - migrate           backfill legacy sessions into the DB + report parity\n\
      - status            row counts\n\
      - gc-legacy --confirm   archive (move, not delete) the old .md memory files"
         .to_owned()
@@ -162,14 +162,12 @@ async fn run_mine(cwd: &std::path::Path) -> String {
     blocking(move || {
         let store = KnowledgeStore::open_default()?;
         let project = jfc_knowledge::project_key(&cwd);
-        let Some(sessions_dir) = dirs::config_dir().map(|c| c.join("jfc").join("sessions")) else {
-            return Ok("Could not locate ~/.config/jfc/sessions.".to_owned());
-        };
-        let (lessons, report) = jfc_knowledge::session_mine::mine_dir(&sessions_dir);
+        let (lessons, report) = jfc_knowledge::session_mine::mine_store(&store, 10_000);
         let (inserted, compounded) = store.ingest_mined(&project, &lessons)?;
         Ok(format!(
             "Mined {} session(s): {} error-lesson(s) ({} verified) + {} preference(s). \
-             Stored {} new, compounded {} existing — all project-scoped. \
+             Stored {} new, compounded {} existing — DB transcripts are the session source of truth. \
+             Use `/knowledge migrate` once to import old JSON sessions before mining them. \
              Use `/knowledge promote <id>` to share one across projects.",
             report.sessions_scanned,
             report.error_lessons,
@@ -182,9 +180,7 @@ async fn run_mine(cwd: &std::path::Path) -> String {
     .await
 }
 
-/// Backfill the DB transcript store from the canonical JSON and report parity
-/// (PLAN TODO 23 / F8). Read-only w.r.t. JSON; no read flip. The reported
-/// `flip_safe` is the gate the read-cutover (TODO 24) waits on.
+/// Backfill the DB transcript store from legacy JSON and report parity.
 async fn run_migrate() -> String {
     let Some(sessions_dir) = dirs::config_dir().map(|c| c.join("jfc").join("sessions")) else {
         return "Could not locate ~/.config/jfc/sessions.".to_owned();
@@ -194,16 +190,16 @@ async fn run_migrate() -> String {
             .await
             .unwrap_or_default();
     let flip = if report.flip_safe() {
-        "PARITY OK — safe to flip session reads to the DB (no mismatches)."
+        "PARITY OK — DB session reads are safe (no mismatches)."
     } else if report.checked == 0 {
         "No sessions found to migrate."
     } else {
-        "PARITY INCOMPLETE — mismatches present; staying on JSON (do not flip)."
+        "PARITY INCOMPLETE — mismatches present; legacy JSON backfill needs review."
     };
     format!(
-        "Session migration (shadow): checked {}, passed {}, mismatched {}, \
-         undeserializable {} (legacy/corrupt JSON, excluded). JSON remains \
-         canonical — nothing deleted. {flip}",
+        "Session migration: checked {}, passed {}, mismatched {}, \
+         undeserializable {} (legacy/corrupt JSON, excluded). Imported rows live \
+         in the DB; runtime session reads no longer use JSON fallback. {flip}",
         report.checked,
         report.passed,
         report.mismatched.len(),

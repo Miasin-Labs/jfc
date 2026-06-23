@@ -1,4 +1,6 @@
-use super::bash::{execute_bash, execute_bash_inner, execute_bash_output};
+use super::bash::{
+    execute_bash, execute_bash_inner, execute_bash_output, execute_bash_with_options,
+};
 use super::daemon::execute_monitor;
 use super::defs::{all_tool_defs, model_tool_defs};
 use super::dispatch::resolve_bash_workdir;
@@ -1393,6 +1395,47 @@ async fn execute_bash_streaming_progress_delivers_bursty_lines_regression() {
     );
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn background_bash_emits_completion_update_for_original_tool_regression() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let result = execute_bash_with_options(
+        "printf 'background-done\\n'",
+        Some(5_000),
+        Path::new("."),
+        Some(("bash-tool-live".to_string(), tx)),
+        true,
+    )
+    .await;
+
+    assert!(!result.is_error(), "{}", result.output);
+    assert!(
+        result.output.contains("task_id: bash_"),
+        "{}",
+        result.output
+    );
+
+    let update = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            if let EngineEvent::Tool(ToolEvent::BackgroundResult { tool_id, result }) = event {
+                return Some((tool_id, result));
+            }
+        }
+        None
+    })
+    .await
+    .expect("background completion update timed out")
+    .expect("event channel closed before background completion");
+
+    assert_eq!(update.0.as_str(), "bash-tool-live");
+    assert!(
+        update.1.output.contains("background-done"),
+        "{}",
+        update.1.output
+    );
+}
+
 // ─── execute_read ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2347,7 +2390,10 @@ fn execute_memory_create_project_writes_file_normal() {
     let dir = tempfile::tempdir().expect("temp dir");
     // SAFETY: tests are run single-threaded via #[serial_test::serial]
     unsafe {
-        std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("test.db").to_string_lossy().as_ref());
+        std::env::set_var(
+            "JFC_KNOWLEDGE_DB",
+            dir.path().join("test.db").to_string_lossy().as_ref(),
+        );
     }
     let r = execute_memory_create(
         "project",
@@ -2373,13 +2419,15 @@ fn execute_memory_delete_missing_path_fails_robust() {
     let dir = tempfile::tempdir().expect("temp dir");
     // SAFETY: tests are run single-threaded via #[serial_test::serial]
     unsafe {
-        std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("test.db").to_string_lossy().as_ref());
+        std::env::set_var(
+            "JFC_KNOWLEDGE_DB",
+            dir.path().join("test.db").to_string_lossy().as_ref(),
+        );
     }
     let r = execute_memory_delete("nonexistent-id-abc123");
     assert!(r.is_error());
     assert!(
-        r.output.to_lowercase().contains("no memory")
-            || r.output.to_lowercase().contains("failed"),
+        r.output.to_lowercase().contains("no memory") || r.output.to_lowercase().contains("failed"),
         "{}",
         r.output
     );
@@ -2932,6 +2980,34 @@ async fn execute_bash_output_unknown_task_id_is_actionable_robust() {
     assert!(output.output.contains("do not invent"), "{}", output.output);
     // Must NOT leak the raw OS error that triggered the retry loop.
     assert!(!output.output.contains("os error 2"), "{}", output.output);
+}
+
+#[tokio::test]
+async fn execute_tool_bash_output_unknown_task_id_is_compat_noop_regression() {
+    crate::sandbox::reset_active_bash_sandbox_for_test();
+    let output = execute_tool(
+        ToolKind::BashOutput,
+        ToolInput::BashOutput {
+            task_id: "bash_d2da789f9f50".to_owned(),
+            offset: None,
+            limit: None,
+            block: Some(false),
+            timeout: None,
+            wait_up_to: None,
+        },
+        std::env::current_dir().expect("cwd"),
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!output.is_error(), "{}", output.output);
+    assert!(
+        output.output.contains("attached to the original Bash tool"),
+        "{}",
+        output.output
+    );
 }
 
 #[tokio::test]

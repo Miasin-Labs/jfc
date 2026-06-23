@@ -24,10 +24,8 @@ pub(super) async fn build_prompt_seed() -> PromptSeed {
     // the leader so the model proactively fires Explore / Plan /
     // verification without the user having to ask. v132 + oh-my-
     // opencode parity: "Default Bias: DELEGATE" + Intent → Dispatch
-    // routing table. Only the built-in agents are consulted here;
-    // user-defined `.claude/agents/*.md` already merge into the same
-    // list via `load_all_agents`, so their `keyTrigger` frontmatter
-    // also takes effect.
+    // routing table. Built-in and DB-backed imported agent definitions merge
+    // into the same list, so their keyTrigger metadata also takes effect.
     let dispatch_section = {
         let cwd_for_agents =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

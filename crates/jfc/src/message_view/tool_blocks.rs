@@ -955,9 +955,11 @@ fn bash_output_display_text<'a>(
     tool: &ToolCall,
     raw: &'a str,
 ) -> Option<std::borrow::Cow<'a, str>> {
-    if !matches!(tool.kind, ToolKind::BashOutput)
-        && !matches!(tool.input, ToolInput::BashOutput { .. })
-    {
+    let bash_output_tool = matches!(tool.kind, ToolKind::BashOutput)
+        || matches!(tool.input, ToolInput::BashOutput { .. });
+    let bash_tool =
+        matches!(tool.kind, ToolKind::Bash) || matches!(tool.input, ToolInput::Bash { .. });
+    if !bash_output_tool && !bash_tool {
         return None;
     }
 
@@ -1657,7 +1659,7 @@ fn soft_wrap_text_str(s: &str, width: usize) -> Vec<String> {
                 last_break = buf
                     .char_indices()
                     .filter_map(|(i, c)| c.is_whitespace().then_some(i))
-                    .last();
+                    .next_back();
             } else {
                 out.push(std::mem::take(&mut buf));
                 col = 0;

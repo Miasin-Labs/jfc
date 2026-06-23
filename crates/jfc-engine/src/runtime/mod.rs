@@ -24,7 +24,7 @@ pub use background::{
 pub use dispatch::{FrontendDirective, handle_engine_event};
 pub use events::{
     APP_EVENT_BUFFER, CompactionEvent, ControlEvent, EngineEvent, EventReceiver, EventSender,
-    FrontendEvent, GoalEvent, ProviderEvent, StreamEvent, StreamLifecyclePhase,
+    FrontendEvent, GoalEvent, PromptSubmission, ProviderEvent, StreamEvent, StreamLifecyclePhase,
     StreamLifecycleStatus, StreamRequestMetadata, StreamRequestOverrides, StreamToolChoice,
     TaskEvent, TeamEvent, ToolEvent, VoiceEvent, WorkflowProgressEvent, scoped_stream_sender,
     send_critical, stream_event,

@@ -54,10 +54,26 @@ async function main() {
 
 async function evalJs(request) {
   const started = Date.now();
+  if (request.script) {
+    return {
+      ok: false,
+      url: null,
+      title: null,
+      result: {
+        kind: 'error',
+        value: {
+          message: 'eval-js no longer accepts raw scripts; use direct-edit-inspect or selector/property inspection'
+        }
+      },
+      logs: [],
+      errors: [],
+      duration_ms: Date.now() - started
+    };
+  }
+
   const { browser, page, logs, errors } = await openPage(request);
   try {
-    const result = await page.evaluate(async (source) => {
-      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const result = await page.evaluate(({ selector, property }) => {
       const serialize = (value) => {
         if (value === undefined) return { kind: 'undefined' };
         if (value === null) return { kind: 'json', value: null };
@@ -78,22 +94,32 @@ async function evalJs(request) {
         }
       };
 
-      try {
-        return serialize(await (0, eval)(source));
-      } catch (expressionError) {
-        try {
-          return serialize(await new AsyncFunction(source)());
-        } catch (statementError) {
-          return {
-            kind: 'error',
-            value: {
-              expression: String(expressionError?.message ?? expressionError),
-              statement: String(statementError?.message ?? statementError)
-            }
-          };
-        }
+      const target = selector ? document.querySelector(selector) : document.documentElement;
+      if (!target) {
+        return {
+          kind: 'error',
+          value: { message: `selector not found: ${selector}` }
+        };
       }
-    }, request.script ?? '');
+
+      if (property) {
+        let value = target;
+        for (const part of String(property).split('.').filter(Boolean)) {
+          if (value == null) break;
+          value = value[part];
+        }
+        return serialize(value);
+      }
+
+      return serialize({
+        tag: target.tagName?.toLowerCase?.() ?? null,
+        text: target.textContent?.slice(0, 4000) ?? '',
+        html: target.innerHTML?.slice(0, 4000) ?? '',
+        attributes: target.attributes
+          ? Object.fromEntries(Array.from(target.attributes).map((attr) => [attr.name, attr.value]))
+          : {}
+      });
+    }, request);
 
     return {
       ok: result.kind !== 'error',
@@ -263,7 +289,9 @@ async function genPptxEditable(request, page, logs, errors, started) {
   }
   if (models.length === 0) throw new Error('no visible slide roots found');
 
-  const notes = await readSpeakerNotes(page);
+  const notesResult = await readSpeakerNotes(page);
+  const notes = notesResult.notes;
+  warnings.push(...notesResult.warnings);
   let editableElements = 0;
   const modelHashes = [];
   for (let index = 0; index < models.length; index += 1) {
@@ -634,17 +662,21 @@ async function waitForFonts(page, timeoutMs) {
 async function readSpeakerNotes(page) {
   return await page.evaluate(() => {
     const raw = document.querySelector('#speaker-notes')?.textContent?.trim();
-    if (!raw) return [];
+    if (!raw) return { notes: [], warnings: [] };
     try {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed.map((note) => String(note));
-      if (Array.isArray(parsed.notes)) return parsed.notes.map((note) => String(note));
-      return [];
-    } catch {
-      return raw
-        .split(/\n-{3,}\n/g)
+      if (Array.isArray(parsed)) return { notes: parsed.map((note) => String(note)), warnings: [] };
+      if (Array.isArray(parsed.notes)) return { notes: parsed.notes.map((note) => String(note)), warnings: [] };
+      return { notes: [], warnings: ['speaker_notes_json_shape'] };
+    } catch (error) {
+      const notes = raw
+        .split(/(?:^|\n)\s*-{3,}\s*(?:\n|$)/g)
         .map((note) => note.trim())
         .filter(Boolean);
+      return {
+        notes,
+        warnings: [`speaker_notes_json_parse_failed:${String(error?.message ?? error)}`]
+      };
     }
   });
 }
@@ -989,9 +1021,15 @@ function duplicateHashWarnings(hashes) {
   for (let i = 1; i < hashes.length; i += 1) {
     if (hashes[i] === hashes[i - 1]) warnings.push(`duplicate_adjacent:${i}`);
   }
-  const counts = new Map();
-  for (const hash of hashes) counts.set(hash, (counts.get(hash) ?? 0) + 1);
-  for (const [hash, count] of counts) {
+  const indicesByHash = new Map();
+  hashes.forEach((hash, index) => {
+    const indices = indicesByHash.get(hash) ?? [];
+    indices.push(index);
+    indicesByHash.set(hash, indices);
+  });
+  for (const [hash, indices] of indicesByHash) {
+    const count = indices.length;
+    if (count > 1) warnings.push(`duplicate_hash:${hash.slice(0, 10)}:${indices.join(',')}`);
     if (hashes.length > 2 && count > Math.ceil(hashes.length * 0.6)) {
       warnings.push(`duplicate_majority:${hash.slice(0, 10)}:${count}`);
     }

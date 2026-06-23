@@ -1,16 +1,12 @@
-//! File-based teammate mailbox system.
+//! DB-backed teammate mailbox system.
 //!
-//! Each teammate has a JSON inbox file at:
-//!   `~/.claude/teams/{team}/inboxes/{agent-name}.json`
-//!
-//! Messages are JSON arrays of `MailboxMessage`. File locking (via an adjacent
-//! `.lock` file) ensures atomic read-modify-write operations across processes.
+//! The public path helpers stay for team-directory compatibility, but message
+//! traffic is persisted in `jfc-knowledge.agent_mailbox`, keyed by team+agent.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::PathBuf;
 
 use tokio::fs;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use super::TEAM_LEAD_NAME;
 use super::types::{IdleNotification, MailboxMessage, ShutdownRequest};
@@ -54,11 +50,6 @@ pub fn inbox_path(agent_name: &str, team_name: &str) -> PathBuf {
     inboxes_dir(team_name).join(format!("{sanitized}.json"))
 }
 
-/// Lock file path for an inbox.
-fn lock_path(inbox: &Path) -> PathBuf {
-    inbox.with_extension("json.lock")
-}
-
 // ─── Ensure directories ──────────────────────────────────────────────────────
 
 /// Ensure the inboxes directory exists.
@@ -68,111 +59,19 @@ pub async fn ensure_inbox_dir(team_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── File locking ────────────────────────────────────────────────────────────
-
-/// Simple advisory file lock using create-exclusive. Returns a guard that
-/// releases the lock on drop.
-///
-/// This is a simplified version — production would use `flock(2)` or
-/// `lockfile` crate. For in-process teammates (our primary mode), the Mutex
-/// in the runner provides the real synchronization; this lock is for
-/// cross-process safety with tmux-based teammates.
-///
-/// **Drop contract**: the `Drop` impl synchronously removes the lockfile.
-/// This is critical because mailbox writes use `?` after acquiring the
-/// lock (read_mailbox / serde_json / fs::write can all fail) — without
-/// `Drop`, an early-return would leak a `.lock` file and the next call
-/// would hang for the 10s timeout before failing. `release(self)` is
-/// kept as an explicit async path for callers that want to await the
-/// FS unlink instead of doing it in `Drop`.
-pub struct FileLock {
-    path: PathBuf,
-    released: bool,
-}
-
-impl FileLock {
-    /// Attempt to acquire the lock, retrying for up to `timeout`.
-    pub async fn acquire(path: PathBuf, timeout: Duration) -> anyhow::Result<Self> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .await
-            {
-                Ok(_) => {
-                    return Ok(Self {
-                        path,
-                        released: false,
-                    });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if tokio::time::Instant::now() >= deadline {
-                        anyhow::bail!("mailbox lock timeout: {}", path.display());
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-
-    /// Release the lock explicitly via tokio's async FS. Equivalent to
-    /// letting the guard drop, but blocks the current task until the
-    /// lockfile is gone.
-    pub async fn release(mut self) {
-        let _ = fs::remove_file(&self.path).await;
-        self.released = true;
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // Best-effort sync cleanup so an error mid-write (or a panic)
-        // can't leave a stale `.lock` file that wedges every subsequent
-        // mailbox operation for the timeout duration. `release()` sets
-        // `released` to skip this path when the caller already cleaned up
-        // via the async path.
-        if !self.released {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
 // ─── Read operations ─────────────────────────────────────────────────────────
 
 /// Read all messages from an agent's inbox.
-///
-/// Acquires the advisory file lock before reading to prevent partial/corrupt
-/// JSON when a concurrent writer is mid-flush. Falls back to unlocked read
-/// if the lock can't be acquired within 1.5s (better stale than deadlocked).
 pub async fn read_mailbox(agent_name: &str, team_name: &str) -> Vec<MailboxMessage> {
-    let path = inbox_path(agent_name, team_name);
-    let lock_file = lock_path(&path);
-
-    let _lock = FileLock::acquire(lock_file, Duration::from_millis(1500))
-        .await
-        .ok();
-
-    read_mailbox_unlocked(&path, agent_name).await
-}
-
-/// Internal: read messages from the inbox file **without** acquiring the
-/// advisory lock. Callers that are already holding the lock (write_to_mailbox,
-/// mark_message_read, mark_all_read) must use this path — otherwise the
-/// outer `FileLock::acquire` succeeds, then `read_mailbox` blocks for the
-/// full 1.5s timeout against its own lock before returning empty / stale
-/// data. Same return contract as `read_mailbox`.
-async fn read_mailbox_unlocked(path: &Path, agent_name: &str) -> Vec<MailboxMessage> {
-    match fs::read_to_string(path).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            warn!("[Mailbox] Failed to read inbox for {agent_name}: {e}");
+    let key = mailbox_key(agent_name, team_name);
+    let rows = match run_mailbox_db(move |store| store.list_agent_mailbox(&key, false)).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            debug!("[Mailbox] Failed to read DB inbox for {agent_name}: {err}");
             Vec::new()
         }
-    }
+    };
+    rows.into_iter().filter_map(row_to_message).collect()
 }
 
 /// Read only unread messages from an agent's inbox.
@@ -200,37 +99,13 @@ pub async fn write_to_mailbox(
 ) -> anyhow::Result<()> {
     ensure_inbox_dir(team_name).await?;
 
-    let path = inbox_path(recipient, team_name);
-    let lock_file = lock_path(&path);
-
     debug!(
-        "[Mailbox] writeToMailbox: recipient={recipient}, from={}, path={}",
-        message.from,
-        path.display()
+        "[Mailbox] writeToMailbox: recipient={recipient}, from={}, team={team_name}",
+        message.from
     );
 
-    // Ensure inbox file exists
-    if !path.exists() {
-        fs::write(&path, "[]").await?;
-    }
-
-    // Acquire lock
-    let lock = FileLock::acquire(lock_file, Duration::from_secs(10)).await?;
-
-    // Read current messages — use the unlocked helper because we already
-    // hold the advisory lock. Calling `read_mailbox` here would block for
-    // its 1.5s lock-acquire timeout before giving up.
-    let mut messages = read_mailbox_unlocked(&path, recipient).await;
-
-    // Append new message
-    messages.push(message);
-
-    // Write back
-    let json = serde_json::to_string_pretty(&messages)?;
-    fs::write(&path, json).await?;
-
-    // Release lock
-    lock.release().await;
+    let row = mailbox_row(recipient, team_name, message)?;
+    run_mailbox_db(move |store| store.enqueue_agent_mailbox(&row)).await?;
 
     debug!("[Mailbox] Wrote message to {recipient}'s inbox");
     Ok(())
@@ -243,51 +118,99 @@ pub async fn mark_message_read(
     team_name: &str,
     index: usize,
 ) -> anyhow::Result<()> {
-    let path = inbox_path(agent_name, team_name);
-    let lock_file = lock_path(&path);
-
-    let lock = FileLock::acquire(lock_file, Duration::from_secs(10)).await?;
-
-    let mut messages = read_mailbox_unlocked(&path, agent_name).await;
-    if index < messages.len() {
-        messages[index].read = true;
-        let json = serde_json::to_string_pretty(&messages)?;
-        fs::write(&path, json).await?;
-    }
-
-    lock.release().await;
+    let key = mailbox_key(agent_name, team_name);
+    run_mailbox_db(move |store| {
+        let rows = store.list_agent_mailbox(&key, false)?;
+        if let Some(row) = rows.get(index) {
+            store.mark_agent_mailbox_read(&row.id)?;
+        }
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 
 /// Mark all messages as read.
 pub async fn mark_all_read(agent_name: &str, team_name: &str) -> anyhow::Result<()> {
-    let path = inbox_path(agent_name, team_name);
-    let lock_file = lock_path(&path);
-
-    let lock = FileLock::acquire(lock_file, Duration::from_secs(10)).await?;
-
-    let mut messages = read_mailbox_unlocked(&path, agent_name).await;
-    for msg in &mut messages {
-        msg.read = true;
-    }
-    let json = serde_json::to_string_pretty(&messages)?;
-    fs::write(&path, json).await?;
-
-    lock.release().await;
+    let key = mailbox_key(agent_name, team_name);
+    run_mailbox_db(move |store| {
+        store.mark_all_agent_mailbox_read(&key)?;
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 
 /// Clear all messages from an agent's inbox.
 pub async fn clear_mailbox(agent_name: &str, team_name: &str) -> anyhow::Result<()> {
-    let path = inbox_path(agent_name, team_name);
-    let lock_file = lock_path(&path);
-
-    let lock = FileLock::acquire(lock_file, Duration::from_secs(10)).await?;
-    fs::write(&path, "[]").await?;
-    lock.release().await;
-
+    let key = mailbox_key(agent_name, team_name);
+    run_mailbox_db(move |store| {
+        store.clear_agent_mailbox(&key)?;
+        Ok(())
+    })
+    .await?;
     debug!("[Mailbox] Cleared inbox for {agent_name}");
     Ok(())
+}
+
+fn mailbox_key(agent_name: &str, team_name: &str) -> String {
+    format!(
+        "team:{}:agent:{}",
+        super::sanitize_name(team_name),
+        super::sanitize_name(agent_name)
+    )
+}
+
+fn mailbox_row(
+    recipient: &str,
+    team_name: &str,
+    message: MailboxMessage,
+) -> anyhow::Result<jfc_knowledge::AgentMailboxRow> {
+    let read = message.read;
+    let content = serde_json::to_string(&message)?;
+    Ok(jfc_knowledge::AgentMailboxRow {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        to_agent: mailbox_key(recipient, team_name),
+        from_agent: Some(message.from.clone()),
+        thread_id: Some(super::sanitize_name(team_name)),
+        task_id: None,
+        priority: 0,
+        content,
+        read_at_ms: read.then(|| chrono::Utc::now().timestamp_millis()),
+        summarized_at_ms: None,
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
+    })
+}
+
+fn row_to_message(row: jfc_knowledge::AgentMailboxRow) -> Option<MailboxMessage> {
+    let mut message: MailboxMessage = serde_json::from_str(&row.content).ok()?;
+    message.read = row.read_at_ms.is_some();
+    Some(message)
+}
+
+async fn run_mailbox_db<T, F>(f: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(jfc_knowledge::KnowledgeStore) -> jfc_knowledge::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let store = open_mailbox_store()?;
+        f(store)
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(anyhow::Error::from)
+}
+
+fn open_mailbox_store() -> jfc_knowledge::Result<jfc_knowledge::KnowledgeStore> {
+    if let Some(home) = swarm_home_override() {
+        let path = home.join(".jfc").join("knowledge.db");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return jfc_knowledge::KnowledgeStore::open(&path);
+    }
+    jfc_knowledge::KnowledgeStore::open_default()
 }
 
 // ─── Convenience: send message to leader ─────────────────────────────────────
@@ -360,7 +283,6 @@ pub fn is_idle_notification(text: &str) -> bool {
 mod tests {
     use super::*;
     use crate::swarm::test_support::HomeOverride;
-    use tempfile::TempDir;
 
     #[test]
     fn teams_base_dir_uses_override_normal() {
@@ -600,33 +522,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_lock_acquires_and_releases_normal() {
-        let dir = TempDir::new().unwrap();
-        let lock_path = dir.path().join("test.lock");
-        let lock = FileLock::acquire(lock_path.clone(), Duration::from_millis(100))
-            .await
-            .unwrap();
-        assert!(lock_path.exists());
-        lock.release().await;
-        assert!(!lock_path.exists());
-    }
-
-    #[tokio::test]
-    async fn file_lock_times_out_when_held_robust() {
-        let dir = TempDir::new().unwrap();
-        let lock_path = dir.path().join("contended.lock");
-        // Hold the lock and try to acquire it again with a short timeout.
-        let _holder = FileLock::acquire(lock_path.clone(), Duration::from_millis(50))
-            .await
-            .unwrap();
-        let result = FileLock::acquire(lock_path, Duration::from_millis(80)).await;
-        assert!(result.is_err(), "second acquire should time out");
-    }
-
-    #[tokio::test]
-    async fn read_mailbox_returns_empty_on_corrupt_file_robust() {
+    async fn mailbox_write_uses_db_not_inbox_file_normal() {
         let _g = HomeOverride::new();
-        // Manually create a corrupt inbox file.
+        write_to_mailbox(
+            "alice",
+            MailboxMessage {
+                from: "leader".into(),
+                text: "db-backed".into(),
+                timestamp: "t".into(),
+                color: None,
+                summary: None,
+                read: false,
+            },
+            "alpha",
+        )
+        .await
+        .unwrap();
+        assert!(!inbox_path("alice", "alpha").exists());
+        assert_eq!(read_mailbox("alice", "alpha").await[0].text, "db-backed");
+    }
+
+    #[tokio::test]
+    async fn mailbox_team_keys_are_isolated_normal() {
+        let _g = HomeOverride::new();
+        for team in ["alpha", "beta"] {
+            write_to_mailbox(
+                "alice",
+                MailboxMessage {
+                    from: "leader".into(),
+                    text: team.into(),
+                    timestamp: "t".into(),
+                    color: None,
+                    summary: None,
+                    read: false,
+                },
+                team,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(read_mailbox("alice", "alpha").await[0].text, "alpha");
+        assert_eq!(read_mailbox("alice", "beta").await[0].text, "beta");
+    }
+
+    #[tokio::test]
+    async fn read_mailbox_ignores_legacy_corrupt_file_robust() {
+        let _g = HomeOverride::new();
         ensure_inbox_dir("alpha").await.unwrap();
         let path = inbox_path("alice", "alpha");
         tokio::fs::write(&path, "not valid json").await.unwrap();

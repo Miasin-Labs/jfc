@@ -84,6 +84,9 @@ fn build_assistant_and_tool_result_messages(msgs: &[ChatMessage]) -> Vec<Provide
                 let MessagePart::Tool(tc) = part else {
                     continue;
                 };
+                if is_hidden_runtime_tool(&tc.kind) {
+                    continue;
+                }
                 if is_server_tool(&tc.kind) {
                     assistant_tool_blocks.push(tool_use_content(tc, &mut counters));
                     // The paired result block (web_search_tool_result, etc.)
@@ -193,6 +196,10 @@ fn build_assistant_and_tool_result_messages(msgs: &[ChatMessage]) -> Vec<Provide
         "build_assistant_and_tool_result_messages"
     );
     out
+}
+
+fn is_hidden_runtime_tool(kind: &crate::types::ToolKind) -> bool {
+    matches!(kind, crate::types::ToolKind::BashOutput)
 }
 
 fn append_total_tokens_reminder_to_tool_results(
@@ -393,6 +400,38 @@ mod tests {
             }
             _ => panic!("expected ToolResult"),
         }
+    }
+
+    #[test]
+    fn build_with_tool_results_skips_hidden_runtime_tools_regression() {
+        let tool = make_tool_call(
+            "toolu_hidden",
+            ToolKind::BashOutput,
+            ToolStatus::Failed,
+            ToolOutput::Text("Unknown Bash task id 'bash_fake'".into()),
+        );
+        let msgs = vec![
+            user_msg("continue"),
+            assistant_with_parts(vec![MessagePart::tool(tool)]),
+        ];
+
+        let out = build_provider_messages_with_tool_results(&msgs);
+
+        assert!(
+            out.iter()
+                .flat_map(|message| &message.content)
+                .all(|content| !matches!(
+                    content,
+                    ProviderContent::ToolUse { name, .. } if name == "BashOutput"
+                )),
+            "BashOutput must not be replayed as a model-visible tool_use"
+        );
+        assert!(
+            out.iter()
+                .flat_map(|message| &message.content)
+                .all(|content| !matches!(content, ProviderContent::ToolResult { .. })),
+            "skipping a hidden tool_use must skip its tool_result pair too"
+        );
     }
 
     #[test]

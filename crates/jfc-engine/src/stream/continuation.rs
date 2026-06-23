@@ -132,8 +132,8 @@ pub fn assistant_text_stalls(messages: &[ChatMessage]) -> bool {
 
 /// Whether self-continuation (auto-driving the next in-scope step without a
 /// user "continue") is enabled. Sources, in order: the `JFC_AUTO_CONTINUE`
-/// env var, then `[continuation] auto_continue` in config, then factory mode
-/// (which implies it). Plan mode disables it unconditionally — the caller is
+/// env var, then `[continuation] auto_continue` in config, then the autonomous
+/// default/factory mode. Plan mode disables it unconditionally — the caller is
 /// responsible for that check since config has no view of permission mode.
 pub fn auto_continue_enabled() -> bool {
     if let Ok(v) = std::env::var("JFC_AUTO_CONTINUE") {
@@ -147,11 +147,11 @@ pub fn auto_continue_enabled() -> bool {
     }
     let cfg = crate::config::load_arc();
     if let Some(c) = cfg.continuation.as_ref()
-        && c.auto_continue
+        && !c.auto_continue
     {
-        return true;
+        return false;
     }
-    crate::runtime::factory_mode_enabled()
+    true
 }
 
 /// Max consecutive self-continuations before we stop and wait for the user —

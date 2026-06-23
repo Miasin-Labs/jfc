@@ -1,4 +1,4 @@
-//! Durable scheduled-task persistence for `.claude/scheduled_tasks.json`.
+//! Durable scheduled-task persistence in the project DB.
 //!
 //! CC 2.1.167 persists `CronCreate(durable: true)` jobs to this file so they
 //! survive restarts. JFC mirrors this: on startup the engine loads any durable
@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::atomic_write::write_atomic_sync;
+const SCHEDULED_TASKS_KIND: &str = "scheduled_tasks";
+const SCHEDULED_TASKS_KEY: &str = "durable";
 
 /// Canonical path to the scheduled-tasks persistence file.
 pub fn scheduled_tasks_path(project_root: &Path) -> PathBuf {
@@ -55,11 +56,32 @@ fn default_true() -> bool {
     true
 }
 
-/// Load all durable scheduled tasks from `<project_root>/.claude/scheduled_tasks.json`.
+fn project_session_id(project_root: &Path) -> String {
+    format!("project:{}", jfc_knowledge::project_key(project_root))
+}
+
+fn project_store(project_root: &Path) -> std::io::Result<jfc_knowledge::KnowledgeStore> {
+    let db_path = project_root.join(".jfc").join("knowledge.db");
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    jfc_knowledge::KnowledgeStore::open(&db_path).map_err(std::io::Error::other)
+}
+
+/// Load all durable scheduled tasks from the project DB.
 ///
-/// Returns an empty `Vec` when the file is absent. Emits `tracing::warn` on
-/// parse errors so misconfigured files are visible without crashing.
+/// Returns an empty `Vec` when no row exists. Legacy files are imported once.
 pub fn load_scheduled_tasks(project_root: &Path) -> Vec<ScheduledTask> {
+    let Ok(store) = project_store(project_root) else {
+        return Vec::new();
+    };
+    if let Ok(Some(row)) = store.get_session_artifact(
+        &project_session_id(project_root),
+        SCHEDULED_TASKS_KIND,
+        SCHEDULED_TASKS_KEY,
+    ) {
+        return serde_json::from_str::<Vec<ScheduledTask>>(&row.value_json).unwrap_or_default();
+    }
     let path = scheduled_tasks_path(project_root);
     let raw = match std::fs::read_to_string(&path) {
         Ok(r) => r,
@@ -75,7 +97,10 @@ pub fn load_scheduled_tasks(project_root: &Path) -> Vec<ScheduledTask> {
         }
     };
     match serde_json::from_str::<Vec<ScheduledTask>>(&raw) {
-        Ok(tasks) => tasks,
+        Ok(tasks) => {
+            let _ = save_scheduled_tasks(project_root, &tasks);
+            tasks
+        }
         Err(err) => {
             tracing::warn!(
                 target: "jfc::config::scheduled_tasks",
@@ -88,18 +113,18 @@ pub fn load_scheduled_tasks(project_root: &Path) -> Vec<ScheduledTask> {
     }
 }
 
-/// Persist the scheduled-task list to `<project_root>/.claude/scheduled_tasks.json`.
-///
-/// Uses an atomic write (write to a temp file, then rename) to avoid
-/// corruption on crash. Creates the `.claude/` directory if needed.
+/// Persist the scheduled-task list to the project DB.
 pub fn save_scheduled_tasks(project_root: &Path, tasks: &[ScheduledTask]) -> std::io::Result<()> {
-    let path = scheduled_tasks_path(project_root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(tasks)
+    let json = serde_json::to_string(tasks)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    write_atomic_sync(&path, json.as_bytes())
+    project_store(project_root)?
+        .upsert_session_artifact(
+            &project_session_id(project_root),
+            SCHEDULED_TASKS_KIND,
+            SCHEDULED_TASKS_KEY,
+            &json,
+        )
+        .map_err(std::io::Error::other)
 }
 
 /// Add a task to the persisted list (idempotent by `id`).

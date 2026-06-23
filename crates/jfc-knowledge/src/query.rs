@@ -7,6 +7,7 @@ use rusqlite::{Connection, params};
 
 use crate::error::{KnowledgeError, Result};
 use crate::record::{Kind, KnowledgeRecord, Scope, now_ms};
+use crate::redact::redact;
 
 /// Filters for a recall query.
 pub struct RecallFilter<'a> {
@@ -81,6 +82,12 @@ pub fn insert(conn: &Connection, rec: &KnowledgeRecord) -> Result<()> {
             "user/global records must not have a project_key".into(),
         ));
     }
+    reject_sensitive_field("title", &rec.title)?;
+    reject_sensitive_field("body", &rec.body)?;
+    reject_sensitive_field("tags", &rec.tags)?;
+    if let Some(source) = &rec.source {
+        reject_sensitive_field("source", source)?;
+    }
     conn.execute(
         "INSERT INTO knowledge (id, kind, scope, project_key, title, body, tags, source, \
          confidence, created_at_ms, last_used_ms, use_count, superseded_by, promoted, \
@@ -108,6 +115,15 @@ pub fn insert(conn: &Connection, rec: &KnowledgeRecord) -> Result<()> {
     Ok(())
 }
 
+fn reject_sensitive_field(field: &str, value: &str) -> Result<()> {
+    if redact(value, false) != value {
+        return Err(KnowledgeError::InvalidRecord(format!(
+            "{field} contains sensitive material"
+        )));
+    }
+    Ok(())
+}
+
 /// Mark `old_id` superseded by `new_id` (immutable revision — the old row
 /// stays for history but is filtered out of recall).
 pub fn supersede(conn: &Connection, old_id: &str, new_id: &str) -> Result<()> {
@@ -118,10 +134,10 @@ pub fn supersede(conn: &Connection, old_id: &str, new_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Promote a record to global scope. This is the **human-gated** boundary: it is
-/// only ever called from an explicit `/knowledge promote` command or an approved
-/// proposal — never from the runtime turn loop. Clears `project_key` (global
-/// rows are project-independent) and sets `promoted = 1`.
+/// Promote a record to global scope. Explicit `/knowledge promote` uses this
+/// path; autonomous promotion uses the stricter `KnowledgeStore::auto_promote`
+/// query. Clears `project_key` (global rows are project-independent) and sets
+/// `promoted = 1`.
 pub fn promote_to_global(conn: &Connection, id: &str) -> Result<bool> {
     let n = conn.execute(
         "UPDATE knowledge SET scope = 'global', project_key = NULL, promoted = 1 \
@@ -226,7 +242,7 @@ pub fn mark_used(conn: &Connection, ids: &[String]) -> Result<()> {
 /// Bounded-growth maintenance. Hard-deletes superseded rows older than
 /// `max_age_ms`, then enforces a per-scope row cap by dropping the
 /// lowest-ranked, never-recently-used rows. Returns the number of rows removed.
-/// Promoted/global rows are never auto-pruned (a human vouched for them).
+/// Explicitly promoted rows are never auto-pruned.
 pub fn decay(conn: &mut Connection, max_age_ms: i64, max_rows_per_scope: i64) -> Result<usize> {
     let now = now_ms();
     let tx = conn.transaction()?;
@@ -238,10 +254,9 @@ pub fn decay(conn: &mut Connection, max_age_ms: i64, max_rows_per_scope: i64) ->
         params![now - max_age_ms],
     )?;
 
-    // 2. Enforce the per-scope cap for non-promoted project/user rows. Keep the
-    //    top `max_rows_per_scope` by score; delete the rest. Global/promoted are
-    //    exempt. Uses the same math-function-free score as recall.
-    for scope in ["project", "user"] {
+    // 2. Enforce the per-scope cap for non-promoted rows. Keep the top
+    //    `max_rows_per_scope` by score; delete the rest.
+    for scope in ["project", "user", "global"] {
         removed += tx.execute(
             "DELETE FROM knowledge WHERE id IN (
                  SELECT id FROM knowledge

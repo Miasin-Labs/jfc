@@ -2,9 +2,9 @@
 //!
 //! Mirrors `cli.js` v126's task tools (TaskCreate / TaskGet / TaskUpdate /
 //! TaskList / TaskDelete / TaskDone) and persistent store. Tasks are NOT
-//! conversation messages — they live in a JSON file under
-//! `~/.config/jfc/tasks/` and survive session resume, compaction, and
-//! context-window limits.
+//! conversation messages. Session-scoped stores and task history live in the
+//! knowledge DB. Team/project stores use synthetic DB identities, with their
+//! old file paths retained only as import/display handles.
 //!
 //! The data model:
 //!
@@ -120,6 +120,15 @@ const TERMINAL_TASK_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// safety net so a single session can't bloat the file without limit; the
 /// most-recent N are kept once the age window has been applied.
 const MAX_TERMINAL_TASKS: usize = 200;
+const TASK_STORE_KIND: &str = "task_store";
+const TASK_STORE_KEY: &str = "active";
+
+fn task_store_db_id_for_path(path: &std::path::Path) -> Option<String> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    Some(format!("__task_store__:{}", path.display()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeletedFilter {
@@ -218,12 +227,9 @@ pub fn is_transient_failure(error: &str) -> bool {
 pub struct TaskStore {
     inner: Mutex<TaskStoreInner>,
     path: PathBuf,
-    /// Last on-disk modification time this store has observed — either
-    /// because it loaded that revision or wrote it. `reload_if_changed`
-    /// compares the live file mtime against this to decide whether an
-    /// external writer (a detached background worker in its own process)
-    /// has touched the file since. Lock order is always `inner` → this,
-    /// matching `persist`, so the two can't deadlock.
+    db_session_id: Option<String>,
+    /// Last legacy-file modification time observed while importing old task
+    /// files. DB-backed stores do not use this on the hot path.
     disk_mtime: Mutex<Option<std::time::SystemTime>>,
 }
 
@@ -236,45 +242,44 @@ struct TaskStoreInner {
 }
 
 impl TaskStore {
-    /// Open or create the task store for the given session id. Path:
-    /// `~/.config/jfc/tasks/<session>.json`. A fresh store is returned if the
-    /// file doesn't exist or is malformed (we never panic on user data).
+    /// Open or create the task store for the given session id.
     pub fn open(session_id: &str) -> Arc<Self> {
-        let path = task_store_path(session_id);
         tracing::info!(
             target: "jfc::tasks",
             session_id,
-            path = %path.display(),
             "TaskStore::open"
         );
-        let inner = Self::load_inner(&path);
-        let disk_mtime = Self::file_mtime(&path);
+        let inner = Self::load_inner_from_db(session_id);
         let store = Arc::new(Self {
             inner: Mutex::new(inner),
-            path,
-            disk_mtime: Mutex::new(disk_mtime),
+            path: PathBuf::new(),
+            db_session_id: Some(session_id.to_owned()),
+            disk_mtime: Mutex::new(None),
         });
         store.delete_legacy_placeholders();
         store.prune_terminal_tasks(MAX_TERMINAL_TASKS);
         store
     }
 
-    /// Open the task store shared by a swarm team. This intentionally uses
-    /// Claude-compatible swarm storage (`~/.claude/tasks/<team>/tasks.json`)
-    /// so the leader and in-process teammates coordinate over one list.
+    /// Open the task store shared by a swarm team.
     pub fn open_team(team_name: &str) -> Arc<Self> {
         let path = team_task_store_path(team_name);
+        let db_id = task_store_db_id_for_path(&path);
         tracing::info!(
             target: "jfc::tasks",
             team_name,
             path = %path.display(),
             "TaskStore::open_team"
         );
-        let disk_mtime = Self::file_mtime(&path);
+        let inner = db_id
+            .as_deref()
+            .map(|id| Self::load_inner_from_db_or_legacy(id, &path))
+            .unwrap_or_default();
         let store = Arc::new(Self {
-            inner: Mutex::new(Self::load_inner(&path)),
+            inner: Mutex::new(inner),
             path,
-            disk_mtime: Mutex::new(disk_mtime),
+            db_session_id: db_id,
+            disk_mtime: Mutex::new(None),
         });
         store.delete_legacy_placeholders();
         store.prune_terminal_tasks(MAX_TERMINAL_TASKS);
@@ -287,31 +292,41 @@ impl TaskStore {
         Arc::new(Self::default())
     }
 
-    /// Backing file path for this store (empty for in-memory stores). Callers
-    /// derive the sibling history-log path from this via
-    /// `jfc_session::history_path_for`.
+    /// Backing file path for file stores (empty for DB/in-memory stores).
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 
+    pub fn history_key(&self) -> Option<String> {
+        crate::task_history::history_key_for_store_path(&self.path).or_else(|| {
+            self.db_session_id
+                .as_deref()
+                .and_then(crate::task_history::session_history_key)
+        })
+    }
+
     /// Open or create the **project-level** task store at
-    /// `<git_root>/.jfc/tasks.json`. This is the primary persistence layer
-    /// that survives across ALL sessions for the same project. Unlike
+    /// `<git_root>/.jfc/tasks.json`. The path is now a stable DB identity and
+    /// legacy import handle; the DB row survives across ALL sessions for the same project. Unlike
     /// per-session stores, every `jfc` instance in the same repo shares this
-    /// file. Falls back to `./.jfc/tasks.json` if no git root is provided.
+    /// store. Falls back to `./.jfc/tasks.json` if no git root is provided.
     pub fn open_project(git_root: Option<&std::path::Path>) -> Arc<Self> {
         let path = project_task_store_path(git_root);
+        let db_id = task_store_db_id_for_path(&path);
         tracing::info!(
             target: "jfc::tasks",
             path = %path.display(),
             "TaskStore::open_project"
         );
-        let inner = Self::load_inner(&path);
-        let disk_mtime = Self::file_mtime(&path);
+        let inner = db_id
+            .as_deref()
+            .map(|id| Self::load_inner_from_db_or_legacy(id, &path))
+            .unwrap_or_default();
         let store = Arc::new(Self {
             inner: Mutex::new(inner),
             path,
-            disk_mtime: Mutex::new(disk_mtime),
+            db_session_id: db_id,
+            disk_mtime: Mutex::new(None),
         });
         store.delete_legacy_placeholders();
         store.prune_terminal_tasks(MAX_TERMINAL_TASKS);
@@ -426,9 +441,9 @@ impl TaskStore {
     /// window (`TERMINAL_TASK_RETENTION_MS`) then a count cap (`max_terminal`).
     ///
     /// Pruned rows are not lost: each is distilled into a `TaskHistoryRecord`
-    /// and appended to the sibling `*-history.jsonl` archive before removal, so
-    /// the durable "everything we've worked on" log survives even as the hot
-    /// working set stays bounded.
+    /// and appended to the DB history stream before removal, so the durable
+    /// "everything we've worked on" log survives even as the hot working set
+    /// stays bounded.
     pub fn prune_terminal_tasks(&self, max_terminal: usize) -> usize {
         let mut inner = self.inner.lock().unwrap();
         let now_ms = now_ms();
@@ -458,15 +473,12 @@ impl TaskStore {
         if pruned.is_empty() {
             return;
         }
-        let history_path = crate::task_history::history_path_for(&self.path);
-        if history_path.as_os_str().is_empty() {
-            return; // in-memory store — nothing durable to archive to
-        }
+        let history_key = self.history_key();
         let records: Vec<crate::TaskHistoryRecord> = pruned
             .iter()
             .map(|task| crate::TaskHistoryRecord::from_task(task, archived_at_ms))
             .collect();
-        crate::task_history::append_records(&history_path, &records);
+        crate::task_history::append_records(history_key.as_deref(), &records);
     }
 
     /// Compute the prune set and remove it, returning the *removed task
@@ -539,19 +551,26 @@ impl TaskStore {
         std::fs::metadata(path).and_then(|m| m.modified()).ok()
     }
 
-    /// Re-read the backing file when an external process has modified it
-    /// since this handle last loaded or persisted. Returns `true` if the
-    /// in-memory state changed.
-    ///
-    /// Why: the UI's `TaskStore` is loaded once into a `Mutex` and never
-    /// re-reads. A detached background worker runs in a *separate process*
-    /// with its own handle; its `TaskUpdate`/`TaskDone` writes land in the
-    /// JSON file but the UI handle stays stale forever. The UI's render
-    /// loop calls this once per tick (mtime-gated, so it's a cheap stat
-    /// when nothing changed) to pick up those external writes.
-    ///
-    /// In-memory stores (empty `path`) are always a no-op.
+    /// Re-read the backing store when an external process has modified it.
     pub fn reload_if_changed(&self) -> bool {
+        if let Some(session_id) = &self.db_session_id {
+            let fresh = Self::load_inner_from_db(session_id);
+            let Ok(fresh_json) = serde_json::to_string(&fresh) else {
+                return false;
+            };
+            let mut inner = self.inner.lock().unwrap();
+            let current_json = serde_json::to_string(&*inner).unwrap_or_default();
+            if current_json == fresh_json {
+                return false;
+            }
+            *inner = fresh;
+            tracing::debug!(
+                target: "jfc::tasks",
+                session_id,
+                "TaskStore::reload_if_changed — picked up DB write"
+            );
+            return true;
+        }
         if self.path.as_os_str().is_empty() {
             return false;
         }
@@ -601,6 +620,43 @@ impl TaskStore {
         true
     }
 
+    fn load_inner_from_db(session_id: &str) -> TaskStoreInner {
+        let Ok(store) = jfc_knowledge::KnowledgeStore::open_default() else {
+            return TaskStoreInner::default();
+        };
+        let Ok(Some(row)) = store.get_session_artifact(session_id, TASK_STORE_KIND, TASK_STORE_KEY)
+        else {
+            return TaskStoreInner::default();
+        };
+        serde_json::from_str::<TaskStoreInner>(&row.value_json).unwrap_or_default()
+    }
+
+    fn load_inner_from_db_or_legacy(session_id: &str, legacy_path: &PathBuf) -> TaskStoreInner {
+        let from_db = Self::load_inner_from_db(session_id);
+        if !from_db.tasks.is_empty() || from_db.next_id > 0 {
+            return from_db;
+        }
+        let legacy = Self::load_inner(legacy_path);
+        if legacy.tasks.is_empty() && legacy.next_id == 0 {
+            return legacy;
+        }
+        if let Ok(json) = serde_json::to_string(&legacy) {
+            let result = jfc_knowledge::KnowledgeStore::open_default().and_then(|store| {
+                store.upsert_session_artifact(session_id, TASK_STORE_KIND, TASK_STORE_KEY, &json)
+            });
+            if let Err(error) = result {
+                tracing::warn!(
+                    target: "jfc::tasks",
+                    session_id,
+                    path = %legacy_path.display(),
+                    %error,
+                    "failed to import legacy task store into DB"
+                );
+            }
+        }
+        legacy
+    }
+
     fn load_inner(path: &PathBuf) -> TaskStoreInner {
         let Some(raw) = std::fs::read_to_string(path).ok() else {
             return TaskStoreInner::default();
@@ -648,40 +704,39 @@ impl TaskStore {
     }
 
     fn persist(&self, inner: &TaskStoreInner) {
-        let _file_lock = self.acquire_file_lock();
+        let _file_lock = if self.db_session_id.is_some() {
+            None
+        } else {
+            self.acquire_file_lock()
+        };
         self.persist_unlocked(inner);
     }
 
-    /// Write the store to disk. Caller must hold the cross-process file lock
-    /// (or accept the pre-lock lost-update semantics).
+    /// Persist the store. DB-backed stores write through `session_artifacts`;
+    /// the file branch is legacy test/import compatibility.
     fn persist_unlocked(&self, inner: &TaskStoreInner) {
-        if self.path.as_os_str().is_empty() {
+        if let Some(session_id) = &self.db_session_id {
+            let Ok(json) = serde_json::to_string(inner) else {
+                return;
+            };
+            let result = jfc_knowledge::KnowledgeStore::open_default().and_then(|store| {
+                store.upsert_session_artifact(session_id, TASK_STORE_KIND, TASK_STORE_KEY, &json)
+            });
+            if let Err(error) = result {
+                tracing::warn!(
+                    target: "jfc::tasks",
+                    session_id,
+                    %error,
+                    "failed to persist DB task store"
+                );
+            }
             return;
         }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        if let Ok(json) = serde_json::to_string_pretty(inner) {
-            // Unique temp name (pid + nanos) so two processes persisting
-            // concurrently don't collide on a shared `.tmp` sibling and
-            // rename each other's partial write into place.
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let tmp = self
-                .path
-                .with_extension(format!("tmp-{}-{nonce}", std::process::id()));
-            if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &self.path).is_ok() {
-                // Record the mtime of the revision we just wrote so a
-                // subsequent `reload_if_changed` doesn't treat our own
-                // write as an external change and clobber newer in-memory
-                // state with a re-read of what we just serialized.
-                if let Ok(mut seen) = self.disk_mtime.lock() {
-                    *seen = Self::file_mtime(&self.path);
-                }
-            }
-        }
+        tracing::debug!(
+            target: "jfc::tasks",
+            path = %self.path.display(),
+            "skipping legacy file task-store persist without DB identity"
+        );
     }
 
     /// Create a new task. Returns Err on duplicate `subject` if you'd want to
@@ -1703,6 +1758,49 @@ fn dependency_path_to(inner: &TaskStoreInner, start: &TaskId, target: &str) -> O
 mod tests {
     use super::*;
 
+    struct TempKnowledgeDb {
+        _dir: tempfile::TempDir,
+        prior_db: Option<String>,
+        prior_config: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TempKnowledgeDb {
+        fn new() -> Self {
+            let guard = crate::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::TempDir::new().unwrap();
+            let prior_db = std::env::var("JFC_KNOWLEDGE_DB").ok();
+            let prior_config = std::env::var("XDG_CONFIG_HOME").ok();
+            unsafe {
+                std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("knowledge.db"));
+                std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            }
+            Self {
+                _dir: dir,
+                prior_db,
+                prior_config,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for TempKnowledgeDb {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prior_db.take() {
+                    Some(prev) => std::env::set_var("JFC_KNOWLEDGE_DB", prev),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                }
+                match self.prior_config.take() {
+                    Some(prev) => std::env::set_var("XDG_CONFIG_HOME", prev),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
+    }
+
     // Normal: create→get→update→list round-trips.
     #[test]
     fn create_get_update_list_roundtrip_normal() {
@@ -1844,17 +1942,44 @@ mod tests {
         assert!(store.get(old_active.id.as_str()).is_some());
     }
 
-    // Normal: pruned terminal tasks are archived to the sibling history JSONL
-    // and can be read back, while the live store no longer contains them. This
-    // is the working-memory → archival-memory handoff end-to-end.
     #[test]
-    fn prune_archives_to_history_jsonl_normal() {
+    fn session_task_store_uses_db_not_legacy_json_normal() {
+        let _guard = TempKnowledgeDb::new();
+        let session_id = "ses_task_db";
+        let store = TaskStore::open(session_id);
+        let task = store
+            .create(
+                "db task".into(),
+                "details".into(),
+                None,
+                Vec::<TaskId>::new(),
+            )
+            .unwrap();
+
+        let reloaded = TaskStore::open(session_id);
+        assert_eq!(
+            reloaded.get(task.id.as_str()).map(|t| t.subject),
+            Some("db task".to_owned())
+        );
+        assert!(
+            !task_store_path(session_id).exists(),
+            "session task store must not create legacy JSON sidecar"
+        );
+    }
+
+    // Normal: pruned terminal tasks are archived to DB history and can be read
+    // back, while the live store no longer contains them. This is the
+    // working-memory → archival-memory handoff end-to-end.
+    #[test]
+    fn prune_archives_to_db_history_normal() {
+        let _db = TempKnowledgeDb::new();
         let tmp = tempfile::TempDir::new().unwrap();
         let store_path = tmp.path().join("tasks.json");
         // Build a store directly on disk (bypass session-id path resolution).
         let store = Arc::new(TaskStore {
             inner: Mutex::new(TaskStoreInner::default()),
             path: store_path.clone(),
+            db_session_id: None,
             disk_mtime: Mutex::new(None),
         });
 
@@ -1887,9 +2012,9 @@ mod tests {
         // Live store no longer has it.
         assert!(store.get(task.id.as_str()).is_none());
 
-        // History log exists beside the store and round-trips.
-        let history_path = crate::task_history::history_path_for(&store_path);
-        let records = crate::task_history::read_records(&history_path, 10, None);
+        // History is persisted in the DB under the shared store identity.
+        let history_key = crate::task_history::history_key_for_store_path(&store_path);
+        let records = crate::task_history::read_records(history_key.as_deref(), 10, None);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].subject, "archived subject");
         assert_eq!(records[0].status, "completed");
@@ -1897,11 +2022,11 @@ mod tests {
 
         // Query filter matches by tag/subject.
         assert_eq!(
-            crate::task_history::read_records(&history_path, 10, Some("perf")).len(),
+            crate::task_history::read_records(history_key.as_deref(), 10, Some("perf")).len(),
             1
         );
         assert_eq!(
-            crate::task_history::read_records(&history_path, 10, Some("nomatch")).len(),
+            crate::task_history::read_records(history_key.as_deref(), 10, Some("nomatch")).len(),
             0
         );
     }
@@ -2161,18 +2286,13 @@ mod tests {
         assert_eq!(store.list(DeletedFilter::Include).len(), 1);
     }
 
-    // Normal: a store re-reads the backing file when an external process
+    // Normal: a store re-reads the backing DB row when an external process
     // (a detached background worker) has written to it since the last load.
     #[test]
-    fn reload_if_changed_picks_up_external_write_normal() {
+    fn reload_if_changed_picks_up_external_db_write_normal() {
+        let _g = TempKnowledgeDb::new();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.json");
-        // Writer process: create a task and persist it.
-        let writer = TaskStore {
-            inner: Mutex::new(TaskStoreInner::default()),
-            path: path.clone(),
-            disk_mtime: Mutex::new(None),
-        };
+        let writer = TaskStore::open_project(Some(dir.path()));
         writer
             .create(
                 "written externally".into(),
@@ -2182,21 +2302,10 @@ mod tests {
             )
             .unwrap();
 
-        // Reader handle: opened before any further writes, sees nothing yet.
-        let reader = TaskStore {
-            inner: Mutex::new(TaskStoreInner::default()),
-            path,
-            disk_mtime: Mutex::new(None),
-        };
-        // mtime starts unset, so the first reload always pulls the file in.
-        assert!(reader.reload_if_changed());
+        let reader = TaskStore::open_project(Some(dir.path()));
         assert_eq!(reader.list(DeletedFilter::Exclude).len(), 1);
-        // Second call with no external change is a cheap no-op.
         assert!(!reader.reload_if_changed());
 
-        // External writer adds another task; the reader picks it up.
-        // Force a distinct mtime — some filesystems have coarse timestamps.
-        std::thread::sleep(std::time::Duration::from_millis(10));
         writer
             .create(
                 "second external".into(),

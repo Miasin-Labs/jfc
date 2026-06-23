@@ -1,24 +1,20 @@
-//! Append-only task history — the durable "everything we've worked on" log.
+//! DB-backed append-only task history — the durable "everything we've worked on" log.
 //!
-//! The live task store (`tasks.json`) is *working memory*: bounded, hot, and
-//! re-read every UI tick. When terminal tasks age out of that working set
-//! (see `TaskStore::prune_terminal_tasks`), they are not simply discarded —
-//! each is distilled into a one-line record appended to a sibling
-//! `*-history.jsonl` file. That file is *archival memory*: it grows
-//! monotonically, is never loaded on the hot path, and is read back only on
-//! demand (e.g. `TaskList { include_history: true }`).
-//!
-//! This mirrors the working-memory / archival-memory split from the agent
-//! memory literature (MemGPT, arXiv 2310.08560): keep the in-context set
-//! small and retrieve long-term history through an explicit query rather than
-//! always-loading it.
+//! The live task store is *working memory*: bounded and hot. When terminal tasks
+//! age out of that working set (see `TaskStore::prune_terminal_tasks`), they are
+//! not discarded. Each is distilled into a small DB artifact event keyed by the
+//! session id or shared task-store identity. That DB event stream is *archival
+//! memory*: it grows monotonically, stays off the hot path, and is read back only
+//! on demand (e.g. `TaskList { include_history: true }`).
 
-use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::Task;
+
+const TASK_HISTORY_SESSION_ID: &str = "__task_history__";
+const TASK_HISTORY_KIND: &str = "task_history";
 
 /// A distilled, immutable record of one completed/failed/deleted task.
 ///
@@ -59,82 +55,68 @@ impl TaskHistoryRecord {
     }
 }
 
-/// Derive the history-log path that sits beside a task-store file.
-/// `<dir>/<stem>.json` → `<dir>/<stem>-history.jsonl`. An empty path (the
-/// in-memory store) yields an empty path, which all callers treat as a no-op.
-pub fn history_path_for(store_path: &Path) -> PathBuf {
-    if store_path.as_os_str().is_empty() {
-        return PathBuf::new();
-    }
-    let stem = store_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("tasks");
-    let file_name = format!("{stem}-history.jsonl");
-    match store_path.parent() {
-        Some(parent) => parent.join(file_name),
-        None => PathBuf::from(file_name),
-    }
+/// Stable DB key for a session-scoped task history stream.
+pub fn session_history_key(session_id: &str) -> Option<String> {
+    let trimmed = session_id.trim();
+    (!trimmed.is_empty()).then(|| format!("session:{trimmed}"))
 }
 
-/// Append distilled records to the JSONL history log (one JSON object per
-/// line). Best-effort and never fails the caller: archival is a hygiene step,
-/// not a correctness invariant, so I/O errors are logged and swallowed.
-pub fn append_records(path: &Path, records: &[TaskHistoryRecord]) {
-    if path.as_os_str().is_empty() || records.is_empty() {
-        return;
+/// Stable DB key for a shared project/team task store.
+pub fn history_key_for_store_path(store_path: &Path) -> Option<String> {
+    if store_path.as_os_str().is_empty() {
+        return None;
     }
-    if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        tracing::warn!(
-            target: "jfc::tasks",
-            error = %e,
-            path = %parent.display(),
-            "failed to create task history directory"
-        );
+    Some(format!("store-path:{}", store_path.display()))
+}
+
+/// Append distilled records to the DB history stream.
+///
+/// Best-effort and never fails the caller: archival is a hygiene step, not a
+/// correctness invariant, so DB errors are logged and swallowed.
+pub fn append_records(history_key: Option<&str>, records: &[TaskHistoryRecord]) {
+    let Some(history_key) = history_key.filter(|key| !key.trim().is_empty()) else {
+        return;
+    };
+    if records.is_empty() {
         return;
     }
 
-    let mut buf = String::with_capacity(records.len() * 96);
+    let store = match jfc_knowledge::KnowledgeStore::open_default() {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(
+                target: "jfc::tasks",
+                %error,
+                "failed to open DB task history store"
+            );
+            return;
+        }
+    };
+
     for rec in records {
-        match serde_json::to_string(rec) {
-            Ok(line) => {
-                buf.push_str(&line);
-                buf.push('\n');
-            }
-            Err(e) => {
+        let json = match serde_json::to_string(rec) {
+            Ok(json) => json,
+            Err(error) => {
                 tracing::warn!(
                     target: "jfc::tasks",
-                    error = %e,
+                    %error,
                     id = %rec.id,
                     "failed to serialize task history record"
                 );
+                continue;
             }
-        }
-    }
-
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(buf.as_bytes()) {
-                tracing::warn!(
-                    target: "jfc::tasks",
-                    error = %e,
-                    path = %path.display(),
-                    "failed to append task history"
-                );
-            }
-        }
-        Err(e) => {
+        };
+        if let Err(error) = store.append_session_artifact_event(
+            TASK_HISTORY_SESSION_ID,
+            TASK_HISTORY_KIND,
+            history_key,
+            &json,
+        ) {
             tracing::warn!(
                 target: "jfc::tasks",
-                error = %e,
-                path = %path.display(),
-                "failed to open task history log"
+                %error,
+                key = history_key,
+                "failed to append DB task history record"
             );
         }
     }
@@ -142,17 +124,28 @@ pub fn append_records(path: &Path, records: &[TaskHistoryRecord]) {
 
 /// Read the most-recent history records, newest first, optionally filtered by
 /// a case-insensitive substring match against the subject/id/tags.
-///
-/// Streams the file line-by-line (the log is append-only and may be large) and
-/// keeps only the tail up to `limit`. Malformed lines are skipped so a single
-/// corrupt entry can't poison retrieval.
-pub fn read_records(path: &Path, limit: usize, query: Option<&str>) -> Vec<TaskHistoryRecord> {
-    if path.as_os_str().is_empty() || limit == 0 {
+pub fn read_records(
+    history_key: Option<&str>,
+    limit: usize,
+    query: Option<&str>,
+) -> Vec<TaskHistoryRecord> {
+    let Some(history_key) = history_key.filter(|key| !key.trim().is_empty()) else {
+        return Vec::new();
+    };
+    if limit == 0 {
         return Vec::new();
     }
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(), // no history yet — normal
+
+    let rows = match jfc_knowledge::KnowledgeStore::open_default().and_then(|store| {
+        store.list_recent_session_artifact_events(
+            TASK_HISTORY_SESSION_ID,
+            TASK_HISTORY_KIND,
+            Some(history_key),
+            limit.saturating_mul(10).max(100).min(10_000),
+        )
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
     };
     let needle = query.map(|q| q.to_lowercase());
     let matches = |rec: &TaskHistoryRecord| -> bool {
@@ -164,21 +157,14 @@ pub fn read_records(path: &Path, limit: usize, query: Option<&str>) -> Vec<TaskH
             || rec.tags.iter().any(|t| t.to_lowercase().contains(n))
     };
 
-    let reader = std::io::BufReader::new(file);
     let mut out: Vec<TaskHistoryRecord> = Vec::new();
-    for line in reader.lines().map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(rec) = serde_json::from_str::<TaskHistoryRecord>(trimmed)
+    for row in rows.into_iter().rev() {
+        if let Ok(rec) = serde_json::from_str::<TaskHistoryRecord>(&row.value_json)
             && matches(&rec)
         {
             out.push(rec);
         }
     }
-    // Newest first, then cap.
-    out.reverse();
     out.truncate(limit);
     out
 }
@@ -200,35 +186,37 @@ mod tests {
     }
 
     #[test]
-    fn history_path_is_sibling_jsonl_normal() {
-        let p = history_path_for(Path::new("/home/u/.jfc/tasks.json"));
-        assert_eq!(p, PathBuf::from("/home/u/.jfc/tasks-history.jsonl"));
+    fn store_path_maps_to_db_key_normal() {
+        let key = history_key_for_store_path(Path::new("/home/u/.jfc/tasks.json"));
+        assert_eq!(key.as_deref(), Some("store-path:/home/u/.jfc/tasks.json"));
     }
 
     #[test]
-    fn empty_store_path_yields_empty_history_path_robust() {
-        assert_eq!(history_path_for(Path::new("")), PathBuf::new());
+    fn empty_store_path_yields_no_history_key_robust() {
+        assert_eq!(history_key_for_store_path(Path::new("")), None);
     }
 
     #[test]
     fn append_then_read_newest_first_normal() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("tasks-history.jsonl");
-        append_records(&path, &[rec("t1", "first", 100)]);
-        append_records(&path, &[rec("t2", "second", 200)]);
+        let _guard = test_db(tmp.path());
+        let key = Some("test-history:newest");
+        append_records(key, &[rec("t1", "first", 100)]);
+        append_records(key, &[rec("t2", "second", 200)]);
 
-        let got = read_records(&path, 10, None);
+        let got = read_records(key, 10, None);
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].id, "t2"); // newest first
+        assert_eq!(got[0].id, "t2");
         assert_eq!(got[1].id, "t1");
     }
 
     #[test]
     fn read_applies_limit_and_query_normal() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("h.jsonl");
+        let _guard = test_db(tmp.path());
+        let key = Some("test-history:query");
         append_records(
-            &path,
+            key,
             &[
                 rec("t1", "fix auth bug", 1),
                 rec("t2", "add caching", 2),
@@ -236,33 +224,70 @@ mod tests {
             ],
         );
 
-        // Query filters to the two "auth" records, newest first.
-        let auth = read_records(&path, 10, Some("AUTH"));
+        let auth = read_records(key, 10, Some("AUTH"));
         assert_eq!(auth.len(), 2);
         assert_eq!(auth[0].id, "t3");
         assert_eq!(auth[1].id, "t1");
 
-        // Limit caps the tail.
-        let one = read_records(&path, 1, None);
+        let one = read_records(key, 1, None);
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].id, "t3");
     }
 
     #[test]
-    fn malformed_lines_are_skipped_robust() {
+    fn malformed_rows_are_skipped_robust() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("h.jsonl");
-        std::fs::write(&path, "not json\n{\"broken\":\n").unwrap();
-        append_records(&path, &[rec("t9", "ok", 9)]);
-        let got = read_records(&path, 10, None);
+        let _guard = test_db(tmp.path());
+        let key = Some("test-history:malformed");
+        let store = jfc_knowledge::KnowledgeStore::open_default().unwrap();
+        store
+            .append_session_artifact_event(
+                TASK_HISTORY_SESSION_ID,
+                TASK_HISTORY_KIND,
+                key.unwrap(),
+                "not json",
+            )
+            .unwrap();
+        append_records(key, &[rec("t9", "ok", 9)]);
+        let got = read_records(key, 10, None);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "t9");
     }
 
     #[test]
-    fn read_missing_file_is_empty_robust() {
+    fn read_missing_key_is_empty_robust() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("does-not-exist.jsonl");
-        assert!(read_records(&path, 10, None).is_empty());
+        let _guard = test_db(tmp.path());
+        assert!(read_records(Some("missing"), 10, None).is_empty());
+    }
+
+    fn test_db(root: &Path) -> EnvGuard {
+        let guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let prior = std::env::var("JFC_KNOWLEDGE_DB").ok();
+        unsafe {
+            std::env::set_var("JFC_KNOWLEDGE_DB", root.join("knowledge.db"));
+        }
+        EnvGuard {
+            prior,
+            _guard: guard,
+        }
+    }
+
+    struct EnvGuard {
+        prior: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prior.take() {
+                    Some(prior) => std::env::set_var("JFC_KNOWLEDGE_DB", prior),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                }
+            }
+        }
     }
 }

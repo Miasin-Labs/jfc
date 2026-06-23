@@ -39,6 +39,7 @@ crates/**/.jfc/
 
 # Agent runtime state (exec-call captures)
 .code/
+.omo/run-continuation/
 
 # Local agent skills and runtime config (machine-specific, not project config)
 .agents/skills/jfc-design/

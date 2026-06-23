@@ -60,6 +60,9 @@ pub(super) async fn run_print_mode(
     // duplicated loop silently dropped them).
     let mut engine = jfc_engine::Engine::new(provider, model.clone(), tx.clone());
     let state = &mut engine.state;
+    if let Ok(cwd) = std::env::current_dir() {
+        jfc_engine::spawn_knowledge_maintenance_once(cwd);
+    }
     // Print mode never persists sessions — the optional --session-mirror file
     // is its own wire-level persistence below.
     state.no_session_persistence = true;
@@ -360,9 +363,11 @@ pub(super) async fn run_print_mode(
 
         // ── 2. Dispatch through the shared engine pump ──
         match engine.handle_event(ev).await? {
-            Some(FrontendDirective::SubmitPrompt(text)) => {
+            Some(FrontendDirective::SubmitPrompt(submission)) => {
                 // Pre-submit compaction re-fired the prompt.
-                let _ = engine.submit(text, Vec::new(), None).await?;
+                let _ = engine
+                    .submit(submission.text, submission.attachments, submission.edit_at)
+                    .await?;
             }
             Some(FrontendDirective::RunCommand(text)) => {
                 // Engine command semantics are shared since stage 8 — print

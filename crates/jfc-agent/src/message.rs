@@ -191,6 +191,7 @@ impl MessageBus {
         let lock = OpenOptions::new()
             .create(true)
             .read(true)
+            .truncate(false)
             .write(true)
             .open(self.inbox_dir.join(".inbox.lock"))?;
         lock.lock_exclusive()?;

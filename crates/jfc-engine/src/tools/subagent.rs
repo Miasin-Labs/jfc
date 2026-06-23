@@ -1343,13 +1343,24 @@ mod tests {
     }
 
     #[test]
-    fn persist_background_result_writes_full_body_normal() {
+    fn persist_background_result_writes_full_body_to_db_normal() {
         let body = "X".repeat(5000);
-        let path = crate::runtime::persist_background_result("toolu_test_abc123", &body)
+        let handle = crate::runtime::persist_background_result("toolu_test_abc123", &body)
             .expect("artifact written");
-        let read = std::fs::read_to_string(&path).expect("read back");
-        assert_eq!(read.len(), 5000, "full body persisted, not truncated");
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            handle.to_string_lossy(),
+            "db:background-result:toolu_test_abc123"
+        );
+        let row = jfc_knowledge::KnowledgeStore::open_default()
+            .unwrap()
+            .get_session_artifact("__daemon__", "background_result", "toolu_test_abc123")
+            .unwrap()
+            .expect("read back");
+        assert_eq!(
+            row.value_json.len(),
+            5000,
+            "full body persisted, not truncated"
+        );
     }
 
     fn task_input(model: Option<&str>) -> crate::types::TaskInput {

@@ -266,8 +266,7 @@ fn slash_command_def() -> ToolDef {
             current git changes), `/commit` (generate a conventional commit message for \
             staged changes), `/plan` / `/roadmap` (draft planning docs), `/workflow \
             <name>` (run a predefined multi-agent workflow), `/diff` / `/turn-diff` \
-            (show pending changes), `/recall <query>` (search past sessions + commits), \
-            `/cost`, `/status`, `/timeline`, `/skills`, `/agents`, `/memory`, \
+            (show pending changes), `/cost`, `/status`, `/timeline`, `/skills`, `/agents`, `/memory`, \
             `/task-list`, `/changes`, `/audit`, `/doctor`, `/market`. \
             Only this curated, non-destructive allowlist is permitted — commands that \
             change auth, permission mode, or wipe state are rejected. The command's \

@@ -7,7 +7,7 @@
 //! 1. a [`ProviderRewriteModel`] adapter that drives the pipeline's
 //!    [`RewriteModel`] trait through a [`jfc_provider::Provider`];
 //! 2. building a [`RewritePipeline`] from [`jfc_config::PromptRewriteConfig`]
-//!    (default-OFF: absent/`enabled = false` ⇒ no-op pass-through); and
+//!    (`enabled = false` ⇒ explicit no-op pass-through); and
 //! 3. prompt/response evaluation helpers used by refusal recovery.
 //!
 //! The gate NEVER rewrites silently: a `Rewritten` outcome is returned to the
@@ -16,25 +16,20 @@
 //! keeps state ownership clean — the gate computes a decision and the caller
 //! decides what to do with the transcript.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use jfc_audit::prompt_rewrite::retry::{self, ResponseRefusalAssessment};
-use jfc_audit::prompt_rewrite::store::RewriteStore;
 use jfc_audit::prompt_rewrite::types::RewriteModel;
 use jfc_audit::{PolicyGate, Rewrite, RewriteDecision, RewritePipeline};
 use jfc_config::PromptRewriteConfig;
 use jfc_provider::{Provider, ProviderContent, ProviderMessage, ProviderRole, StreamOptions};
 
-/// Path of the durable accepted-rewrite log (experience replay + drift input),
-/// shared across sessions under the JFC session dir.
-pub fn store_path() -> PathBuf {
-    jfc_session::sessions_dir().join("prompt_rewrites.jsonl")
-}
-
 /// Number of past accepted rewrites loaded as few-shot exemplars.
 const EXEMPLAR_LIMIT: usize = 5;
+const PROMPT_REWRITE_SESSION_ID: &str = "__global__";
+const PROMPT_REWRITE_KIND: &str = "prompt_rewrite";
+const PROMPT_REWRITE_KEY: &str = "accepted";
 
 /// Append an accepted rewrite to the durable log so future pipelines can replay
 /// it as a few-shot exemplar. Best-effort: a write failure is logged, not fatal.
@@ -47,7 +42,20 @@ pub fn record_accepted(original_intent: String, text: String, rationale: String)
         text,
         rationale,
     };
-    if let Err(e) = RewriteStore::new(store_path()).append(&rewrite) {
+    let result = jfc_knowledge::KnowledgeStore::open_default().and_then(|store| {
+        let json = serde_json::to_string(&rewrite).map_err(|e| {
+            jfc_knowledge::KnowledgeError::InvalidRecord(format!("serialize prompt rewrite: {e}"))
+        })?;
+        store
+            .append_session_artifact_event(
+                PROMPT_REWRITE_SESSION_ID,
+                PROMPT_REWRITE_KIND,
+                PROMPT_REWRITE_KEY,
+                &json,
+            )
+            .map(|_| ())
+    });
+    if let Err(e) = result {
         tracing::warn!(target: "jfc::prompt_rewrite", error = %e, "failed to persist accepted rewrite");
     }
 }
@@ -89,7 +97,7 @@ impl RewriteModel for ProviderRewriteModel {
 
 /// Build a pipeline from config, or `None` when the feature is disabled. A
 /// `None` here means the caller must treat the prompt as an unchanged
-/// pass-through (the default-OFF contract).
+/// pass-through.
 pub fn pipeline_from_config(cfg: Option<&PromptRewriteConfig>) -> Option<RewritePipeline> {
     let cfg = cfg?;
     if !cfg.enabled {
@@ -104,13 +112,28 @@ pub fn pipeline_from_config(cfg: Option<&PromptRewriteConfig>) -> Option<Rewrite
         pipeline = pipeline.with_threshold(tau);
     }
     // Experience replay: seed the rewriter with prior accepted rewrites.
-    let exemplars = RewriteStore::new(store_path())
-        .load_recent(EXEMPLAR_LIMIT)
-        .unwrap_or_default();
+    let exemplars = load_recent_exemplars(EXEMPLAR_LIMIT);
     if !exemplars.is_empty() {
         pipeline = pipeline.with_exemplars(exemplars);
     }
     Some(pipeline)
+}
+
+fn load_recent_exemplars(limit: usize) -> Vec<Rewrite> {
+    let Ok(store) = jfc_knowledge::KnowledgeStore::open_default() else {
+        return Vec::new();
+    };
+    let Ok(rows) = store.list_recent_session_artifact_events(
+        PROMPT_REWRITE_SESSION_ID,
+        PROMPT_REWRITE_KIND,
+        Some(PROMPT_REWRITE_KEY),
+        limit,
+    ) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter_map(|row| serde_json::from_str::<Rewrite>(&row.value_json).ok())
+        .collect()
 }
 
 /// Resolve the model id the LLM stages should use: explicit

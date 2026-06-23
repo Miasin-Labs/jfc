@@ -494,8 +494,8 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
                 task_id: task_id.clone(),
                 task_input: task_input.clone(),
                 parent_session_id: current_session_id.clone(),
-                model: model.clone(),
-                provider_name: Some(provider.name().to_owned()),
+                model: model_task.clone(),
+                provider_name: Some(provider_task.name().to_owned()),
                 agent_def: agent_def.clone(),
                 cwd: task_input
                     .cwd
@@ -1119,6 +1119,7 @@ where
             args: workflow_args.clone(),
             provider,
             model,
+            session_id: current_session_id.as_ref().map(|id| id.as_str().to_owned()),
             session_dir: session_dir.clone(),
             resume_from_run_id,
             cancel,

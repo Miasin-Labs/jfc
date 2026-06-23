@@ -29,7 +29,7 @@ jobs:
 
       - name: Run CodeAnt CI Scan
         if: ${{ env.CODEANT_TOKEN != '' }}
-        uses: CodeAnt-AI/codeant-ci-scan-action@v0.0.5
+        uses: CodeAnt-AI/codeant-ci-scan-action@82f83c97a923b626244fdbf9b749ae37308eaf9e
         with:
           access_token: ${{ secrets.CODEANT_TOKEN }}
           scanners: all

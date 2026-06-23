@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 // ─── Team File ───────────────────────────────────────────────────────────────
 
-/// The team configuration file stored at `~/.claude/teams/{name}/config.json`.
+/// The team roster stored as a DB artifact.
 /// Contains the roster of all team members and metadata about the team.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
