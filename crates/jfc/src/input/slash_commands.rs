@@ -86,6 +86,10 @@ pub async fn run_slash_command(app: &mut App, text: &str) {
     handle_slash_command(app, text, None).await
 }
 
+pub async fn run_slash_command_with_tx(app: &mut App, text: &str, tx: &mpsc::Sender<EngineEvent>) {
+    handle_slash_command(app, text, Some(tx)).await
+}
+
 pub(super) async fn handle_slash_command(
     app: &mut App,
     text: &str,

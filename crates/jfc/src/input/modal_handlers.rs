@@ -9,7 +9,7 @@ use super::theme_picker::{apply_theme, close_theme_picker, filtered_theme_choice
 pub(super) async fn handle_modal_key(
     app: &mut App,
     key: event::KeyEvent,
-    _tx: &tokio::sync::mpsc::Sender<EngineEvent>,
+    tx: &tokio::sync::mpsc::Sender<EngineEvent>,
 ) -> bool {
     if handle_task_panel_key(app, key) {
         return true;
@@ -20,7 +20,7 @@ pub(super) async fn handle_modal_key(
     if handle_sidebar_key(app, key).await {
         return true;
     }
-    if handle_palette_key(app, key).await {
+    if handle_palette_key(app, key, tx).await {
         return true;
     }
     if handle_theme_picker_key(app, key) {
@@ -204,7 +204,11 @@ async fn handle_sidebar_key(app: &mut App, key: event::KeyEvent) -> bool {
     true
 }
 
-async fn handle_palette_key(app: &mut App, key: event::KeyEvent) -> bool {
+async fn handle_palette_key(
+    app: &mut App,
+    key: event::KeyEvent,
+    tx: &tokio::sync::mpsc::Sender<EngineEvent>,
+) -> bool {
     if !app.show_palette {
         return false;
     }
@@ -221,7 +225,7 @@ async fn handle_palette_key(app: &mut App, key: event::KeyEvent) -> bool {
                 app.show_palette = false;
                 app.palette_input.clear();
                 app.palette_selected = 0;
-                execute_palette_action(app, &label).await;
+                execute_palette_action(app, &label, tx).await;
             }
         }
         KeyCode::Up if app.palette_selected > 0 => {

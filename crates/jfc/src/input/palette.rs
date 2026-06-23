@@ -1,9 +1,14 @@
 use crate::app::App;
-use jfc_core::ChatMessage;
+use crate::runtime::EngineEvent;
+use tokio::sync::mpsc;
 
 use super::theme_picker::{apply_theme, open_theme_picker};
 
-pub(super) async fn execute_palette_action(app: &mut App, label: &str) {
+pub(super) async fn execute_palette_action(
+    app: &mut App,
+    label: &str,
+    tx: &mpsc::Sender<EngineEvent>,
+) {
     match label {
         "Clear Messages (/clear)" => {
             app.engine.messages.clear();
@@ -24,13 +29,7 @@ pub(super) async fn execute_palette_action(app: &mut App, label: &str) {
                 message_count = app.engine.messages.len(),
                 "palette: Compact Conversation triggered"
             );
-            app.engine.force_compact_pending = true;
-            app.engine
-                .messages
-                .push(ChatMessage::user("/compact".into()));
-            app.engine.messages.push(ChatMessage::assistant(
-                "Compaction queued — runs on the next turn.".into(),
-            ));
+            super::run_slash_command_with_tx(app, "/compact", tx).await;
         }
         "Toggle Sessions Sidebar (Ctrl+B)" => {
             app.show_sidebar = !app.show_sidebar;
@@ -64,17 +63,17 @@ pub(super) async fn execute_palette_action(app: &mut App, label: &str) {
             super::step_reasoning_effort(app, false);
         }
         "Continue Most Recent Session (/continue)" => {
-            super::run_slash_command(app, "/continue").await;
+            super::run_slash_command_with_tx(app, "/continue", tx).await;
         }
         "Show Tasks (/tasks)" => {
-            super::run_slash_command(app, "/tasks").await;
+            super::run_slash_command_with_tx(app, "/tasks", tx).await;
         }
         "Show Help (/help)" => {
-            super::run_slash_command(app, "/help").await;
+            super::run_slash_command_with_tx(app, "/help", tx).await;
         }
         other if other.starts_with("Run /") => {
             if let Some(command) = other.strip_prefix("Run ") {
-                super::run_slash_command(app, command).await;
+                super::run_slash_command_with_tx(app, command, tx).await;
             }
         }
         _ => {}

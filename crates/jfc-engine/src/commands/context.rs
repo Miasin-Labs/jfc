@@ -33,13 +33,8 @@ pub(super) async fn cmd_compact(
     state: &mut EngineState,
     _parts: &[&str],
     _text: &str,
-    _tx: Option<&mpsc::Sender<EngineEvent>>,
+    tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    // Use the calibrated context size (same source as the gauge
-    // and pre-submit gate). Previously this re-ran the raw
-    // `estimate_tokens` heuristic, so the manual report disagreed
-    // with the live gauge and could show "0%" for a session the
-    // sidebar reports as 90%-full.
     let est = state.tool_ctx.approx_tokens;
     let level = crate::compact::compact_level_with_output(
         est,
@@ -55,14 +50,21 @@ pub(super) async fn cmd_compact(
         pct, ?level, model = %state.model,
         "manual /compact command invoked"
     );
-    state.messages.push(ChatMessage::user("/compact".into()));
-    state.messages.push(ChatMessage::assistant(format!(
-                "Manual compaction queued — current estimate **{est} / {} tokens ({pct}%)**, level: **{level:?}**.\n\n\
-                 The next assistant turn will summarize the conversation up to here, replacing the prior turns with a 9-section summary.\n\n\
-                 *(Tip: set `JFC_AUTOCOMPACT_PCT_OVERRIDE=N` (1-100) to test thresholds, or `JFC_DISABLE_AUTO_COMPACT=1` to disable auto-compact entirely.)*",
-                state.max_context_tokens
-            )));
-    state.force_compact_pending = true;
+    if let Some(tx) = tx {
+        let _ = crate::runtime::ops::start_manual_compaction(state, tx).await;
+    } else {
+        state.force_compact_pending = true;
+        toast::push_with_cap(
+            &mut state.toasts,
+            toast::Toast::new(
+                toast::ToastKind::Warning,
+                format!(
+                    "Compaction queued — no runtime channel available ({est} / {} tokens, {pct}%, {level:?})",
+                    state.max_context_tokens
+                ),
+            ),
+        );
+    }
 }
 
 pub(super) async fn cmd_advisor(
