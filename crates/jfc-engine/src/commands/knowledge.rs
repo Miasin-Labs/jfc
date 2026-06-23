@@ -23,6 +23,7 @@ fn usage() -> String {
      - promote <id>      promote a lesson to cross-project (global) scope\n\
      - forget <id>       delete one record\n\
      - consolidate       dedup/forget pass (offline maintenance)\n\
+     - migrate           shadow-backfill sessions into the DB + report parity\n\
      - status            row counts\n\
      - gc-legacy --confirm   archive (move, not delete) the old .md memory files"
         .to_owned()
@@ -42,6 +43,7 @@ pub(super) async fn handle_knowledge_command(state: &mut EngineState, arg: &str)
         "import" => run_import(&cwd).await,
         "mine" => run_mine(&cwd).await,
         "consolidate" => run_consolidate(&cwd).await,
+        "migrate" => run_migrate().await,
         "promote" => run_promote(&cwd, rest.first().map(String::as_str)).await,
         "forget" => run_forget(&cwd, rest.first().map(String::as_str)).await,
         "gc-legacy" => run_gc_legacy(&cwd, rest.iter().any(|a| a == "--confirm")).await,
@@ -158,6 +160,36 @@ async fn run_mine(cwd: &std::path::Path) -> String {
         ))
     })
     .await
+}
+
+/// Backfill the DB transcript store from the canonical JSON and report parity
+/// (PLAN TODO 23 / F8). Read-only w.r.t. JSON; no read flip. The reported
+/// `flip_safe` is the gate the read-cutover (TODO 24) waits on.
+async fn run_migrate() -> String {
+    let Some(sessions_dir) = dirs::config_dir().map(|c| c.join("jfc").join("sessions")) else {
+        return "Could not locate ~/.config/jfc/sessions.".to_owned();
+    };
+    let report = tokio::task::spawn_blocking(move || {
+        crate::backfill_and_verify_sessions(&sessions_dir)
+    })
+    .await
+    .unwrap_or_default();
+    let flip = if report.flip_safe() {
+        "PARITY OK — safe to flip session reads to the DB (no mismatches)."
+    } else if report.checked == 0 {
+        "No sessions found to migrate."
+    } else {
+        "PARITY INCOMPLETE — mismatches present; staying on JSON (do not flip)."
+    };
+    format!(
+        "Session migration (shadow): checked {}, passed {}, mismatched {}, \
+         undeserializable {} (legacy/corrupt JSON, excluded). JSON remains \
+         canonical — nothing deleted. {flip}",
+        report.checked,
+        report.passed,
+        report.mismatched.len(),
+        report.undeserializable.len()
+    )
 }
 
 async fn run_consolidate(cwd: &std::path::Path) -> String {

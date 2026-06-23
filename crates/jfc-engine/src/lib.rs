@@ -286,6 +286,159 @@ pub fn index_session(
     }
 }
 
+/// Map serialized session messages → the knowledge crate's `SessionMessage`
+/// (text flattened for FTS, full message JSON kept verbatim in `meta` for a
+/// lossless round trip). Borrowing, so no `Clone` on the serialized type tree.
+pub(crate) fn to_session_messages(
+    serialized_messages: &[crate::session::serialization::SerializedMessage],
+) -> Vec<jfc_knowledge::SessionMessage> {
+    serialized_messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let content = m
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::session::serialization::SerializedPart::Text { content } => {
+                        Some(content.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            jfc_knowledge::SessionMessage {
+                seq: i as i64,
+                role: m.role.clone(),
+                content,
+                meta: serde_json::to_string(m).ok(),
+            }
+        })
+        .collect()
+}
+
+/// Shadow-write a session's full transcript into the DB (PLAN TODO 23). ADDITIVE:
+/// the JSON file stays canonical; this mirrors the messages into the
+/// `session_messages` table so a future read-flip (gated on the parity verifier)
+/// can serve resume/search from the DB. Best-effort and silent on error — never
+/// affects the save.
+pub fn shadow_session_transcript(
+    row: jfc_knowledge::SessionRow,
+    messages: Vec<jfc_knowledge::SessionMessage>,
+) {
+    let id = row.id.clone();
+    match jfc_knowledge::KnowledgeStore::open_default()
+        .and_then(|mut s| s.replace_transcript(&row, &messages))
+    {
+        Ok(()) => {}
+        Err(e) => tracing::debug!(
+            target: "jfc::knowledge",
+            session_id = id,
+            error = %e,
+            "session transcript shadow-write skipped (JSON remains canonical)"
+        ),
+    }
+}
+
+/// Result of the session→DB parity verifier (PLAN TODO 23 / F8). The flip gate
+/// (council decision 2) is `mismatch == 0` among deserializable sessions, with a
+/// recorded disposition for every `undeserializable` one.
+#[derive(Debug, Default, Clone)]
+pub struct SessionParityReport {
+    pub checked: usize,
+    pub passed: usize,
+    pub mismatched: Vec<String>,
+    pub undeserializable: Vec<String>,
+}
+
+impl SessionParityReport {
+    /// Safe to flip reads to the DB: every deserializable session matched.
+    pub fn flip_safe(&self) -> bool {
+        self.mismatched.is_empty() && self.checked > 0
+    }
+}
+
+/// Backfill the DB transcript store from the canonical JSON sessions AND verify
+/// parity (council decision 2). Reads every `ses_*.json`, shadow-writes its
+/// transcript, then reloads from the DB and asserts the canonicalized message
+/// stream (role + text per seq, message count) matches. Sessions whose JSON the
+/// current reader can't deserialize are bucketed as `undeserializable` (already
+/// dead — excluded from the mismatch denominator), never silently dropped.
+/// READ-ONLY w.r.t. the JSON files; report-only — performs no read flip.
+pub fn backfill_and_verify_sessions(sessions_dir: &std::path::Path) -> SessionParityReport {
+    use crate::session::serialization::SerializedSession;
+    let mut report = SessionParityReport::default();
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return report;
+    };
+    let Ok(store) = jfc_knowledge::KnowledgeStore::open_default() else {
+        return report;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("ses_") || !name.ends_with(".json") || name.contains("goal") {
+            continue;
+        }
+        report.checked += 1;
+        let id = name.trim_end_matches(".json").to_owned();
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            report.undeserializable.push(id);
+            continue;
+        };
+        let Ok(session) = serde_json::from_str::<SerializedSession>(&raw) else {
+            report.undeserializable.push(id);
+            continue;
+        };
+        let row = jfc_knowledge::SessionRow {
+            id: session.id.clone(),
+            cwd: session.cwd.clone(),
+            model: session.model.clone(),
+            created_at: Some(session.created_at.clone()),
+            updated_at: session.updated_at.clone(),
+            first_prompt: session.first_prompt.clone(),
+            title: session.title.clone(),
+            message_count: session.messages.len() as i64,
+        };
+        // Expected canonicalized stream from the JSON.
+        let expected: Vec<(String, String)> = session
+            .messages
+            .iter()
+            .map(|m| {
+                let text = m
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        crate::session::serialization::SerializedPart::Text { content } => {
+                            Some(content.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (m.role.clone(), text)
+            })
+            .collect();
+
+        shadow_session_transcript(row, to_session_messages(&session.messages));
+
+        // Reload from the DB and compare the canonicalized stream.
+        let actual: Vec<(String, String)> = match store.load_transcript(&session.id) {
+            Ok(msgs) => msgs.into_iter().map(|m| (m.role, m.content)).collect(),
+            Err(_) => {
+                report.mismatched.push(id);
+                continue;
+            }
+        };
+        if actual == expected {
+            report.passed += 1;
+        } else {
+            report.mismatched.push(id);
+        }
+    }
+    report
+}
+
 /// Run one autonomous cross-project knowledge maintenance pass (import + mine +
 /// consolidate + auto-promote). Thin re-export so UI/binary crates don't depend
 /// on `jfc-knowledge` directly. Returns the maintenance summary.

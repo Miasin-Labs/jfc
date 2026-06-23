@@ -359,6 +359,106 @@ impl KnowledgeStore {
             .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?)
     }
 
+    /// Replace a session's full transcript (PLAN TODO 23). The header upsert and
+    /// all message rows commit in ONE transaction (council decision 1+5:
+    /// cross-row atomicity the per-file rename never gave us). We delete+reinsert
+    /// rather than diff because the engine coalesces messages on save, so seq
+    /// numbers can shift; the FTS mirror stays consistent via triggers. Shadow
+    /// write — JSON remains canonical until the parity gate passes.
+    pub fn replace_transcript(&mut self, row: &SessionRow, messages: &[SessionMessage]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO sessions \
+             (id, cwd, model, created_at, updated_at, first_prompt, title, message_count) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8) \
+             ON CONFLICT(id) DO UPDATE SET \
+                cwd=excluded.cwd, model=excluded.model, created_at=excluded.created_at, \
+                updated_at=excluded.updated_at, first_prompt=excluded.first_prompt, \
+                title=excluded.title, message_count=excluded.message_count",
+            rusqlite::params![
+                row.id, row.cwd, row.model, row.created_at, row.updated_at,
+                row.first_prompt, row.title, row.message_count,
+            ],
+        )?;
+        tx.execute("DELETE FROM session_messages WHERE session_id = ?1", [&row.id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO session_messages (session_id, seq, role, content, meta) \
+                 VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for m in messages {
+                stmt.execute(rusqlite::params![row.id, m.seq, m.role, m.content, m.meta])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Load a session's full transcript in `seq` order (resume path, post-flip).
+    pub fn load_transcript(&self, session_id: &str) -> Result<Vec<SessionMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, role, content, meta FROM session_messages \
+             WHERE session_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok(SessionMessage {
+                seq: r.get(0)?,
+                role: r.get(1)?,
+                content: r.get(2)?,
+                meta: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Whether a session has any transcript rows (parity bookkeeping).
+    pub fn has_transcript(&self, session_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT 1 FROM session_messages WHERE session_id = ?1 LIMIT 1",
+            [session_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+    }
+
+    /// Session ids whose transcript matches an FTS query (substring search path).
+    pub fn search_transcripts(&self, query: &str, limit: usize) -> Result<Vec<String>> {
+        let terms = query
+            .split_whitespace()
+            .filter(|t| t.len() >= 2)
+            .map(|t| format!("\"{}\"", t.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT m.session_id FROM session_messages_fts f \
+             JOIN session_messages m ON m.rowid = f.rowid \
+             WHERE session_messages_fts MATCH ?1 LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![terms, limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Fast, consistent file-level backup (council decision 5: one DB is a single
+    /// failure domain, so keep a recoverable snapshot). `VACUUM INTO` writes a
+    /// fully-consistent copy without blocking writers for long.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
     /// Whether an autonomous maintenance pass is due for `project_key` (no pass
     /// within `throttle_ms`). True on the first ever run.
     pub fn maintain_due(&self, project_key: &str, throttle_ms: i64) -> Result<bool> {
@@ -435,6 +535,17 @@ fn session_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         title: row.get(6)?,
         message_count: row.get(7)?,
     })
+}
+
+/// One message of a session transcript (PLAN TODO 23). `meta` is opaque
+/// serialized JSON (tool calls, parts, usage) the engine round-trips verbatim,
+/// so the knowledge crate stays free of the engine's message types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMessage {
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub meta: Option<String>,
 }
 
 /// Summary of one autonomous maintenance pass.
@@ -945,6 +1056,52 @@ mod tests {
 
     // TODO 22: the session index upserts (idempotent), lists most-recent-first,
     // and filters by cwd — additive, no JSON involved.
+    // TODO 23: full-transcript shadow store — replace/load round-trips in seq
+    // order, FTS search finds the right session, replace is idempotent (coalesce-
+    // safe), and backup writes a consistent copy.
+    #[test]
+    fn session_transcript_roundtrip_and_search_normal() {
+        let mut store = KnowledgeStore::open_in_memory().unwrap();
+        let hdr = SessionRow {
+            id: "ses_x".into(),
+            cwd: Some("/proj".into()),
+            model: Some("m".into()),
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some("2026-01-01T01:00:00Z".into()),
+            first_prompt: Some("hello".into()),
+            title: None,
+            message_count: 2,
+        };
+        let msgs = vec![
+            SessionMessage { seq: 0, role: "user".into(), content: "fix the ripgrep gutter bug".into(), meta: None },
+            SessionMessage { seq: 1, role: "assistant".into(), content: "done, edited bash.rs".into(), meta: Some("{\"k\":1}".into()) },
+        ];
+        store.replace_transcript(&hdr, &msgs).unwrap();
+
+        // Round-trips in order with meta intact.
+        let loaded = store.load_transcript("ses_x").unwrap();
+        assert_eq!(loaded, msgs);
+        assert!(store.has_transcript("ses_x").unwrap());
+        assert_eq!(store.session_count().unwrap(), 1, "header upserted in same txn");
+
+        // FTS search finds the session by a content term.
+        assert_eq!(store.search_transcripts("ripgrep", 10).unwrap(), vec!["ses_x".to_string()]);
+        assert!(store.search_transcripts("nonexistentterm", 10).unwrap().is_empty());
+
+        // Replace with a coalesced (shorter) transcript — no stale rows, FTS updated.
+        let shorter = vec![SessionMessage { seq: 0, role: "user".into(), content: "different now".into(), meta: None }];
+        store.replace_transcript(&SessionRow { message_count: 1, ..hdr.clone() }, &shorter).unwrap();
+        assert_eq!(store.load_transcript("ses_x").unwrap(), shorter);
+        assert!(store.search_transcripts("ripgrep", 10).unwrap().is_empty(), "old content gone from FTS");
+
+        // Backup writes a consistent, openable copy.
+        let dir = tempfile::tempdir().unwrap();
+        let bpath = dir.path().join("backup.db");
+        store.backup_to(&bpath).unwrap();
+        let restored = KnowledgeStore::open(&bpath).unwrap();
+        assert_eq!(restored.load_transcript("ses_x").unwrap(), shorter);
+    }
+
     #[test]
     fn session_index_upsert_and_list_normal() {
         let store = KnowledgeStore::open_in_memory().unwrap();

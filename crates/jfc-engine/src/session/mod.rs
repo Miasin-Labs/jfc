@@ -11,7 +11,7 @@
 mod compaction;
 mod core;
 mod deserialize;
-mod serialization;
+pub(crate) mod serialization;
 mod serialize;
 
 #[cfg(test)]

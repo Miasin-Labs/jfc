@@ -164,27 +164,25 @@ pub async fn save_session(
             // this only powers a faster catalog/picker. Best-effort: a failure is
             // logged at debug and never affects the save. Off the hot path
             // (blocking SQLite) via spawn_blocking.
-            let idx = (
-                serialized.id.clone(),
-                serialized.cwd.clone(),
-                serialized.model.clone(),
-                serialized.created_at.clone(), // String (always present)
-                serialized.updated_at.clone(),
-                serialized.first_prompt.clone(),
-                serialized.title.clone(),
-                coalesced.len() as i64,
-            );
+            // Build the index row + clone the serialized messages for the
+            // shadow transcript write (TODO 23). Both stay additive: JSON is
+            // canonical, this only mirrors into the DB for a future read-flip.
+            let row = jfc_knowledge::SessionRow {
+                id: serialized.id.clone(),
+                cwd: serialized.cwd.clone(),
+                model: serialized.model.clone(),
+                created_at: Some(serialized.created_at.clone()),
+                updated_at: serialized.updated_at.clone(),
+                first_prompt: serialized.first_prompt.clone(),
+                title: serialized.title.clone(),
+                message_count: coalesced.len() as i64,
+            };
+            // Map to the knowledge crate's message type before the spawn (avoids
+            // cloning the serialized-part tree). replace_transcript upserts the
+            // header + all messages in one transaction.
+            let shadow_msgs = crate::to_session_messages(&serialized.messages);
             tokio::task::spawn_blocking(move || {
-                crate::index_session(
-                    &idx.0,
-                    idx.1.as_deref(),
-                    idx.2.as_deref(),
-                    Some(idx.3.as_str()),
-                    idx.4.as_deref(),
-                    idx.5.as_deref(),
-                    idx.6.as_deref(),
-                    idx.7,
-                );
+                crate::shadow_session_transcript(row, shadow_msgs);
             });
         }
     } else {

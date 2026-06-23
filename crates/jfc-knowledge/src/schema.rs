@@ -108,6 +108,33 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_sessions_cwd ON sessions(cwd);
     CREATE INDEX idx_sessions_updated ON sessions(updated_at);
     "#,
+    // v5 — full session TRANSCRIPT (PLAN TODO 23, council decision 1: row-per-
+    // message, not a blob, so search is a query and saves append deltas instead
+    // of rewriting the whole session). `meta` holds serialized tool-call/parts
+    // JSON so structured fidelity survives the round trip. FTS5 mirror powers
+    // substring search. Still SHADOW: JSON remains canonical; no reader switched.
+    r#"
+    CREATE TABLE session_messages (
+        session_id TEXT NOT NULL,
+        seq        INTEGER NOT NULL,
+        role       TEXT NOT NULL,
+        content    TEXT NOT NULL DEFAULT '',
+        meta       TEXT,
+        PRIMARY KEY (session_id, seq)
+    );
+    CREATE INDEX idx_session_messages_sid ON session_messages(session_id);
+
+    CREATE VIRTUAL TABLE session_messages_fts USING fts5(
+        content, content='session_messages', content_rowid='rowid'
+    );
+    CREATE TRIGGER session_messages_ai AFTER INSERT ON session_messages BEGIN
+        INSERT INTO session_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+    END;
+    CREATE TRIGGER session_messages_ad AFTER DELETE ON session_messages BEGIN
+        INSERT INTO session_messages_fts(session_messages_fts, rowid, content)
+        VALUES ('delete', old.rowid, old.content);
+    END;
+    "#,
 ];
 
 /// The schema version this build expects (== number of migrations).
@@ -120,6 +147,10 @@ pub fn apply_pragmas(conn: &Connection) -> Result<()> {
     // WAL persists on the DB file, but setting it per-open is harmless and
     // guarantees it even on a freshly created file.
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // NORMAL is WAL-safe and durable across an app crash / SIGKILL (an
+    // uncommitted txn rolls back on next open). Council decision 5: this is the
+    // right durability tier for a single-file store that's becoming the source of
+    // truth; FULL would add fsync cost per commit without a meaningful win here.
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;

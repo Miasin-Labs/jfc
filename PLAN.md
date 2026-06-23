@@ -322,12 +322,16 @@ any removal — never a blind `rm`.
   (spawn_blocking, debug-on-error). No reader switched yet. Test
   `session_index_upsert_and_list_normal` (idempotent upsert, cwd filter,
   recency order). DONE.
-- [ ] 23. **Full transcript in the DB (shadow-write).** Extend the table (or a
-  `session_messages` table) to hold the serialized messages; `save_session`
-  shadow-writes the full transcript alongside the JSON. Reads still come from
-  JSON. Add a `verify` that DB-loaded == JSON-loaded for every existing session
-  (round-trip parity gate). **This is the genuine fork** — needs the parity gate
-  green before TODO 24.
+- [x] 23. **Full transcript in the DB (shadow-write + parity gate).** Council
+  decision 1: a `session_messages` row-per-message table (+ FTS5 mirror), not a
+  blob — so search is a query and saves append in one transaction. Migration v5;
+  `replace_transcript` (header + messages in one txn), `load_transcript`,
+  `search_transcripts`, `backup_to` (VACUUM INTO). `save_session` now
+  shadow-writes the transcript via `jfc_engine::shadow_session_transcript` after
+  the atomic JSON write (JSON still canonical). `backfill_and_verify_sessions` +
+  `/knowledge migrate` run the parity gate. **Verified on the real corpus: 344
+  checked, 344 passed, 0 mismatch, 0 undeserializable → flip_safe=true.** Reads
+  still come from JSON; the flip is TODO 24.
 - [ ] 24. **Read sessions from the DB + retire JSON (cutover, `--confirm`).** Flip
   `load_session`/resume/`/continue`/search to read the DB; keep a
   `session_source = "db" | "json"` escape hatch. Only after a green parity window,
@@ -386,10 +390,12 @@ deliberately **not** the takeover Layer 3 the scenario exists to warn about.
 - [ ] F7. Memory cutover parity (TODO 18–21): a memory saved as `.md` and imported
   recalls identically from the DB path; a newly-saved memory creates a DB row and
   no `.md`; `gc-legacy --confirm` archives (moves) the `.md` dirs reversibly.
-- [ ] F8. Session cutover parity (TODO 22–24): saving a session upserts a matching
-  index row (JSON still canonical); for every existing session, DB-loaded ==
-  JSON-loaded (round-trip parity) before any read flip; JSON files are only
-  archived (moved) under `--confirm` after a green parity window.
+- [x] F8 (parity half). Session round-trip parity: `backfill_and_verify_sessions`
+  over the real corpus reports 344/344 passed, 0 mismatch, 0 undeserializable
+  (`flip_safe=true`); `session_transcript_roundtrip_and_search_normal` covers
+  replace/load/FTS/backup. Index dual-write matches the JSON header. The read
+  flip (TODO 24) and `--confirm` archive remain gated on this staying green
+  through a rollback window.
 
 ## Success Criteria
 
