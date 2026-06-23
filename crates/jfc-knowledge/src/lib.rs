@@ -24,7 +24,9 @@ pub mod import;
 pub mod project;
 pub mod query;
 pub mod record;
+pub mod redact;
 mod schema;
+pub mod session_mine;
 
 use std::path::{Path, PathBuf};
 
@@ -81,6 +83,58 @@ impl KnowledgeStore {
     /// Insert a record (validated at the boundary).
     pub fn insert(&self, rec: &KnowledgeRecord) -> Result<()> {
         query::insert(&self.conn, rec)
+    }
+
+    /// Fold mined session lessons (`session_mine`) into **project-scoped**
+    /// candidate records. Compounding: a lesson whose `norm_key` already exists
+    /// bumps that row's `use_count` (support) and upgrades it to `Verified` if
+    /// the new evidence is verified — instead of inserting a duplicate. Never
+    /// promotes to global scope (that stays human-gated). Returns
+    /// `(inserted, compounded)`.
+    pub fn ingest_mined(
+        &self,
+        project_key: &str,
+        lessons: &[session_mine::MinedLesson],
+    ) -> Result<(usize, usize)> {
+        let mut inserted = 0usize;
+        let mut compounded = 0usize;
+        for lesson in lessons {
+            // norm_key is the dedup identity; make it a deterministic row id
+            // scoped to this project so cross-project mining can't collide.
+            let id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("mined:{project_key}:{}", lesson.norm_key).as_bytes(),
+            )
+            .simple()
+            .to_string();
+
+            if self.contains(&id)? {
+                // Compound: bump support, and upgrade outcome if newly verified.
+                self.conn.execute(
+                    "UPDATE knowledge SET use_count = use_count + 1, last_used_ms = ?2, \
+                     outcome = CASE WHEN ?3 = 'verified' THEN 'verified' ELSE outcome END \
+                     WHERE id = ?1",
+                    rusqlite::params![id, record::now_ms(), lesson.outcome.slug()],
+                )?;
+                compounded += 1;
+                continue;
+            }
+
+            let mut rec = KnowledgeRecord::new(
+                lesson.kind,
+                Scope::Project,
+                Some(project_key.to_owned()),
+                lesson.trigger.clone(),
+                lesson.claim.clone(),
+            )
+            .with_outcome(lesson.outcome)
+            .with_source(format!("mined:session:{}", lesson.session_id));
+            rec.id = id;
+            rec.tags = lesson.norm_key.clone();
+            self.insert(&rec)?;
+            inserted += 1;
+        }
+        Ok((inserted, compounded))
     }
 
     /// Whether a record id already exists (live or superseded).
@@ -469,6 +523,46 @@ mod tests {
         assert_eq!(hits[0].id, strong.id);
         // Idempotent.
         assert_eq!(store.consolidate().unwrap(), 0);
+    }
+
+    // TODO 11-13: mined lessons fold into project candidates and COMPOUND by
+    // norm_key (support bump + verified upgrade) instead of duplicating.
+    #[test]
+    fn ingest_mined_compounds_by_norm_key_regression() {
+        use crate::session_mine::MinedLesson;
+        let store = KnowledgeStore::open_in_memory().unwrap();
+        let unverified = MinedLesson {
+            kind: Kind::Finding,
+            trigger: "Edit failed: old_string-not-found".into(),
+            claim: "re-read exact bytes before retry".into(),
+            outcome: Outcome::Unverified,
+            norm_key: "err:edit:old_string-not-found".into(),
+            session_id: "s1".into(),
+        };
+        let (ins, comp) = store.ingest_mined("P", &[unverified.clone()]).unwrap();
+        assert_eq!((ins, comp), (1, 0));
+        assert_eq!(store.live_count().unwrap(), 1);
+
+        // Same norm_key, now VERIFIED → compounds onto the existing row + upgrades.
+        let mut verified = unverified.clone();
+        verified.outcome = Outcome::Verified;
+        verified.session_id = "s2".into();
+        let (ins2, comp2) = store.ingest_mined("P", &[verified]).unwrap();
+        assert_eq!((ins2, comp2), (0, 1), "should compound, not duplicate");
+        assert_eq!(store.live_count().unwrap(), 1);
+
+        let hits = store
+            .recall("retry", &crate::query::RecallFilter { project_key: Some("P"), limit: 8 })
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].outcome, Outcome::Verified, "outcome upgraded by new evidence");
+        assert!(hits[0].use_count >= 1, "support compounded");
+
+        // A DIFFERENT project must not see P's mined lesson.
+        let other = store
+            .recall("retry", &crate::query::RecallFilter { project_key: Some("Q"), limit: 8 })
+            .unwrap();
+        assert!(other.is_empty());
     }
 
     #[test]
