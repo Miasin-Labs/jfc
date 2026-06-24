@@ -149,6 +149,7 @@ fn part_has_meaningful_content(part: &MessagePart) -> bool {
         MessagePart::Text(s) | MessagePart::Reasoning(s) | MessagePart::Advisor(s) => {
             !s.trim().is_empty()
         }
+        MessagePart::ReasoningSignature(_) => false,
         MessagePart::RedactedThinking(_)
         | MessagePart::Tool(_)
         | MessagePart::TaskStatus(_)

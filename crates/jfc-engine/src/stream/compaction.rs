@@ -47,6 +47,11 @@ pub fn render_message_as_text(msg: &ProviderMessage) -> String {
     for c in &msg.content {
         match c {
             ProviderContent::Text(t) => out.push_str(t),
+            ProviderContent::Thinking { text, .. } => {
+                out.push_str("\n  <thinking>");
+                out.push_str(text);
+                out.push_str("</thinking>");
+            }
             ProviderContent::ToolUse { name, input, .. } => {
                 let preview = serde_json::to_string(input)
                     .unwrap_or_default()
@@ -278,6 +283,9 @@ pub fn estimate_provider_message_bytes(msg: &ProviderMessage) -> usize {
         .iter()
         .map(|c| match c {
             ProviderContent::Text(t) => t.len(),
+            ProviderContent::Thinking { text, signature } => {
+                text.len() + signature.as_deref().map_or(0, str::len)
+            }
             ProviderContent::ToolUse { name, input, .. } => {
                 name.len() + serde_json::to_string(input).map(|s| s.len()).unwrap_or(0)
             }

@@ -641,6 +641,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let init = build_providers();
     let providers = init.providers;
     let active_idx = init.active_idx;
+    let cfg = jfc_engine::config::load_arc();
     // Determine startup session from CLI flags (before consuming cli fields)
     let startup_session = cli.startup_session();
     let initial_prompt = cli.prompt;
@@ -666,7 +667,6 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
 
     let advisor_cli = cli.advisor.clone();
     let local_advisor = {
-        let cfg = jfc_engine::config::load_arc();
         let configured = advisor_cli
             .as_deref()
             .or_else(|| cfg.advisor_model.as_deref());
@@ -711,7 +711,6 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let server_advisor_cli = cli.server_advisor.clone();
     let advisor_model = {
-        let cfg = jfc_engine::config::load_arc();
         let configured = server_advisor_cli
             .as_deref()
             .or_else(|| cfg.server_advisor_model.as_deref());
@@ -847,7 +846,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         local_advisor_provider: local_advisor.0,
         local_advisor_model: local_advisor.1,
         server_advisor_model: advisor_model,
-        custom_betas: cli.betas.clone(),
+        custom_betas: cfg.anthropic_betas(cli.betas.clone()),
         fine_grained_tool_streaming: cli.fine_grained_tool_streaming,
         strict_tool_schemas: cli.strict_tool_schemas,
         remote_control,
@@ -902,7 +901,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
                 session_mirror: cli.session_mirror.clone(),
                 permission_prompt_tool: cli.permission_prompt_tool.clone(),
                 sdk_url: cli.sdk_url.clone(),
-                custom_betas: cli.betas.clone(),
+                custom_betas: cfg.anthropic_betas(cli.betas.clone()),
                 fine_grained_tool_streaming: cli.fine_grained_tool_streaming,
                 strict_tool_schemas: cli.strict_tool_schemas,
                 max_turns: cli.max_turns,

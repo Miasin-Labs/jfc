@@ -52,7 +52,10 @@ pub(crate) async fn handle_tick(
             thinking_live,
             thinking_ended: app.engine.thinking_ended_at.is_some(),
             output_started: app.engine.streaming_response_bytes > 0,
-            tools_pending: !app.engine.pending_tool_calls.is_empty(),
+            tools_pending: !app.engine.pending_tool_calls.is_empty()
+                || !app.engine.in_progress_tool_use_ids.is_empty()
+                || app.engine.in_flight_tool_batches > 0
+                || app.engine.in_flight_eager_dispatches > 0,
             turn_active,
         };
         let next = crate::spinner::next_phase(
@@ -850,6 +853,58 @@ mod tests {
             app.engine.token_rate_samples.back().map(|&(_, n)| n),
             Some(200)
         );
+    }
+
+    #[tokio::test]
+    async fn thinking_token_path_samples_live_and_final_usage_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let started = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        app.engine.is_streaming = true;
+        app.engine.streaming_started_at = Some(started);
+        app.engine.turn_started_at = Some(started);
+
+        jfc_engine::runtime::handle_engine_event(
+            &mut app.engine,
+            &tx,
+            EngineEvent::Stream(jfc_engine::runtime::StreamEvent::ThinkingTokens(70)),
+        )
+        .await
+        .expect("thinking token event dispatches");
+
+        handle_tick(&mut app, &tx, None).await;
+
+        assert_eq!(app.engine.streaming_thinking_tokens, 70);
+        assert_eq!(app.engine.token_rate_sample_thinking, Some(true));
+        assert_eq!(
+            app.engine.token_rate_samples.back().map(|&(_, n)| n),
+            Some(70)
+        );
+
+        jfc_engine::runtime::handle_engine_event(
+            &mut app.engine,
+            &tx,
+            EngineEvent::Stream(jfc_engine::runtime::StreamEvent::Usage {
+                input_tokens: 1_000,
+                output_tokens: 240,
+                thinking_tokens: Some(123),
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            }),
+        )
+        .await
+        .expect("usage event dispatches");
+
+        assert_eq!(app.engine.streaming_thinking_tokens, 123);
+        assert_eq!(app.engine.streaming_response_bytes / 4, 240);
+        assert_eq!(app.engine.turn_output_tokens, 240);
+        let usage = app
+            .engine
+            .usage_by_model
+            .get("test-model")
+            .expect("model usage");
+        assert_eq!(usage.output_tokens, 240);
+        assert_eq!(usage.thinking_tokens, 123);
     }
 
     #[tokio::test]

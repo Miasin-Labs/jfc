@@ -54,7 +54,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 // unconditionally to older models risks the API responding with
 // "unexpected value" beta errors that flip our cap-strip-and-retry path on
 // for no reason. Appended conditionally in `build_beta_header` below.
-const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,redact-thinking-2026-02-12,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
+const ANTHROPIC_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,output-128k-2025-02-19,context-management-2025-06-27,web-search-2025-03-05,structured-outputs-2025-12-15,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19,files-api-2025-04-14,cache-diagnosis-2026-04-07,effort-2025-11-24,environments-2025-11-01";
 const NARRATION_SUMMARIES_BETA: &str = jfc_anthropic_sdk::beta::NARRATION_SUMMARIES;
 
 /// Whether `mid-conversation-system-2026-04-07` should be appended for `model`.
@@ -3244,6 +3244,32 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_beta_does_not_redact_thinking_by_default_regression() {
+        assert!(
+            !ANTHROPIC_BETA.contains("redact-thinking"),
+            "redact-thinking suppresses visible summarized thinking deltas"
+        );
+    }
+
+    #[test]
+    fn build_beta_header_appends_redacted_thinking_when_requested_normal() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities::default();
+        let header = build_beta_header(
+            &caps,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &["redact-thinking-2026-02-12".to_owned()],
+            "claude-opus-4-7",
+        );
+        assert!(header.contains("redact-thinking-2026-02-12"));
+    }
+
+    #[test]
     fn build_beta_header_includes_gated_when_capability_unknown() {
         let caps = super::super::anthropic_accounts::AccountCapabilities::default();
         let header = build_beta_header(
@@ -3399,6 +3425,24 @@ mod tests {
             "claude-opus-4-7",
         );
         assert!(!header.contains(NARRATION_SUMMARIES_BETA));
+    }
+
+    #[test]
+    fn build_beta_header_includes_thinking_token_count_when_enabled_normal() {
+        let caps = super::super::anthropic_accounts::AccountCapabilities::default();
+        let header = build_beta_header(
+            &caps,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            &[],
+            "claude-opus-4-7",
+        );
+        assert!(header.contains("thinking-token-count-2026-05-13"));
     }
 
     // ── mid_conversation_system gating ─────────────────────────────────────

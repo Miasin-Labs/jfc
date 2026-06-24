@@ -20,6 +20,7 @@ pub(crate) fn start_content_block(
         ContentBlock::Thinking { .. } => BlockState::Thinking {
             accumulated: String::new(),
             estimated_tokens: 0,
+            signature: None,
         },
         ContentBlock::RedactedThinking { data } => BlockState::RedactedThinking { data },
         ContentBlock::ToolUse { id, name, input } => BlockState::ToolUse {
@@ -82,6 +83,7 @@ pub(crate) fn apply_content_delta(
             if let Some(Some(BlockState::Thinking {
                 accumulated,
                 estimated_tokens,
+                ..
             })) = blocks.get_mut(index)
             {
                 accumulated.push_str(&thinking);
@@ -121,11 +123,14 @@ pub(crate) fn apply_content_delta(
         }
         Delta::SignatureDelta { signature } => {
             let Some(Some(BlockState::Thinking {
-                estimated_tokens, ..
+                estimated_tokens,
+                signature: slot,
+                ..
             })) = blocks.get_mut(index)
             else {
                 return None;
             };
+            *slot = Some(signature.clone());
             let signature_total = estimate_signature_thinking_tokens(&signature);
             if signature_total <= *estimated_tokens {
                 return None;
@@ -159,9 +164,14 @@ pub(crate) fn stop_content_block(
             index,
             text: accumulated,
         }),
-        Some(BlockState::Thinking { accumulated, .. }) => Some(StreamEvent::ThinkingDone {
+        Some(BlockState::Thinking {
+            accumulated,
+            signature,
+            ..
+        }) => Some(StreamEvent::ThinkingDone {
             index,
             text: accumulated,
+            signature,
         }),
         Some(BlockState::RedactedThinking { data }) => {
             Some(StreamEvent::RedactedThinkingDone { index, data })

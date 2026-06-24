@@ -312,6 +312,7 @@ fn serialized_message_search_text(
             SerializedPart::Text { content }
             | SerializedPart::Reasoning { content }
             | SerializedPart::Advisor { content } => parts.push(content.trim().to_owned()),
+            SerializedPart::ReasoningSignature { .. } => {}
             SerializedPart::Tool { tool } => {
                 parts.push(tool.kind.clone());
                 parts.push(tool.status.clone());

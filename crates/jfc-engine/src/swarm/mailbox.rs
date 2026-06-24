@@ -4,6 +4,7 @@
 //! traffic is persisted in `jfc-knowledge.agent_mailbox`, keyed by team+agent.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use tokio::fs;
 use tracing::{debug, trace};
@@ -171,7 +172,7 @@ fn mailbox_row(
     Ok(jfc_knowledge::AgentMailboxRow {
         id: uuid::Uuid::new_v4().simple().to_string(),
         to_agent: mailbox_key(recipient, team_name),
-        from_agent: Some(message.from.clone()),
+        from_agent: Some(message.from),
         thread_id: Some(super::sanitize_name(team_name)),
         task_id: None,
         priority: 0,
@@ -193,13 +194,20 @@ where
     T: Send + 'static,
     F: FnOnce(jfc_knowledge::KnowledgeStore) -> jfc_knowledge::Result<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let store = open_mailbox_store()?;
-        f(store)
+    tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
+        let _guard = mailbox_db_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mailbox DB lock poisoned"))?;
+        let store = open_mailbox_store().map_err(anyhow::Error::from)?;
+        f(store).map_err(anyhow::Error::from)
     })
     .await
     .map_err(anyhow::Error::from)?
-    .map_err(anyhow::Error::from)
+}
+
+fn mailbox_db_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn open_mailbox_store() -> jfc_knowledge::Result<jfc_knowledge::KnowledgeStore> {

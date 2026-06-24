@@ -1013,6 +1013,94 @@ fn pick_next_open_task(tasks: &[jfc_session::Task]) -> Option<&jfc_session::Task
         .or_else(|| tasks.iter().find(|t| t.status.is_open()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ActivityLabel {
+    Working,
+    Planning,
+    Reading,
+    Searching,
+    Running,
+    Editing,
+}
+
+impl ActivityLabel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Editing => "Editing",
+            Self::Running => "Running",
+            Self::Searching => "Searching",
+            Self::Reading => "Reading",
+            Self::Planning => "Planning",
+            Self::Working => "Working",
+        }
+    }
+
+    fn for_tool(tool: &jfc_core::ToolCall) -> Self {
+        match &tool.kind {
+            ToolKind::Edit | ToolKind::Write | ToolKind::MultiEdit | ToolKind::ApplyPatch => {
+                Self::Editing
+            }
+            ToolKind::Bash | ToolKind::BashOutput | ToolKind::HcomRun | ToolKind::HcomTerm => {
+                Self::Running
+            }
+            ToolKind::Glob
+            | ToolKind::Grep
+            | ToolKind::Search
+            | ToolKind::WebFetch
+            | ToolKind::WebSearch
+            | ToolKind::ToolSearch
+            | ToolKind::Lsp => Self::Searching,
+            ToolKind::Read | ToolKind::NotebookRead => Self::Reading,
+            ToolKind::TaskCreate
+            | ToolKind::TaskUpdate
+            | ToolKind::TaskList
+            | ToolKind::TaskDone
+            | ToolKind::TaskStop
+            | ToolKind::TaskGet
+            | ToolKind::TaskValidate
+            | ToolKind::PlanCreate
+            | ToolKind::PlanList
+            | ToolKind::PlanShow
+            | ToolKind::PlanAdvance
+            | ToolKind::PlanArchive
+            | ToolKind::PlanMaterialize => Self::Planning,
+            _ => Self::Working,
+        }
+    }
+}
+
+fn active_tool_activity_label(app: &App) -> Option<&'static str> {
+    let mut best: Option<ActivityLabel> = None;
+    let mut consider = |tool: &jfc_core::ToolCall| {
+        let label = ActivityLabel::for_tool(tool);
+        if best.is_none_or(|current| label > current) {
+            best = Some(label);
+        }
+    };
+
+    for tool in &app.engine.pending_tool_calls {
+        consider(tool);
+    }
+
+    for message in &app.engine.messages {
+        for part in &message.parts {
+            let MessagePart::Tool(tool) = part else {
+                continue;
+            };
+            let executing = matches!(tool.status, ToolStatus::Pending | ToolStatus::Running)
+                || app
+                    .engine
+                    .in_progress_tool_use_ids
+                    .contains(tool.id.as_str());
+            if executing {
+                consider(tool);
+            }
+        }
+    }
+
+    best.map(ActivityLabel::as_str)
+}
+
 /// Single- or double-row spinner widget rendered between the message
 /// scroll and the input bar (v126 layout, cli.js:323180-323235 + 323851).
 /// Row 0 = verb + elapsed + live-token-count + stall-status, composed in
@@ -1162,18 +1250,16 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
                 std::borrow::Cow::Borrowed(status.phase.label())
             } else {
                 match app.spinner_state.phase {
+                    crate::spinner::SpinnerPhase::ToolUse
+                    | crate::spinner::SpinnerPhase::Working => active_tool_activity_label(app)
+                        .map(std::borrow::Cow::Borrowed)
+                        .unwrap_or_else(|| {
+                            std::borrow::Cow::Borrowed(app.spinner_state.phase.label())
+                        }),
                     crate::spinner::SpinnerPhase::Requesting
                     | crate::spinner::SpinnerPhase::Thinking
-                    | crate::spinner::SpinnerPhase::Responding
-                    | crate::spinner::SpinnerPhase::ToolUse
-                    | crate::spinner::SpinnerPhase::Working => {
-                        let mut seed = app.engine.tool_ctx.total_user_turns as usize;
-                        if let Some(session_id) = app.engine.current_session_id.as_ref() {
-                            for b in session_id.as_str().bytes() {
-                                seed = seed.wrapping_mul(16_777_619) ^ b as usize;
-                            }
-                        }
-                        crate::spinner::spinner_verb_for_index(seed)
+                    | crate::spinner::SpinnerPhase::Responding => {
+                        std::borrow::Cow::Borrowed(app.spinner_state.phase.label())
                     }
                     crate::spinner::SpinnerPhase::Compacting
                     | crate::spinner::SpinnerPhase::NetworkRecovery => {

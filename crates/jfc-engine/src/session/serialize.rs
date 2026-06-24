@@ -26,6 +26,9 @@ pub fn serialize_part(part: &MessagePart) -> SerializedPart {
     match part {
         MessagePart::Text(t) => SerializedPart::Text { content: t.clone() },
         MessagePart::Reasoning(t) => SerializedPart::Reasoning { content: t.clone() },
+        MessagePart::ReasoningSignature(signature) => SerializedPart::ReasoningSignature {
+            signature: signature.clone(),
+        },
         MessagePart::Tool(tc) => SerializedPart::Tool {
             tool: Box::new(SerializedToolPart {
                 id: tc.id.as_str().to_owned(),

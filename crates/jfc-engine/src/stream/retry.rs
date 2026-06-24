@@ -56,6 +56,7 @@ fn advisor_placeholder_needed(content: &[ProviderContent]) -> bool {
     content.is_empty()
         || content.iter().all(|block| match block {
             ProviderContent::Text(text) => text.trim().is_empty(),
+            ProviderContent::Thinking { .. } => true,
             ProviderContent::RedactedThinking { .. } => true,
             _ => false,
         })

@@ -537,8 +537,18 @@ pub async fn drain_stream_events(
                         .await;
                 }
             }
-            StreamEvent::TextDone { .. } | StreamEvent::ThinkingDone { .. } => {
+            StreamEvent::TextDone { .. } => {
                 pending_visible.flush(tx).await;
+            }
+            StreamEvent::ThinkingDone { signature, .. } => {
+                pending_visible.flush(tx).await;
+                if let Some(signature) = signature {
+                    let _ = tx
+                        .send(EngineEvent::Stream(RuntimeStreamEvent::ThinkingSignature(
+                            signature,
+                        )))
+                        .await;
+                }
             }
             StreamEvent::RedactedThinkingDone { data, .. } => {
                 pending_visible.flush(tx).await;

@@ -141,7 +141,7 @@ pub fn read_records(
             TASK_HISTORY_SESSION_ID,
             TASK_HISTORY_KIND,
             Some(history_key),
-            limit.saturating_mul(10).max(100).min(10_000),
+            limit.saturating_mul(10).clamp(100, 10_000),
         )
     }) {
         Ok(rows) => rows,

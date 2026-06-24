@@ -9,6 +9,7 @@ pub enum BlockState {
     Thinking {
         accumulated: String,
         estimated_tokens: u32,
+        signature: Option<String>,
     },
     /// Opaque redacted thinking — no deltas, complete at start.
     /// Must be round-tripped in subsequent requests verbatim.

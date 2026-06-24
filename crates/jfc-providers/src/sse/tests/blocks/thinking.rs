@@ -163,9 +163,61 @@ fn signature_delta_parses_and_emits_token_topup() {
     blocks.push(Some(BlockState::Thinking {
         accumulated: "thought".into(),
         estimated_tokens: 1,
+        signature: None,
     }));
     assert!(matches!(
         translate(event, &mut blocks, &mut sr),
         Some(StreamEvent::ThinkingTokens { delta, .. }) if delta > 0
+    ));
+}
+
+#[test]
+fn signature_delta_round_trips_on_thinking_done_regression() {
+    let (mut blocks, mut sr) = empty_state();
+    translate(
+        SseEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Thinking {
+                thinking: String::new(),
+            },
+        },
+        &mut blocks,
+        &mut sr,
+    );
+    let _ = translate(
+        SseEvent::ContentBlockDelta {
+            index: 0,
+            delta: Delta::ThinkingDelta {
+                thinking: "visible thought".into(),
+                estimated_tokens: Some(3),
+            },
+        },
+        &mut blocks,
+        &mut sr,
+    );
+    let _ = translate(
+        SseEvent::ContentBlockDelta {
+            index: 0,
+            delta: Delta::SignatureDelta {
+                signature: "sig_1".into(),
+            },
+        },
+        &mut blocks,
+        &mut sr,
+    );
+
+    let out = translate(
+        SseEvent::ContentBlockStop { index: 0 },
+        &mut blocks,
+        &mut sr,
+    );
+
+    assert!(matches!(
+        out,
+        Some(StreamEvent::ThinkingDone {
+            text,
+            signature: Some(signature),
+            ..
+        }) if text == "visible thought" && signature == "sig_1"
     ));
 }

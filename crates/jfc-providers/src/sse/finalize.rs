@@ -27,10 +27,15 @@ pub fn finalize_open_blocks(
                     text: accumulated,
                 });
             }
-            Some(BlockState::Thinking { accumulated, .. }) if !accumulated.is_empty() => {
+            Some(BlockState::Thinking {
+                accumulated,
+                signature,
+                ..
+            }) if !accumulated.is_empty() => {
                 out.push(StreamEvent::ThinkingDone {
                     index,
                     text: accumulated,
+                    signature,
                 });
             }
             Some(BlockState::RedactedThinking { data }) => {

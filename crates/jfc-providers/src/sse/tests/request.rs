@@ -56,6 +56,22 @@ fn build_messages_tool_use_shape() {
 }
 
 #[test]
+fn build_messages_thinking_shape_includes_signature_regression() {
+    let msg = ProviderMessage {
+        role: ProviderRole::Assistant,
+        content: vec![ProviderContent::Thinking {
+            text: "thinking".into(),
+            signature: Some("sig_1".into()),
+        }],
+    };
+    let v = build_messages(&[msg]);
+    let block = &v[0]["content"][0];
+    assert_eq!(block["type"], "thinking");
+    assert_eq!(block["thinking"], "thinking");
+    assert_eq!(block["signature"], "sig_1");
+}
+
+#[test]
 fn build_tools_shape() {
     let tools = vec![ToolDef {
         name: "bash".into(),

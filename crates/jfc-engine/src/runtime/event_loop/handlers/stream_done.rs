@@ -1104,6 +1104,7 @@ fn should_self_continue_after_stop_reason(stop_reason: &jfc_provider::StopReason
 fn assistant_turn_has_no_content(msg: &types::ChatMessage) -> bool {
     !msg.parts.iter().any(|p| match p {
         MessagePart::Text(s) | MessagePart::Reasoning(s) | MessagePart::Advisor(s) => !s.is_empty(),
+        MessagePart::ReasoningSignature(_) => false,
         MessagePart::RedactedThinking(_)
         | MessagePart::Tool(_)
         | MessagePart::TaskStatus(_)

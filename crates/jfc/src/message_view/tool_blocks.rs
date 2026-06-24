@@ -3,6 +3,10 @@ use super::bash::{BashCmdKind, classify_bash_cmd};
 use super::core::diagnostics_for_path;
 use super::detection::detect_background_task_notification;
 use super::detection::looks_like_git_diff_output;
+use super::file_tool::{
+    diff_counts_for_header, diff_view_line_count, file_mutation_success_body_is_redundant,
+    is_file_mutation_tool, render_diff_skip,
+};
 use super::formatters::{
     produce_cat_markdown_output_line_count, produce_cat_markdown_output_lines,
     produce_cat_output_line_count, produce_cat_output_lines, produce_command_output_line_count,
@@ -19,7 +23,6 @@ use super::output_style::{
     colorize_diagnostic_prefix, colorize_git_commit_line, colorize_git_diff_line,
     colorize_git_log_line, colorize_git_push_line, colorize_git_status_line,
 };
-use super::outputs::{diff_view_line_count, render_diff_skip};
 use super::syntax::{
     infer_lang_from_bash, infer_lang_from_tool, looks_like_markdown,
     produce_highlighted_block_line_count, produce_highlighted_block_lines,
@@ -38,9 +41,16 @@ pub(super) fn tool_body_line_count(tool: &ToolCall, content_w: usize) -> usize {
     if let ToolInput::AskModel { model, prompt, .. } = &tool.input {
         return ask_model_exchange_lines(model, prompt, &tool.output, content_w, t).len();
     }
+    if file_mutation_success_body_is_redundant(tool) {
+        return 0;
+    }
     match &tool.output {
         ToolOutput::Empty => 0,
         ToolOutput::Text(s) => {
+            let s = visible_tool_text_without_guard(s);
+            if s.is_empty() {
+                return 0;
+            }
             if let Some(display) = bash_output_display_text(tool, s) {
                 return produce_text_block_line_count(
                     display.as_ref(),
@@ -71,6 +81,9 @@ pub(super) fn tool_body_line_count(tool: &ToolCall, content_w: usize) -> usize {
             }
         }
         ToolOutput::LargeText(lt) => {
+            if matches!(tool.status, ToolStatus::Completed) && is_file_mutation_tool(tool) {
+                return 0;
+            }
             let huge = lt.line_count > LargeText::COLLAPSE_LINES
                 || lt.content.len() > LargeText::COLLAPSE_BYTES;
             if huge && !expanded {
@@ -198,11 +211,18 @@ pub(super) fn tool_body_lines_themed(
     if let ToolInput::AskModel { model, prompt, .. } = &tool.input {
         return ask_model_exchange_lines(model, prompt, &tool.output, content_w, t);
     }
+    if file_mutation_success_body_is_redundant(tool) {
+        return Vec::new();
+    }
 
     // Body content branch by tool.output (mirrors render_tool_content_with_skip).
     match &tool.output {
         ToolOutput::Empty => Vec::new(),
         ToolOutput::Text(s) => {
+            let s = visible_tool_text_without_guard(s);
+            if s.is_empty() {
+                return Vec::new();
+            }
             if let Some(display) = bash_output_display_text(tool, s) {
                 return produce_text_block_lines(
                     display.as_ref(),
@@ -263,6 +283,9 @@ pub(super) fn tool_body_lines_themed(
             }
         }
         ToolOutput::LargeText(lt) => {
+            if matches!(tool.status, ToolStatus::Completed) && is_file_mutation_tool(tool) {
+                return Vec::new();
+            }
             let huge = lt.line_count > LargeText::COLLAPSE_LINES
                 || lt.content.len() > LargeText::COLLAPSE_BYTES;
             if huge && !tool.display.is_expanded() {
@@ -667,6 +690,22 @@ pub(super) fn build_title_spans<'a>(
         .min(tool_title_width_cap())
         .saturating_sub(4 + badge_w);
     spans.extend(build_header_inner_spans(tool, t, effective));
+    if let Some((additions, deletions)) = diff_counts_for_header(tool) {
+        if additions > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("+{additions}"),
+                Style::default().fg(t.success),
+            ));
+        }
+        if deletions > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("-{deletions}"),
+                Style::default().fg(t.error),
+            ));
+        }
+    }
     if let Some(code) = exit_badge {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
@@ -684,6 +723,11 @@ pub(super) fn build_title_spans<'a>(
         ));
     }
     spans
+}
+
+fn visible_tool_text_without_guard(raw: &str) -> &str {
+    raw.split_once(jfc_engine::tools::SLOP_GUARD_MARKER)
+        .map_or(raw, |(visible, _)| visible.trim_end())
 }
 
 /// Exit-code badge for a failed command tool, e.g. `(1)`. Returns `None`

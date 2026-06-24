@@ -64,6 +64,16 @@ pub fn build_messages(messages: &[ProviderMessage]) -> Value {
                 .iter()
                 .map(|c| match c {
                     ProviderContent::Text(t) => json!({ "type": "text", "text": t }),
+                    ProviderContent::Thinking { text, signature } => {
+                        let mut block = json!({
+                            "type": "thinking",
+                            "thinking": text,
+                        });
+                        if let Some(signature) = signature {
+                            block["signature"] = json!(signature);
+                        }
+                        block
+                    }
                     ProviderContent::ToolResult {
                         tool_use_id,
                         content,

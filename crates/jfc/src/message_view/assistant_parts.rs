@@ -6,6 +6,7 @@ pub(super) fn push_reasoning_lines<'a>(
     text: &'a str,
     expanded: bool,
     active: bool,
+    thinking_tokens: Option<u64>,
     t: &Theme,
 ) {
     let summary = reasoning_summary(text);
@@ -29,6 +30,7 @@ pub(super) fn push_reasoning_lines<'a>(
                     .add_modifier(Modifier::ITALIC),
             ));
         }
+        push_thinking_token_badge(&mut spans, thinking_tokens, t);
         spans.push(Span::styled(
             "  ctrl+o to collapse",
             Style::default().fg(t.text_muted),
@@ -105,6 +107,7 @@ pub(super) fn push_reasoning_lines<'a>(
                     .add_modifier(Modifier::ITALIC),
             ));
         }
+        push_thinking_token_badge(&mut spans, thinking_tokens, t);
         if !flattened.is_empty() {
             spans.push(Span::styled(
                 format!(" — {flattened}{ellipsis}"),
@@ -112,6 +115,36 @@ pub(super) fn push_reasoning_lines<'a>(
             ));
         }
         items.push(RenderItem::TextLine(Line::from(spans)));
+    }
+}
+
+fn push_thinking_token_badge(spans: &mut Vec<Span<'_>>, thinking_tokens: Option<u64>, t: &Theme) {
+    let Some(tokens) = thinking_tokens.filter(|tokens| *tokens > 0) else {
+        return;
+    };
+    spans.push(Span::styled(
+        format!(" · ↓ {}", format_token_count(tokens)),
+        Style::default().fg(t.text_muted),
+    ));
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format_compact(tokens, 1_000_000, "m")
+    } else if tokens >= 1_000 {
+        format_compact(tokens, 1_000, "k")
+    } else {
+        format!("{tokens} tokens")
+    }
+}
+
+fn format_compact(tokens: u64, divisor: u64, suffix: &str) -> String {
+    let whole = tokens / divisor;
+    let tenth = (tokens % divisor) * 10 / divisor;
+    if tenth == 0 {
+        format!("{whole}{suffix} tokens")
+    } else {
+        format!("{whole}.{tenth}{suffix} tokens")
     }
 }
 
@@ -416,7 +449,7 @@ mod reasoning_preview_tests {
     fn collapsed_preview(text: &str) -> String {
         let mut items: Vec<RenderItem<'_>> = Vec::new();
         let theme = crate::theme::Theme::dark();
-        push_reasoning_lines(&mut items, text, false, false, &theme);
+        push_reasoning_lines(&mut items, text, false, false, None, &theme);
         // The single line we pushed has two spans; the second contains the
         // preview. Concatenate the visible text so tests can assert on it.
         match items.into_iter().next() {
@@ -516,7 +549,7 @@ mod reasoning_preview_tests {
     fn active_reasoning_uses_thinking_label_normal() {
         let mut items: Vec<RenderItem<'_>> = Vec::new();
         let theme = crate::theme::Theme::dark();
-        push_reasoning_lines(&mut items, "live thought", true, true, &theme);
+        push_reasoning_lines(&mut items, "live thought", true, true, None, &theme);
         let rendered = match items.into_iter().next() {
             Some(RenderItem::TextLine(line)) => line
                 .spans
@@ -526,5 +559,29 @@ mod reasoning_preview_tests {
             _ => String::new(),
         };
         assert!(rendered.contains("∴ Thinking"), "got: {rendered:?}");
+    }
+
+    #[test]
+    fn completed_reasoning_shows_thinking_tokens_normal() {
+        let mut items: Vec<RenderItem<'_>> = Vec::new();
+        let theme = crate::theme::Theme::dark();
+        push_reasoning_lines(
+            &mut items,
+            "visible thinking",
+            false,
+            false,
+            Some(123),
+            &theme,
+        );
+        let rendered = match items.into_iter().next() {
+            Some(RenderItem::TextLine(line)) => line
+                .spans
+                .into_iter()
+                .map(|s| s.content.into_owned())
+                .collect::<String>(),
+            _ => String::new(),
+        };
+        assert!(rendered.contains("∴ Thought"), "got: {rendered:?}");
+        assert!(rendered.contains("123 tokens"), "got: {rendered:?}");
     }
 }

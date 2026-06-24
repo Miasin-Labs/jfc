@@ -384,6 +384,7 @@ fn describe_message_structure(msgs: &[ProviderMessage]) -> String {
                         format!("server_tool_result:{tool_use_id}")
                     }
                     ProviderContent::Text(_) => "text".to_owned(),
+                    ProviderContent::Thinking { .. } => "thinking".to_owned(),
                     ProviderContent::Attachment(_) => "attachment".to_owned(),
                     ProviderContent::RedactedThinking { .. } => "redacted_thinking".to_owned(),
                 })
@@ -627,6 +628,7 @@ pub fn validate_provider_messages(msgs: &[ProviderMessage]) {
                     msg_index = i,
                     content_kinds = ?msg.content.iter().map(|c| match c {
                         ProviderContent::Text(_) => "text",
+                        ProviderContent::Thinking { .. } => "thinking",
                         ProviderContent::ToolUse { .. } => "tool_use",
                         ProviderContent::ToolResult { .. } => "tool_result",
                         ProviderContent::ServerToolUse { .. } => "server_tool_use",

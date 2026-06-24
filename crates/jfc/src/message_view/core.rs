@@ -91,6 +91,7 @@ pub struct RenderCtx<'a> {
     /// still overrides this per-message when the user toggles with ctrl+o.
     /// Mirrors Claude Code: expand streaming thinking, collapse once done.
     pub active_reasoning_idx: Option<usize>,
+    pub live_thinking_tokens: u64,
     pub tool_group_expanded: &'a std::collections::HashSet<String>,
     pub render_cache: &'a RefCell<crate::render_cache::RenderCache>,
     pub theme: crate::theme::Theme,
@@ -125,6 +126,7 @@ impl<'a> RenderCtx<'a> {
                     None
                 }
             },
+            live_thinking_tokens: app.engine.streaming_thinking_tokens,
             tool_group_expanded: &app.tool_group_expanded,
             render_cache: &app.render_cache,
             theme: app.theme,
@@ -158,6 +160,7 @@ impl<'a> RenderCtx<'a> {
             reasoning_expanded: EMPTY_REASONING.get_or_init(HashMap::new),
             always_show_thinking: false,
             active_reasoning_idx: None,
+            live_thinking_tokens: 0,
             tool_group_expanded: EMPTY_GROUPS.get_or_init(std::collections::HashSet::new),
             render_cache: &app.render_cache,
             theme: app.theme,
@@ -814,6 +817,25 @@ fn is_reminder_only_user(msg: &ChatMessage) -> bool {
     strip_system_reminders(&joined).trim().is_empty()
 }
 
+fn message_has_visible_transcript_content(ctx: &RenderCtx<'_>, msg: &ChatMessage) -> bool {
+    if msg.role == Role::User && !msg.attachments.is_empty() {
+        return true;
+    }
+
+    msg.parts.iter().any(|part| match part {
+        MessagePart::Text(text) => {
+            !text.is_empty() && !(ctx.brief_mode && msg.role == Role::Assistant)
+        }
+        MessagePart::Reasoning(text) => !text.is_empty(),
+        MessagePart::ReasoningSignature(_) => false,
+        MessagePart::Tool(tool) => !is_invisible_in_transcript(&tool.kind),
+        MessagePart::TaskStatus(_) => true,
+        MessagePart::CompactBoundary { .. } => true,
+        MessagePart::Advisor(text) => !text.is_empty(),
+        MessagePart::RedactedThinking(_) => true,
+    })
+}
+
 fn push_user_prompt_lines(
     items: &mut Vec<RenderItem<'_>>,
     text: &str,
@@ -901,16 +923,6 @@ pub(crate) fn build_message_items<'a>(
         // under it — the dedicated spinner row above the input is the
         // visual cue that work is in flight.
         let is_streaming_placeholder = ctx.streaming_idx == Some(idx) && ctx.is_streaming;
-        if is_streaming_placeholder {
-            let has_content = msg.parts.iter().any(|p| match p {
-                MessagePart::Text(s) => !s.is_empty(),
-                MessagePart::Reasoning(s) => !s.is_empty(),
-                _ => true,
-            });
-            if !has_content {
-                return;
-            }
-        }
 
         // Auto-continuation nudges (goal loop, dynamic keepalive, background
         // reminders) push a USER message whose only content is a
@@ -921,6 +933,9 @@ pub(crate) fn build_message_items<'a>(
         // the user typed. Real prompts (text, with reminders appended) and
         // attachment-only turns still render.
         if msg.role == Role::User && is_reminder_only_user(msg) {
+            return;
+        }
+        if !message_has_visible_transcript_content(ctx, msg) {
             return;
         }
 
@@ -1038,6 +1053,17 @@ pub(crate) fn build_message_items<'a>(
             .get(&idx)
             .copied()
             .unwrap_or(ctx.always_show_thinking || reasoning_active);
+        let final_thinking_tokens = msg
+            .usage
+            .as_ref()
+            .map(|usage| usage.thinking_tokens)
+            .filter(|tokens| *tokens > 0);
+        let live_thinking_tokens = if reasoning_active {
+            Some(ctx.live_thinking_tokens).filter(|tokens| *tokens > 0)
+        } else {
+            None
+        };
+        let mut reasoning_token_badge_rendered = false;
 
         // Walk parts with peek-ahead so consecutive groupable tools
         // (Read/Glob/Grep) collapse into a single ToolGroup row when
@@ -1174,8 +1200,22 @@ pub(crate) fn build_message_items<'a>(
                     }
                 }
                 MessagePart::Reasoning(text) => {
-                    push_reasoning_lines(items, text, reasoning_expanded, reasoning_active, &t);
+                    let thinking_tokens = if reasoning_token_badge_rendered {
+                        None
+                    } else {
+                        live_thinking_tokens.or(final_thinking_tokens)
+                    };
+                    reasoning_token_badge_rendered = true;
+                    push_reasoning_lines(
+                        items,
+                        text,
+                        reasoning_expanded,
+                        reasoning_active,
+                        thinking_tokens,
+                        &t,
+                    );
                 }
+                MessagePart::ReasoningSignature(_) => {}
                 MessagePart::Tool(tool) => {
                     if !is_invisible_in_transcript(&tool.kind) {
                         items.push(RenderItem::ToolBlock(tool));

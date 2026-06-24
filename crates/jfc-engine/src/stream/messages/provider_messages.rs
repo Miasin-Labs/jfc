@@ -136,10 +136,31 @@ fn build_assistant_and_tool_result_messages(msgs: &[ChatMessage]) -> Vec<Provide
         }
 
         let mut assistant_content = Vec::new();
-        // Redacted thinking blocks must be round-tripped before text/tools.
-        for part in &m.parts {
-            if let MessagePart::RedactedThinking(data) = part {
-                assistant_content.push(ProviderContent::RedactedThinking { data: data.clone() });
+        // Thinking blocks must be round-tripped before text/tools so Anthropic
+        // can validate signed thinking context on continuation. The signature
+        // marker is a hidden sibling part emitted at `signature_delta`.
+        if role == ProviderRole::Assistant {
+            let mut iter = m.parts.iter().peekable();
+            while let Some(part) = iter.next() {
+                match part {
+                    MessagePart::Reasoning(text) if !text.is_empty() => {
+                        let signature = match iter.peek() {
+                            Some(MessagePart::ReasoningSignature(signature)) => {
+                                Some((*signature).clone())
+                            }
+                            _ => None,
+                        };
+                        assistant_content.push(ProviderContent::Thinking {
+                            text: text.clone(),
+                            signature,
+                        });
+                    }
+                    MessagePart::RedactedThinking(data) => {
+                        assistant_content
+                            .push(ProviderContent::RedactedThinking { data: data.clone() });
+                    }
+                    _ => {}
+                }
             }
         }
         if !text.is_empty() {
@@ -303,6 +324,27 @@ mod tests {
             ProviderContent::Text(t) => assert_eq!(t, "first\nsecond"),
             _ => panic!("expected text content"),
         }
+    }
+
+    #[test]
+    fn build_preserves_signed_anthropic_reasoning_regression() {
+        let msgs = vec![assistant_with_parts(vec![
+            MessagePart::Reasoning("thinking".into()),
+            MessagePart::ReasoningSignature("sig_1".into()),
+            MessagePart::Text("answer".into()),
+        ])];
+
+        let out = build_provider_messages(&msgs);
+
+        assert_eq!(out[0].role, ProviderRole::Assistant);
+        assert!(matches!(
+            &out[0].content[0],
+            ProviderContent::Thinking {
+                text,
+                signature: Some(signature),
+            } if text == "thinking" && signature == "sig_1"
+        ));
+        assert!(matches!(&out[0].content[1], ProviderContent::Text(text) if text == "answer"));
     }
 
     // Robust: empty / whitespace-only messages drop out entirely so the API

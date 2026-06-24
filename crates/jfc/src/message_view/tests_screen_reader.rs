@@ -9,7 +9,14 @@ fn reasoning_header_uses_text_label_in_screen_reader_mode() {
     let t = Theme::dark();
     let mut items: Vec<super::core::RenderItem<'_>> = Vec::new();
     // Expanded=true path exercises the header rendering directly.
-    super::assistant_parts::push_reasoning_lines(&mut items, "internal thoughts", true, true, &t);
+    super::assistant_parts::push_reasoning_lines(
+        &mut items,
+        "internal thoughts",
+        true,
+        true,
+        None,
+        &t,
+    );
 
     // Find the first TextLine and flatten to string.
     fn line_text(l: &ratatui::text::Line<'_>) -> String {

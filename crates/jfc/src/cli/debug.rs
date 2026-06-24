@@ -182,7 +182,8 @@ async fn run_query(args: QueryArgs) -> anyhow::Result<()> {
     // Refresh auth (OAuth providers need a live access token before streaming).
     provider.ensure_auth().await?;
 
-    let opts = build_stream_options(&model, &args);
+    let cfg = jfc_engine::config::load();
+    let opts = build_stream_options(&model, &args, &cfg);
 
     let messages = vec![ProviderMessage {
         role: ProviderRole::User,
@@ -218,7 +219,11 @@ async fn run_query(args: QueryArgs) -> anyhow::Result<()> {
 }
 
 /// Build the [`StreamOptions`] for a query from its CLI args.
-fn build_stream_options(model: &str, args: &QueryArgs) -> StreamOptions {
+fn build_stream_options(
+    model: &str,
+    args: &QueryArgs,
+    cfg: &jfc_engine::config::Config,
+) -> StreamOptions {
     let mut opts = StreamOptions::new(model.to_string()).max_tokens(args.max_tokens);
     if let Some(system) = &args.system {
         opts = opts.system(system.clone());
@@ -233,6 +238,10 @@ fn build_stream_options(model: &str, args: &QueryArgs) -> StreamOptions {
     }
     if let Some(effort) = &args.reasoning_effort {
         opts = opts.reasoning_effort(effort.clone());
+    }
+    let custom_betas = cfg.anthropic_betas(std::iter::empty::<String>());
+    if !custom_betas.is_empty() {
+        opts = opts.custom_betas(custom_betas);
     }
     opts
 }
@@ -481,8 +490,12 @@ fn event_to_json(event: &StreamEvent) -> String {
             "delta": delta,
             "estimated_tokens": estimated_tokens,
         }),
-        StreamEvent::ThinkingDone { index, text } => {
-            json!({"kind": "thinking_done", "index": index, "text": text})
+        StreamEvent::ThinkingDone {
+            index,
+            text,
+            signature,
+        } => {
+            json!({"kind": "thinking_done", "index": index, "text": text, "signature": signature})
         }
         StreamEvent::ThinkingTokens { index, delta } => {
             json!({"kind": "thinking_tokens", "index": index, "delta": delta})

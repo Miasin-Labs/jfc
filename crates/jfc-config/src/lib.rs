@@ -24,6 +24,8 @@ pub use claude_settings::ClaudeCompatibilityConfig;
 /// Re-export from jfc-mcp so existing callsites keep working.
 pub use jfc_mcp::McpServerConfig;
 
+pub const REDACT_THINKING_BETA: &str = "redact-thinking-2026-02-12";
+
 /// Top-level config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
@@ -203,6 +205,12 @@ pub struct Config {
     /// of collapsing to a one-line teaser.
     #[serde(default)]
     pub always_show_thinking: bool,
+    #[serde(
+        default,
+        alias = "redactedThinkingEnabled",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub redacted_thinking_enabled: Option<bool>,
     /// Emit OSC 8 hyperlinks for file paths in tool-block headers (Edit/Write/Read).
     /// Terminals that support OSC 8 (iTerm2, kitty, WezTerm, Windows Terminal,
     /// recent gnome-terminal) render the path as a clickable `file://` link.
@@ -656,6 +664,7 @@ impl Default for Config {
             extends: None,
             auto_compact_threshold_pct: default_auto_compact_threshold_pct(),
             always_show_thinking: false,
+            redacted_thinking_enabled: None,
             osc8_hyperlinks: default_true(),
             enter_sends_message: default_true(),
             session_max_age_days: default_session_max_age_days(),
@@ -669,6 +678,25 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn redacted_thinking_enabled(&self) -> bool {
+        self.redacted_thinking_enabled.unwrap_or(false)
+    }
+
+    pub fn anthropic_betas<I, S>(&self, extra_betas: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut betas = Vec::new();
+        if self.redacted_thinking_enabled() {
+            push_beta_once(&mut betas, REDACT_THINKING_BETA.to_owned());
+        }
+        for beta in extra_betas {
+            push_beta_once(&mut betas, beta.into());
+        }
+        betas
+    }
+
     /// Merge `other` (local override) on top of `self` (base). For every
     /// `Option<T>` field, the local value wins when it is `Some`; otherwise
     /// the base value is used. For plain-bool/scalar fields the local wins
@@ -750,6 +778,7 @@ impl Config {
             refusal_fallback_model: local_or_base!(refusal_fallback_model),
             refusal_rewrite_retry_max: local_or_base!(refusal_rewrite_retry_max),
             bash_shell: local_or_base!(bash_shell),
+            redacted_thinking_enabled: local_or_base!(redacted_thinking_enabled),
             // `extends` from the local file is already resolved; don't
             // propagate the base's extends path into the merged result.
             extends: other.extends,
@@ -764,6 +793,14 @@ impl Config {
             claude: other.claude,
         }
     }
+}
+
+fn push_beta_once(betas: &mut Vec<String>, beta: String) {
+    let beta = beta.trim();
+    if beta.is_empty() || betas.iter().any(|existing| existing == beta) {
+        return;
+    }
+    betas.push(beta.to_owned());
 }
 
 /// `[exploration]` section in config.toml — controls the adaptive
@@ -2478,5 +2515,35 @@ theme = "local-theme"
     fn always_show_thinking_parses_from_toml_normal() {
         let cfg: Config = toml::from_str("always_show_thinking = true").expect("parse");
         assert!(cfg.always_show_thinking);
+    }
+
+    #[test]
+    fn redacted_thinking_defaults_off_regression() {
+        let cfg = Config::default();
+        assert!(!cfg.redacted_thinking_enabled());
+        assert!(cfg.anthropic_betas(std::iter::empty::<String>()).is_empty());
+    }
+
+    #[test]
+    fn redacted_thinking_flag_appends_beta_when_enabled_normal() {
+        let cfg: Config = toml::from_str("redacted_thinking_enabled = true").expect("parse");
+        assert!(cfg.redacted_thinking_enabled());
+        assert_eq!(
+            cfg.anthropic_betas(["custom-beta-2099-01-01"]),
+            vec![
+                REDACT_THINKING_BETA.to_owned(),
+                "custom-beta-2099-01-01".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_false_keeps_beta_out_robust() {
+        let cfg: Config = toml::from_str("redacted_thinking_enabled = false").expect("parse");
+        assert!(!cfg.redacted_thinking_enabled());
+        assert_eq!(
+            cfg.anthropic_betas(["custom-beta-2099-01-01"]),
+            vec!["custom-beta-2099-01-01".to_owned()]
+        );
     }
 }

@@ -172,7 +172,7 @@ fn render_part_into(part: &MessagePart, out: &mut String) {
         MessagePart::Text(t) => out.push_str(t),
         // Reasoning is private to the model; the evaluator should
         // judge from public output only.
-        MessagePart::Reasoning(_) => {}
+        MessagePart::Reasoning(_) | MessagePart::ReasoningSignature(_) => {}
         MessagePart::Tool(tc) => {
             // Show kind + input summary + a short slice of the output so
             // the evaluator can spot "the agent already ran cargo test

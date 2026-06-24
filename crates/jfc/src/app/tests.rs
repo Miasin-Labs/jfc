@@ -6,7 +6,7 @@ use jfc_core::{
     ChatMessage, MessagePart, ModelUsage, ReplacementMode, ToolCall, ToolInput, ToolKind,
     ToolOutput, ToolStatus,
 };
-use jfc_engine::app::recent_models::save_recent_models;
+use jfc_engine::app::recent_models::{load_recent_models_from_store, save_recent_models_to_store};
 use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
 
 /// Minimal Provider implementation for App-construction tests. The
@@ -740,7 +740,9 @@ fn sync_task_completions_tracks_and_prunes_normal() {
 /// developer's `~/.config/jfc/recent_models.json`.
 struct TempConfigHome {
     _dir: tempfile::TempDir,
-    prior: Option<String>,
+    prior_config: Option<String>,
+    prior_data: Option<String>,
+    prior_db: Option<String>,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -750,14 +752,20 @@ impl TempConfigHome {
     fn new() -> Self {
         let guard = RECENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let prior = std::env::var("XDG_CONFIG_HOME").ok();
+        let prior_config = std::env::var("XDG_CONFIG_HOME").ok();
+        let prior_data = std::env::var("XDG_DATA_HOME").ok();
+        let prior_db = std::env::var("JFC_KNOWLEDGE_DB").ok();
         // Safety: env mutation serialized through RECENT_LOCK.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", dir.path());
+            std::env::set_var("XDG_DATA_HOME", dir.path());
+            std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("knowledge.db"));
         }
         Self {
             _dir: dir,
-            prior,
+            prior_config,
+            prior_data,
+            prior_db,
             _guard: guard,
         }
     }
@@ -766,9 +774,17 @@ impl TempConfigHome {
 impl Drop for TempConfigHome {
     fn drop(&mut self) {
         unsafe {
-            match self.prior.take() {
+            match self.prior_config.take() {
                 Some(prev) => std::env::set_var("XDG_CONFIG_HOME", prev),
                 None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match self.prior_data.take() {
+                Some(prev) => std::env::set_var("XDG_DATA_HOME", prev),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match self.prior_db.take() {
+                Some(prev) => std::env::set_var("JFC_KNOWLEDGE_DB", prev),
+                None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
             }
         }
     }
@@ -814,22 +830,24 @@ fn push_recent_model_empty_seed_robust() {
 // Normal: save_recent_models then load_recent_models round-trips.
 #[test]
 fn save_load_recent_models_round_trips_normal() {
-    let _g = TempConfigHome::new();
-    // Ensure jfc/ exists under the tempdir so save_recent_models
-    // doesn't silently fail.
-    let cfg = dirs::config_dir().expect("config dir");
-    std::fs::create_dir_all(cfg.join("jfc")).expect("jfc dir");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store =
+        jfc_engine::app::recent_models::open_recent_models_store(&dir.path().join("knowledge.db"))
+            .unwrap();
     let models = vec!["m1".to_owned(), "m2".to_owned()];
-    save_recent_models(&models);
-    let loaded = load_recent_models();
+    save_recent_models_to_store(&store, &models);
+    let loaded = load_recent_models_from_store(&store);
     assert_eq!(loaded, models);
 }
 
 // Robust: load_recent_models returns empty when no file exists.
 #[test]
 fn load_recent_models_missing_is_empty_robust() {
-    let _g = TempConfigHome::new();
-    let loaded = load_recent_models();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store =
+        jfc_engine::app::recent_models::open_recent_models_store(&dir.path().join("knowledge.db"))
+            .unwrap();
+    let loaded = load_recent_models_from_store(&store);
     assert!(loaded.is_empty());
 }
 

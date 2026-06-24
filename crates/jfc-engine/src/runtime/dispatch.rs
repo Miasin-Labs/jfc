@@ -70,6 +70,11 @@ pub async fn handle_engine_event(
                 state, tokens,
             );
         }
+        EngineEvent::Stream(StreamEvent::ThinkingSignature(signature)) => {
+            crate::runtime::event_loop::handlers::stream_chunk::handle_thinking_signature(
+                state, signature,
+            );
+        }
         EngineEvent::Stream(StreamEvent::RedactedThinking(data)) => {
             crate::runtime::event_loop::handlers::stream_chunk::handle_redacted_thinking(
                 state, data,

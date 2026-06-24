@@ -80,6 +80,9 @@ pub enum SerializedPart {
     Reasoning {
         content: String,
     },
+    ReasoningSignature {
+        signature: String,
+    },
     Tool {
         #[serde(flatten)]
         tool: Box<SerializedToolPart>,

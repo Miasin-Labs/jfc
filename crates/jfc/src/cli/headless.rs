@@ -846,6 +846,15 @@ fn provider_content_from_json(value: &serde_json::Value) -> Option<jfc_provider:
             .get("text")
             .and_then(|v| v.as_str())
             .map(|text| jfc_provider::ProviderContent::Text(text.to_owned())),
+        "thinking" => value.get("thinking").and_then(|v| v.as_str()).map(|text| {
+            jfc_provider::ProviderContent::Thinking {
+                text: text.to_owned(),
+                signature: value
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+            }
+        }),
         "tool_use" => Some(jfc_provider::ProviderContent::ToolUse {
             id: value.get("id")?.as_str()?.to_owned(),
             name: value.get("name")?.as_str()?.to_owned(),
@@ -917,6 +926,9 @@ fn provider_content_to_json(content: &jfc_provider::ProviderContent) -> serde_js
     match content {
         jfc_provider::ProviderContent::Text(text) => {
             serde_json::json!({"type": "text", "text": text})
+        }
+        jfc_provider::ProviderContent::Thinking { text, signature } => {
+            serde_json::json!({"type": "thinking", "thinking": text, "signature": signature})
         }
         jfc_provider::ProviderContent::ToolResult {
             tool_use_id,

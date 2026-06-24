@@ -223,6 +223,18 @@ pub fn handle_thinking_tokens(state: &mut EngineState, token_delta: u32) {
         .saturating_add(token_delta as u64);
 }
 
+pub fn handle_thinking_signature(state: &mut EngineState, signature: String) {
+    if signature.is_empty() {
+        return;
+    }
+    if let Some(msg) = streaming_assistant_mut(state) {
+        if matches!(msg.parts.last(), Some(MessagePart::ReasoningSignature(_))) {
+            msg.parts.pop();
+        }
+        msg.parts.push(MessagePart::ReasoningSignature(signature));
+    }
+}
+
 pub fn handle_response_id(state: &mut EngineState, id: String) {
     state.record_stream_activity();
     crate::cache_lineage::record_response_id(state, id);

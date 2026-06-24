@@ -587,6 +587,11 @@ pub enum StreamEvent {
     ThinkingDone {
         index: usize,
         text: String,
+        /// Anthropic thinking block signature from `signature_delta`.
+        /// Must be persisted with the visible thinking text and echoed back
+        /// in later Anthropic requests so signed thinking context survives
+        /// continuation/resume.
+        signature: Option<String>,
     },
     /// Server-redacted thinking block — opaque base64 blob that must be
     /// round-tripped verbatim in subsequent requests. No deltas; the
@@ -806,6 +811,14 @@ pub enum ProviderRole {
 #[derive(Debug, Clone)]
 pub enum ProviderContent {
     Text(String),
+    /// Anthropic visible thinking block. Unlike `RedactedThinking`, this is
+    /// plaintext returned by the provider and may be rendered in the transcript.
+    /// When `signature` is present it must be echoed back with the same text on
+    /// the next Anthropic request.
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
     ToolResult {
         tool_use_id: String,
         content: String,
@@ -993,8 +1006,16 @@ impl StreamOptions {
 
     pub fn thinking(mut self, budget: u32) -> Self {
         self.thinking_budget = Some(budget);
+        self.enable_visible_thinking_defaults();
         self.clamp_legacy_thinking_budget();
         self
+    }
+
+    fn enable_visible_thinking_defaults(&mut self) {
+        if self.thinking_display.is_none() {
+            self.thinking_display = Some("summarized".to_owned());
+        }
+        self.thinking_token_count = true;
     }
 
     fn clamp_legacy_thinking_budget(&mut self) {
@@ -1011,6 +1032,7 @@ impl StreamOptions {
     /// Use adaptive thinking (Opus 4.6+, Sonnet 4.6+). Ignores budget_tokens.
     pub fn adaptive(mut self) -> Self {
         self.adaptive_thinking = true;
+        self.enable_visible_thinking_defaults();
         self
     }
 
@@ -1936,6 +1958,31 @@ mod tests {
     }
 
     #[test]
+    fn stream_options_thinking_defaults_to_visible_summarized_and_counts_regression() {
+        let opts = StreamOptions::new("m").thinking(4096);
+        assert_eq!(opts.thinking_budget, Some(4096));
+        assert_eq!(opts.thinking_display.as_deref(), Some("summarized"));
+        assert!(opts.thinking_token_count);
+    }
+
+    #[test]
+    fn stream_options_adaptive_defaults_to_visible_summarized_and_counts_regression() {
+        let opts = StreamOptions::new("m").adaptive();
+        assert!(opts.adaptive_thinking);
+        assert_eq!(opts.thinking_display.as_deref(), Some("summarized"));
+        assert!(opts.thinking_token_count);
+    }
+
+    #[test]
+    fn stream_options_thinking_preserves_explicit_display_robust() {
+        let opts = StreamOptions::new("m")
+            .thinking_display("omitted")
+            .thinking(4096);
+        assert_eq!(opts.thinking_display.as_deref(), Some("omitted"));
+        assert!(opts.thinking_token_count);
+    }
+
+    #[test]
     fn stream_options_clamps_thinking_budget_below_max_tokens_regression() {
         let opts = StreamOptions::new("m").thinking(8192).max_tokens(4096);
         assert_eq!(opts.max_tokens, 4096);
@@ -2196,6 +2243,7 @@ mod tests {
                 StreamEvent::ThinkingDone {
                     index: 0,
                     text: "x".into(),
+                    signature: None,
                 },
                 Reasoning,
             ),

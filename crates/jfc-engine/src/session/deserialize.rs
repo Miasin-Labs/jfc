@@ -60,6 +60,9 @@ pub fn deserialize_part(part: SerializedPart) -> MessagePart {
     match part {
         SerializedPart::Text { content } => MessagePart::Text(content),
         SerializedPart::Reasoning { content } => MessagePart::Reasoning(content),
+        SerializedPart::ReasoningSignature { signature } => {
+            MessagePart::ReasoningSignature(signature)
+        }
         SerializedPart::Tool { tool } => {
             let SerializedToolPart {
                 id,

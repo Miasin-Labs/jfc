@@ -28,6 +28,10 @@ impl std::fmt::Display for Role {
 pub enum MessagePart {
     Text(String),
     Reasoning(String),
+    /// Hidden Anthropic signature for the preceding visible `Reasoning` part.
+    /// This is not user-facing content; it exists so provider lowering can
+    /// reconstruct `{ type: "thinking", thinking, signature }` on resume.
+    ReasoningSignature(String),
     /// Opaque redacted thinking blob from Anthropic. Round-tripped verbatim.
     RedactedThinking(String),
     Tool(Box<ToolCall>),
@@ -56,6 +60,7 @@ impl MessagePart {
     pub fn approx_text_len(&self) -> usize {
         match self {
             Self::Text(s) | Self::Reasoning(s) | Self::Advisor(s) => s.len(),
+            Self::ReasoningSignature(_) => 0,
             Self::RedactedThinking(s) => s.len(),
             Self::Tool(tc) => tc.input.summary().len() + tc.output.approx_text_len(),
             Self::TaskStatus(ts) => {
@@ -68,6 +73,7 @@ impl MessagePart {
     pub fn text_only(&self) -> String {
         match self {
             Self::Text(s) | Self::Reasoning(s) => s.clone(),
+            Self::ReasoningSignature(_) => String::new(),
             Self::RedactedThinking(_) => String::new(),
             Self::Advisor(s) => format!("[Advisor: {s}]"),
             Self::Tool(tc) => {
@@ -86,6 +92,7 @@ impl MessagePart {
         match self {
             Self::Text(s) => s.clone(),
             Self::Reasoning(s) => format!("[Reasoning: {}]", s),
+            Self::ReasoningSignature(_) => "[Reasoning signature preserved]".to_owned(),
             Self::RedactedThinking(data) => {
                 format!(
                     "[Redacted thinking: provider withheld plaintext, {} bytes preserved]",
@@ -353,6 +360,7 @@ pub fn validate_turn_invariants_inner(
             MessagePart::Text(s) | MessagePart::Reasoning(s) | MessagePart::Advisor(s) => {
                 !s.is_empty()
             }
+            MessagePart::ReasoningSignature(_) => false,
             MessagePart::RedactedThinking(_) => true,
             MessagePart::Tool(_)
             | MessagePart::TaskStatus(_)

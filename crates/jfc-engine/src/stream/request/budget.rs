@@ -7,6 +7,9 @@ fn chars_to_tokens(chars: usize) -> u64 {
 fn provider_content_chars(content: &ProviderContent) -> usize {
     match content {
         ProviderContent::Text(text) => text.len(),
+        ProviderContent::Thinking { text, signature } => {
+            text.len() + signature.as_deref().map_or(0, str::len)
+        }
         ProviderContent::ToolResult { content, .. } => content.len(),
         ProviderContent::ToolUse { name, input, .. }
         | ProviderContent::ServerToolUse { name, input, .. } => {

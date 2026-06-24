@@ -6,12 +6,12 @@ use super::core::{
     message_view_total_lines, severity_rank,
 };
 use super::detection::{looks_like_difftastic_output, looks_like_git_diff_output};
+use super::file_tool::{diff_lang, produce_diff_view_lines};
 use super::formatters::{
     produce_command_output_lines, produce_git_diff_output_line_count,
     produce_git_diff_output_lines, produce_grep_output_lines,
 };
 use super::output_style::path_color;
-use super::outputs::{diff_lang, produce_diff_view_lines};
 use super::syntax::{
     infer_lang_from_bash, infer_lang_from_tool, lang_from_path, looks_like_markdown, redact_quoted,
 };
@@ -1201,9 +1201,55 @@ mod helper_tests {
     }
 
     #[test]
-    fn structured_diff_changed_rows_use_diff_colors_not_language_syntax_robust() {
+    fn completed_write_text_body_is_hidden_and_slop_guard_not_rendered_robust() {
+        let output = format!(
+            "Successfully wrote 12 bytes to /tmp/out.rs{}Slop Guard findings:\n- noisy",
+            jfc_engine::tools::SLOP_GUARD_MARKER
+        );
+        let tool = dummy_tool(
+            ToolInput::Write {
+                file_path: "/tmp/out.rs".into(),
+                content: "fn main() {}\n".into(),
+            },
+            ToolOutput::Text(output),
+            ToolKind::Write,
+        );
+
+        assert_eq!(tool_body_line_count(&tool, 80), 0);
+        let lines = tool_body_lines_themed(&tool, 80, Theme::dark(), None);
+        assert!(lines.is_empty(), "write body leaked rows: {lines:?}");
+    }
+
+    #[test]
+    fn failed_write_text_body_still_renders_without_slop_guard_tail_robust() {
+        let output = format!(
+            "write: cannot write /tmp/out.rs: denied{}Slop Guard findings:\n- noisy",
+            jfc_engine::tools::SLOP_GUARD_MARKER
+        );
+        let mut tool = dummy_tool(
+            ToolInput::Write {
+                file_path: "/tmp/out.rs".into(),
+                content: "fn main() {}\n".into(),
+            },
+            ToolOutput::Text(output),
+            ToolKind::Write,
+        );
+        tool.status = ToolStatus::Failed;
+
+        let lines = tool_body_lines_themed(&tool, 80, Theme::dark(), None);
+        let rendered = lines_to_plain(&lines);
+        assert!(rendered.contains("denied"), "error missing: {rendered}");
+        assert!(
+            !rendered.contains("Slop Guard") && !rendered.contains("noisy"),
+            "guard output leaked: {rendered}"
+        );
+        assert_eq!(tool_body_line_count(&tool, 80), lines.len());
+    }
+
+    #[test]
+    fn structured_diff_changed_rows_use_syntax_inside_diff_gutter_normal() {
         let diff = DiffView {
-            file_path: "theories/CopyPropagation.v".into(),
+            file_path: "src/lib.rs".into(),
             additions: 1,
             deletions: 1,
             hunks: vec![DiffHunk {
@@ -1215,14 +1261,13 @@ mod helper_tests {
                         kind: DiffLineKind::Removed,
                         old_line: Some(134),
                         new_line: None,
-                        content: "(* Two stores that differ ONLY at [t] stay equal off [t]. *)"
-                            .into(),
+                        content: "let message = \"old\";".into(),
                     },
                     DiffLine {
                         kind: DiffLineKind::Added,
                         old_line: None,
                         new_line: Some(134),
-                        content: "(* [t] is never READ by program [p]. *)".into(),
+                        content: "let message = \"new\";".into(),
                     },
                 ],
             }],
@@ -1240,9 +1285,9 @@ mod helper_tests {
                     .iter()
                     .map(|span| span.content.as_ref())
                     .collect();
-                if plain.contains("Two stores") {
+                if plain.contains("\"old\"") {
                     Some((DiffLineKind::Removed, line))
-                } else if plain.contains("never READ") {
+                } else if plain.contains("\"new\"") {
                     Some((DiffLineKind::Added, line))
                 } else {
                     None
@@ -1261,13 +1306,175 @@ mod helper_tests {
                 if span.content.trim().is_empty() {
                     continue;
                 }
-                assert_eq!(
-                    span.style.fg,
-                    Some(expected),
-                    "changed diff content should keep diff color, not language syntax color:\n{rendered}"
-                );
+                assert_eq!(span.style.bg, Some(theme.code_bg));
             }
+
+            let has_syntax_fg = line
+                .spans
+                .iter()
+                .skip(2)
+                .filter(|span| !span.content.trim().is_empty())
+                .filter_map(|span| span.style.fg)
+                .any(|fg| fg != expected);
+            assert!(
+                has_syntax_fg,
+                "changed diff content should syntax-highlight code, not paint every token the diff color:\n{rendered}"
+            );
+            assert!(
+                line.spans
+                    .get(1)
+                    .is_some_and(|span| span.style.fg == Some(expected)),
+                "diff gutter should keep add/remove color:\n{rendered}"
+            );
         }
+    }
+
+    #[test]
+    fn structured_diff_summary_pluralizes_added_and_removed_lines_normal() {
+        let diff = DiffView {
+            file_path: "src/lib.rs".into(),
+            additions: 1,
+            deletions: 3,
+            hunks: Vec::new(),
+        };
+        let lines = produce_diff_view_lines(&diff, Theme::dark(), true, 120);
+        let rendered = lines_to_plain(&lines);
+
+        assert!(
+            rendered.contains("□ Added 1 line, removed 3 lines"),
+            "summary should include exact add/remove counts:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn structured_diff_highlights_hunks_as_one_syntax_block_robust() {
+        let diff = DiffView {
+            file_path: "src/lib.rs".into(),
+            additions: 1,
+            deletions: 1,
+            hunks: vec![DiffHunk {
+                old_start: 10,
+                new_start: 10,
+                header: "@@ -10,3 +10,3 @@".into(),
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Context,
+                        old_line: Some(10),
+                        new_line: Some(10),
+                        content: "let query = r#\"".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        old_line: Some(11),
+                        new_line: None,
+                        content: "select old_value from events".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        old_line: None,
+                        new_line: Some(11),
+                        content: "select new_value from events".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Context,
+                        old_line: Some(12),
+                        new_line: Some(12),
+                        content: "\"#;".into(),
+                    },
+                ],
+            }],
+        };
+        let theme = Theme::dark();
+        let lines = produce_diff_view_lines(&diff, theme, true, 120);
+        let rendered = lines_to_plain(&lines);
+
+        for needle in ["old_value", "new_value"] {
+            let row = lines
+                .iter()
+                .find(|line| {
+                    line.spans
+                        .iter()
+                        .any(|span| span.content.as_ref().contains(needle))
+                })
+                .unwrap_or_else(|| panic!("missing row for {needle}:\n{rendered}"));
+            let content_spans: Vec<_> = row
+                .spans
+                .iter()
+                .skip(2)
+                .filter(|span| !span.content.trim().is_empty())
+                .collect();
+            assert!(
+                content_spans
+                    .iter()
+                    .all(|span| span.style.bg == Some(theme.code_bg)),
+                "hunk-highlighted code should keep diff row background:\n{rendered}"
+            );
+            assert!(
+                content_spans.iter().any(|span| span.style.fg.is_some()),
+                "hunk-highlighted code should carry syntax styles:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_edit_diff_reaches_terminal_buffer_with_counts_and_body_normal() {
+        let app = stub_app();
+        let diff = DiffView {
+            file_path: "/tmp/src/lib.rs".into(),
+            additions: 1,
+            deletions: 1,
+            hunks: vec![DiffHunk {
+                old_start: 7,
+                new_start: 7,
+                header: "@@ -7,1 +7,1 @@".into(),
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        old_line: Some(7),
+                        new_line: None,
+                        content: "let value = \"old\";".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        old_line: None,
+                        new_line: Some(7),
+                        content: "let value = \"new\";".into(),
+                    },
+                ],
+            }],
+        };
+        let tool = dummy_tool(
+            ToolInput::Edit {
+                file_path: "/tmp/src/lib.rs".into(),
+                old_string: "old".into(),
+                new_string: "new".into(),
+                replacement: ReplacementMode::FirstOnly,
+            },
+            ToolOutput::Diff(diff),
+            ToolKind::Edit,
+        );
+        let rendered = rendered_tool_text(&app, &tool, 120);
+
+        assert!(
+            rendered.contains("Edit("),
+            "missing edit header:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("+1") && rendered.contains("-1"),
+            "missing compact diff counts:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Added 1 line, removed 1 line"),
+            "missing diff summary:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("\"old\""),
+            "missing removed row:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("\"new\""),
+            "missing added row:\n{rendered}"
+        );
     }
 
     #[test]
@@ -1611,6 +1818,12 @@ mod helper_tests {
     }
 
     #[test]
+    fn task_management_tools_are_hidden_from_normal_transcript_regression() {
+        assert!(is_invisible_in_transcript(&ToolKind::TaskCreate));
+        assert!(is_invisible_in_transcript(&ToolKind::TaskDone));
+    }
+
+    #[test]
     fn render_items_drop_bash_output_compatibility_tool_regression() {
         let mut app = stub_app();
         let mut msg = ChatMessage::assistant(String::new());
@@ -1667,6 +1880,213 @@ mod helper_tests {
                 .any(|item| matches!(item, super::core::RenderItem::ToolBlock(_))),
             "Bash calls should surface through footer/background state, not transcript tool widgets"
         );
+    }
+
+    #[test]
+    fn completed_reasoning_header_includes_thinking_usage_regression() {
+        let mut app = stub_app();
+        let mut msg = ChatMessage::assistant_parts(vec![MessagePart::Reasoning(
+            "The actual visible thinking text.".into(),
+        )]);
+        msg.usage = Some(ModelUsage {
+            input_tokens: 1_000,
+            output_tokens: 240,
+            thinking_tokens: 123,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+        });
+        app.engine.messages.push(msg);
+
+        let ctx = RenderCtx::from_app(&app);
+        let items = build_render_items_ctx(&ctx, 80);
+        let text = items
+            .iter()
+            .filter_map(|item| match item {
+                super::core::RenderItem::TextLine(line) => Some(
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Thought"), "reasoning label missing:\n{text}");
+        assert!(
+            text.contains("123 tokens"),
+            "thinking token usage missing from reasoning header:\n{text}"
+        );
+    }
+
+    #[test]
+    fn completed_reasoning_thinking_usage_reaches_terminal_buffer_regression() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut app = stub_app();
+        let mut msg = ChatMessage::assistant_parts(vec![MessagePart::Reasoning(
+            "The actual visible thinking text.".into(),
+        )]);
+        msg.usage = Some(ModelUsage {
+            input_tokens: 1_000,
+            output_tokens: 240,
+            thinking_tokens: 123,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+        });
+        app.engine.messages.push(msg);
+
+        let backend = TestBackend::new(80, 6);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|frame| {
+            frame.render_widget(
+                super::core::MessageView {
+                    app: &app,
+                    prebuilt: None,
+                },
+                frame.area(),
+            );
+        })
+        .expect("draw");
+        let buffer = term.backend().buffer();
+        let area = buffer.area();
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("123 tokens"),
+            "terminal buffer missed thinking token usage:\n{text}"
+        );
+    }
+
+    #[test]
+    fn hidden_bash_tool_only_message_allocates_no_rows_regression() {
+        let mut app = stub_app();
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(MessagePart::Tool(Box::new(dummy_tool(
+            ToolInput::Bash {
+                command: "cargo test".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: None,
+                suppress_output: None,
+            },
+            ToolOutput::Text("test result: ok".into()),
+            ToolKind::Bash,
+        ))));
+        app.engine.messages.push(msg);
+
+        let ctx = RenderCtx::from_app(&app);
+        let items = build_render_items_ctx(&ctx, 80);
+        let rendered_height: usize = items.iter().map(|item| item.height(80)).sum();
+
+        assert!(items.is_empty(), "hidden-only Bash emitted transcript rows");
+        assert_eq!(rendered_height, 0);
+        assert_eq!(message_view_total_lines(&app, 80), 0);
+    }
+
+    #[test]
+    fn hidden_bash_output_only_message_allocates_no_rows_regression() {
+        let mut app = stub_app();
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(MessagePart::Tool(Box::new(dummy_tool(
+            ToolInput::BashOutput {
+                task_id: "bash_fake".into(),
+                offset: None,
+                limit: None,
+                block: None,
+                timeout: None,
+                wait_up_to: None,
+            },
+            ToolOutput::Text("Unknown Bash task id 'bash_fake'".into()),
+            ToolKind::BashOutput,
+        ))));
+        app.engine.messages.push(msg);
+
+        let ctx = RenderCtx::from_app(&app);
+        let items = build_render_items_ctx(&ctx, 80);
+        let rendered_height: usize = items.iter().map(|item| item.height(80)).sum();
+
+        assert!(
+            items.is_empty(),
+            "hidden-only BashOutput emitted transcript rows"
+        );
+        assert_eq!(rendered_height, 0);
+        assert_eq!(message_view_total_lines(&app, 80), 0);
+    }
+
+    #[test]
+    fn hidden_taskcreate_only_message_allocates_no_rows_regression() {
+        let mut app = stub_app();
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(MessagePart::Tool(Box::new(dummy_tool(
+            ToolInput::TaskCreate {
+                subject: "fix transcript gap".into(),
+                description: "hidden tool-only messages must not reserve rows".into(),
+                active_form: None,
+                blocked_by: Vec::new(),
+                acceptance_criteria: None,
+                verification_command: None,
+                risk: None,
+                parent_id: None,
+                kind: None,
+                tags: Vec::new(),
+                priority: None,
+                effort: None,
+                model: None,
+            },
+            ToolOutput::Text("created t1".into()),
+            ToolKind::TaskCreate,
+        ))));
+        app.engine.messages.push(msg);
+
+        let ctx = RenderCtx::from_app(&app);
+        let items = build_render_items_ctx(&ctx, 80);
+        let rendered_height: usize = items.iter().map(|item| item.height(80)).sum();
+
+        assert!(
+            items.is_empty(),
+            "hidden-only TaskCreate emitted transcript rows"
+        );
+        assert_eq!(rendered_height, 0);
+        assert_eq!(message_view_total_lines(&app, 80), 0);
+    }
+
+    #[test]
+    fn hidden_taskdone_only_message_allocates_no_rows_regression() {
+        let mut app = stub_app();
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        msg.parts.push(MessagePart::Tool(Box::new(dummy_tool(
+            ToolInput::TaskDone {
+                task_id: "t1".into(),
+            },
+            ToolOutput::Text("done t1".into()),
+            ToolKind::TaskDone,
+        ))));
+        app.engine.messages.push(msg);
+
+        let ctx = RenderCtx::from_app(&app);
+        let items = build_render_items_ctx(&ctx, 80);
+        let rendered_height: usize = items.iter().map(|item| item.height(80)).sum();
+
+        assert!(
+            items.is_empty(),
+            "hidden-only TaskDone emitted transcript rows"
+        );
+        assert_eq!(rendered_height, 0);
+        assert_eq!(message_view_total_lines(&app, 80), 0);
     }
 
     // --- tool_status_icon_animated -----------------------------------
@@ -2298,6 +2718,33 @@ mod helper_tests {
         let spans = build_title_spans(&tool, &t, "●", Style::default(), 80);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(combined.contains("◆"), "expected pin glyph: {combined:?}");
+    }
+
+    #[test]
+    fn build_title_spans_adds_diff_counts_for_file_mutations_normal() {
+        let t = Theme::dark();
+        let diff = DiffView {
+            file_path: "src/lib.rs".into(),
+            additions: 26,
+            deletions: 31,
+            hunks: Vec::new(),
+        };
+        let tool = dummy_tool(
+            ToolInput::Edit {
+                file_path: "src/lib.rs".into(),
+                old_string: "old".into(),
+                new_string: "new".into(),
+                replacement: ReplacementMode::FirstOnly,
+            },
+            ToolOutput::Diff(diff),
+            ToolKind::Edit,
+        );
+        let spans = build_title_spans(&tool, &t, "●", Style::default(), 120);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            combined.contains("+26") && combined.contains("-31"),
+            "missing diff counts: {combined:?}"
+        );
     }
 
     #[test]
@@ -3057,6 +3504,7 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
             reasoning_expanded: &expanded,
             always_show_thinking: true,
             active_reasoning_idx: None,
+            live_thinking_tokens: 0,
             tool_group_expanded: &groups,
             render_cache: &app.render_cache,
             theme: app.theme,
@@ -3188,6 +3636,60 @@ fatal: external diff died, stopping at crates/jfc/src/agents.rs\n";
             }
         }
         painted
+    }
+
+    fn rendered_tool_text(app: &App, tool: &ToolCall, width: u16) -> String {
+        let h = tool_block_height(tool, width as usize).saturating_add(4) as u16;
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: h.max(8),
+        };
+        let mut buf = Buffer::empty(area);
+        render_tool_block(app, tool, area, app.theme, &mut buf, 0);
+
+        let mut out = String::new();
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push_str(row.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn completed_write_with_slop_guard_paints_only_compact_header_regression() {
+        let app = stub_app();
+        let output = format!(
+            "Successfully wrote /tmp/out.rs{}Slop Guard findings:\n- noisy",
+            jfc_engine::tools::SLOP_GUARD_MARKER
+        );
+        let tool = dummy_tool(
+            ToolInput::Write {
+                file_path: "/tmp/out.rs".into(),
+                content: "fn main() {}\n".into(),
+            },
+            ToolOutput::Text(output),
+            ToolKind::Write,
+        );
+
+        assert_eq!(tool_block_height(&tool, 80), 1);
+        assert_eq!(rendered_tool_rows(&app, &tool, 80), 1);
+        let rendered = rendered_tool_text(&app, &tool, 80);
+        assert!(
+            rendered.contains("Write("),
+            "missing compact header: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Successfully wrote")
+                && !rendered.contains("Slop Guard")
+                && !rendered.contains("noisy"),
+            "write body leaked into compact render: {rendered}"
+        );
     }
 
     #[test]

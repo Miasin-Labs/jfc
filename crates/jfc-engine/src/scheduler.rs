@@ -1,9 +1,9 @@
 //! Tool concurrency scheduler.
 //!
 //! Groups tool calls from a single model response into batches that respect
-//! concurrency safety. Concurrency-safe tools (Read, Glob, Grep) run in
-//! parallel up to `MAX_CONCURRENCY`. Non-safe tools (Edit, Write, Bash) run
-//! sequentially. Batches are processed in model order:
+//! concurrency safety. Concurrency-safe read-only tools run in parallel up to
+//! `MAX_CONCURRENCY`. Non-safe tools (Edit, Write, Bash, task/team/message
+//! mutations) run sequentially. Batches are processed in model order:
 //!
 //!   parallel batch → sequential single → parallel batch → …
 
@@ -35,8 +35,9 @@ pub enum ToolBatch {
 
 /// Whether a tool kind is safe to run concurrently with other tools.
 ///
-/// Read-only tools that don't mutate the filesystem or have side effects are
-/// concurrency-safe. Write tools, shell commands, patches, and TaskDone
+/// Read-only tools that don't mutate the filesystem, session state, task
+/// state, team state, or inter-agent mailboxes are concurrency-safe. Write
+/// tools, shell commands, patches, task/team/message mutations, and TaskDone
 /// verifications are not.
 pub fn is_concurrency_safe(kind: &ToolKind) -> bool {
     matches!(
@@ -46,15 +47,10 @@ pub fn is_concurrency_safe(kind: &ToolKind) -> bool {
             | ToolKind::Grep
             | ToolKind::Search
             | ToolKind::BashOutput
-            | ToolKind::TaskCreate
-            | ToolKind::TaskUpdate
             | ToolKind::TaskList
             | ToolKind::Skill
             | ToolKind::ToolSearch
             | ToolKind::ToolSuggest
-            | ToolKind::TeamCreate
-            | ToolKind::TeamDelete
-            | ToolKind::SendMessage
             | ToolKind::DesignProjectList
             | ToolKind::DesignListFiles
             | ToolKind::DesignReadFile
@@ -471,15 +467,10 @@ mod tests {
             ToolKind::Glob,
             ToolKind::Grep,
             ToolKind::Search,
-            ToolKind::TaskCreate,
-            ToolKind::TaskUpdate,
             ToolKind::TaskList,
             ToolKind::Skill,
             ToolKind::ToolSearch,
             ToolKind::ToolSuggest,
-            ToolKind::TeamCreate,
-            ToolKind::TeamDelete,
-            ToolKind::SendMessage,
         ] {
             assert!(
                 is_concurrency_safe(&kind),
@@ -489,8 +480,8 @@ mod tests {
     }
 
     // Robust: side-effecting tool kinds are NOT concurrency-safe — they
-    // must run sequentially because they mutate the filesystem or invoke
-    // shell processes.
+    // must run sequentially because they mutate the filesystem, session/task
+    // state, team state, mailboxes, or invoke shell processes.
     #[test]
     fn is_concurrency_safe_rejects_mutating_tools_robust() {
         for kind in [
@@ -499,7 +490,12 @@ mod tests {
             ToolKind::Bash,
             ToolKind::ApplyPatch,
             ToolKind::Task,
+            ToolKind::TaskCreate,
+            ToolKind::TaskUpdate,
             ToolKind::TaskDone,
+            ToolKind::TeamCreate,
+            ToolKind::TeamDelete,
+            ToolKind::SendMessage,
             ToolKind::MemoryCreate,
             ToolKind::MemoryDelete,
         ] {

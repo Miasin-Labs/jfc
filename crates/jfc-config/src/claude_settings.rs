@@ -542,17 +542,19 @@ pub fn apply_settings(cfg: &mut Config, settings: ClaudeCompatibilityConfig) {
         }
         cfg.refusal_fallback_model = Some(fallback_model.trim().to_owned());
     }
-    if let Some(theme) = settings
-        .theme
-        .as_ref()
-        .filter(|theme| !theme.trim().is_empty())
+    if cfg.theme.is_none()
+        && let Some(theme) = settings
+            .theme
+            .as_ref()
+            .filter(|theme| !theme.trim().is_empty())
     {
         cfg.theme = Some(theme.trim().to_owned());
     }
-    if let Some(output_style) = settings
-        .output_style
-        .as_ref()
-        .filter(|style| !style.trim().is_empty())
+    if cfg.output_style.is_none()
+        && let Some(output_style) = settings
+            .output_style
+            .as_ref()
+            .filter(|style| !style.trim().is_empty())
     {
         cfg.output_style = Some(output_style.trim().to_owned());
     }
@@ -1378,6 +1380,27 @@ mod tests {
         assert_eq!(chrome.server_type.as_deref(), Some("stdio"));
         assert_eq!(chrome.command.as_deref(), Some("claude"));
         assert_eq!(chrome.args, vec![CLAUDE_IN_CHROME_MCP_ARG]);
+    }
+
+    #[test]
+    fn apply_settings_preserves_explicit_jfc_theme_and_output_style_regression() {
+        let mut cfg = Config {
+            theme: Some("claude".to_owned()),
+            output_style: Some("brief".to_owned()),
+            ..Default::default()
+        };
+
+        apply_settings(
+            &mut cfg,
+            ClaudeCompatibilityConfig {
+                theme: Some("dark".to_owned()),
+                output_style: Some("concise".to_owned()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(cfg.theme.as_deref(), Some("claude"));
+        assert_eq!(cfg.output_style.as_deref(), Some("brief"));
     }
 
     #[test]

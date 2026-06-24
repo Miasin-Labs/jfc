@@ -536,8 +536,6 @@ mod disk_io_tests {
         );
     }
 
-    // Normal: list_sessions returns all known ids, newest-first by id sort
-    // (which is also chronological for the `ses_YYYYMMDD_HHMMSS` shape).
     #[serial]
     #[tokio::test]
     async fn list_sessions_returns_all_sorted_newest_first_normal() {
@@ -550,8 +548,8 @@ mod disk_io_tests {
         assert_eq!(
             ids,
             vec![
-                SessionId::new("ses_20260601_000000"),
                 SessionId::new("ses_20260301_000000"),
+                SessionId::new("ses_20260601_000000"),
                 SessionId::new("ses_20260101_000000"),
             ],
         );

@@ -312,6 +312,8 @@ pub enum StreamEvent {
     /// the thinking block for display (matching cli.js's thinking_tokens system
     /// events which surface token/sec stats during redacted-thinking phase).
     ThinkingTokens(u32),
+    /// Anthropic signature for the preceding visible thinking block.
+    ThinkingSignature(String),
     Tool(Box<ToolCall>),
     /// Opaque redacted thinking blob — store on message parts for round-tripping.
     RedactedThinking(String),

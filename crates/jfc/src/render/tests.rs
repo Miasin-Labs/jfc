@@ -1360,7 +1360,10 @@ mod subagent_counter_tests {
 #[cfg(test)]
 mod render_snapshot_tests {
     use crate::app::{App, BackgroundTask, PermissionMode};
-    use jfc_core::{MessagePart, TaskLifecycle, ToolCall, ToolInput, ToolKind, ToolOutput};
+    use jfc_core::{
+        ChatMessage, MessagePart, TaskLifecycle, ToolCall, ToolInput, ToolKind, ToolOutput,
+        ToolStatus,
+    };
     use ratatui::{Terminal, backend::TestBackend, style::Color};
     use std::sync::Arc;
 
@@ -1537,6 +1540,71 @@ mod render_snapshot_tests {
 
         let text = buffer_text(&term);
         assert!(text.contains("1 shell"), "shell badge missing:\n{text}");
+    }
+
+    #[test]
+    fn spinner_row_renders_editing_for_in_progress_edit_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.turn_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        app.spinner_state.phase = crate::spinner::SpinnerPhase::Working;
+
+        let tool_id = "edit-1";
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        let mut tool = ToolCall::new_pending(
+            tool_id.into(),
+            ToolKind::Edit,
+            ToolInput::Edit {
+                file_path: "src/tool_blocks.rs".into(),
+                old_string: "old".into(),
+                new_string: "new".into(),
+                replacement: jfc_core::ReplacementMode::FirstOnly,
+            },
+        );
+        tool.status = ToolStatus::Running;
+        msg.parts.push(MessagePart::tool(tool));
+        app.engine.in_progress_tool_use_ids.insert(tool_id.into());
+        app.engine.messages.push(msg);
+
+        let backend = TestBackend::new(80, 2);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::spinner_row(f, &app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(text.contains("Editing"), "editing label missing:\n{text}");
+        assert!(!text.contains("Working"), "generic label leaked:\n{text}");
+    }
+
+    #[test]
+    fn spinner_row_renders_semantic_thinking_label_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        let now = std::time::Instant::now();
+        app.engine.turn_started_at = Some(now - std::time::Duration::from_secs(3));
+        app.engine.is_streaming = true;
+        app.engine.thinking_started_at = Some(now - std::time::Duration::from_secs(2));
+        app.spinner_state.phase = crate::spinner::SpinnerPhase::Thinking;
+
+        let backend = TestBackend::new(80, 2);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::spinner_row(f, &app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(text.contains("Thinking"), "thinking label missing:\n{text}");
+        assert!(
+            !text.contains("Jitterbugging"),
+            "decorative verb leaked:\n{text}"
+        );
     }
 
     // The teammates panel renders the agent's description and the shared

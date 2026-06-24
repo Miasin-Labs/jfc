@@ -133,6 +133,9 @@ fn estimate_provider_messages_tokens(messages: &[ProviderMessage]) -> u64 {
 fn estimate_provider_content_chars(content: &ProviderContent) -> usize {
     match content {
         ProviderContent::Text(text) => text.len(),
+        ProviderContent::Thinking { text, signature } => {
+            text.len() + signature.as_deref().map_or(0, str::len)
+        }
         ProviderContent::ToolResult {
             tool_use_id,
             content,

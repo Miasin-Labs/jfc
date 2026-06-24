@@ -24,9 +24,10 @@
 //!   * width change / theme-ish global change → `clear()` (the caller
 //!     compares widths);
 //!   * message content change → fingerprint mismatch on that entry;
-//!   * expansion state (reasoning / tool groups) changes message layout
-//!     without changing content — the fingerprint folds in the per-message
-//!     expansion inputs so toggles invalidate exactly the toggled message;
+//!   * expansion state (reasoning / tool groups) and brief-mode filtering
+//!     change message layout without changing content — the fingerprint folds
+//!     in those per-message layout inputs so toggles invalidate exactly the
+//!     affected message;
 //!   * the streaming message is ALWAYS re-measured (its text accrues
 //!     between fingerprint checks within the same byte length only in
 //!     pathological cases, but pacing also changes revealed lines, which
@@ -49,7 +50,7 @@ pub struct MsgFingerprint {
     last_part_bytes: usize,
     /// Folded layout inputs that change a message's height without
     /// changing its text: tool statuses/expansion, reasoning expansion,
-    /// queued flag, elapsed footer.
+    /// queued flag, elapsed footer, brief-mode filtering.
     layout: u64,
 }
 
@@ -71,6 +72,7 @@ fn layout_word(ctx: &RenderCtx<'_>, idx: usize, msg: &ChatMessage) -> u64 {
     };
     mix(msg.queued as u64);
     mix(msg.elapsed.is_some() as u64);
+    mix(ctx.brief_mode as u64);
     let reasoning_expanded = ctx
         .reasoning_expanded
         .get(&idx)
@@ -97,6 +99,7 @@ fn layout_word(ctx: &RenderCtx<'_>, idx: usize, msg: &ChatMessage) -> u64 {
             // fingerprint already cover them.
             MessagePart::Text(_)
             | MessagePart::Reasoning(_)
+            | MessagePart::ReasoningSignature(_)
             | MessagePart::Advisor(_)
             | MessagePart::RedactedThinking(_)
             | MessagePart::CompactBoundary { .. } => {}
@@ -335,6 +338,32 @@ mod tests {
         let t1 = index.sync(&ctx, 80);
         let t2 = index.sync(&ctx, 80);
         assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn brief_mode_invalidates_cached_heights_robust() {
+        let mut app = test_app(vec![
+            ChatMessage::user("question".to_string()),
+            ChatMessage::assistant("answer\nwith\nseveral\nvisible\nlines".to_string()),
+        ]);
+        let mut index = HeightIndex::new();
+        {
+            let ctx = ctx_for(&app);
+            let normal = index.sync(&ctx, 80);
+            assert!(normal > 0, "fixture must render visible rows");
+        }
+
+        app.engine.brief_mode = true;
+        let ctx = ctx_for(&app);
+        let brief = index.sync(&ctx, 80);
+        let full: usize = super::super::core::build_render_items_ctx(&ctx, 80)
+            .iter()
+            .map(|i| i.height(80))
+            .sum();
+        assert_eq!(
+            brief, full,
+            "brief mode total must not reuse normal heights"
+        );
     }
 
     #[test]

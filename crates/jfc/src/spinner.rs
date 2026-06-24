@@ -1,16 +1,15 @@
 //! Streaming-status model for the spinner row.
 //!
 //! Elapsed time, token counts, thinking status, throughput, and silence
-//! reflect real stream signals. The active verb follows Claude Code's
-//! spinner vocabulary and user-configurable `spinnerVerbs`; the renderer
-//! picks one verb per activity instead of exposing lifecycle states such
-//! as "requesting" or "responding".
+//! reflect real stream signals. The active label is semantic (`Thinking`,
+//! `Responding`, `Editing`, `Running`, etc.) so the user sees what is actually
+//! happening instead of a decorative verb hiding the current mode.
 //!
 //! ## Format (one line)
 //!
 //! ```text
-//! ✦ Percolating… (1m04s · ↓ 1.2k tokens · thinking)
-//! ✦ Unfurling… (1m22s · ↓ 2.4k tokens · 47 tok/s)
+//! ✦ Thinking… (1m04s · ↓ 1.2k tokens · thinking)
+//! ✦ Editing… (1m22s · ↓ 2.4k tokens · 47 tok/s)
 //! ```
 //!
 //! The glyph advances one frame per render tick *while streaming* — that
