@@ -27,6 +27,7 @@ mod policy;
 
 mod rc;
 mod redteam;
+mod rsi_worker;
 mod terminal;
 
 // Provider bootstrap moved to the engine side (runtime/bootstrap.rs) so the
@@ -52,6 +53,7 @@ use plugin::{PluginSubcommand, run_plugin_subcommand};
 use policy::{PolicySubcommand, run_policy_subcommand};
 use rc::{RcSubcommand, run_rc_subcommand};
 use redteam::{RedTeamSubcommand, run_redteam_subcommand};
+use rsi_worker::{RsiWorkerArgs, run_rsi_worker_subcommand};
 use terminal::{enable_keyboard_enhancement, install_terminal_panic_hook};
 
 /// JFC - A TUI assistant for code exploration and development
@@ -334,6 +336,8 @@ pub(crate) struct Cli {
 /// invocation keeps `jfc` ergonomic for humans.
 #[derive(Subcommand, Debug)]
 enum Command {
+    #[command(hide = true)]
+    RsiWorker(RsiWorkerArgs),
     /// Manage the background daemon (cron jobs + scheduled wakeups).
     Daemon {
         #[command(subcommand)]
@@ -1002,6 +1006,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
 /// Dispatch `jfc <subcommand>`. Pure CLI — no terminal raw-mode, no TUI.
 async fn run_subcommand(cmd: Command) -> anyhow::Result<()> {
     match cmd {
+        Command::RsiWorker(args) => run_rsi_worker_subcommand(args).await,
         Command::Daemon { sub } => run_daemon_subcommand(sub).await,
         Command::Auth { sub } => run_auth_subcommand(sub).await,
         Command::Rc { sub } => run_rc_subcommand(sub).await,

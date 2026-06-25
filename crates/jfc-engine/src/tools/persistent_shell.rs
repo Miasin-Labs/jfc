@@ -190,9 +190,7 @@ pub async fn run_in_shell(id: &str, command: &str, timeout: Duration) -> ShellRe
 }
 
 /// Spawn a shell into the slot. Separated so `run_in_shell` stays flat.
-async fn ensure_spawned(
-    guard: &mut Option<PersistentShell>,
-) -> std::io::Result<()> {
+async fn ensure_spawned(guard: &mut Option<PersistentShell>) -> std::io::Result<()> {
     *guard = Some(PersistentShell::spawn(&configured_shell()).await?);
     Ok(())
 }

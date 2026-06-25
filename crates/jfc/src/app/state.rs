@@ -150,7 +150,7 @@ pub struct PromptRewriteProposal {
 
 pub const SPINNER: &[&str] = crate::glyphs::TASK_FRAMES;
 pub const IDLE_TICK_MS: u64 = 80;
-pub const ANIM_TICK_MS: u64 = 33;
+pub const ANIM_TICK_MS: u64 = 80;
 
 pub struct App {
     /// The frontend-neutral engine state: conversation, streaming,

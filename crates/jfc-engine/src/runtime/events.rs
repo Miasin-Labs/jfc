@@ -530,6 +530,7 @@ pub enum TaskEvent {
     Progress {
         task_id: crate::ids::TaskId,
         last_tool: Option<String>,
+        last_tool_info: Option<String>,
         elapsed_ms: u64,
         /// Cumulative tools invoked this run (None = no update). Routed
         /// to `BackgroundTask.tool_use_count` so the fan UI can render

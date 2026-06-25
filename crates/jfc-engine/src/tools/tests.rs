@@ -324,6 +324,14 @@ fn all_tool_defs_includes_every_canonical_tool_normal() {
         "HcomKill",
         "HcomRelay",
         "HcomRun",
+        "learn_status",
+        "learn_historize",
+        "learn_dream",
+        "learn_rsi_list",
+        "learn_rsi_promote",
+        "learn_rsi_rollback",
+        "learn_key_files_list",
+        "learn_user_profile_show",
         "post_bounty",
         "run_bounty",
         "market_status",
@@ -1135,6 +1143,46 @@ fn filter_tools_empty_allowed_means_all_normal() {
     ];
     let filtered = filter_tools_for_agent(all, &[], &[], false);
     assert_eq!(filtered.len(), 3);
+}
+
+#[test]
+fn filter_tools_preserves_mcp_codegraph_when_allowing_all_regression() {
+    let all = vec![
+        make_tool_def("Read"),
+        make_tool_def("mcp__codegraph__codegraph_explore"),
+    ];
+    let filtered = filter_tools_for_agent(all, &[], &[], false);
+
+    assert!(
+        filtered
+            .iter()
+            .any(|tool| tool.name == "mcp__codegraph__codegraph_explore"),
+        "MCP CodeGraph tools must remain visible to subagents"
+    );
+}
+
+#[test]
+fn filter_tools_allowed_raw_codegraph_matches_mcp_name_regression() {
+    let all = vec![
+        make_tool_def("Read"),
+        make_tool_def("mcp__codegraph__codegraph_explore"),
+    ];
+    let filtered = filter_tools_for_agent(all, &["codegraph_explore".into()], &[], false);
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].name, "mcp__codegraph__codegraph_explore");
+}
+
+#[test]
+fn filter_tools_disallowed_raw_codegraph_matches_mcp_name_regression() {
+    let all = vec![
+        make_tool_def("Read"),
+        make_tool_def("mcp__codegraph__codegraph_explore"),
+    ];
+    let filtered = filter_tools_for_agent(all, &[], &["codegraph_explore".into()], false);
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].name, "Read");
 }
 
 #[test]

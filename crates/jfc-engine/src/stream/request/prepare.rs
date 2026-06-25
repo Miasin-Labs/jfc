@@ -12,6 +12,7 @@ use super::PreparedStreamRequest;
 use super::budget::stream_context_budget;
 use super::project_context::append_project_context;
 use super::prompt_seed::{PromptSeed, build_prompt_seed};
+use super::rsi_runtime::append_active_rsi_prompt_sections;
 use super::runtime_prompt::{append_runtime_prompt_sections, append_turn_prompt_sections};
 use super::thinking::{enforce_thinking_budget_fits_max_tokens, requested_thinking_display};
 use super::tool_catalog::prepare_advertised_tools;
@@ -39,6 +40,7 @@ pub async fn prepare_stream_request(
     )
     .await;
     let runtime_prompt = append_runtime_prompt_sections(&mut system_prompt, &provider);
+    let rsi_runtime = append_active_rsi_prompt_sections(&mut system_prompt).await;
     append_turn_prompt_sections(&mut system_prompt, &overrides, messages);
 
     let provider_name = provider.name().to_owned();
@@ -62,6 +64,8 @@ pub async fn prepare_stream_request(
         skills_chars,
         dispatch_chars,
         diagnostics_chars,
+        rsi_prompt_sections = rsi_runtime.prompt_sections,
+        rsi_tool_visibility_rules = rsi_runtime.tool_visibility_rules,
         total_system_chars = system_prompt.len(),
         estimated_tokens = system_prompt.len() / 4,
         "system prompt budget breakdown"

@@ -465,13 +465,14 @@ pub fn save_sidecar(session_id: &str, goal: Option<&ActiveGoal>) {
         Some(g) => match serde_json::to_string(g) {
             Ok(json) => {
                 if let Err(e) = jfc_knowledge::block_on_knowledge(async {
-                    store.upsert_session_artifact(
-                        session_id,
-                        GOAL_ARTIFACT_KIND,
-                        GOAL_ARTIFACT_KEY,
-                        &json,
-                    )
-                    .await
+                    store
+                        .upsert_session_artifact(
+                            session_id,
+                            GOAL_ARTIFACT_KIND,
+                            GOAL_ARTIFACT_KEY,
+                            &json,
+                        )
+                        .await
                 }) {
                     tracing::warn!(target: "jfc::goal", session_id, error = %e, "failed to persist goal");
                     return;
@@ -494,7 +495,8 @@ pub fn save_sidecar(session_id: &str, goal: Option<&ActiveGoal>) {
         },
         None => {
             let _ = jfc_knowledge::block_on_knowledge(async {
-                store.delete_session_artifact(session_id, GOAL_ARTIFACT_KIND, GOAL_ARTIFACT_KEY)
+                store
+                    .delete_session_artifact(session_id, GOAL_ARTIFACT_KIND, GOAL_ARTIFACT_KEY)
                     .await
             });
             tracing::debug!(

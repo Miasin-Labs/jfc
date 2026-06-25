@@ -10,6 +10,9 @@ use super::ExecutionResult;
 use jfc_memory::{MemoryLevel, MemoryScope, MemoryType};
 use std::path::Path;
 
+mod rsi;
+pub use rsi::{execute_learn_rsi_list, execute_learn_rsi_promote, execute_learn_rsi_rollback};
+
 const LEARN_PENDING_TRANSCRIPT_KIND: &str = "learn_pending_transcript";
 const LEARN_PROCESSED_TRANSCRIPT_KIND: &str = "learn_processed_transcript";
 const LEARN_FAILED_TRANSCRIPT_KIND: &str = "learn_failed_transcript";
@@ -325,7 +328,7 @@ pub fn execute_learn_dream() -> ExecutionResult {
 
     use jfc_learn::dreamer::{Dreamer, DreamerTask, MemoryRecord, acquire_lease, release_lease};
 
-    let result = match jfc_knowledge::block_on_knowledge(async {
+    let (result, rsi_reports) = match jfc_knowledge::block_on_knowledge(async {
         let lease = match acquire_lease(&lease_path).await {
             Ok(l) => l,
             Err(e) => {
@@ -346,7 +349,22 @@ pub fn execute_learn_dream() -> ExecutionResult {
             })
             .collect();
 
-        let dreamer = Dreamer::new(lease_path.clone());
+        let mut dreamer = Dreamer::new(lease_path.clone());
+        let cwd_string = cwd.to_string_lossy().to_string();
+        if let Ok(store) = jfc_knowledge::KnowledgeStore::open_default().await
+            && let Ok(Some(mut job)) = jfc_learn::build_recent_rsi_job(
+                &store,
+                Some(&cwd_string),
+                50,
+                jfc_learn::RsiCuratorConfig::default(),
+                jfc_learn::RsiPromotionPolicy::default(),
+            )
+            .await
+        {
+            job.sandbox_enforcement = Some(crate::sandbox::rsi_external_worker_sandbox(&cwd));
+            job.worker = crate::sandbox::rsi_curator_worker_config(&cwd);
+            dreamer = dreamer.with_rsi_curator(job);
+        }
         let tasks = [
             DreamerTask::Consolidate,
             DreamerTask::ArchiveStale,
@@ -356,11 +374,12 @@ pub fn execute_learn_dream() -> ExecutionResult {
         ];
 
         let result = dreamer.run_cycle(&tasks, &mut records);
+        let rsi_reports = dreamer.rsi_reports();
         if let Err(e) = release_lease(&lease_path, &lease.holder_id).await {
             tracing::warn!(target: "jfc::learn", error = %e, "failed to release dreamer lease");
         }
 
-        Ok::<_, String>(result)
+        Ok::<_, String>((result, rsi_reports))
     }) {
         Ok(dreamer_result) => dreamer_result,
         Err(e) => return ExecutionResult::failure(e),
@@ -384,10 +403,54 @@ pub fn execute_learn_dream() -> ExecutionResult {
                     r.task, r.actions_taken, r.duration_ms
                 ));
             }
+            append_rsi_report_summary(&mut msg, &rsi_reports);
             ExecutionResult::success(msg)
         }
         Err(e) => ExecutionResult::failure(format!("Dreamer cycle failed: {e}")),
     }
+}
+
+fn append_rsi_report_summary(msg: &mut String, reports: &[jfc_learn::RsiCuratorReport]) {
+    let traces: usize = reports.iter().map(|report| report.traces_scored).sum();
+    let candidate_count: usize = reports.iter().map(|report| report.candidates.len()).sum();
+    if traces == 0 && candidate_count == 0 {
+        return;
+    }
+
+    let mut by_kind = std::collections::BTreeMap::<&'static str, usize>::new();
+    let mut by_status = std::collections::BTreeMap::<&'static str, usize>::new();
+    let mut by_research_profile = std::collections::BTreeMap::<&'static str, usize>::new();
+    for candidate in reports.iter().flat_map(|report| &report.candidates) {
+        *by_kind.entry(candidate.kind.slug()).or_default() += 1;
+        *by_status.entry(candidate.status.slug()).or_default() += 1;
+        *by_research_profile
+            .entry(candidate.eval.research_profile.slug())
+            .or_default() += 1;
+    }
+
+    msg.push_str(&format!(
+        "  RSI: {traces} traces, {candidate_count} candidates"
+    ));
+    append_count_group(msg, "kinds", &by_kind);
+    append_count_group(msg, "statuses", &by_status);
+    append_count_group(msg, "research", &by_research_profile);
+    msg.push('\n');
+}
+
+fn append_count_group(
+    msg: &mut String,
+    label: &str,
+    counts: &std::collections::BTreeMap<&'static str, usize>,
+) {
+    if counts.is_empty() {
+        return;
+    }
+    let rendered = counts
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    msg.push_str(&format!("; {label}: {rendered}"));
 }
 
 /// `/learn key-files list` — list pinned key files.
@@ -454,6 +517,57 @@ mod tests {
         let result = execute_learn_status();
         assert!(!result.is_error());
         assert!(result.output.contains("Learning subsystem"));
+    }
+
+    #[test]
+    fn rsi_summary_lists_candidate_kind_and_status_normal() {
+        let mut output = String::new();
+        append_rsi_report_summary(
+            &mut output,
+            &[jfc_learn::RsiCuratorReport {
+                traces_scored: 1,
+                candidates: vec![jfc_learn::CandidateChange {
+                    id: "abc".to_owned(),
+                    kind: jfc_learn::CandidateKind::HarnessPatch,
+                    target: jfc_learn::CandidateTarget {
+                        kind: "agent_harness".to_owned(),
+                        name: "edit".to_owned(),
+                    },
+                    title: "Harness patch".to_owned(),
+                    body: "verify before retry".to_owned(),
+                    evidence: "session=s1".to_owned(),
+                    source_session_id: "s1".to_owned(),
+                    source_turn_id: None,
+                    score: 0.9,
+                    recurrence_count: 1,
+                    eval: jfc_learn::CandidateEval::pass(0.9, "passed").with_research_gate(
+                        jfc_learn::RsiEvalProfile::HarnessSelfImprovement,
+                        vec![jfc_learn::RsiResearchCheck::new("harness_gate", true)],
+                        vec![jfc_learn::RsiResearchRef {
+                            paper_id: "2603.03329",
+                            role: "autoharness",
+                        }],
+                    ),
+                    status: jfc_learn::CandidateStatus::Candidate,
+                    budget: None,
+                    thinking: jfc_learn::ThinkingProvenance {
+                        source: jfc_learn::ThinkingSource::PrivateReasoningDerived,
+                        private_blocks_seen: 1,
+                        thinking_tokens: 32,
+                        raw_stored: false,
+                    },
+                }],
+                experience_graph: jfc_learn::ExperienceGraph::default(),
+                experiment_dashboard: Default::default(),
+                experiment_loop: Default::default(),
+                experiment_job: Default::default(),
+            }],
+        );
+
+        assert!(output.contains("RSI: 1 traces, 1 candidates"));
+        assert!(output.contains("harness_patch=1"));
+        assert!(output.contains("candidate=1"));
+        assert!(output.contains("harness_self_improvement=1"));
     }
 
     #[test]
@@ -534,9 +648,135 @@ mod tests {
         assert!(result.output.contains("Dreamer") || result.output.contains("lease"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn learn_dream_persists_rsi_candidates_from_transcript_normal() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("JFC_KNOWLEDGE_DB", temp.path().join("knowledge.db"));
+        let _cwd = CwdGuard::set(temp.path());
+        let cwd = temp.path().to_string_lossy().to_string();
+        let store = jfc_knowledge::KnowledgeStore::open_default().await.unwrap();
+        let row = jfc_knowledge::SessionRow {
+            id: "rsi-session".to_owned(),
+            cwd: Some(cwd.clone()),
+            model: Some("claude-test".to_owned()),
+            created_at: Some("2026-06-24T00:00:00Z".to_owned()),
+            updated_at: Some("2026-06-24T00:00:01Z".to_owned()),
+            first_prompt: Some("fix it".to_owned()),
+            title: Some("RSI fixture".to_owned()),
+            message_count: 2,
+        };
+        let messages = vec![
+            jfc_knowledge::SessionMessage {
+                seq: 0,
+                role: "assistant".to_owned(),
+                content: "Reasoning text Bash cargo test".to_owned(),
+                meta: Some(
+                    serde_json::json!({
+                        "role": "assistant",
+                        "model_name": "claude-test",
+                        "usage": { "thinking_tokens": 640 },
+                        "parts": [
+                            { "type": "reasoning", "content": "private analysis" },
+                            {
+                                "type": "tool",
+                                "kind": "Bash",
+                                "status": "complete",
+                                "input": { "command": "cargo test -p jfc-learn" }
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ),
+            },
+            jfc_knowledge::SessionMessage {
+                seq: 1,
+                role: "user".to_owned(),
+                content: "actually verify with clippy too".to_owned(),
+                meta: None,
+            },
+        ];
+        store.replace_transcript(&row, &messages).await.unwrap();
+
+        let result = execute_learn_dream();
+
+        assert!(!result.is_error(), "{}", result.output);
+        let events = store
+            .list_learning_events(Some("candidate"), 10)
+            .await
+            .unwrap();
+        assert!(!events.is_empty());
+        let project = jfc_knowledge::project_key(temp.path());
+        let system_prompt_event = events
+            .iter()
+            .find(|event| event.verifier_evidence.contains("system_prompt_patch"))
+            .unwrap();
+        let candidate_id = system_prompt_event.id.trim_start_matches("rsi:");
+        let name = format!("rsi-system_prompt_patch-{}", &candidate_id[..12]);
+        let definition = store
+            .get_definition_by_name(
+                "system_prompt",
+                jfc_knowledge::DefinitionScope::Project,
+                Some(&project),
+                None,
+                &name,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(definition.status, "candidate");
+    }
+
     #[test]
     fn learn_user_profile_handles_empty() {
         let result = execute_learn_user_profile_show();
         assert!(!result.is_error());
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::path::Path>) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: these tests are serial and do not run concurrently with
+            // other code that reads this process-wide environment variable.
+            unsafe { std::env::set_var(key, value.as_ref()) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: these tests are serial and restore process-wide state
+            // before any following test can observe it.
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    struct CwdGuard {
+        previous: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).unwrap();
+        }
     }
 }

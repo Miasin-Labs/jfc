@@ -135,6 +135,33 @@ async fn prepare_advertises_team_tools_for_delegation_prompt_regression() {
 }
 
 #[tokio::test]
+async fn prepare_does_not_advertise_commit_message_tool_for_commit_action_regression() {
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider {
+        name: "openai-test",
+        convention: StreamConvention::OpenAiNative,
+    });
+    let request = prepare_stream_request(
+        provider,
+        &[user_text("can you git commit and push please")],
+        &ModelId::new("test-model"),
+        Default::default(),
+    )
+    .await;
+
+    let tool_names = request
+        .opts
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(tool_names.contains(&"Bash"));
+    assert!(!tool_names.contains(&"SuggestCommitMessage"));
+
+    let system = request.opts.system.as_deref().unwrap_or_default();
+    assert!(!system.contains("### Commit messages"), "{system}");
+}
+
+#[tokio::test]
 #[serial_test::serial]
 async fn prepare_injects_total_tokens_reminder_countdown_normal() {
     let provider: Arc<dyn Provider> = Arc::new(TestProvider {

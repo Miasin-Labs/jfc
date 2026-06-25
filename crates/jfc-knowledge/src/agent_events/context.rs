@@ -50,12 +50,12 @@ impl KnowledgeStore {
                 "SELECT id, session_id, turn_id, agent_id, subagent_id, model, input_tokens, \
                         output_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, \
                         context_limit, bust_cause, drop_cause, payload, created_at_ms \
-                 FROM context_events WHERE session_id = ?1 ORDER BY created_at_ms ASC LIMIT ?2"
+                 FROM context_events WHERE session_id = ?1 ORDER BY created_at_ms ASC LIMIT ?2",
             )
-                .bind(session_id)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await?;
+            .bind(session_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
             for row in rows {
                 out.push(context_event_from(&row)?);
             }
@@ -64,11 +64,11 @@ impl KnowledgeStore {
                 "SELECT id, session_id, turn_id, agent_id, subagent_id, model, input_tokens, \
                         output_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, \
                         context_limit, bust_cause, drop_cause, payload, created_at_ms \
-                 FROM context_events ORDER BY created_at_ms DESC LIMIT ?1"
+                 FROM context_events ORDER BY created_at_ms DESC LIMIT ?1",
             )
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await?;
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
             for row in rows {
                 out.push(context_event_from(&row)?);
             }
@@ -123,23 +123,23 @@ pub(crate) async fn insert_context_events_from_messages(
              (id, session_id, turn_id, agent_id, subagent_id, model, input_tokens, output_tokens, \
               thinking_tokens, cache_read_tokens, cache_write_tokens, context_limit, bust_cause, \
               drop_cause, payload, created_at_ms) \
-             VALUES (?1,?2,?3,NULL,NULL,?4,?5,?6,?7,?8,?9,NULL,?10,?11,?12,?13)"
+             VALUES (?1,?2,?3,NULL,NULL,?4,?5,?6,?7,?8,?9,NULL,?10,?11,?12,?13)",
         )
-            .bind(deterministic_context_id(&row.id, message.seq))
-            .bind(&row.id)
-            .bind(&turn_id)
-            .bind(&model)
-            .bind(usage.input_tokens)
-            .bind(usage.output_tokens)
-            .bind(usage.thinking_tokens)
-            .bind(usage.cache_read_tokens)
-            .bind(usage.cache_write_tokens)
-            .bind(cache_bust_cause(&usage))
-            .bind(Option::<String>::None)
-            .bind(&payload)
-            .bind(created_at_ms)
-            .execute(&mut *tx)
-            .await?;
+        .bind(deterministic_context_id(&row.id, message.seq))
+        .bind(&row.id)
+        .bind(&turn_id)
+        .bind(&model)
+        .bind(usage.input_tokens)
+        .bind(usage.output_tokens)
+        .bind(usage.thinking_tokens)
+        .bind(usage.cache_read_tokens)
+        .bind(usage.cache_write_tokens)
+        .bind(cache_bust_cause(&usage))
+        .bind(Option::<String>::None)
+        .bind(&payload)
+        .bind(created_at_ms)
+        .execute(&mut *tx)
+        .await?;
     }
     Ok(())
 }

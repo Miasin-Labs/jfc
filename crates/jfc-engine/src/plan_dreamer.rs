@@ -83,11 +83,14 @@ impl DreamerLease {
     fn acquire(&self, ttl: Duration) -> Result<()> {
         jfc_knowledge::block_on_knowledge(async {
             let store = jfc_knowledge::KnowledgeStore::open_default().await?;
-            if let Some(row) = store.get_session_artifact(
-                &self.session_id,
-                PLAN_DREAMER_LEASE_KIND,
-                PLAN_DREAMER_LEASE_KEY,
-            ).await? && let Ok(claim) = serde_json::from_str::<LeaseClaim>(&row.value_json)
+            if let Some(row) = store
+                .get_session_artifact(
+                    &self.session_id,
+                    PLAN_DREAMER_LEASE_KIND,
+                    PLAN_DREAMER_LEASE_KEY,
+                )
+                .await?
+                && let Ok(claim) = serde_json::from_str::<LeaseClaim>(&row.value_json)
             {
                 let now_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -111,12 +114,14 @@ impl DreamerLease {
                 expiry_ms: now_ms + ttl.as_millis() as u64,
             };
             let json = serde_json::to_string(&claim)?;
-            store.upsert_session_artifact(
-                &self.session_id,
-                PLAN_DREAMER_LEASE_KIND,
-                PLAN_DREAMER_LEASE_KEY,
-                &json,
-            ).await?;
+            store
+                .upsert_session_artifact(
+                    &self.session_id,
+                    PLAN_DREAMER_LEASE_KIND,
+                    PLAN_DREAMER_LEASE_KEY,
+                    &json,
+                )
+                .await?;
             Ok(())
         })
     }
@@ -477,7 +482,7 @@ mod tests {
         assert_eq!(plan.frontmatter.status, PlanStatus::Archived);
     }
 
-    #[tokio::test(flavor="multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn lease_prevents_concurrent_normal() {
         let dir = TempDir::new().unwrap();
         let plans_dir = dir.path().join("plans");

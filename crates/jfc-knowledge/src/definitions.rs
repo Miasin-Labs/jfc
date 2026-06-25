@@ -1,5 +1,5 @@
-use sqlx::Row;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
 use crate::record::now_ms;
 use crate::{KnowledgeStore, Result};
@@ -204,11 +204,11 @@ impl KnowledgeStore {
                     body, metadata_json, source_path, source_hash, status, version,
                     created_by, created_at_ms, updated_at_ms, superseded_by
              FROM definitions
-             WHERE id = ?1 AND superseded_by IS NULL"
+             WHERE id = ?1 AND superseded_by IS NULL",
         )
-            .bind(&id)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(&id)
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|r| row_to_definition(&r)).transpose()
     }
 
@@ -226,12 +226,45 @@ impl KnowledgeStore {
                AND status = 'active'
                AND superseded_by IS NULL
                AND (project_key IS NULL OR project_key = ?2)
-             ORDER BY updated_at_ms ASC"
+             ORDER BY updated_at_ms ASC",
         )
-            .bind(kind)
-            .bind(project_key)
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(kind)
+        .bind(project_key)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_definition(&row)?);
+        }
+        Ok(out)
+    }
+
+    pub async fn list_definitions_for_project_status(
+        &self,
+        kind: &str,
+        project_key: &str,
+        status: &str,
+        limit: usize,
+    ) -> Result<Vec<DefinitionRecord>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = sqlx::query(
+            "SELECT id, kind, scope, project_key, namespace, name, title, description,
+                    body, metadata_json, source_path, source_hash, status, version,
+                    created_by, created_at_ms, updated_at_ms, superseded_by
+             FROM definitions
+             WHERE kind = ?1
+               AND status = ?3
+               AND superseded_by IS NULL
+               AND (project_key IS NULL OR project_key = ?2)
+             ORDER BY updated_at_ms DESC
+             LIMIT ?4",
+        )
+        .bind(kind)
+        .bind(project_key)
+        .bind(status)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row_to_definition(&row)?);
@@ -262,10 +295,20 @@ mod tests {
         }
     }
 
+    fn sample_with_status(name: &str, status: DefinitionStatus) -> NewDefinition {
+        NewDefinition {
+            status,
+            ..sample(name, "body")
+        }
+    }
+
     #[tokio::test]
     async fn upsert_definition_round_trips_normal() {
         let store = KnowledgeStore::open_in_memory().await.unwrap();
-        let id = store.upsert_definition(&sample("deploy", "body")).await.unwrap();
+        let id = store
+            .upsert_definition(&sample("deploy", "body"))
+            .await
+            .unwrap();
 
         let loaded = store
             .get_definition_by_name(
@@ -287,7 +330,10 @@ mod tests {
     #[tokio::test]
     async fn upsert_definition_bumps_version_when_body_changes_normal() {
         let store = KnowledgeStore::open_in_memory().await.unwrap();
-        store.upsert_definition(&sample("deploy", "body")).await.unwrap();
+        store
+            .upsert_definition(&sample("deploy", "body"))
+            .await
+            .unwrap();
         store
             .upsert_definition(&sample("deploy", "better body"))
             .await
@@ -307,5 +353,30 @@ mod tests {
 
         assert_eq!(loaded.body, "better body");
         assert_eq!(loaded.version, 2);
+    }
+
+    #[tokio::test]
+    async fn list_definitions_for_project_status_returns_candidates_normal() {
+        let store = KnowledgeStore::open_in_memory().await.unwrap();
+        store
+            .upsert_definition(&sample_with_status("active", DefinitionStatus::Active))
+            .await
+            .unwrap();
+        store
+            .upsert_definition(&sample_with_status(
+                "candidate",
+                DefinitionStatus::Candidate,
+            ))
+            .await
+            .unwrap();
+
+        let candidates = store
+            .list_definitions_for_project_status("skill", "proj", "candidate", 10)
+            .await
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "candidate");
+        assert_eq!(candidates[0].status, DefinitionStatus::Candidate.slug());
     }
 }

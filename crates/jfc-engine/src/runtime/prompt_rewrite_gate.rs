@@ -128,13 +128,14 @@ fn load_recent_exemplars(limit: usize) -> Vec<Rewrite> {
         return Vec::new();
     };
     let Ok(rows) = jfc_knowledge::block_on_knowledge(async {
-        store.list_recent_session_artifact_events(
-            PROMPT_REWRITE_SESSION_ID,
-            PROMPT_REWRITE_KIND,
-            Some(PROMPT_REWRITE_KEY),
-            limit,
-        )
-        .await
+        store
+            .list_recent_session_artifact_events(
+                PROMPT_REWRITE_SESSION_ID,
+                PROMPT_REWRITE_KIND,
+                Some(PROMPT_REWRITE_KEY),
+                limit,
+            )
+            .await
     }) else {
         return Vec::new();
     };

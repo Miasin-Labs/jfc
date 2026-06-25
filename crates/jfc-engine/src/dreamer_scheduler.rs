@@ -130,12 +130,11 @@ fn run_learn_dreamer(
     project_root: &std::path::Path,
     lease_path: &std::path::Path,
 ) -> Result<String, String> {
-    use jfc_learn::dreamer::{Dreamer, DreamerTask, MemoryRecord, acquire_lease, release_lease};
+    use jfc_learn::dreamer::{DreamerTask, MemoryRecord, acquire_lease, release_lease};
 
     // Acquire the learn lease (cross-process exclusion).
-    let lease = jfc_knowledge::block_on_knowledge(async {
-        acquire_lease(lease_path).await
-    }).map_err(|e| e.to_string())?;
+    let lease = jfc_knowledge::block_on_knowledge(async { acquire_lease(lease_path).await })
+        .map_err(|e| e.to_string())?;
 
     // Load memories from disk as MemoryRecords.
     let entries = jfc_knowledge::block_on_knowledge(async {
@@ -153,7 +152,7 @@ fn run_learn_dreamer(
         })
         .collect();
 
-    let dreamer = Dreamer::new(lease_path.to_path_buf());
+    let dreamer = dreamer_with_recent_rsi(lease_path, project_root);
     let tasks = [
         DreamerTask::Consolidate,
         DreamerTask::ArchiveStale,
@@ -186,6 +185,34 @@ fn run_learn_dreamer(
         },
         digest_wiki
     ))
+}
+
+fn dreamer_with_recent_rsi(
+    lease_path: &std::path::Path,
+    project_root: &std::path::Path,
+) -> jfc_learn::Dreamer {
+    let base = jfc_learn::Dreamer::new(lease_path.to_path_buf());
+    let cwd = project_root.to_string_lossy().to_string();
+    let job = jfc_knowledge::block_on_knowledge(async {
+        let store = jfc_knowledge::KnowledgeStore::open_default().await?;
+        jfc_learn::build_recent_rsi_job(
+            &store,
+            Some(&cwd),
+            50,
+            jfc_learn::RsiCuratorConfig::default(),
+            jfc_learn::RsiPromotionPolicy::default(),
+        )
+        .await
+    })
+    .ok()
+    .flatten();
+    if let Some(mut job) = job {
+        job.sandbox_enforcement = Some(crate::sandbox::rsi_external_worker_sandbox(project_root));
+        job.worker = crate::sandbox::rsi_curator_worker_config(project_root);
+        base.with_rsi_curator(job)
+    } else {
+        base
+    }
 }
 
 const DREAMER_ARTIFACT_KIND: &str = "dreamer_docs";
@@ -240,7 +267,8 @@ fn write_digest_and_wiki(
                 .to_string(),
             )
             .await
-    }).is_ok()
+    })
+    .is_ok()
     {
         wrote.push(format!("digest:{}", digest.items.len()));
     }
@@ -259,7 +287,8 @@ fn write_digest_and_wiki(
                 .to_string(),
             )
             .await
-    }).is_ok()
+    })
+    .is_ok()
     {
         wrote.push(format!("wiki:{}", wiki.pages.len()));
     }

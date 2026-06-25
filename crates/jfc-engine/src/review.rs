@@ -430,7 +430,9 @@ async fn append_review_artifact<T: Serialize>(
     let value_json = serde_json::to_string(value).map_err(std::io::Error::other)?;
     tokio::task::spawn_blocking(move || {
         jfc_knowledge::block_on_knowledge(async {
-            let store = jfc_knowledge::KnowledgeStore::open_default().await.map_err(std::io::Error::other)?;
+            let store = jfc_knowledge::KnowledgeStore::open_default()
+                .await
+                .map_err(std::io::Error::other)?;
             store
                 .append_session_artifact_event(
                     REVIEW_ARTIFACT_SESSION_ID,
@@ -586,7 +588,9 @@ mod tests {
         persist_review_comment(&cwd, &comment).await.unwrap();
 
         let project_key = jfc_knowledge::project_key(&cwd);
-        let rows = jfc_knowledge::KnowledgeStore::open_default().await.unwrap()
+        let rows = jfc_knowledge::KnowledgeStore::open_default()
+            .await
+            .unwrap()
             .list_recent_session_artifact_events(
                 REVIEW_ARTIFACT_SESSION_ID,
                 REVIEW_ARTIFACT_KIND,

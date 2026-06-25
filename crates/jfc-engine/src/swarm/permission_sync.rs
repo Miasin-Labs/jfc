@@ -103,7 +103,9 @@ async fn import_legacy_permission_files(
             continue;
         };
         let key = permission_key(team_name, &request.id);
-        store.upsert_session_artifact(PERMISSION_SESSION_ID, kind, &key, &content).await?;
+        store
+            .upsert_session_artifact(PERMISSION_SESSION_ID, kind, &key, &content)
+            .await?;
         let _ = std::fs::remove_file(&path);
     }
     Ok(())
@@ -168,13 +170,14 @@ pub async fn write_permission_request(request: &SwarmPermissionRequest) -> anyho
         Box::pin(async move {
             let key = permission_key(&request.team_name, &request.id);
             let json = serde_json::to_string(&request)?;
-            store.upsert_session_artifact(
-                PERMISSION_SESSION_ID,
-                PERMISSION_PENDING_KIND,
-                &key,
-                &json,
-            )
-            .await?;
+            store
+                .upsert_session_artifact(
+                    PERMISSION_SESSION_ID,
+                    PERMISSION_PENDING_KIND,
+                    &key,
+                    &json,
+                )
+                .await?;
             Ok(())
         })
     })
@@ -198,7 +201,9 @@ pub async fn read_pending_permissions(team_name: &str) -> Vec<SwarmPermissionReq
                 .await?
                 .into_iter()
                 .filter(|row| row.key.starts_with(&prefix))
-                .filter_map(|row| serde_json::from_str::<SwarmPermissionRequest>(&row.value_json).ok())
+                .filter_map(|row| {
+                    serde_json::from_str::<SwarmPermissionRequest>(&row.value_json).ok()
+                })
                 .collect::<Vec<_>>();
             results.sort_by_key(|r| r.created_at);
             Ok(results)
@@ -223,10 +228,12 @@ pub async fn resolve_permission(
     let resolution = resolution.clone();
     let moved = run_permission_db(move |store| {
         Box::pin(async move {
-            import_legacy_permission_files(&store, PERMISSION_PENDING_KIND, &team_name_owned).await?;
+            import_legacy_permission_files(&store, PERMISSION_PENDING_KIND, &team_name_owned)
+                .await?;
             let key = permission_key(&team_name_owned, &request_id_owned);
-            let Some(row) =
-                store.get_session_artifact(PERMISSION_SESSION_ID, PERMISSION_PENDING_KIND, &key).await?
+            let Some(row) = store
+                .get_session_artifact(PERMISSION_SESSION_ID, PERMISSION_PENDING_KIND, &key)
+                .await?
             else {
                 debug!("[PermissionSync] Pending request not found: {request_id_owned}");
                 return Ok(false);
@@ -244,13 +251,17 @@ pub async fn resolve_permission(
             request.permission_updates = resolution.permission_updates;
 
             let json = serde_json::to_string(&request)?;
-            store.upsert_session_artifact(
-                PERMISSION_SESSION_ID,
-                PERMISSION_RESOLVED_KIND,
-                &key,
-                &json,
-            ).await?;
-            store.delete_session_artifact(PERMISSION_SESSION_ID, PERMISSION_PENDING_KIND, &key).await?;
+            store
+                .upsert_session_artifact(
+                    PERMISSION_SESSION_ID,
+                    PERMISSION_RESOLVED_KIND,
+                    &key,
+                    &json,
+                )
+                .await?;
+            store
+                .delete_session_artifact(PERMISSION_SESSION_ID, PERMISSION_PENDING_KIND, &key)
+                .await?;
             Ok(true)
         })
     })
@@ -271,8 +282,9 @@ pub async fn read_resolved_permission(
         Box::pin(async move {
             import_legacy_permission_files(&store, PERMISSION_RESOLVED_KIND, &team_name).await?;
             let key = permission_key(&team_name, &request_id);
-            let row =
-                store.get_session_artifact(PERMISSION_SESSION_ID, PERMISSION_RESOLVED_KIND, &key).await?;
+            let row = store
+                .get_session_artifact(PERMISSION_SESSION_ID, PERMISSION_RESOLVED_KIND, &key)
+                .await?;
             Ok(row.and_then(|row| serde_json::from_str(&row.value_json).ok()))
         })
     })
@@ -288,7 +300,9 @@ pub async fn delete_resolved_permission(request_id: &str, team_name: &str) -> an
     run_permission_db(move |store| {
         Box::pin(async move {
             let key = permission_key(&team_name, &request_id);
-            store.delete_session_artifact(PERMISSION_SESSION_ID, PERMISSION_RESOLVED_KIND, &key).await?;
+            store
+                .delete_session_artifact(PERMISSION_SESSION_ID, PERMISSION_RESOLVED_KIND, &key)
+                .await?;
             Ok(())
         })
     })
@@ -332,16 +346,19 @@ pub async fn cleanup_old_resolutions(team_name: &str, max_age: Duration) -> u32 
                 .into_iter()
                 .filter(|row| row.key.starts_with(&prefix))
             {
-                let Ok(req) = serde_json::from_str::<SwarmPermissionRequest>(&row.value_json) else {
+                let Ok(req) = serde_json::from_str::<SwarmPermissionRequest>(&row.value_json)
+                else {
                     continue;
                 };
                 let resolved_at = req.resolved_at.unwrap_or(req.created_at);
                 if now.saturating_sub(resolved_at) >= max_age_ms {
-                    store.delete_session_artifact(
-                        PERMISSION_SESSION_ID,
-                        PERMISSION_RESOLVED_KIND,
-                        &row.key,
-                    ).await?;
+                    store
+                        .delete_session_artifact(
+                            PERMISSION_SESSION_ID,
+                            PERMISSION_RESOLVED_KIND,
+                            &row.key,
+                        )
+                        .await?;
                     cleaned += 1;
                 }
             }
@@ -592,12 +609,14 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         run_permission_db(move |store| {
             Box::pin(async move {
-                store.upsert_session_artifact(
-                    PERMISSION_SESSION_ID,
-                    PERMISSION_RESOLVED_KIND,
-                    &key,
-                    &json,
-                ).await?;
+                store
+                    .upsert_session_artifact(
+                        PERMISSION_SESSION_ID,
+                        PERMISSION_RESOLVED_KIND,
+                        &key,
+                        &json,
+                    )
+                    .await?;
                 Ok(())
             })
         })
@@ -619,12 +638,14 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         run_permission_db(move |store| {
             Box::pin(async move {
-                store.upsert_session_artifact(
-                    PERMISSION_SESSION_ID,
-                    PERMISSION_RESOLVED_KIND,
-                    &key,
-                    &json,
-                ).await?;
+                store
+                    .upsert_session_artifact(
+                        PERMISSION_SESSION_ID,
+                        PERMISSION_RESOLVED_KIND,
+                        &key,
+                        &json,
+                    )
+                    .await?;
                 Ok(())
             })
         })

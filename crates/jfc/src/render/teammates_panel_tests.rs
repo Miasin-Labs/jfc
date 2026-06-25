@@ -44,6 +44,7 @@ fn background_task(
         summary: None,
         error: None,
         last_tool: None,
+        last_tool_info: None,
         messages: Vec::new(),
         chat_messages: Vec::new(),
         tool_use_count: 0,

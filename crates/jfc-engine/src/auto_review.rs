@@ -801,7 +801,9 @@ async fn save_content_hashes(cwd: &Path, hashes: &std::collections::BTreeMap<Str
     let artifact_key = auto_review_artifact_key(cwd, "content_hashes", "snapshot");
     let _ = tokio::task::spawn_blocking(move || {
         jfc_knowledge::block_on_knowledge(async {
-            let store = jfc_knowledge::KnowledgeStore::open_default().await.map_err(std::io::Error::other)?;
+            let store = jfc_knowledge::KnowledgeStore::open_default()
+                .await
+                .map_err(std::io::Error::other)?;
             store
                 .upsert_session_artifact(
                     REVIEW_ARTIFACT_SESSION_ID,
@@ -1221,7 +1223,9 @@ async fn append_review_artifact<T: Serialize>(
     let value_json = serde_json::to_string(value).map_err(std::io::Error::other)?;
     tokio::task::spawn_blocking(move || {
         jfc_knowledge::block_on_knowledge(async {
-            let store = jfc_knowledge::KnowledgeStore::open_default().await.map_err(std::io::Error::other)?;
+            let store = jfc_knowledge::KnowledgeStore::open_default()
+                .await
+                .map_err(std::io::Error::other)?;
             store
                 .append_session_artifact_event(
                     REVIEW_ARTIFACT_SESSION_ID,
@@ -1255,7 +1259,9 @@ async fn load_existing_fingerprints(cwd: &Path) -> HashSet<String> {
             Some(
                 rows.into_iter()
                     .filter(|row| row.key.starts_with(&format!("{project_key}:findings:")))
-                    .filter_map(|row| serde_json::from_str::<ReviewFindingRecord>(&row.value_json).ok())
+                    .filter_map(|row| {
+                        serde_json::from_str::<ReviewFindingRecord>(&row.value_json).ok()
+                    })
                     .map(|record| record.fingerprint)
                     .collect::<HashSet<_>>(),
             )

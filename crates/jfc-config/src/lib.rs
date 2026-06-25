@@ -1807,7 +1807,9 @@ fn import_system_prompt_definition(
         status: jfc_knowledge::DefinitionStatus::Active,
         created_by: "legacy_import".to_owned(),
     };
-    if let Err(err) = jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await }) {
+    if let Err(err) =
+        jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await })
+    {
         tracing::warn!(
             target: "jfc::config",
             path = %path.display(),

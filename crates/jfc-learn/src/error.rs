@@ -16,6 +16,12 @@ pub enum LearnError {
         source: serde_json::Error,
     },
 
+    #[error("Knowledge store error: {source}")]
+    Knowledge {
+        #[from]
+        source: jfc_knowledge::KnowledgeError,
+    },
+
     #[error("Provider error: {message}")]
     Provider { message: String },
 

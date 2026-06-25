@@ -6,11 +6,11 @@
 //! ## Architecture (Helix / rust-analyzer pattern, NOT tower-lsp)
 //!
 //! Three tokio tasks per spawned server:
-//! 1. **stderr-drain** — reads stderr line-by-line and forwards to
-//!    `tracing::warn!`. Required because language servers (especially
-//!    rust-analyzer) chatter heavily on stderr; if we don't drain it, the
-//!    OS pipe fills, the server's `eprintln!` blocks, and the whole
-//!    thing deadlocks.
+//! 1. **stderr-drain** — reads stderr line-by-line, drops known noisy
+//!    progress chatter, and forwards genuine server errors to tracing.
+//!    Required because language servers (especially rust-analyzer) chatter
+//!    heavily on stderr; if we don't drain it, the OS pipe fills, the
+//!    server's `eprintln!` blocks, and the whole thing deadlocks.
 //! 2. **stdout-reader** — accumulates bytes into a buffer, then loops
 //!    calling `lsp_rpc::try_parse(&buf)`. Each successful parse drains
 //!    the consumed bytes from the front of the buffer. On
@@ -76,6 +76,60 @@ pub struct LspLocation {
 /// mutex avoids spawning a runtime task per drop.
 type PendingMap = HashMap<u64, oneshot::Sender<Value>>;
 type PendingRequests = Arc<Mutex<PendingMap>>;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum LspStderrDisposition {
+    Suppress,
+    Debug,
+    Warn,
+}
+
+fn env_flag_is_truthy(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let value = value.trim();
+    value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+}
+
+fn lsp_autostart_enabled_from_env(disable: Option<&str>, enable: Option<&str>) -> bool {
+    !env_flag_is_truthy(disable) && env_flag_is_truthy(enable)
+}
+
+fn lsp_autostart_enabled() -> bool {
+    let disable = std::env::var("JFC_DISABLE_LSP").ok();
+    let enable = std::env::var("JFC_ENABLE_LSP_AUTOSTART").ok();
+    lsp_autostart_enabled_from_env(disable.as_deref(), enable.as_deref())
+}
+
+fn classify_lsp_stderr(trimmed: &str) -> LspStderrDisposition {
+    if is_rust_analyzer_cache_prime_chatter(trimmed) {
+        return LspStderrDisposition::Suppress;
+    }
+
+    if trimmed.contains("ERROR")
+        || trimmed.contains("error[")
+        || trimmed.contains("panic")
+        || trimmed.contains("thread '")
+        || trimmed.contains("fatal")
+    {
+        LspStderrDisposition::Warn
+    } else {
+        LspStderrDisposition::Debug
+    }
+}
+
+fn is_rust_analyzer_cache_prime_chatter(trimmed: &str) -> bool {
+    trimmed.contains("overly long loop turn")
+        || trimmed.contains("PrimeCaches(")
+        || trimmed.contains("ParallelPrimeCachesProgress")
+        || trimmed.contains("(event handling took")
+        || trimmed.contains("(cancellation took")
+        || trimmed.contains("(garbage collection took")
+}
 
 fn lock_pending<'a>(
     pending: &'a PendingRequests,
@@ -296,15 +350,14 @@ impl LspClient {
                     continue;
                 }
                 let shown: String = trimmed.chars().take(MAX_LEN).collect();
-                let looks_error = trimmed.contains("ERROR")
-                    || trimmed.contains("error[")
-                    || trimmed.contains("panic")
-                    || trimmed.contains("thread '")
-                    || trimmed.contains("fatal");
-                if looks_error {
-                    tracing::warn!(target: "jfc::lsp", stderr = %shown, "lsp stderr");
-                } else {
-                    tracing::debug!(target: "jfc::lsp", stderr = %shown, "lsp stderr");
+                match classify_lsp_stderr(trimmed) {
+                    LspStderrDisposition::Suppress => {}
+                    LspStderrDisposition::Debug => {
+                        tracing::debug!(target: "jfc::lsp", stderr = %shown, "lsp stderr");
+                    }
+                    LspStderrDisposition::Warn => {
+                        tracing::warn!(target: "jfc::lsp", stderr = %shown, "lsp stderr");
+                    }
                 }
             }
         });
@@ -756,20 +809,22 @@ pub fn detect_lsp_for_cwd(cwd: &std::path::Path) -> Option<(&'static str, Vec<&'
 }
 
 /// Best-effort startup orchestration: detect a language server for the
-/// current working directory and spawn it in the background. Gated by
-/// `JFC_DISABLE_LSP=1` for CI / users who prefer the cargo-check
-/// producer alone.
+/// current working directory and spawn it in the background when explicitly
+/// enabled. Disabled by default because rust-analyzer can eagerly index
+/// large workspaces just from startup. Set `JFC_ENABLE_LSP_AUTOSTART=1` to
+/// opt into pushed diagnostics; `JFC_DISABLE_LSP=1` still wins as an
+/// explicit off switch.
 ///
 /// This is a fire-and-forget helper — it never blocks the caller. The
 /// returned task handle is dropped (we don't keep the client alive
 /// across the UI loop yet; that's a follow-up integration). Wire it up
 /// from `main.rs` near the other startup spawns.
 pub fn maybe_spawn_lsp_clients(cwd: std::path::PathBuf, app_tx: mpsc::Sender<EngineEvent>) {
-    if matches!(
-        std::env::var("JFC_DISABLE_LSP").as_deref(),
-        Ok("1") | Ok("true")
-    ) {
-        tracing::debug!(target: "jfc::lsp", "LSP disabled via JFC_DISABLE_LSP");
+    if !lsp_autostart_enabled() {
+        tracing::debug!(
+            target: "jfc::lsp",
+            "LSP autostart disabled; set JFC_ENABLE_LSP_AUTOSTART=1 to enable pushed diagnostics"
+        );
         return;
     }
     let Some((cmd, args)) = detect_lsp_for_cwd(&cwd) else {
@@ -991,6 +1046,47 @@ mod tests {
         assert_eq!(m["jsonrpc"], "2.0");
         assert_eq!(m["method"], "exit");
         assert!(m.get("id").is_none(), "exit is a notification");
+    }
+
+    #[test]
+    fn lsp_autostart_requires_explicit_enable_regression() {
+        assert!(!lsp_autostart_enabled_from_env(None, None));
+        assert!(!lsp_autostart_enabled_from_env(None, Some("0")));
+        assert!(!lsp_autostart_enabled_from_env(None, Some("false")));
+        assert!(lsp_autostart_enabled_from_env(None, Some("1")));
+        assert!(lsp_autostart_enabled_from_env(None, Some("true")));
+        assert!(lsp_autostart_enabled_from_env(None, Some("yes")));
+
+        assert!(
+            !lsp_autostart_enabled_from_env(Some("1"), Some("1")),
+            "explicit disable must override opt-in"
+        );
+    }
+
+    #[test]
+    fn rust_analyzer_cache_prime_warnings_are_suppressed_regression() {
+        let lines = [
+            "2026-06-24T14:55:36.069506281-04:00  WARN overly long loop turn took 3.723958302s:",
+            "(event handling took 3.723937293s): PrimeCaches(Report(ParallelPrimeCachesProgress { crates_currently_indexing: [\"litemap\"], crates_total: 653, crates_done: 136, work_type: \"Indexing\" }))",
+            "(cancellation took None)",
+            "                (garbage collection took Some(24.536309ms))",
+        ];
+
+        for line in lines {
+            assert_eq!(classify_lsp_stderr(line), LspStderrDisposition::Suppress);
+        }
+    }
+
+    #[test]
+    fn lsp_stderr_errors_still_warn_robust() {
+        assert_eq!(
+            classify_lsp_stderr("thread 'tokio-runtime-worker' panicked at fatal error"),
+            LspStderrDisposition::Warn
+        );
+        assert_eq!(
+            classify_lsp_stderr("server initialized successfully"),
+            LspStderrDisposition::Debug
+        );
     }
 
     #[test]

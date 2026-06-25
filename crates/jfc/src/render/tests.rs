@@ -113,6 +113,34 @@ mod task_view_tests {
     }
 
     #[test]
+    fn task_progress_ping_renders_as_compact_activity_normal() {
+        let theme = Theme::dark();
+        let messages = vec!["[17s] Bash".to_string(), "[18s] Read".to_string()];
+        let lines = task_view_body_lines(&messages, &HashSet::new(), &theme, 80, false);
+        let joined: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(
+            joined.contains("[17s] Running shell"),
+            "bash progress should render as a compact activity row:\n{joined}"
+        );
+        assert!(
+            joined.contains("[18s] Reading"),
+            "read progress should render as a compact activity row:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn task_progress_ping_preserves_tool_info_normal() {
+        let theme = Theme::dark();
+        let messages = vec!["[19s] Bash(cargo test -p jfc)".to_string()];
+        let lines = task_view_body_lines(&messages, &HashSet::new(), &theme, 80, false);
+        let joined: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(
+            joined.contains("[19s] Bash(cargo test -p jfc)"),
+            "tool input summary should stay visible:\n{joined}"
+        );
+    }
+
+    #[test]
     fn large_byte_payload_collapses_even_without_many_lines_robust() {
         // A single >5 KB line still trips the byte threshold even though
         // the line count is 1 — guards against unwrapped JSON dumps.
@@ -1251,6 +1279,7 @@ mod subagent_counter_tests {
             summary: None,
             error: None,
             last_tool: None,
+            last_tool_info: None,
             messages: Vec::new(),
             chat_messages: Vec::new(),
             tool_use_count: tools,
@@ -1400,6 +1429,7 @@ mod render_snapshot_tests {
             summary: None,
             error: None,
             last_tool: None,
+            last_tool_info: None,
             messages: Vec::new(),
             chat_messages: Vec::new(),
             tool_use_count: 0,
@@ -1578,7 +1608,193 @@ mod render_snapshot_tests {
 
         let text = buffer_text(&term);
         assert!(text.contains("Editing"), "editing label missing:\n{text}");
+        assert!(
+            text.contains("tool_blocks.rs"),
+            "edited path missing from spinner verb slot:\n{text}"
+        );
+        assert!(text.contains("+1"), "added count missing:\n{text}");
+        assert!(text.contains("-1"), "removed count missing:\n{text}");
         assert!(!text.contains("Working"), "generic label leaked:\n{text}");
+    }
+
+    #[test]
+    fn spinner_animation_tick_is_slow_enough_for_status_text_regression() {
+        assert!(
+            crate::app::ANIM_TICK_MS >= 80,
+            "spinner verbs should not animate at a twitchy 30fps cadence"
+        );
+    }
+
+    #[test]
+    fn spinner_row_renders_creating_file_diff_counts_in_verb_slot_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.turn_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        app.spinner_state.phase = crate::spinner::SpinnerPhase::Working;
+
+        let tool_id = "write-1";
+        let content = (1..=12)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        let mut tool = ToolCall::new_pending(
+            tool_id.into(),
+            ToolKind::Write,
+            ToolInput::Write {
+                file_path: ".debug-journal.md".into(),
+                content,
+            },
+        );
+        tool.status = ToolStatus::Running;
+        msg.parts.push(MessagePart::tool(tool));
+        app.engine.in_progress_tool_use_ids.insert(tool_id.into());
+        app.engine.messages.push(msg);
+
+        let backend = TestBackend::new(90, 2);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::spinner_row(f, &app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        if let Ok(path) = std::env::var("JFC_SPINNER_FILE_CAPTURE") {
+            std::fs::write(path, &text).expect("write spinner file capture");
+        }
+        assert!(text.contains("Creating"), "creating label missing:\n{text}");
+        assert!(
+            text.contains(".debug-journal.md"),
+            "created path missing from spinner verb slot:\n{text}"
+        );
+        assert!(text.contains("+12"), "added count missing:\n{text}");
+        assert!(text.contains("-0"), "removed count missing:\n{text}");
+    }
+
+    #[test]
+    fn spinner_row_animates_responding_verb_with_sweep_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        let now = std::time::Instant::now();
+        app.engine.turn_started_at = Some(now - std::time::Duration::from_secs(3));
+        app.engine.is_streaming = true;
+        app.engine.streaming_response_bytes = 128;
+        app.spinner_state.phase = crate::spinner::SpinnerPhase::Responding;
+        app.spinner_frame = 2;
+
+        let backend = TestBackend::new(80, 2);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::spinner_row(f, &app, area);
+        })
+        .expect("draw");
+
+        let buf = term.backend().buffer();
+        let target: Vec<String> = "Responding".chars().map(|ch| ch.to_string()).collect();
+        let x = (0..buf.area.width)
+            .find(|x| {
+                target.iter().enumerate().all(|(offset, expected)| {
+                    let cell_x = x.saturating_add(offset as u16);
+                    cell_x < buf.area.width && buf[(cell_x, 0)].symbol() == expected
+                })
+            })
+            .expect("responding label");
+        let mut colors: Vec<Color> = Vec::new();
+        for cell_x in x..x + target.len() as u16 {
+            let fg = buf[(cell_x, 0)].fg;
+            if !colors.contains(&fg) {
+                colors.push(fg);
+            }
+        }
+        let text = buffer_text(&term);
+        assert!(
+            colors.len() > 1,
+            "responding verb should have a left-to-right color sweep:\n{text}"
+        );
+    }
+
+    #[test]
+    fn spinner_row_prefers_active_edit_over_responding_phase_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        let now = std::time::Instant::now();
+        app.engine.turn_started_at = Some(now - std::time::Duration::from_secs(3));
+        app.engine.is_streaming = true;
+        app.engine.streaming_response_bytes = 128;
+        app.spinner_state.phase = crate::spinner::SpinnerPhase::Responding;
+
+        let tool_id = "edit-while-streaming";
+        let mut msg = ChatMessage::assistant(String::new());
+        msg.parts.clear();
+        let mut tool = ToolCall::new_pending(
+            tool_id.into(),
+            ToolKind::Edit,
+            ToolInput::Edit {
+                file_path: "/tmp/messages.rs".into(),
+                old_string: "old\nold2".into(),
+                new_string: "new\nnew2".into(),
+                replacement: jfc_core::ReplacementMode::FirstOnly,
+            },
+        );
+        tool.status = ToolStatus::Running;
+        msg.parts.push(MessagePart::tool(tool));
+        app.engine.in_progress_tool_use_ids.insert(tool_id.into());
+        app.engine.messages.push(msg);
+
+        let backend = TestBackend::new(90, 2);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::spinner_row(f, &app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        if let Ok(path) = std::env::var("JFC_SPINNER_EDIT_CAPTURE") {
+            std::fs::write(path, &text).expect("write spinner edit capture");
+        }
+        assert!(
+            text.contains("Editing messages.rs +2 -2"),
+            "active edit should own the spinner verb slot:\n{text}"
+        );
+        assert!(
+            !text.contains("Responding"),
+            "responding label should not hide active file edits:\n{text}"
+        );
+    }
+
+    #[test]
+    fn frame_keeps_spinner_row_for_in_flight_tool_pipeline_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.is_streaming = false;
+        app.engine.turn_started_at = None;
+        app.engine.pending_tool_calls.clear();
+        app.engine.in_flight_tool_batches = 1;
+        app.engine
+            .in_progress_tool_use_ids
+            .insert("tool-1".to_owned());
+        app.spinner_state.phase = crate::spinner::SpinnerPhase::ToolUse;
+
+        let backend = TestBackend::new(90, 18);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            super::super::frame::frame(f, &mut app);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        if let Ok(path) = std::env::var("JFC_SPINNER_FRAME_CAPTURE") {
+            std::fs::write(path, &text).expect("write spinner frame capture");
+        }
+        assert!(
+            text.contains("Working"),
+            "spinner row should stay visible while tool batch is executing:\n{text}"
+        );
     }
 
     #[test]
@@ -2088,7 +2304,7 @@ mod render_snapshot_tests {
             let bt = app.engine.background_tasks.get_mut("tx").unwrap();
             bt.tool_use_count = 2;
             bt.messages = vec!["[worker-started] pid=1\n".into()];
-            bt.chat_messages.clear(); // force the fallback (string-log) path
+            bt.chat_messages.clear();
         }
         app.viewing_task_id = Some("tx".to_string());
 
@@ -2107,6 +2323,62 @@ mod render_snapshot_tests {
         assert!(
             text.contains("2 tools"),
             "canonical stats missing in drill-in view:\n{text}"
+        );
+    }
+
+    #[test]
+    fn task_view_drillin_renders_progress_pings_as_activity_rows_normal() {
+        let mut app = app_with_task(TaskLifecycle::Running, "drill in agent");
+        {
+            let bt = app.engine.background_tasks.get_mut("tx").unwrap();
+            bt.messages = vec!["[17s] Bash".into(), "[18s] Read".into()];
+            bt.chat_messages.clear();
+        }
+        app.viewing_task_id = Some("tx".to_string());
+
+        let backend = TestBackend::new(90, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::messages_task_view(f, &mut app, area, "tx");
+        })
+        .expect("draw");
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("[17s] Running shell"),
+            "task view should render progress as compact activity:\n{text}"
+        );
+        assert!(
+            text.contains("[18s] Reading"),
+            "task view should render read progress as compact activity:\n{text}"
+        );
+    }
+
+    #[test]
+    fn task_view_drillin_shows_last_tool_info_normal() {
+        let mut app = app_with_task(TaskLifecycle::Running, "drill in agent");
+        {
+            let bt = app.engine.background_tasks.get_mut("tx").unwrap();
+            bt.last_tool = Some("Read".into());
+            bt.last_tool_info = Some("Read(crates/jfc/src/render/roster.rs)".into());
+            bt.chat_messages.clear();
+        }
+        app.viewing_task_id = Some("tx".to_string());
+
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::messages::messages_task_view(f, &mut app, area, "tx");
+        })
+        .expect("draw");
+        let text = buffer_text(&term);
+        if let Ok(path) = std::env::var("JFC_TASK_TOOL_INFO_CAPTURE") {
+            std::fs::write(path, &text).expect("write task tool info capture");
+        }
+        assert!(
+            text.contains("Read(crates/jfc/src/render/roster.rs)"),
+            "task view should show the tool input summary:\n{text}"
         );
     }
 

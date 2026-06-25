@@ -866,13 +866,9 @@ async fn archive_council_report(root: &Path, report: &CouncilReport) -> Result<P
     let session_id = format!("project:{}", jfc_knowledge::project_key(root));
     let value_json = serde_json::to_string(&meta)?;
     let store = jfc_knowledge::KnowledgeStore::open_default().await?;
-    store.upsert_session_artifact(
-        &session_id,
-        COUNCIL_ARCHIVE_KIND,
-        &id,
-        &value_json,
-    )
-    .await?;
+    store
+        .upsert_session_artifact(&session_id, COUNCIL_ARCHIVE_KIND, &id, &value_json)
+        .await?;
     Ok(PathBuf::from(format!("db:council:{id}")))
 }
 
@@ -1331,7 +1327,9 @@ mod tests {
             .strip_prefix("db:council:")
             .expect("db council handle")
             .to_owned();
-        let row = jfc_knowledge::KnowledgeStore::open_default().await.unwrap()
+        let row = jfc_knowledge::KnowledgeStore::open_default()
+            .await
+            .unwrap()
             .get_session_artifact(
                 &format!("project:{}", jfc_knowledge::project_key(&root)),
                 COUNCIL_ARCHIVE_KIND,

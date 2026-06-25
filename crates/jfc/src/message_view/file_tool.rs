@@ -28,18 +28,6 @@ pub(super) fn is_file_mutation_tool(tool: &ToolCall) -> bool {
     )
 }
 
-pub(super) fn diff_counts_for_header(tool: &ToolCall) -> Option<(usize, usize)> {
-    if !is_file_mutation_tool(tool) {
-        return None;
-    }
-    match &tool.output {
-        ToolOutput::Diff(diff) if diff.additions > 0 || diff.deletions > 0 => {
-            Some((diff.additions, diff.deletions))
-        }
-        _ => None,
-    }
-}
-
 pub(super) fn diff_lang(diff: &DiffView) -> Option<String> {
     lang_from_path(&diff.file_path)
 }

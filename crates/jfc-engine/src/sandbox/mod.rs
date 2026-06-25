@@ -11,6 +11,7 @@
 //! - Falls back gracefully when bwrap is unavailable
 //! - Auto-approves Bash tool calls when sandbox is active
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
@@ -248,5 +249,64 @@ pub fn bash_sandbox_config_from_settings(
                 .allow_managed_read_paths_only
                 .unwrap_or(false),
         },
+    }
+}
+
+pub fn rsi_external_worker_sandbox(cwd: &Path) -> jfc_learn::RsiSandboxEnforcement {
+    let cfg = BashSandboxConfig {
+        enabled: true,
+        fail_if_unavailable: true,
+        auto_allow_bash_if_sandboxed: true,
+        bwrap_path: None,
+        network: NetworkSandboxConfig::default(),
+        filesystem: FilesystemSandboxConfig::default(),
+    };
+    let argv = build_bwrap_argv(&cfg, cwd);
+    let bwrap_available = argv.is_some();
+    let unshare_net = argv
+        .as_ref()
+        .is_some_and(|args| args.iter().any(|arg| arg == "--unshare-net"));
+    jfc_learn::RsiSandboxEnforcement::bubblewrap_worker(
+        &jfc_learn::RsiLoopSandboxPlan::default(),
+        bwrap_available,
+        unshare_net,
+    )
+}
+
+pub fn rsi_curator_worker_config(cwd: &Path) -> Option<jfc_learn::RsiCuratorWorkerConfig> {
+    let explicit = std::env::var_os("JFC_RSI_WORKER_BIN").map(PathBuf::from);
+    if cfg!(test) && explicit.is_none() {
+        return None;
+    }
+    let binary = explicit.or_else(|| std::env::current_exe().ok())?;
+    Some(jfc_learn::RsiCuratorWorkerConfig {
+        binary,
+        cwd: cwd.to_path_buf(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rsi_external_worker_sandbox_uses_bwrap_unshare_net_when_available_normal() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sandbox = rsi_external_worker_sandbox(temp.path());
+
+        assert_eq!(sandbox.kernel_backend, "bubblewrap_unshare_net");
+        if find_bwrap().is_some() {
+            assert_eq!(
+                sandbox.status,
+                jfc_learn::RsiSandboxEnforcementStatus::KernelEnforced
+            );
+            assert!(sandbox.egress_isolated);
+        } else {
+            assert_eq!(
+                sandbox.status,
+                jfc_learn::RsiSandboxEnforcementStatus::Blocked
+            );
+            assert!(sandbox.reasons.contains(&"bubblewrap_unavailable"));
+        }
     }
 }

@@ -217,7 +217,7 @@ fn roster_fields(bt: &crate::app::BackgroundTask, now: std::time::Instant) -> Ve
         elapsed
     };
     let mut fields: Vec<String> = Vec::new();
-    if let Some(tool) = bt.last_tool.as_deref() {
+    if let Some(tool) = bt.last_tool_info.as_deref().or(bt.last_tool.as_deref()) {
         fields.push(tool.to_owned());
     }
     if let Some(model) = bt.model_used.as_deref() {
@@ -291,7 +291,7 @@ pub(crate) fn agent_detail_lines(
     )));
 
     // Last tool activity
-    if let Some(ref tool) = bt.last_tool {
+    if let Some(tool) = bt.last_tool_info.as_ref().or(bt.last_tool.as_ref()) {
         lines.push(Line::from(vec![
             Span::styled("  › ", Style::default().fg(t.accent)),
             Span::styled(tool.clone(), Style::default().fg(t.text_primary)),

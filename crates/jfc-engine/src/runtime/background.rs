@@ -96,6 +96,7 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
                 summary: agent.summary.clone(),
                 error: agent.error.clone(),
                 last_tool: agent.last_tool.clone(),
+                last_tool_info: agent.last_tool_info.clone(),
                 messages: Vec::new(),
                 chat_messages: Vec::new(),
                 tool_use_count: agent.tool_use_count,
@@ -155,6 +156,10 @@ fn sync_detached_background_tasks_from_daemon_with_paths(
         }
         if entry.last_tool != agent.last_tool {
             entry.last_tool = agent.last_tool.clone();
+            changed = true;
+        }
+        if entry.last_tool_info != agent.last_tool_info {
+            entry.last_tool_info = agent.last_tool_info.clone();
             changed = true;
         }
         if entry.summary != agent.summary {
@@ -313,6 +318,7 @@ pub fn restore_persistent_background_agents(state: &mut EngineState) {
                 summary: agent.summary,
                 error: agent.error,
                 last_tool: agent.last_tool,
+                last_tool_info: agent.last_tool_info,
                 messages,
                 chat_messages,
                 tool_use_count: agent.tool_use_count,
@@ -429,6 +435,7 @@ mod tests {
             latest_cache_write_tokens: 0,
             cumulative_output_tokens: 0,
             last_tool: None,
+            last_tool_info: None,
         }
     }
 

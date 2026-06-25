@@ -38,7 +38,9 @@ pub fn load_background_agent_launch(
         jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open_default())
     } else {
         std::fs::create_dir_all(&paths.base_dir)?;
-        jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(&paths.base_dir.join("knowledge.db")))
+        jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(
+            &paths.base_dir.join("knowledge.db"),
+        ))
     }
     .map_err(std::io::Error::other)?;
     let row = jfc_knowledge::block_on_knowledge(async {
@@ -50,13 +52,13 @@ pub fn load_background_agent_launch(
             )
             .await
     })
-        .map_err(std::io::Error::other)?
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("background agent launch spec not found: {key}"),
-            )
-        })?;
+    .map_err(std::io::Error::other)?
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("background agent launch spec not found: {key}"),
+        )
+    })?;
     serde_json::from_str(&row.value_json).map_err(std::io::Error::other)
 }
 
@@ -71,7 +73,9 @@ fn persist_background_agent_launch(
         jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open_default())
     } else {
         std::fs::create_dir_all(&paths.base_dir)?;
-        jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(&paths.base_dir.join("knowledge.db")))
+        jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(
+            &paths.base_dir.join("knowledge.db"),
+        ))
     }
     .map_err(std::io::Error::other)?;
     jfc_knowledge::block_on_knowledge(async {
@@ -579,6 +583,7 @@ pub fn spawn_background_agent_worker(launch: BackgroundAgentLaunch) -> std::io::
                 latest_cache_write_tokens: 0,
                 cumulative_output_tokens: 0,
                 last_tool: None,
+                last_tool_info: None,
             },
         );
         save_state(&paths, &state)?;

@@ -107,6 +107,7 @@ pub fn record_background_agent_started_at(
                 latest_cache_write_tokens: 0,
                 cumulative_output_tokens: 0,
                 last_tool: None,
+                last_tool_info: None,
             });
         entry.description = description_owned.clone();
         if parent_session_id.is_some() {
@@ -221,6 +222,7 @@ pub fn record_background_agent_log_at_epoch(id: &str, worker_epoch: u64, text: &
                 latest_cache_write_tokens: 0,
                 cumulative_output_tokens: 0,
                 last_tool: None,
+                last_tool_info: None,
             },
         );
         let _ = save_state(&paths, &state);
@@ -241,6 +243,7 @@ pub fn record_background_agent_log_at_epoch(id: &str, worker_epoch: u64, text: &
 pub fn record_background_agent_progress(
     id: &str,
     last_tool: Option<&str>,
+    last_tool_info: Option<&str>,
     tool_use_count: Option<u32>,
     latest_input_tokens: Option<u64>,
     latest_cache_read_tokens: Option<u64>,
@@ -251,6 +254,7 @@ pub fn record_background_agent_progress(
         id,
         0,
         last_tool,
+        last_tool_info,
         tool_use_count,
         latest_input_tokens,
         latest_cache_read_tokens,
@@ -263,6 +267,7 @@ pub fn record_background_agent_progress_at_epoch(
     id: &str,
     worker_epoch: u64,
     last_tool: Option<&str>,
+    last_tool_info: Option<&str>,
     tool_use_count: Option<u32>,
     latest_input_tokens: Option<u64>,
     latest_cache_read_tokens: Option<u64>,
@@ -275,6 +280,7 @@ pub fn record_background_agent_progress_at_epoch(
         id,
         worker_epoch,
         last_tool,
+        last_tool_info,
         tool_use_count,
         latest_input_tokens,
         latest_cache_read_tokens,
@@ -289,6 +295,7 @@ pub fn record_background_agent_progress_at_epoch_with_paths(
     id: &str,
     worker_epoch: u64,
     last_tool: Option<&str>,
+    last_tool_info: Option<&str>,
     tool_use_count: Option<u32>,
     latest_input_tokens: Option<u64>,
     latest_cache_read_tokens: Option<u64>,
@@ -328,12 +335,15 @@ pub fn record_background_agent_progress_at_epoch_with_paths(
         if let Some(tool) = last_tool {
             agent.last_tool = Some(tool.to_owned());
         }
+        if let Some(info) = last_tool_info {
+            agent.last_tool_info = Some(info.to_owned());
+        }
         let log_path = agent.log_path.clone();
         let _ = save_state(paths, &state);
         Some(log_path)
     });
     let ok = log_path.is_some();
-    if let (Some(log_path), Some(tool)) = (log_path.as_ref(), last_tool) {
+    if let (Some(log_path), Some(tool)) = (log_path.as_ref(), last_tool_info.or(last_tool)) {
         append_log_line(log_path, &format!("[tool] {tool}"));
     }
     Ok(ok)

@@ -5,10 +5,12 @@ pub(super) fn intent_tool_matches(intent: &str, all: &[ToolDef], limit: usize) -
     if terms.is_empty() {
         return Vec::new();
     }
+    let explicit_commit_message_intent = explicitly_requests_commit_message(intent);
 
     let docs: Vec<(String, String)> = all
         .iter()
         .filter(|tool| !super::super::defs::is_model_hidden_builtin_tool_name(&tool.name))
+        .filter(|tool| !is_commit_message_tool(&tool.name) || explicit_commit_message_intent)
         .map(|tool| {
             let schema = tool
                 .input_schema
@@ -32,6 +34,7 @@ pub(super) fn intent_tool_matches(intent: &str, all: &[ToolDef], limit: usize) -
     let mut scored: Vec<(usize, String)> = all
         .iter()
         .filter(|tool| !super::super::defs::is_model_hidden_builtin_tool_name(&tool.name))
+        .filter(|tool| !is_commit_message_tool(&tool.name) || explicit_commit_message_intent)
         .filter_map(|tool| {
             let score = intent_score(tool, &terms);
             (score >= 4).then(|| (score, tool.name.clone()))
@@ -84,6 +87,27 @@ fn intent_terms(intent: &str) -> Vec<String> {
         terms.push(term.to_owned());
     }
     super::dedup_preserve_order(terms)
+}
+
+fn is_commit_message_tool(name: &str) -> bool {
+    name.eq_ignore_ascii_case("SuggestCommitMessage")
+        || name.eq_ignore_ascii_case("suggest_commit_message")
+}
+
+fn explicitly_requests_commit_message(intent: &str) -> bool {
+    let lower = intent.to_ascii_lowercase();
+    let normalized = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = normalized.trim();
+    trimmed.contains("commit message")
+        || trimmed.contains("conventional commit")
+        || trimmed.contains("suggest commit")
+        || trimmed.contains("generate commit")
+        || trimmed.contains("write commit")
+        || trimmed.contains("draft commit")
 }
 
 const INTENT_STOPWORDS: &[&str] = &[

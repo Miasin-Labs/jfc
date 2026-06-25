@@ -75,16 +75,19 @@ async fn run_list(cwd: &std::path::Path) -> String {
         jfc_knowledge::block_on_knowledge(async {
             let store = KnowledgeStore::open_default().await?;
             let project = jfc_knowledge::project_key(&cwd);
-            let hits = store.recall(
-                "",
-                &RecallFilter {
-                    project_key: Some(&project),
-                    limit: 20,
-                },
-            ).await?;
+            let hits = store
+                .recall(
+                    "",
+                    &RecallFilter {
+                        project_key: Some(&project),
+                        limit: 20,
+                    },
+                )
+                .await?;
             if hits.is_empty() {
                 return Ok(
-                    "No knowledge stored yet. Try `/knowledge import` or `/knowledge mine`.".to_owned(),
+                    "No knowledge stored yet. Try `/knowledge import` or `/knowledge mine`."
+                        .to_owned(),
                 );
             }
             let mut out = String::from("Recent knowledge (top-ranked):\n");
@@ -118,7 +121,8 @@ async fn run_gaps(cwd: &std::path::Path) -> String {
             if gaps.is_empty() {
                 return Ok("No open knowledge gaps.".to_owned());
             }
-            let mut out = String::from("Knowledge gaps (what to learn next, by reference count):\n");
+            let mut out =
+                String::from("Knowledge gaps (what to learn next, by reference count):\n");
             for g in gaps {
                 out.push_str(&format!("- ×{} {} — {}\n", g.ref_count, g.label, g.reason));
             }
@@ -224,10 +228,12 @@ async fn run_consolidate(cwd: &std::path::Path) -> String {
             let _ = cwd;
             let store = KnowledgeStore::open_default().await?;
             let superseded = store.consolidate().await?;
-            let removed = store.decay(
-                jfc_knowledge::DEFAULT_MAX_AGE_MS,
-                jfc_knowledge::DEFAULT_MAX_ROWS_PER_SCOPE,
-            ).await?;
+            let removed = store
+                .decay(
+                    jfc_knowledge::DEFAULT_MAX_AGE_MS,
+                    jfc_knowledge::DEFAULT_MAX_ROWS_PER_SCOPE,
+                )
+                .await?;
             Ok(format!(
                 "Consolidated: {superseded} duplicate(s) superseded, {removed} stale row(s) pruned."
             ))

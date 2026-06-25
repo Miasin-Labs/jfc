@@ -223,6 +223,8 @@ pub struct BackgroundAgentInfo {
     /// "task · last_tool" for detached agents, not just in-process ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool_info: Option<String>,
 }
 
 /// Durable worker launch metadata for a background Task. This is the piece that
@@ -327,7 +329,9 @@ fn daemon_state_store(paths: &DaemonPaths) -> jfc_knowledge::Result<jfc_knowledg
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::create_dir_all(&paths.base_dir)?;
-    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(&paths.base_dir.join("knowledge.db")))
+    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(
+        &paths.base_dir.join("knowledge.db"),
+    ))
 }
 
 fn load_state_row(
@@ -335,11 +339,9 @@ fn load_state_row(
 ) -> jfc_knowledge::Result<Option<jfc_knowledge::SessionArtifactRow>> {
     let store = daemon_state_store(paths)?;
     jfc_knowledge::block_on_knowledge(async {
-        store.get_session_artifact(
-            DAEMON_STATE_SESSION_ID,
-            DAEMON_STATE_KIND,
-            DAEMON_STATE_KEY,
-        ).await
+        store
+            .get_session_artifact(DAEMON_STATE_SESSION_ID, DAEMON_STATE_KIND, DAEMON_STATE_KEY)
+            .await
     })
 }
 
@@ -558,12 +560,14 @@ pub fn save_state(paths: &DaemonPaths, state: &DaemonState) -> std::io::Result<(
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     let store = daemon_state_store(paths).map_err(std::io::Error::other)?;
     jfc_knowledge::block_on_knowledge(async {
-        store.upsert_session_artifact(
-            DAEMON_STATE_SESSION_ID,
-            DAEMON_STATE_KIND,
-            DAEMON_STATE_KEY,
-            &json,
-        ).await
+        store
+            .upsert_session_artifact(
+                DAEMON_STATE_SESSION_ID,
+                DAEMON_STATE_KIND,
+                DAEMON_STATE_KEY,
+                &json,
+            )
+            .await
     })
     .map_err(std::io::Error::other)
 }
@@ -615,6 +619,7 @@ mod tests {
             latest_cache_write_tokens: 0,
             cumulative_output_tokens: 0,
             last_tool: None,
+            last_tool_info: None,
         }
     }
 

@@ -5,6 +5,7 @@ mod economy;
 mod filesystem;
 mod hcom;
 mod interaction;
+mod learn;
 mod plan;
 mod review;
 mod tasks;
@@ -14,7 +15,7 @@ use jfc_provider::ToolDef;
 const DEF_KIND_TOOL: &str = "tool_definition";
 
 pub fn all_tool_defs() -> Vec<ToolDef> {
-    let mut defs = Vec::with_capacity(64);
+    let mut defs = Vec::with_capacity(72);
     defs.extend(filesystem::filesystem_tool_defs());
     defs.extend(tasks::task_tool_defs());
     defs.extend(plan::plan_tool_defs());
@@ -23,6 +24,7 @@ pub fn all_tool_defs() -> Vec<ToolDef> {
     defs.extend(design::design_tool_defs());
     defs.extend(hcom::hcom_tool_defs());
     defs.extend(interaction::interaction_tool_defs());
+    defs.extend(learn::learn_tool_defs());
     defs.extend(review::review_tool_defs());
     defs.extend(daemon::daemon_tool_defs());
     defs
@@ -71,9 +73,9 @@ pub fn sync_tool_definitions_to_db(tools: &[ToolDef]) {
             status: jfc_knowledge::DefinitionStatus::Active,
             created_by: "runtime_catalog".to_owned(),
         };
-        if let Err(err) = jfc_knowledge::block_on_knowledge(async {
-            store.upsert_definition(&def).await
-        }) {
+        if let Err(err) =
+            jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await })
+        {
             tracing::warn!(
                 target: "jfc::tools",
                 tool = %tool.name,
@@ -94,14 +96,16 @@ fn open_definition_store(project_root: &std::path::Path) -> Option<jfc_knowledge
         let path = path.clone();
         jfc_knowledge::block_on_knowledge(async move {
             jfc_knowledge::KnowledgeStore::open(&path).await
-        }).ok()
+        })
+        .ok()
     }
     #[cfg(not(test))]
     {
         let _ = project_root;
         jfc_knowledge::block_on_knowledge(async {
             jfc_knowledge::KnowledgeStore::open_default().await
-        }).ok()
+        })
+        .ok()
     }
 }
 

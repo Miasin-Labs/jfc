@@ -81,10 +81,11 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // earlier gate (`is_streaming || compacting || pending_tool_calls`)
     // dropped to false during the brief gap between SSE end and the
     // next stream's start mid-agentic-loop — the spinner blinked off
-    // and back on. Adding `turn_started_at.is_some()` keeps it lit
-    // for the *whole* turn (set at submit, cleared at the
-    // turn-complete event). Background tasks count too so a fan of
-    // subagents keeps the spinner alive even if the leader finished.
+    // and back on. `turn_started_at` and the tool pipeline keep it lit for the
+    // *whole* turn (set at submit, cleared at the turn-complete event), even
+    // after queued tools drain into an executing batch. Background tasks count
+    // too so a fan of subagents keeps the spinner alive even if the leader
+    // finished.
     let any_alive_subagent = app
         .engine
         .background_tasks
@@ -92,7 +93,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         .any(|bt| bt.status.is_alive());
     let show_spinner = app.engine.is_streaming
         || app.engine.compacting_started_at.is_some()
-        || !app.engine.pending_tool_calls.is_empty()
+        || app.engine.pipeline_busy_for_submit()
         || app.engine.turn_started_at.is_some()
         || any_alive_subagent;
     // Spinner row above input: verb + Next preview only. Background agents are

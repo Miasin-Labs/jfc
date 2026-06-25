@@ -93,26 +93,26 @@ pub async fn insert(pool: &SqlitePool, rec: &KnowledgeRecord) -> Result<()> {
         "INSERT INTO knowledge (id, kind, scope, project_key, title, body, tags, source, \
          confidence, created_at_ms, last_used_ms, use_count, superseded_by, promoted, \
          outcome, importance) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
     )
-        .bind(&rec.id)
-        .bind(rec.kind.slug())
-        .bind(rec.scope.slug())
-        .bind(&rec.project_key)
-        .bind(&rec.title)
-        .bind(&rec.body)
-        .bind(&rec.tags)
-        .bind(&rec.source)
-        .bind(rec.confidence)
-        .bind(rec.created_at_ms)
-        .bind(rec.last_used_ms)
-        .bind(rec.use_count)
-        .bind(&rec.superseded_by)
-        .bind(rec.promoted as i64)
-        .bind(rec.outcome.slug())
-        .bind(rec.importance)
-        .execute(pool)
-        .await?;
+    .bind(&rec.id)
+    .bind(rec.kind.slug())
+    .bind(rec.scope.slug())
+    .bind(&rec.project_key)
+    .bind(&rec.title)
+    .bind(&rec.body)
+    .bind(&rec.tags)
+    .bind(&rec.source)
+    .bind(rec.confidence)
+    .bind(rec.created_at_ms)
+    .bind(rec.last_used_ms)
+    .bind(rec.use_count)
+    .bind(&rec.superseded_by)
+    .bind(rec.promoted as i64)
+    .bind(rec.outcome.slug())
+    .bind(rec.importance)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -143,11 +143,11 @@ pub async fn supersede(pool: &SqlitePool, old_id: &str, new_id: &str) -> Result<
 pub async fn promote_to_global(pool: &SqlitePool, id: &str) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE knowledge SET scope = 'global', project_key = NULL, promoted = 1 \
-         WHERE id = ?1 AND superseded_by IS NULL"
+         WHERE id = ?1 AND superseded_by IS NULL",
     )
-        .bind(id)
-        .execute(pool)
-        .await?;
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -205,8 +205,7 @@ pub async fn recall(
 
     // FTS path: join the fts table on rowid, rank by our score.
     // Binds: ?1=fts_query, ?2=project_key, ?3=halflife, ?4=now, ?5=limit.
-    let scope_clause =
-        "(scope IN ('user','global') OR (scope = 'project' AND project_key = ?2))";
+    let scope_clause = "(scope IN ('user','global') OR (scope = 'project' AND project_key = ?2))";
     let score_expr = "k.importance * k.confidence \
         * (CASE k.outcome WHEN 'verified' THEN 2.0 WHEN 'refuted' THEN 0.1 ELSE 1.0 END) \
         * (?3 / (?3 + CAST(?4 - k.created_at_ms AS REAL))) \
@@ -238,12 +237,12 @@ pub async fn mark_used(pool: &SqlitePool, ids: &[String]) -> Result<()> {
     let now = now_ms();
     for id in ids {
         sqlx::query(
-            "UPDATE knowledge SET use_count = use_count + 1, last_used_ms = ?2 WHERE id = ?1"
+            "UPDATE knowledge SET use_count = use_count + 1, last_used_ms = ?2 WHERE id = ?1",
         )
-            .bind(id)
-            .bind(now)
-            .execute(pool)
-            .await?;
+        .bind(id)
+        .bind(now)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
@@ -258,12 +257,11 @@ pub async fn decay(pool: &SqlitePool, max_age_ms: i64, max_rows_per_scope: i64) 
     let mut removed = 0usize;
 
     // 1. Drop old superseded tombstones.
-    let result = sqlx::query(
-        "DELETE FROM knowledge WHERE superseded_by IS NOT NULL AND created_at_ms < ?1"
-    )
-        .bind(now - max_age_ms)
-        .execute(&mut *tx)
-        .await?;
+    let result =
+        sqlx::query("DELETE FROM knowledge WHERE superseded_by IS NOT NULL AND created_at_ms < ?1")
+            .bind(now - max_age_ms)
+            .execute(&mut *tx)
+            .await?;
     removed += result.rows_affected() as usize;
 
     // 2. Enforce the per-scope cap for non-promoted rows. Keep the top
@@ -275,12 +273,12 @@ pub async fn decay(pool: &SqlitePool, max_age_ms: i64, max_rows_per_scope: i64) 
                  WHERE scope = ?1 AND promoted = 0 AND superseded_by IS NULL
                  ORDER BY confidence * (1.0 + CAST(use_count AS REAL) / (use_count + 4)) DESC
                  LIMIT -1 OFFSET ?2
-             )"
+             )",
         )
-            .bind(scope)
-            .bind(max_rows_per_scope)
-            .execute(&mut *tx)
-            .await?;
+        .bind(scope)
+        .bind(max_rows_per_scope)
+        .execute(&mut *tx)
+        .await?;
         removed += result.rows_affected() as usize;
     }
     tx.commit().await?;
@@ -295,14 +293,14 @@ use crate::record::RelKind;
 pub async fn link(pool: &SqlitePool, from_id: &str, to_id: &str, rel: RelKind) -> Result<()> {
     sqlx::query(
         "INSERT OR IGNORE INTO knowledge_links (from_id, to_id, rel, created_at_ms) \
-         VALUES (?1, ?2, ?3, ?4)"
+         VALUES (?1, ?2, ?3, ?4)",
     )
-        .bind(from_id)
-        .bind(to_id)
-        .bind(rel.slug())
-        .bind(now_ms())
-        .execute(pool)
-        .await?;
+    .bind(from_id)
+    .bind(to_id)
+    .bind(rel.slug())
+    .bind(now_ms())
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -319,11 +317,11 @@ pub async fn linked(pool: &SqlitePool, id: &str) -> Result<Vec<LinkedRecord>> {
     let rows = sqlx::query(
         "SELECT l.rel AS rel, k.* FROM knowledge_links l \
          JOIN knowledge k ON k.id = l.to_id \
-         WHERE l.from_id = ?1 AND k.superseded_by IS NULL"
+         WHERE l.from_id = ?1 AND k.superseded_by IS NULL",
     )
-        .bind(id)
-        .fetch_all(pool)
-        .await?;
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
     let mut out = Vec::new();
     for row in rows {
         let rel_s: String = row.try_get("rel")?;
@@ -365,14 +363,14 @@ pub async fn note_gap(pool: &SqlitePool, label: &str, reason: &str) -> Result<()
     sqlx::query(
         "INSERT INTO knowledge_gaps (id, label, reason, ref_count, first_seen_ms, last_seen_ms) \
          VALUES (?1, ?2, ?3, 1, ?4, ?4) \
-         ON CONFLICT(id) DO UPDATE SET ref_count = ref_count + 1, last_seen_ms = ?4"
+         ON CONFLICT(id) DO UPDATE SET ref_count = ref_count + 1, last_seen_ms = ?4",
     )
-        .bind(&id)
-        .bind(label.trim())
-        .bind(reason)
-        .bind(now)
-        .execute(pool)
-        .await?;
+    .bind(&id)
+    .bind(label.trim())
+    .bind(reason)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -388,11 +386,11 @@ pub struct Gap {
 pub async fn gaps(pool: &SqlitePool, limit: usize) -> Result<Vec<Gap>> {
     let rows = sqlx::query(
         "SELECT id, label, reason, ref_count FROM knowledge_gaps \
-         WHERE resolved_by IS NULL ORDER BY ref_count DESC, last_seen_ms DESC LIMIT ?1"
+         WHERE resolved_by IS NULL ORDER BY ref_count DESC, last_seen_ms DESC LIMIT ?1",
     )
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await?;
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
     let mut out = Vec::new();
     for row in rows {
         out.push(Gap {
@@ -420,10 +418,10 @@ pub async fn consolidate(pool: &SqlitePool) -> Result<usize> {
         let rows = sqlx::query(
             "SELECT id, scope, COALESCE(project_key,'') as proj, body, importance, confidence, \
              CASE outcome WHEN 'verified' THEN 1 ELSE 0 END AS verified \
-             FROM knowledge WHERE superseded_by IS NULL"
+             FROM knowledge WHERE superseded_by IS NULL",
         )
-            .fetch_all(pool)
-            .await?;
+        .fetch_all(pool)
+        .await?;
         for row in rows {
             let id: String = row.try_get("id")?;
             let scope: String = row.try_get("scope")?;

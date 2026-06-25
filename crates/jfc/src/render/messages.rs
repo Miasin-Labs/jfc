@@ -1021,11 +1021,13 @@ enum ActivityLabel {
     Searching,
     Running,
     Editing,
+    Creating,
 }
 
 impl ActivityLabel {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Creating => "Creating",
             Self::Editing => "Editing",
             Self::Running => "Running",
             Self::Searching => "Searching",
@@ -1037,9 +1039,8 @@ impl ActivityLabel {
 
     fn for_tool(tool: &jfc_core::ToolCall) -> Self {
         match &tool.kind {
-            ToolKind::Edit | ToolKind::Write | ToolKind::MultiEdit | ToolKind::ApplyPatch => {
-                Self::Editing
-            }
+            ToolKind::Write => Self::Creating,
+            ToolKind::Edit | ToolKind::MultiEdit | ToolKind::ApplyPatch => Self::Editing,
             ToolKind::Bash | ToolKind::BashOutput | ToolKind::HcomRun | ToolKind::HcomTerm => {
                 Self::Running
             }
@@ -1069,12 +1070,109 @@ impl ActivityLabel {
     }
 }
 
-fn active_tool_activity_label(app: &App) -> Option<&'static str> {
-    let mut best: Option<ActivityLabel> = None;
+#[derive(Clone)]
+struct FileActivity {
+    path: String,
+    additions: usize,
+    deletions: usize,
+}
+
+#[derive(Clone)]
+struct ActivityDetails {
+    label: ActivityLabel,
+    file: Option<FileActivity>,
+}
+
+fn changed_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count().max(1)
+    }
+}
+
+fn estimate_multiedit_counts(edits: &serde_json::Value) -> (usize, usize) {
+    let Some(edits) = edits.as_array() else {
+        return (0, 0);
+    };
+    edits.iter().fold((0, 0), |(adds, dels), edit| {
+        let old = edit
+            .get("old_string")
+            .or_else(|| edit.get("old_str"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let new = edit
+            .get("new_string")
+            .or_else(|| edit.get("new_str"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        (
+            adds + changed_line_count(new),
+            dels + changed_line_count(old),
+        )
+    })
+}
+
+fn file_activity_for_tool(tool: &jfc_core::ToolCall) -> Option<FileActivity> {
+    if let ToolOutput::Diff(diff) = &tool.output {
+        return Some(FileActivity {
+            path: diff.file_path.clone(),
+            additions: diff.additions,
+            deletions: diff.deletions,
+        });
+    }
+    match &tool.input {
+        ToolInput::Write { file_path, content } => Some(FileActivity {
+            path: file_path.clone(),
+            additions: changed_line_count(content),
+            deletions: 0,
+        }),
+        ToolInput::Edit {
+            file_path,
+            old_string,
+            new_string,
+            ..
+        } => Some(FileActivity {
+            path: file_path.clone(),
+            additions: changed_line_count(new_string),
+            deletions: changed_line_count(old_string),
+        }),
+        ToolInput::MultiEdit { file_path, edits } => {
+            let (additions, deletions) = estimate_multiedit_counts(edits);
+            Some(FileActivity {
+                path: file_path.clone(),
+                additions,
+                deletions,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn activity_display_path(path: &str) -> String {
+    let name = path
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+    truncate_str(name, 48)
+}
+
+fn active_tool_activity(app: &App) -> Option<ActivityDetails> {
+    let mut best: Option<ActivityDetails> = None;
     let mut consider = |tool: &jfc_core::ToolCall| {
-        let label = ActivityLabel::for_tool(tool);
-        if best.is_none_or(|current| label > current) {
-            best = Some(label);
+        let label = match &tool.input {
+            ToolInput::Edit { old_string, .. } if old_string.is_empty() => ActivityLabel::Creating,
+            _ => ActivityLabel::for_tool(tool),
+        };
+        let details = ActivityDetails {
+            label,
+            file: file_activity_for_tool(tool),
+        };
+        let replace = best.as_ref().is_none_or(|current| {
+            label > current.label || current.file.is_none() && details.file.is_some()
+        });
+        if replace {
+            best = Some(details);
         }
     };
 
@@ -1098,7 +1196,64 @@ fn active_tool_activity_label(app: &App) -> Option<&'static str> {
         }
     }
 
-    best.map(ActivityLabel::as_str)
+    best
+}
+
+fn push_swept_text(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    tick: usize,
+    base: Color,
+    sweep: Color,
+) {
+    if crate::spinner::reduced_motion() {
+        spans.push(Span::styled(text.to_owned(), Style::default().fg(base)));
+        return;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len().max(1);
+    let head = tick % (len + 4);
+    for (idx, ch) in chars.into_iter().enumerate() {
+        let distance = head.abs_diff(idx);
+        let color = if distance <= 1 { sweep } else { base };
+        spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+    }
+}
+
+fn push_activity_spans(
+    spans: &mut Vec<Span<'static>>,
+    details: &ActivityDetails,
+    tick: usize,
+    t: Theme,
+) {
+    let ui_tokens = t.claude_ui_tokens();
+    if let Some(file) = &details.file {
+        push_swept_text(
+            spans,
+            details.label.as_str(),
+            tick,
+            t.text_secondary,
+            t.warning,
+        );
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            activity_display_path(&file.path),
+            Style::default().fg(t.accent_secondary),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("+{}", file.additions),
+            Style::default().fg(ui_tokens.diff_added),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("-{}", file.deletions),
+            Style::default().fg(ui_tokens.diff_removed),
+        ));
+    } else {
+        let label = format!("{}…", details.label.as_str());
+        push_swept_text(spans, &label, tick, t.warning, t.text_primary);
+    }
 }
 
 /// Single- or double-row spinner widget rendered between the message
@@ -1245,20 +1400,27 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         );
         head_glyph = segs.glyph;
         dim = segs.dim;
+        let activity = match app.spinner_state.phase {
+            crate::spinner::SpinnerPhase::Responding
+            | crate::spinner::SpinnerPhase::ToolUse
+            | crate::spinner::SpinnerPhase::Working => active_tool_activity(app),
+            _ => None,
+        };
         let label: std::borrow::Cow<'_, str> = {
             if let Some(status) = lifecycle {
                 std::borrow::Cow::Borrowed(status.phase.label())
             } else {
                 match app.spinner_state.phase {
-                    crate::spinner::SpinnerPhase::ToolUse
-                    | crate::spinner::SpinnerPhase::Working => active_tool_activity_label(app)
-                        .map(std::borrow::Cow::Borrowed)
+                    crate::spinner::SpinnerPhase::Responding
+                    | crate::spinner::SpinnerPhase::ToolUse
+                    | crate::spinner::SpinnerPhase::Working => activity
+                        .as_ref()
+                        .map(|details| std::borrow::Cow::Borrowed(details.label.as_str()))
                         .unwrap_or_else(|| {
                             std::borrow::Cow::Borrowed(app.spinner_state.phase.label())
                         }),
                     crate::spinner::SpinnerPhase::Requesting
-                    | crate::spinner::SpinnerPhase::Thinking
-                    | crate::spinner::SpinnerPhase::Responding => {
+                    | crate::spinner::SpinnerPhase::Thinking => {
                         std::borrow::Cow::Borrowed(app.spinner_state.phase.label())
                     }
                     crate::spinner::SpinnerPhase::Compacting
@@ -1287,7 +1449,17 @@ pub(super) fn spinner_row(f: &mut Frame, app: &App, area: Rect) {
         // Label color: secondary while live, muted once the stream has
         // gone quiet (the honest "stalled" tint — dimmer, not redder).
         let label_color = if dim { t.text_muted } else { t.warning };
-        verb_spans.push(Span::styled(label, Style::default().fg(label_color)));
+        if let Some(activity) = activity {
+            push_activity_spans(&mut verb_spans, &activity, app.spinner_frame, t);
+        } else {
+            push_swept_text(
+                &mut verb_spans,
+                &label,
+                app.spinner_frame,
+                label_color,
+                t.text_primary,
+            );
+        }
     };
     // The `· N agents…` fanout badge that used to live here is gone — the
     // agent fan's `agents  ●N ○N ✓N ✗N` summary line (just below the

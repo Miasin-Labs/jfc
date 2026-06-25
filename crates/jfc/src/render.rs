@@ -47,8 +47,9 @@ pub use frame::frame;
 
 // Re-export utilities needed by other modules
 #[cfg(test)]
+pub(crate) use crate::message_view::TASK_VIEW_COLLAPSE_BYTES;
+#[cfg(test)]
 pub(crate) use crate::message_view::task_body::task_view_body_lines;
-pub(crate) use crate::message_view::{TASK_VIEW_COLLAPSE_BYTES, TASK_VIEW_COLLAPSE_LINES};
 pub(crate) use agents::fleet_ordered_task_ids;
 pub(crate) use overlays::{current_slash_prefix, slash_matches};
 pub use session_sidebar::ordered_sidebar_sessions;

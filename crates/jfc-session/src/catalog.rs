@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use tracing::{debug, info};
 
 use crate::SessionId;
@@ -211,12 +213,34 @@ pub fn cwd_mismatch_message(session_cwd: Option<&str>, current_cwd: &str) -> Opt
     if current_cwd.is_empty() {
         return None;
     }
-    if session_cwd == current_cwd {
+    if cwd_paths_match(session_cwd, current_cwd) {
         return None;
     }
     Some(format!(
         "Session was created in {session_cwd}; current cwd is {current_cwd}"
     ))
+}
+
+fn cwd_matches_filter(session_cwd: Option<&str>, cwd_filter: Option<&str>) -> bool {
+    match cwd_filter {
+        None => true,
+        Some(target) => session_cwd.is_some_and(|cwd| cwd_paths_match(cwd, target)),
+    }
+}
+
+fn cwd_paths_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    normalized_cwd(left) == normalized_cwd(right)
+}
+
+fn normalized_cwd(path: &str) -> PathBuf {
+    let trimmed = path.trim_end_matches('/');
+    let stable = if trimmed.is_empty() { "/" } else { trimmed };
+    Path::new(stable)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(stable))
 }
 
 pub async fn list_sessions() -> Vec<SessionId> {
@@ -244,12 +268,11 @@ pub async fn list_sessions_filtered(cwd_filter: Option<&str>) -> Vec<SessionMeta
     let mut sessions = Vec::new();
     if let Some(store) = open_session_db() {
         if let Ok(rows) = store.list_sessions(None, 100_000).await {
-            sessions.extend(rows.into_iter().map(metadata_from_row).filter(
-                |meta| match cwd_filter {
-                    None => true,
-                    Some(target) => meta.cwd.as_deref() == Some(target),
-                },
-            ));
+            sessions.extend(
+                rows.into_iter()
+                    .map(metadata_from_row)
+                    .filter(|meta| cwd_matches_filter(meta.cwd.as_deref(), cwd_filter)),
+            );
         }
     }
     sessions.sort_by(|a, b| {
@@ -285,4 +308,90 @@ pub async fn most_recent_session() -> Option<SessionId> {
     let result = list_sessions().await.into_iter().next();
     debug!(target: "jfc::session", found = result.is_some(), "most recent session (global)");
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cwd_filter_matches_trailing_slash_variant_regression() {
+        assert!(cwd_matches_filter(
+            Some("/tmp/project/"),
+            Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn cwd_filter_matches_canonical_equivalent_path_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let equivalent = nested.join("..").join("nested");
+
+        assert!(cwd_matches_filter(nested.to_str(), equivalent.to_str()));
+    }
+
+    #[test]
+    fn cwd_mismatch_uses_normalized_paths_normal() {
+        assert_eq!(
+            cwd_mismatch_message(Some("/tmp/project/"), "/tmp/project"),
+            None
+        );
+    }
+
+    #[test]
+    fn most_recent_session_for_cwd_uses_normalized_db_cwd_regression() {
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let equivalent = project.join("..").join("project");
+        let db = dir.path().join("knowledge.db");
+        let previous = std::env::var_os("JFC_KNOWLEDGE_DB");
+        unsafe { std::env::set_var("JFC_KNOWLEDGE_DB", &db) };
+
+        jfc_knowledge::block_on_knowledge(async {
+            let store = jfc_knowledge::KnowledgeStore::open_default().await.unwrap();
+            store
+                .upsert_session(&jfc_knowledge::SessionRow {
+                    id: "matching-project".to_owned(),
+                    cwd: Some(project.display().to_string()),
+                    model: None,
+                    created_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                    updated_at: Some("2026-01-01T00:00:01Z".to_owned()),
+                    first_prompt: None,
+                    title: None,
+                    message_count: 1,
+                })
+                .await
+                .unwrap();
+            store
+                .upsert_session(&jfc_knowledge::SessionRow {
+                    id: "newer-other-project".to_owned(),
+                    cwd: Some(dir.path().join("other").display().to_string()),
+                    model: None,
+                    created_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                    updated_at: Some("2026-01-01T00:00:02Z".to_owned()),
+                    first_prompt: None,
+                    title: None,
+                    message_count: 1,
+                })
+                .await
+                .unwrap();
+        });
+
+        let picked = jfc_knowledge::block_on_knowledge(async {
+            most_recent_session_for_cwd(equivalent.to_str()).await
+        });
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("JFC_KNOWLEDGE_DB", value) },
+            None => unsafe { std::env::remove_var("JFC_KNOWLEDGE_DB") },
+        }
+        assert_eq!(
+            picked.map(|id| id.as_str().to_owned()),
+            Some("matching-project".to_owned())
+        );
+    }
 }

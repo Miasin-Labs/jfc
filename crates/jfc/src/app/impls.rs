@@ -20,7 +20,7 @@ impl App {
         // cadence and stops redrawing mid-turn.
         let turn_active = self.engine.turn_started_at.is_some()
             || self.engine.compacting_started_at.is_some()
-            || !self.engine.pending_tool_calls.is_empty()
+            || self.engine.pipeline_busy_for_submit()
             || self.engine.network_recovery_status.is_some()
             || self.engine.stream_lifecycle.is_some();
         let dominated = self.launched_at.elapsed() < std::time::Duration::from_millis(1500)

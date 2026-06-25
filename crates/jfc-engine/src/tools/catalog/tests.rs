@@ -259,6 +259,46 @@ fn progressive_catalog_selects_tools_from_intent_normal() {
     assert!(names.contains(&"WebSearch"));
 }
 
+#[test]
+fn progressive_catalog_does_not_suggest_commit_message_for_commit_action_regression() {
+    let all = vec![
+        tool("Bash", "run shell commands"),
+        tool(
+            "SuggestCommitMessage",
+            "Persist one concise commit-message suggestion after inspecting the actual diff.",
+        ),
+    ];
+
+    let selected = progressive_tool_defs(all, &[], Some("can you git commit and push please"));
+    let names: Vec<&str> = selected.iter().map(|tool| tool.name.as_str()).collect();
+
+    assert!(names.contains(&"Bash"));
+    assert!(
+        !names.contains(&"SuggestCommitMessage"),
+        "commit-and-push execution should not advertise the commit-message suggestion tool"
+    );
+}
+
+#[test]
+fn progressive_catalog_suggests_commit_message_for_explicit_message_intent_normal() {
+    let all = vec![
+        tool("Bash", "run shell commands"),
+        tool(
+            "SuggestCommitMessage",
+            "Persist one concise commit-message suggestion after inspecting the actual diff.",
+        ),
+    ];
+
+    let selected = progressive_tool_defs(
+        all,
+        &[],
+        Some("generate a conventional commit message for the staged diff"),
+    );
+    let names: Vec<&str> = selected.iter().map(|tool| tool.name.as_str()).collect();
+
+    assert!(names.contains(&"SuggestCommitMessage"));
+}
+
 #[serial_test::serial(env)]
 #[test]
 fn env_limits_ignore_invalid_values_regression() {

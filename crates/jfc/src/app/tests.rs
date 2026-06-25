@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Instant,
+};
 
 use super::shell_safety::is_readonly_bash;
 use super::*;
@@ -54,6 +57,25 @@ fn make_tool(kind: ToolKind, id: &str) -> ToolCall {
         started_at: None,
         thought_signature: None,
     }
+}
+
+#[test]
+fn animation_frame_stays_live_for_in_flight_tool_pipeline_regression() {
+    let mut app = new_app();
+    app.engine.is_streaming = false;
+    app.engine.turn_started_at = None;
+    app.engine.pending_tool_calls.clear();
+    app.engine.in_flight_tool_batches = 1;
+    app.engine
+        .in_progress_tool_use_ids
+        .insert("tool-1".to_owned());
+
+    app.update_wants_animation_frame();
+
+    assert!(
+        app.wants_animation_frame.load(Ordering::Relaxed),
+        "footer spinner must keep animating after pending tools drain into an executing batch"
+    );
 }
 
 // ─────── PermissionMode pure logic ────────────────────────────────

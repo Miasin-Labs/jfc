@@ -68,6 +68,18 @@ fn prioritize_terminal_events(events: &mut Vec<AppEvent>) {
     *events = terminal_events;
 }
 
+fn effective_cwd_filter(cwd: &str) -> Option<&str> {
+    (!cwd.is_empty()).then_some(cwd)
+}
+
+fn highlight_cache_path(cwd: &str) -> Option<std::path::PathBuf> {
+    effective_cwd_filter(cwd).map(|cwd| {
+        std::path::Path::new(cwd)
+            .join(".jfc")
+            .join("highlight-heights.json")
+    })
+}
+
 pub(crate) async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     providers: Vec<Arc<dyn Provider>>,
@@ -354,16 +366,16 @@ pub(crate) async fn run(
             // `--continue` is cwd-scoped (codex-rs / v126 parity). The
             // user can pass `--continue --global` later if we add the
             // flag; for now the cwd default is what they actually want.
-            let cwd_str = std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string());
+            let cwd_str = app.engine.cwd.clone();
             // Prefer a session from *this* project (cwd-scoped, codex-rs /
             // v126 parity). Only when the current cwd has no sessions at all
             // do we fall back to the globally-most-recent — and we flag that
             // so the user isn't silently dropped into an unrelated project's
             // transcript (the "`--continue` resumed the wrong repo" footgun).
             let mut continued_foreign_cwd = false;
-            let id = match jfc_session::most_recent_session_for_cwd(cwd_str.as_deref()).await {
+            let id = match jfc_session::most_recent_session_for_cwd(effective_cwd_filter(&cwd_str))
+                .await
+            {
                 Some(id) => Some(id),
                 None => {
                     let fallback = jfc_session::most_recent_session().await;
@@ -382,7 +394,7 @@ pub(crate) async fn run(
                     session_id = %session_id,
                     message_count = messages.len(),
                     saved_model = ?saved_model,
-                    cwd = ?cwd_str,
+                    cwd = %cwd_str,
                     "continuing most recent session"
                 );
                 app.engine.messages = messages;
@@ -434,7 +446,7 @@ pub(crate) async fn run(
                 if continued_foreign_cwd {
                     tracing::warn!(
                         target: "jfc::session",
-                        cwd = ?cwd_str,
+                        cwd = %cwd_str,
                         "no session for this cwd — continued the globally-most-recent session from another project"
                     );
                     jfc_engine::toast::push_with_cap(
@@ -447,16 +459,15 @@ pub(crate) async fn run(
                         ),
                     );
                 }
-                let hl_cache_path = std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(".jfc/highlight-heights.json");
-                let hl_loaded = jfc_markdown::load_highlight_line_counts(&hl_cache_path);
-                if hl_loaded > 0 {
-                    tracing::debug!(
-                        target: "jfc::session",
-                        hl_loaded,
-                        "pre-seeded highlight line-count cache"
-                    );
+                if let Some(hl_cache_path) = highlight_cache_path(&cwd_str) {
+                    let hl_loaded = jfc_markdown::load_highlight_line_counts(&hl_cache_path);
+                    if hl_loaded > 0 {
+                        tracing::debug!(
+                            target: "jfc::session",
+                            hl_loaded,
+                            "pre-seeded highlight line-count cache"
+                        );
+                    }
                 }
             }
         }
@@ -475,9 +486,7 @@ pub(crate) async fn run(
                 let session_cwd = jfc_session::load_session_metadata(&session_id)
                     .await
                     .and_then(|m| m.cwd);
-                let current_cwd = std::env::current_dir()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let current_cwd = app.engine.cwd.clone();
                 if let Some(msg) =
                     jfc_session::cwd_mismatch_message(session_cwd.as_deref(), &current_cwd)
                 {
@@ -525,16 +534,15 @@ pub(crate) async fn run(
                     }
                 }
                 app.recompute_token_estimate();
-                let hl_cache_path = std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(".jfc/highlight-heights.json");
-                let hl_loaded = jfc_markdown::load_highlight_line_counts(&hl_cache_path);
-                if hl_loaded > 0 {
-                    tracing::debug!(
-                        target: "jfc::session",
-                        hl_loaded,
-                        "pre-seeded highlight line-count cache from disk (resume)"
-                    );
+                if let Some(hl_cache_path) = highlight_cache_path(&current_cwd) {
+                    let hl_loaded = jfc_markdown::load_highlight_line_counts(&hl_cache_path);
+                    if hl_loaded > 0 {
+                        tracing::debug!(
+                            target: "jfc::session",
+                            hl_loaded,
+                            "pre-seeded highlight line-count cache from disk (resume)"
+                        );
+                    }
                 }
             } else {
                 tracing::warn!(
@@ -753,13 +761,9 @@ pub(crate) async fn run(
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     jfc_engine::spawn_knowledge_maintenance_loop(cwd);
 
-    // Real LSP client: spawns rust-analyzer (Cargo.toml present) or zls
-    // (build.zig present) and routes `textDocument/publishDiagnostics`
-    // into `ProviderEvent::DiagnosticsUpdated`. Gated by `JFC_DISABLE_LSP=1`.
-    // `maybe_spawn_lsp_clients` is fire-and-forget — startup never
-    // blocks on the handshake. If the binary isn't on PATH, the spawn
-    // task silently returns and we fall back to the cargo-check
-    // producer above.
+    // Optional pushed-diagnostics LSP client. It is opt-in because
+    // rust-analyzer can eagerly prime caches for large workspaces on spawn;
+    // the LSP tool still starts a one-shot server on demand.
     {
         let tx_lsp = tx.clone();
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
@@ -1114,7 +1118,7 @@ pub(crate) async fn run(
         // move their cursor to trigger a redraw).
         let want_streaming_cursor = app.engine.is_streaming
             || app.engine.compacting_started_at.is_some()
-            || !app.engine.pending_tool_calls.is_empty()
+            || app.engine.pipeline_busy_for_submit()
             || app.engine.pending_approval.is_some()
             || !app.engine.approval_queue.is_empty()
             || app
@@ -1526,6 +1530,29 @@ mod event_priority_tests {
             &events[3],
             AppEvent::Engine(EngineEvent::Stream(StreamEvent::Chunk { .. }))
         ));
+    }
+}
+
+#[cfg(test)]
+mod startup_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn effective_cwd_filter_uses_engine_cwd_after_override_regression() {
+        assert_eq!(
+            effective_cwd_filter("/home/cole/project"),
+            Some("/home/cole/project")
+        );
+        assert_eq!(effective_cwd_filter(""), None);
+    }
+
+    #[test]
+    fn highlight_cache_path_uses_effective_cwd_regression() {
+        let path = highlight_cache_path("/tmp/jfc-project").unwrap();
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/jfc-project/.jfc/highlight-heights.json")
+        );
     }
 }
 

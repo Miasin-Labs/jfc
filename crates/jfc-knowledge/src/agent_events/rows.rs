@@ -137,7 +137,9 @@ pub(super) fn agent_mailbox_from(row: &sqlx::sqlite::SqliteRow) -> crate::Result
     })
 }
 
-pub(super) fn learning_event_from(row: &sqlx::sqlite::SqliteRow) -> crate::Result<LearningEventRow> {
+pub(super) fn learning_event_from(
+    row: &sqlx::sqlite::SqliteRow,
+) -> crate::Result<LearningEventRow> {
     use sqlx::Row;
     Ok(LearningEventRow {
         id: row.try_get(0)?,

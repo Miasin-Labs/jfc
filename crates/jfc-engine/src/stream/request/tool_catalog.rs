@@ -24,6 +24,15 @@ pub(super) async fn prepare_advertised_tools(
     let mut full_tool_catalog = tools::all_tool_defs_with_mcp().await;
     append_historical_hidden_builtin_tool_defs(&mut full_tool_catalog, messages);
     tools::sync_tool_definitions_to_db(&full_tool_catalog);
+    let rsi_tool_patches =
+        super::rsi_runtime::apply_active_tool_definition_patches(&mut full_tool_catalog).await;
+    if rsi_tool_patches > 0 {
+        tracing::debug!(
+            target: "jfc::stream::rsi",
+            patched_tools = rsi_tool_patches,
+            "applied active RSI tool definition patches"
+        );
+    }
     let full_tool_count = full_tool_catalog.len();
     let mut advertised_tools = if overrides.allowed_tools.is_empty() {
         let tool_intent = last_user_text(messages);

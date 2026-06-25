@@ -2208,6 +2208,38 @@ mod helper_tests {
     }
 
     #[test]
+    fn tool_status_icon_animated_running_task_uses_ring_frames_normal() {
+        let t = Theme::dark();
+        let mut tool = dummy_tool(
+            ToolInput::Task(jfc_core::TaskInput {
+                description: "Audit EC telemetry gaps".into(),
+                prompt: "audit it".into(),
+                subagent_type: None,
+                category: Some("audit".into()),
+                run_in_background: true,
+                model: Some("haiku".into()),
+                effort: None,
+                name: None,
+                team_name: None,
+                mode: None,
+                isolation: None,
+                parent_task_id: None,
+                schema: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
+                cwd: None,
+            }),
+            ToolOutput::Empty,
+            ToolKind::Task,
+        );
+        tool.status = ToolStatus::Running;
+        let (g0, _) = tool_status_icon_animated(&tool, &t, 0);
+        let (g2, _) = tool_status_icon_animated(&tool, &t, 2);
+        let (g4, _) = tool_status_icon_animated(&tool, &t, 4);
+        assert_eq!((g0, g2, g4), ("◌", "◎", "◉"));
+    }
+
+    #[test]
     fn tool_status_icon_animated_complete_static_robust() {
         // Complete state always returns the static icon regardless of frame.
         let t = Theme::dark();
@@ -2256,6 +2288,49 @@ mod helper_tests {
         };
         let (g, _) = tool_status_icon_animated(&tool, &t, 42);
         assert_eq!(g, "✗");
+    }
+
+    #[test]
+    fn task_header_names_agent_and_shows_model_meta_normal() {
+        let t = Theme::dark();
+        let tool = dummy_tool(
+            ToolInput::Task(jfc_core::TaskInput {
+                description: "Map ironbar fork capabilities".into(),
+                prompt: "map it".into(),
+                subagent_type: None,
+                category: Some("map".into()),
+                run_in_background: true,
+                model: Some("haiku".into()),
+                effort: None,
+                name: None,
+                team_name: None,
+                mode: None,
+                isolation: None,
+                parent_task_id: None,
+                schema: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
+                cwd: None,
+            }),
+            ToolOutput::Empty,
+            ToolKind::Task,
+        );
+        let text = build_header_inner_spans(&tool, &t, 80)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            text.contains("Agent Map ironbar fork capabilities"),
+            "task header should read like an agent row, got: {text}"
+        );
+        assert!(
+            text.contains("map · haiku"),
+            "missing task metadata: {text}"
+        );
+        assert!(
+            !text.starts_with("Task "),
+            "generic Task label leaked: {text}"
+        );
     }
 
     // --- format_elapsed_badge ----------------------------------------
@@ -2781,7 +2856,7 @@ mod helper_tests {
     }
 
     #[test]
-    fn build_title_spans_adds_diff_counts_for_file_mutations_normal() {
+    fn build_title_spans_keeps_file_mutation_counts_out_of_edit_title_regression() {
         let t = Theme::dark();
         let diff = DiffView {
             file_path: "src/lib.rs".into(),
@@ -2802,8 +2877,8 @@ mod helper_tests {
         let spans = build_title_spans(&tool, &t, "●", Style::default(), 120);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            combined.contains("+26") && combined.contains("-31"),
-            "missing diff counts: {combined:?}"
+            !combined.contains("+26") && !combined.contains("-31"),
+            "diff counts belong in the diff summary, not the edit title: {combined:?}"
         );
     }
 

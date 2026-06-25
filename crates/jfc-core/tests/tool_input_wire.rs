@@ -99,6 +99,33 @@ mod tests {
     }
 
     #[test]
+    fn learn_rsi_control_inputs_round_trip_normal() {
+        let list = ToolInput::from_value(
+            "learn_rsi_list",
+            serde_json::json!({"status": "candidate", "limit": 3}),
+        )
+        .unwrap();
+        assert!(list.summary().contains("candidate"));
+        assert_eq!(list.to_value()["limit"], 3);
+
+        let promote = ToolInput::from_value(
+            "learn_rsi_promote",
+            serde_json::json!({"kind": "tool_definition", "name": "rsi-tool_definition_patch-abc"}),
+        )
+        .unwrap();
+        assert!(promote.summary().contains("tool_definition"));
+        assert_eq!(promote.to_value()["name"], "rsi-tool_definition_patch-abc");
+
+        let rollback = ToolInput::from_value(
+            "learn_rsi_rollback",
+            serde_json::json!({"kind": "tool_definition", "name": "Edit"}),
+        )
+        .unwrap();
+        assert!(rollback.summary().contains("Edit"));
+        assert_eq!(rollback.to_value()["kind"], "tool_definition");
+    }
+
+    #[test]
     fn summary_v2_1_132_tools_normal() {
         let lsp = ToolInput::Lsp {
             kind: "hover".into(),

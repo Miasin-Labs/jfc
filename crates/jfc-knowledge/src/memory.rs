@@ -117,11 +117,11 @@ impl super::KnowledgeStore {
     pub async fn find_memory_by_hash(&self, hash: &str) -> Result<Option<String>> {
         let row = sqlx::query(
             "SELECT id FROM knowledge WHERE mem_level IS NOT NULL AND tags = ?1 \
-             AND superseded_by IS NULL LIMIT 1"
+             AND superseded_by IS NULL LIMIT 1",
         )
-            .bind(hash)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.try_get::<String, _>("id")).transpose()?)
     }
 
@@ -133,11 +133,11 @@ impl super::KnowledgeStore {
              WHERE mem_level IS NOT NULL AND superseded_by IS NULL \
                AND (mem_level IN ('user','external') \
                     OR (mem_level IN ('project','team') AND project_key IS ?1)) \
-             ORDER BY created_at_ms ASC"
+             ORDER BY created_at_ms ASC",
         )
-            .bind(project_key)
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(project_key)
+        .fetch_all(&self.pool)
+        .await?;
         let mut out = Vec::new();
         for r in rows {
             let level_s: String = r.try_get("mem_level")?;
@@ -154,9 +154,7 @@ impl super::KnowledgeStore {
 
     /// Delete a memory by id (the delete-by-id contract). Returns rows removed.
     pub async fn delete_memory_by_id(&self, id: &str) -> Result<usize> {
-        let result = sqlx::query(
-            "DELETE FROM knowledge WHERE id = ?1 AND mem_level IS NOT NULL"
-        )
+        let result = sqlx::query("DELETE FROM knowledge WHERE id = ?1 AND mem_level IS NOT NULL")
             .bind(id)
             .execute(&self.pool)
             .await?;

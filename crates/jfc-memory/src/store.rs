@@ -328,7 +328,10 @@ pub async fn load_all_memories(project_root: &Path) -> Vec<MemoryEntry> {
     }
     let project_key = jfc_knowledge::project_key(project_root);
     let rows = match jfc_knowledge::KnowledgeStore::open_default().await {
-        Ok(store) => store.load_memories(Some(&project_key)).await.unwrap_or_default(),
+        Ok(store) => store
+            .load_memories(Some(&project_key))
+            .await
+            .unwrap_or_default(),
         Err(e) => {
             tracing::warn!(target: "jfc::memory", error = %e, "knowledge store open failed; no memories loaded");
             return Vec::new();
@@ -431,7 +434,9 @@ fn content_hash(body: &str) -> String {
 }
 
 async fn open_store_or_err() -> Result<jfc_knowledge::KnowledgeStore, String> {
-    jfc_knowledge::KnowledgeStore::open_default().await.map_err(|e| format!("knowledge store: {e}"))
+    jfc_knowledge::KnowledgeStore::open_default()
+        .await
+        .map_err(|e| format!("knowledge store: {e}"))
 }
 
 async fn import_legacy_memory_dirs(project_root: &Path) -> Result<(), String> {
@@ -440,19 +445,22 @@ async fn import_legacy_memory_dirs(project_root: &Path) -> Result<(), String> {
         &user_memory_dir(),
         MemoryLevel::User,
         MemoryScope::Private,
-    ).await?;
+    )
+    .await?;
     import_memory_dir_to_db(
         project_root,
         &project_memory_dir(project_root),
         MemoryLevel::Project,
         MemoryScope::Private,
-    ).await?;
+    )
+    .await?;
     import_memory_dir_to_db(
         project_root,
         &team_memory_dir(project_root),
         MemoryLevel::Team,
         MemoryScope::Team,
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -639,7 +647,8 @@ pub async fn sync_team_memory(
         &local_dir,
         MemoryLevel::Team,
         MemoryScope::Team,
-    ).await?;
+    )
+    .await?;
 
     Ok(report)
 }
@@ -726,7 +735,9 @@ async fn import_memory_dir_to_db(
             frontmatter.scope,
             body.trim(),
             project_root,
-        ).await {
+        )
+        .await
+        {
             tracing::warn!(
                 target: "jfc::memory",
                 path = %path.display(),

@@ -322,6 +322,9 @@ macro_rules! for_each_regular_tool_input {
             LearnStatus => {}
             LearnHistorize => {}
             LearnDream => {}
+            LearnRsiList => { status: opt_str @ "status", limit: opt_u64 @ "limit" }
+            LearnRsiPromote => { kind: req_str @ "kind", name: req_str @ "name" }
+            LearnRsiRollback => { kind: req_str @ "kind", name: req_str @ "name" }
             LearnKeyFilesList => {}
             LearnUserProfileShow => {}
             PostBounty => { description: req_str @ "description", budget: u64_or_0 @ "budget", acceptance_criteria: req_str @ "acceptance_criteria", max_solvers: opt_u64_as_u8 @ "max_solvers", auto_dispatch: bool_field @ "auto_dispatch" }
@@ -745,6 +748,20 @@ pub enum ToolInput {
     LearnStatus {},
     LearnHistorize {},
     LearnDream {},
+    LearnRsiList {
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
+    LearnRsiPromote {
+        kind: String,
+        name: String,
+    },
+    LearnRsiRollback {
+        kind: String,
+        name: String,
+    },
     LearnKeyFilesList {},
     LearnUserProfileShow {},
     ExitPlanMode {
@@ -1137,6 +1154,16 @@ impl ToolInput {
             Self::LearnStatus { .. } => "learn_status".into(),
             Self::LearnHistorize { .. } => "learn_historize".into(),
             Self::LearnDream { .. } => "learn_dream".into(),
+            Self::LearnRsiList { status, limit } => match (status, limit) {
+                (Some(status), Some(limit)) => format!("learn_rsi_list {status} limit={limit}"),
+                (Some(status), None) => format!("learn_rsi_list {status}"),
+                (None, Some(limit)) => format!("learn_rsi_list limit={limit}"),
+                (None, None) => "learn_rsi_list".into(),
+            },
+            Self::LearnRsiPromote { kind, name } => format!("learn_rsi_promote {kind}/{name}"),
+            Self::LearnRsiRollback { kind, name } => {
+                format!("learn_rsi_rollback {kind}/{name}")
+            }
             Self::LearnKeyFilesList { .. } => "learn_key_files_list".into(),
             Self::LearnUserProfileShow { .. } => "learn_user_profile_show".into(),
             Self::PostBounty {

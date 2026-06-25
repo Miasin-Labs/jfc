@@ -29,14 +29,18 @@ fn artifact_key(path: &Path) -> String {
 fn artifact_store(path: &Path) -> std::io::Result<jfc_knowledge::KnowledgeStore> {
     let default_base = crate::state::DaemonPaths::default_user().base_dir;
     if path.starts_with(&default_base) {
-        return jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open_default()).map_err(std::io::Error::other);
+        return jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open_default())
+            .map_err(std::io::Error::other);
     }
     let db_dir = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     std::fs::create_dir_all(&db_dir)?;
-    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(&db_dir.join("knowledge.db"))).map_err(std::io::Error::other)
+    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(
+        &db_dir.join("knowledge.db"),
+    ))
+    .map_err(std::io::Error::other)
 }
 
 /// Lifecycle state of a scheduled agentic task. Mirrors the
@@ -287,7 +291,7 @@ impl ScheduledTaskRegistry {
                 .get_session_artifact(SCHEDULED_TASKS_SESSION_ID, SCHEDULED_TASKS_KIND, &key)
                 .await
         })
-            .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)?
         {
             return serde_json::from_str(&row.value_json)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
@@ -310,7 +314,7 @@ impl ScheduledTaskRegistry {
                 )
                 .await
         })
-            .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)?;
         Ok(legacy)
     }
 
@@ -362,7 +366,7 @@ impl ScheduledTaskRegistry {
                 )
                 .await
         })
-            .map_err(std::io::Error::other)
+        .map_err(std::io::Error::other)
     }
 }
 

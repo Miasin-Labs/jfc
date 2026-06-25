@@ -347,6 +347,20 @@ pub fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
         ToolInput::LearnDream { .. } => SerializedToolInput::Generic {
             summary: "learn_dream".into(),
         },
+        ToolInput::LearnRsiList { status, limit } => SerializedToolInput::Generic {
+            summary: match (status, limit) {
+                (Some(status), Some(limit)) => format!("learn_rsi_list {status} limit={limit}"),
+                (Some(status), None) => format!("learn_rsi_list {status}"),
+                (None, Some(limit)) => format!("learn_rsi_list limit={limit}"),
+                (None, None) => "learn_rsi_list".into(),
+            },
+        },
+        ToolInput::LearnRsiPromote { kind, name } => SerializedToolInput::Generic {
+            summary: format!("learn_rsi_promote {kind}/{name}"),
+        },
+        ToolInput::LearnRsiRollback { kind, name } => SerializedToolInput::Generic {
+            summary: format!("learn_rsi_rollback {kind}/{name}"),
+        },
         ToolInput::LearnKeyFilesList { .. } => SerializedToolInput::Generic {
             summary: "learn_key_files_list".into(),
         },

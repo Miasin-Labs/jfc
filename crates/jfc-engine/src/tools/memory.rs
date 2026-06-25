@@ -54,9 +54,9 @@ pub fn execute_memory_delete(id: &str) -> ExecutionResult {
 
     let id_for_format = id.trim().to_owned();
     let id_for_call = id_for_format.clone();
-    match jfc_knowledge::block_on_knowledge(async move {
-        memory::delete_memory(&id_for_call).await
-    }) {
+    match jfc_knowledge::block_on_knowledge(
+        async move { memory::delete_memory(&id_for_call).await },
+    ) {
         Ok(()) => ExecutionResult::success(format!(
             "Memory deleted: {id_for_format}\n\nThis memory will no longer be included in future conversations."
         )),

@@ -140,7 +140,12 @@ mod tests {
     /// Build a store with one record backdated by `idle_days`. This writes the
     /// legacy `name -> SkillUsage` JSON map and loads it through the import
     /// path so DB-backed callers keep old telemetry.
-    async fn store_with(name: &str, by: CreatedBy, idle_days: i64, pinned: bool) -> SkillUsageStore {
+    async fn store_with(
+        name: &str,
+        by: CreatedBy,
+        idle_days: i64,
+        pinned: bool,
+    ) -> SkillUsageStore {
         let ts = (Utc::now() - Duration::days(idle_days)).to_rfc3339();
         let rec = SkillUsage {
             use_count: 1,

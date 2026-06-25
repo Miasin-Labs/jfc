@@ -35,8 +35,8 @@ pub mod session_mine;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use sqlx::Row;
 use sqlx::AssertSqlSafe;
+use sqlx::Row;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteRow,
     SqliteSynchronous,
@@ -445,11 +445,7 @@ impl KnowledgeStore {
 
     /// Session-index rows, most-recently-updated first. `cwd` filters to one
     /// project when `Some`.
-    pub async fn list_sessions(
-        &self,
-        cwd: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<SessionRow>> {
+    pub async fn list_sessions(&self, cwd: Option<&str>, limit: usize) -> Result<Vec<SessionRow>> {
         let rows = if let Some(cwd) = cwd {
             sqlx::query(
                 "SELECT id, cwd, model, created_at, updated_at, first_prompt, title, message_count \
@@ -475,8 +471,7 @@ impl KnowledgeStore {
     /// removed across session-owned tables.
     pub async fn delete_session(&self, id: &str) -> Result<usize> {
         let mut tx = self.pool.begin().await?;
-        let agent_scoped =
-            agent_events::delete_session_scoped_rows(&mut tx, id).await?;
+        let agent_scoped = agent_events::delete_session_scoped_rows(&mut tx, id).await?;
         let mut removed = agent_scoped;
         for sql in [
             "DELETE FROM session_artifact_events WHERE session_id = ?1",
@@ -650,10 +645,7 @@ impl KnowledgeStore {
             .collect()
     }
 
-    pub async fn list_session_tool_runs(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<SessionToolRunRow>> {
+    pub async fn list_session_tool_runs(&self, session_id: &str) -> Result<Vec<SessionToolRunRow>> {
         let rows = sqlx::query(
             "SELECT id, session_id, message_seq, part_index, tool_call_id, runtime_id, kind, \
                     status, input_json, output_json, duration_ms, created_at_ms \
@@ -911,8 +903,10 @@ impl KnowledgeStore {
             .fetch_all(&self.pool)
             .await?
         };
-        let mut out: Vec<SessionArtifactEventRow> =
-            rows.iter().map(session_artifact_event_from).collect::<Result<_>>()?;
+        let mut out: Vec<SessionArtifactEventRow> = rows
+            .iter()
+            .map(session_artifact_event_from)
+            .collect::<Result<_>>()?;
         out.reverse();
         Ok(out)
     }
@@ -934,13 +928,11 @@ impl KnowledgeStore {
             .execute(&self.pool)
             .await?
         } else {
-            sqlx::query(
-                "DELETE FROM session_artifact_events WHERE session_id = ?1 AND kind = ?2",
-            )
-            .bind(session_id)
-            .bind(kind)
-            .execute(&self.pool)
-            .await?
+            sqlx::query("DELETE FROM session_artifact_events WHERE session_id = ?1 AND kind = ?2")
+                .bind(session_id)
+                .bind(kind)
+                .execute(&self.pool)
+                .await?
         };
         Ok(result.rows_affected() as usize)
     }
@@ -965,7 +957,9 @@ impl KnowledgeStore {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(|r| Ok(r.try_get::<String, _>(0)?)).collect()
+        rows.iter()
+            .map(|r| Ok(r.try_get::<String, _>(0)?))
+            .collect()
     }
 
     /// Fast, consistent file-level backup (council decision 5: one DB is a single
@@ -1604,7 +1598,10 @@ mod tests {
         .with_confidence(0.9);
         store.insert(&r).await.unwrap();
 
-        let hits = store.recall("edition", &RecallFilter::default()).await.unwrap();
+        let hits = store
+            .recall("edition", &RecallFilter::default())
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, r.id);
         assert_eq!(hits[0].title, "Rust edition");
@@ -1641,13 +1638,16 @@ mod tests {
     async fn recall_scope_isolation_normal() {
         let store = KnowledgeStore::open_in_memory().await.unwrap();
         store
-            .insert(&rec(Scope::Project, Some("A"), "a-only", "alpha secret")).await
+            .insert(&rec(Scope::Project, Some("A"), "a-only", "alpha secret"))
+            .await
             .unwrap();
         store
-            .insert(&rec(Scope::Project, Some("B"), "b-only", "beta secret")).await
+            .insert(&rec(Scope::Project, Some("B"), "b-only", "beta secret"))
+            .await
             .unwrap();
         store
-            .insert(&rec(Scope::User, None, "user-pref", "alpha beta gamma")).await
+            .insert(&rec(Scope::User, None, "user-pref", "alpha beta gamma"))
+            .await
             .unwrap();
 
         let from_a = RecallFilter {
@@ -1673,7 +1673,10 @@ mod tests {
         store.insert(&new).await.unwrap();
         store.supersede(&old.id, &new.id).await.unwrap();
 
-        let hits = store.recall("stack", &RecallFilter::default()).await.unwrap();
+        let hits = store
+            .recall("stack", &RecallFilter::default())
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, new.id, "stale row should be filtered out");
     }
@@ -1681,11 +1684,22 @@ mod tests {
     #[tokio::test]
     async fn insert_rejects_invalid_records_robust() {
         let store = KnowledgeStore::open_in_memory().await.unwrap();
-        assert!(store.insert(&rec(Scope::Global, None, "t", "  ")).await.is_err());
-        assert!(store.insert(&rec(Scope::Project, None, "t", "b")).await.is_err());
         assert!(
             store
-                .insert(&rec(Scope::Global, Some("x"), "t", "b")).await
+                .insert(&rec(Scope::Global, None, "t", "  "))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .insert(&rec(Scope::Project, None, "t", "b"))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .insert(&rec(Scope::Global, Some("x"), "t", "b"))
+                .await
                 .is_err()
         );
         let mut bad = rec(Scope::Global, None, "t", "b");
@@ -1724,7 +1738,8 @@ mod tests {
                     Some("P"),
                     &format!("row {i}"),
                     "filler body",
-                )).await
+                ))
+                .await
                 .unwrap();
         }
         for i in 0..50 {
@@ -1734,7 +1749,8 @@ mod tests {
                     None,
                     &format!("global row {i}"),
                     "global filler body",
-                )).await
+                ))
+                .await
                 .unwrap();
         }
         assert_eq!(store.live_count().await.unwrap(), 101);
@@ -1746,7 +1762,10 @@ mod tests {
         );
         assert!(store.live_count().await.unwrap() <= 21);
 
-        let hits = store.recall("keeper", &RecallFilter::default()).await.unwrap();
+        let hits = store
+            .recall("keeper", &RecallFilter::default())
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
     }
 
@@ -1761,7 +1780,10 @@ mod tests {
         for _ in 0..5 {
             store.mark_used(std::slice::from_ref(&a.id)).await.unwrap();
         }
-        let hits = store.recall("apple", &RecallFilter::default()).await.unwrap();
+        let hits = store
+            .recall("apple", &RecallFilter::default())
+            .await
+            .unwrap();
         assert_eq!(hits.first().map(|h| h.id.as_str()), Some(a.id.as_str()));
     }
 
@@ -1855,7 +1877,10 @@ mod tests {
             .with_outcome(Outcome::Verified);
         store.insert(&weak).await.unwrap();
         store.insert(&strong).await.unwrap();
-        let hits = store.recall("apple", &RecallFilter::default()).await.unwrap();
+        let hits = store
+            .recall("apple", &RecallFilter::default())
+            .await
+            .unwrap();
         assert_eq!(
             hits.first().map(|h| h.id.as_str()),
             Some(strong.id.as_str()),
@@ -1876,16 +1901,25 @@ mod tests {
         );
         store.insert(&err).await.unwrap();
         store.insert(&fix).await.unwrap();
-        store.link(&err.id, &fix.id, RelKind::FixedBy).await.unwrap();
+        store
+            .link(&err.id, &fix.id, RelKind::FixedBy)
+            .await
+            .unwrap();
 
         let linked = store.linked(&err.id).await.unwrap();
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].rel, RelKind::FixedBy);
         assert_eq!(linked[0].record.id, fix.id);
 
-        assert_eq!(store.backlinks(&fix.id).await.unwrap(), vec![err.id.clone()]);
+        assert_eq!(
+            store.backlinks(&fix.id).await.unwrap(),
+            vec![err.id.clone()]
+        );
         // Idempotent: re-linking the same edge doesn't duplicate.
-        store.link(&err.id, &fix.id, RelKind::FixedBy).await.unwrap();
+        store
+            .link(&err.id, &fix.id, RelKind::FixedBy)
+            .await
+            .unwrap();
         assert_eq!(store.linked(&err.id).await.unwrap().len(), 1);
     }
 
@@ -1894,10 +1928,12 @@ mod tests {
     async fn knowledge_gaps_rank_by_ref_count_normal() {
         let store = KnowledgeStore::open_in_memory().await.unwrap();
         store
-            .note_gap("how to mock the network layer", "referenced, no lesson").await
+            .note_gap("how to mock the network layer", "referenced, no lesson")
+            .await
             .unwrap();
         store
-            .note_gap("how to mock the network layer", "again").await
+            .note_gap("how to mock the network layer", "again")
+            .await
             .unwrap();
         store.note_gap("CI cache config", "once").await.unwrap();
         let gaps = store.gaps(10).await.unwrap();
@@ -1930,7 +1966,8 @@ mod tests {
                     project_key: Some("P"),
                     limit: 8,
                 },
-            ).await
+            )
+            .await
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, strong.id);
@@ -1953,7 +1990,8 @@ mod tests {
             session_id: "s1".into(),
         };
         let (ins, comp) = store
-            .ingest_mined("P", std::slice::from_ref(&unverified)).await
+            .ingest_mined("P", std::slice::from_ref(&unverified))
+            .await
             .unwrap();
         assert_eq!((ins, comp), (1, 0));
         assert_eq!(store.live_count().await.unwrap(), 1);
@@ -1973,7 +2011,8 @@ mod tests {
                     project_key: Some("P"),
                     limit: 8,
                 },
-            ).await
+            )
+            .await
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(
@@ -1991,7 +2030,8 @@ mod tests {
                     project_key: Some("Q"),
                     limit: 8,
                 },
-            ).await
+            )
+            .await
             .unwrap();
         assert!(other.is_empty());
     }
@@ -2040,7 +2080,13 @@ mod tests {
         assert_eq!(hits[0].id, hot.id);
         // The unverified/rare/fact ones did not leak across projects.
         assert!(store.recall("niche", &other).await.unwrap().is_empty());
-        assert!(store.recall("unconfirmed", &other).await.unwrap().is_empty());
+        assert!(
+            store
+                .recall("unconfirmed", &other)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             store.recall("vite", &other).await.unwrap().is_empty(),
             "project-specific fact must not leak"
@@ -2135,7 +2181,8 @@ mod tests {
                         ),
                     },
                 ],
-            ).await
+            )
+            .await
             .unwrap();
         drop(store);
 
@@ -2182,7 +2229,8 @@ mod tests {
                     project_key: Some("other-project"),
                     limit: 8,
                 },
-            ).await
+            )
+            .await
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id);
@@ -2283,7 +2331,8 @@ mod tests {
         );
         assert!(
             store
-                .search_transcripts("nonexistentterm", 10).await
+                .search_transcripts("nonexistentterm", 10)
+                .await
                 .unwrap()
                 .is_empty()
         );
@@ -2302,11 +2351,16 @@ mod tests {
                     ..hdr.clone()
                 },
                 &shorter,
-            ).await
+            )
+            .await
             .unwrap();
         assert_eq!(store.load_transcript("ses_x").await.unwrap(), shorter);
         assert!(
-            store.search_transcripts("ripgrep", 10).await.unwrap().is_empty(),
+            store
+                .search_transcripts("ripgrep", 10)
+                .await
+                .unwrap()
+                .is_empty(),
             "old content gone from FTS"
         );
 
@@ -2322,7 +2376,8 @@ mod tests {
                     ..hdr.clone()
                 },
                 &shorter,
-            ).await
+            )
+            .await
             .unwrap();
 
         // Backup writes a consistent, openable copy.
@@ -2413,7 +2468,10 @@ mod tests {
         assert_eq!(tools[0].status, "success");
         assert_eq!(tools[0].duration_ms, Some(742));
 
-        let context = store.list_context_events(Some("ses_events"), 20).await.unwrap();
+        let context = store
+            .list_context_events(Some("ses_events"), 20)
+            .await
+            .unwrap();
         assert_eq!(context.len(), 1);
         assert_eq!(context[0].turn_id.as_deref(), Some("ses_events:1"));
         assert_eq!(context[0].model, "anthropic/claude-opus-4-7");
@@ -2508,18 +2566,25 @@ mod tests {
             vec![event]
         );
         assert_eq!(
-            store.list_agent_mailbox("agent_advisor_1", true).await.unwrap(),
+            store
+                .list_agent_mailbox("agent_advisor_1", true)
+                .await
+                .unwrap(),
             vec![mail.clone()]
         );
         assert_eq!(store.mark_agent_mailbox_read("mail_1").await.unwrap(), 1);
         assert!(
             store
-                .list_agent_mailbox("agent_advisor_1", true).await
+                .list_agent_mailbox("agent_advisor_1", true)
+                .await
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            store.list_learning_events(Some("candidate"), 10).await.unwrap(),
+            store
+                .list_learning_events(Some("candidate"), 10)
+                .await
+                .unwrap(),
             vec![learning]
         );
 
@@ -2527,13 +2592,15 @@ mod tests {
         assert!(deleted >= 3);
         assert!(
             store
-                .list_agent_events("ses_parent", 10).await
+                .list_agent_events("ses_parent", 10)
+                .await
                 .unwrap()
                 .is_empty()
         );
         assert!(
             store
-                .list_learning_events(Some("candidate"), 10).await
+                .list_learning_events(Some("candidate"), 10)
+                .await
                 .unwrap()
                 .is_empty()
         );
@@ -2553,22 +2620,34 @@ mod tests {
             message_count: n,
         };
         store
-            .upsert_session(&row("s1", "/a", "2026-01-01T01:00:00Z", 2)).await
+            .upsert_session(&row("s1", "/a", "2026-01-01T01:00:00Z", 2))
+            .await
             .unwrap();
         store
-            .upsert_session(&row("s2", "/a", "2026-01-01T03:00:00Z", 4)).await
+            .upsert_session(&row("s2", "/a", "2026-01-01T03:00:00Z", 4))
+            .await
             .unwrap();
         store
-            .upsert_session(&row("s3", "/b", "2026-01-01T02:00:00Z", 6)).await
+            .upsert_session(&row("s3", "/b", "2026-01-01T02:00:00Z", 6))
+            .await
             .unwrap();
         assert_eq!(store.session_count().await.unwrap(), 3);
 
         // Re-upsert s1 with a new message_count → updates, not duplicates.
         store
-            .upsert_session(&row("s1", "/a", "2026-01-01T05:00:00Z", 9)).await
+            .upsert_session(&row("s1", "/a", "2026-01-01T05:00:00Z", 9))
+            .await
             .unwrap();
         assert_eq!(store.session_count().await.unwrap(), 3);
-        assert_eq!(store.get_session("s1").await.unwrap().unwrap().message_count, 9);
+        assert_eq!(
+            store
+                .get_session("s1")
+                .await
+                .unwrap()
+                .unwrap()
+                .message_count,
+            9
+        );
 
         // List for /a, most-recently-updated first (s1 now newest after re-upsert).
         let a = store.list_sessions(Some("/a"), 10).await.unwrap();
@@ -2579,7 +2658,13 @@ mod tests {
         // Global list includes all three.
         assert_eq!(store.list_sessions(None, 10).await.unwrap().len(), 3);
         // Unknown cwd → empty.
-        assert!(store.list_sessions(Some("/nope"), 10).await.unwrap().is_empty());
+        assert!(
+            store
+                .list_sessions(Some("/nope"), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2596,5 +2681,3 @@ mod tests {
         }
     }
 }
-
-

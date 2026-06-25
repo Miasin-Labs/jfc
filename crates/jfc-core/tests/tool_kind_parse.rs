@@ -211,4 +211,23 @@ mod tests {
         assert_eq!(ToolKind::ApplyPatch.api_name(), "apply_patch");
         assert_eq!(ToolKind::Edit.api_name(), "Edit");
     }
+
+    #[test]
+    fn from_name_resolves_rsi_learn_controls_normal() {
+        assert!(matches!(
+            ToolKind::from_name("learn_rsi_list"),
+            ToolKind::LearnRsiList
+        ));
+        assert!(matches!(
+            ToolKind::from_name("learn_rsi_promote"),
+            ToolKind::LearnRsiPromote
+        ));
+        assert!(matches!(
+            ToolKind::from_name("LearnRsiRollback"),
+            ToolKind::LearnRsiRollback
+        ));
+        assert_eq!(ToolKind::LearnRsiList.api_name(), "learn_rsi_list");
+        assert_eq!(ToolKind::LearnRsiPromote.api_name(), "learn_rsi_promote");
+        assert_eq!(ToolKind::LearnRsiRollback.api_name(), "learn_rsi_rollback");
+    }
 }

@@ -105,6 +105,7 @@ pub fn handle_task_started(
             summary: None,
             error: None,
             last_tool: None,
+            last_tool_info: None,
             messages: Vec::new(),
             chat_messages: Vec::new(),
             tool_use_count: 0,
@@ -169,6 +170,7 @@ pub fn handle_task_progress(
     state: &mut EngineState,
     task_id: crate::ids::TaskId,
     last_tool: Option<String>,
+    last_tool_info: Option<String>,
     elapsed_ms: u64,
     tool_use_count: Option<u32>,
     input_tokens: Option<u64>,
@@ -180,12 +182,10 @@ pub fn handle_task_progress(
     if let Some(bt) = state.background_tasks.get_mut(task_id.as_str()) {
         if let Some(ref tool) = last_tool {
             let elapsed_s = elapsed_ms / 1000;
-            let entry = format!("[{elapsed_s}s] {tool}");
-            bt.push_log(entry.clone());
-            // Push a muted user-role note into the structured log
-            // so the MessageView renderer can show tool activity
-            // inline with the assistant's text output.
-            bt.push_chat(types::ChatMessage::user(entry));
+            let display = last_tool_info.clone().unwrap_or_else(|| tool.clone());
+            let entry = format!("[{elapsed_s}s] {display}");
+            bt.push_log(entry);
+            bt.last_tool_info = Some(display);
         }
         bt.last_tool = last_tool.clone();
         bt.last_activity_at = std::time::Instant::now();
@@ -225,6 +225,7 @@ pub fn handle_task_progress(
     crate::daemon::record_background_agent_progress(
         task_id.as_str(),
         last_tool.as_deref(),
+        last_tool_info.as_deref(),
         tool_use_count,
         input_tokens,
         cache_read_tokens,
@@ -681,6 +682,67 @@ mod autowake_tests {
         EngineState::new(Arc::new(TestProvider), "test-model")
     }
 
+    #[test]
+    fn task_progress_updates_activity_without_chat_ping_normal() {
+        let mut state = test_app();
+        state.background_tasks.insert(
+            "agent-1".into(),
+            crate::app::BackgroundTask {
+                task_id: "agent-1".into(),
+                description: "audit".into(),
+                status: TaskLifecycle::Running,
+                started_at: std::time::Instant::now(),
+                completed_at: None,
+                summary: None,
+                error: None,
+                last_tool: None,
+                last_tool_info: None,
+                messages: Vec::new(),
+                chat_messages: Vec::new(),
+                tool_use_count: 0,
+                latest_input_tokens: 0,
+                latest_cache_read_tokens: 0,
+                latest_cache_write_tokens: 0,
+                cumulative_output_tokens: 0,
+                model_used: Some("haiku".into()),
+                agent_messages: Vec::new(),
+                max_input_tokens: None,
+                budget_killed: false,
+                parent_task_id: None,
+                workflow_progress: None,
+                last_activity_at: std::time::Instant::now(),
+            },
+        );
+
+        handle_task_progress(
+            &mut state,
+            crate::ids::TaskId::from("agent-1"),
+            Some("Read".into()),
+            Some("Read(src/lib.rs)".into()),
+            7_000,
+            Some(3),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let bt = state.background_tasks.get("agent-1").unwrap();
+        assert_eq!(bt.last_tool.as_deref(), Some("Read"));
+        assert_eq!(bt.last_tool_info.as_deref(), Some("Read(src/lib.rs)"));
+        assert_eq!(bt.tool_use_count, 3);
+        assert!(
+            bt.messages
+                .iter()
+                .any(|line| line == "[7s] Read(src/lib.rs)"),
+            "fallback log should still record progress"
+        );
+        assert!(
+            bt.chat_messages.is_empty(),
+            "synthetic progress pings should not render as grey user rows"
+        );
+    }
+
     fn terminal_bg(id: &str, summary: &str) -> crate::app::BackgroundTask {
         crate::app::BackgroundTask {
             task_id: id.into(),
@@ -691,6 +753,7 @@ mod autowake_tests {
             summary: Some(summary.to_owned()),
             error: None,
             last_tool: None,
+            last_tool_info: None,
             messages: Vec::new(),
             chat_messages: Vec::new(),
             tool_use_count: 0,

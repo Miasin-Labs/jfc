@@ -55,9 +55,16 @@ impl JournalWriter {
         let json = serde_json::to_string(entry).map_err(io_invalid)?;
         tokio::task::spawn_blocking(move || {
             jfc_knowledge::block_on_knowledge(async {
-                let store = jfc_knowledge::KnowledgeStore::open_default().await.map_err(io_other)?;
+                let store = jfc_knowledge::KnowledgeStore::open_default()
+                    .await
+                    .map_err(io_other)?;
                 store
-                    .append_session_artifact_event(&session_id, WORKFLOW_JOURNAL_KIND, &run_id, &json)
+                    .append_session_artifact_event(
+                        &session_id,
+                        WORKFLOW_JOURNAL_KIND,
+                        &run_id,
+                        &json,
+                    )
                     .await
                     .map_err(io_other)?;
                 Ok(())

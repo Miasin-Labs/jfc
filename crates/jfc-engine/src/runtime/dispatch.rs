@@ -390,6 +390,7 @@ pub async fn handle_engine_event(
         EngineEvent::Task(TaskEvent::Progress {
             task_id,
             last_tool,
+            last_tool_info,
             elapsed_ms,
             tool_use_count,
             input_tokens,
@@ -401,6 +402,7 @@ pub async fn handle_engine_event(
                 state,
                 task_id,
                 last_tool,
+                last_tool_info,
                 elapsed_ms,
                 tool_use_count,
                 input_tokens,

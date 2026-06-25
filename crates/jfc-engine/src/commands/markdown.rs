@@ -220,9 +220,9 @@ fn import_legacy_markdown_commands(store: &KnowledgeStore, project_root: &Path, 
                 status: DefinitionStatus::Active,
                 created_by: "legacy_import".to_owned(),
             };
-            if let Err(err) = jfc_knowledge::block_on_knowledge(async {
-                store.upsert_definition(&def).await
-            }) {
+            if let Err(err) =
+                jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await })
+            {
                 tracing::warn!(
                     target: "jfc::commands",
                     path = %path.display(),
@@ -256,16 +256,12 @@ fn open_definition_store(project_root: &Path) -> Option<KnowledgeStore> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        jfc_knowledge::block_on_knowledge(async {
-            KnowledgeStore::open(&path).await.ok()
-        })
+        jfc_knowledge::block_on_knowledge(async { KnowledgeStore::open(&path).await.ok() })
     }
     #[cfg(not(test))]
     {
         let _ = project_root;
-        jfc_knowledge::block_on_knowledge(async {
-            KnowledgeStore::open_default().await.ok()
-        })
+        jfc_knowledge::block_on_knowledge(async { KnowledgeStore::open_default().await.ok() })
     }
 }
 

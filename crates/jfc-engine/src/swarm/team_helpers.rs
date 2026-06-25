@@ -209,7 +209,9 @@ fn read_team_file_db_or_legacy(team_name: &str) -> Option<TeamFile> {
     let store = open_team_store().ok()?;
     let key = team_file_key(team_name);
     let row = jfc_knowledge::block_on_knowledge(async {
-        store.get_session_artifact(TEAM_FILE_SESSION_ID, TEAM_FILE_KIND, &key).await
+        store
+            .get_session_artifact(TEAM_FILE_SESSION_ID, TEAM_FILE_KIND, &key)
+            .await
     });
     if let Ok(Some(row)) = row {
         return serde_json::from_str(&row.value_json).ok();
@@ -225,23 +227,28 @@ fn write_team_file_db(team_name: &str, team_file: &TeamFile) -> anyhow::Result<(
     let json = serde_json::to_string(team_file)?;
     let store = open_team_store()?;
     jfc_knowledge::block_on_knowledge(async {
-        store.upsert_session_artifact(
-            TEAM_FILE_SESSION_ID,
-            TEAM_FILE_KIND,
-            &team_file_key(team_name),
-            &json,
-        ).await
-    }).map_err(|e| anyhow::anyhow!("{}", e))
+        store
+            .upsert_session_artifact(
+                TEAM_FILE_SESSION_ID,
+                TEAM_FILE_KIND,
+                &team_file_key(team_name),
+                &json,
+            )
+            .await
+    })
+    .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 fn delete_team_file_db(team_name: &str) -> anyhow::Result<()> {
     let store = open_team_store()?;
     jfc_knowledge::block_on_knowledge(async {
-        store.delete_session_artifact(
-            TEAM_FILE_SESSION_ID,
-            TEAM_FILE_KIND,
-            &team_file_key(team_name),
-        ).await
+        store
+            .delete_session_artifact(
+                TEAM_FILE_SESSION_ID,
+                TEAM_FILE_KIND,
+                &team_file_key(team_name),
+            )
+            .await
     })?;
     Ok(())
 }

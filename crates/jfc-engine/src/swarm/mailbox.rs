@@ -66,7 +66,9 @@ pub async fn read_mailbox(agent_name: &str, team_name: &str) -> Vec<MailboxMessa
     let key = mailbox_key(agent_name, team_name);
     let rows = match run_mailbox_db(move |store| {
         Box::pin(async move { store.list_agent_mailbox(&key, false).await })
-    }).await {
+    })
+    .await
+    {
         Ok(rows) => rows,
         Err(err) => {
             debug!("[Mailbox] Failed to read DB inbox for {agent_name}: {err}");
@@ -107,9 +109,8 @@ pub async fn write_to_mailbox(
     );
 
     let row = mailbox_row(recipient, team_name, message)?;
-    run_mailbox_db(move |store| {
-        Box::pin(async move { store.enqueue_agent_mailbox(&row).await })
-    }).await?;
+    run_mailbox_db(move |store| Box::pin(async move { store.enqueue_agent_mailbox(&row).await }))
+        .await?;
 
     debug!("[Mailbox] Wrote message to {recipient}'s inbox");
     Ok(())

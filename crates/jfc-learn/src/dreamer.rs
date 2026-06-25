@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::LearnError;
 use crate::historian::CandidateFact;
+use crate::rsi_curator::{RsiCurator, RsiCuratorJob, RsiCuratorReport};
 use crate::variant_selector::{PromptVariant, Teleprompter, VariantEvaluator};
 use crate::verifier::{LlmVerifier, PromotionVerifier, VerifierVerdict};
 
@@ -105,9 +106,11 @@ pub struct Dreamer {
     /// recurring tool-sequences and stores the resulting proposals in
     /// [`Dreamer::skill_proposals`]. `None` makes that task a no-op.
     pub skill_induction: Option<SkillInductionJob>,
+    pub rsi_curator: Option<RsiCuratorJob>,
     /// Output slot for the most recent [`DreamerTask::InduceSkills`] run — the
     /// scored proposals to surface to the user / agent for confirmation.
     pub skill_proposals: std::sync::Mutex<Vec<crate::skill_induction::SkillProposal>>,
+    pub rsi_reports: std::sync::Mutex<Vec<RsiCuratorReport>>,
 }
 
 /// Configuration for [`DreamerTask::InduceSkills`]: the session traces to mine
@@ -124,7 +127,9 @@ impl Dreamer {
             project_root: None,
             prompt_compile: None,
             skill_induction: None,
+            rsi_curator: None,
             skill_proposals: std::sync::Mutex::new(Vec::new()),
+            rsi_reports: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -139,6 +144,18 @@ impl Dreamer {
     /// run. Cloned out so callers can surface them without holding the lock.
     pub fn skill_proposals(&self) -> Vec<crate::skill_induction::SkillProposal> {
         self.skill_proposals
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn with_rsi_curator(mut self, job: RsiCuratorJob) -> Self {
+        self.rsi_curator = Some(job);
+        self
+    }
+
+    pub fn rsi_reports(&self) -> Vec<RsiCuratorReport> {
+        self.rsi_reports
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default()
@@ -365,9 +382,32 @@ impl Dreamer {
         Ok(actions)
     }
 
-    /// Improve — stub, needs LLM.
     fn improve(&self) -> Result<usize, LearnError> {
-        Ok(0)
+        let Some(job) = &self.rsi_curator else {
+            return Ok(0);
+        };
+        if job.worker.is_some() {
+            let output = crate::rsi_curator::run_rsi_worker_job(job)?;
+            return Ok(output.actions);
+        }
+        let curator = RsiCurator::new(job.config.clone(), job.promotion_policy.clone());
+        let mut report = curator.run(&job.traces)?;
+        if let Some(sandbox) = &job.sandbox_enforcement {
+            report.experiment_job.external_worker_sandbox = sandbox.clone();
+        }
+        let actions = if let Some(project_key) = &job.project_key {
+            let applied = jfc_knowledge::block_on_knowledge(async {
+                let store = jfc_knowledge::KnowledgeStore::open_default().await?;
+                report.apply_to_store(&store, project_key).await
+            })?;
+            applied.actions()
+        } else {
+            report.len()
+        };
+        if let Ok(mut reports) = self.rsi_reports.lock() {
+            reports.push(report);
+        }
+        Ok(actions)
     }
 
     /// MaintainDocs — synthesise a lightweight `ARCHITECTURE.md` from the
@@ -442,9 +482,11 @@ pub async fn acquire_lease(lease_path: &Path) -> Result<DreamerLease, LearnError
         expiry_ms: now_ms() + DEFAULT_LEASE_DURATION_MS,
     };
 
-    let store = jfc_knowledge::KnowledgeStore::open_default().await.map_err(|e| LearnError::Io {
-        source: std::io::Error::other(e),
-    })?;
+    let store = jfc_knowledge::KnowledgeStore::open_default()
+        .await
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?;
     let key = dreamer_lease_key(lease_path);
     if let Some(row) = store
         .get_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
@@ -475,9 +517,11 @@ pub async fn acquire_lease(lease_path: &Path) -> Result<DreamerLease, LearnError
 
 /// Release a lease (only the holder can release).
 pub async fn release_lease(lease_path: &Path, holder_id: &str) -> Result<(), LearnError> {
-    let store = jfc_knowledge::KnowledgeStore::open_default().await.map_err(|e| LearnError::Io {
-        source: std::io::Error::other(e),
-    })?;
+    let store = jfc_knowledge::KnowledgeStore::open_default()
+        .await
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?;
     let key = dreamer_lease_key(lease_path);
     let Some(row) = store
         .get_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
@@ -510,9 +554,11 @@ pub async fn release_lease(lease_path: &Path, holder_id: &str) -> Result<(), Lea
 
 /// Renew a lease (extend expiry).
 pub async fn renew_lease(lease_path: &Path, holder_id: &str) -> Result<(), LearnError> {
-    let store = jfc_knowledge::KnowledgeStore::open_default().await.map_err(|e| LearnError::Io {
-        source: std::io::Error::other(e),
-    })?;
+    let store = jfc_knowledge::KnowledgeStore::open_default()
+        .await
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?;
     let key = dreamer_lease_key(lease_path);
     let Some(row) = store
         .get_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
@@ -756,6 +802,32 @@ mod tests {
         assert_eq!(report.tasks_run[0].actions_taken, 0);
         assert!(report.tasks_run[0].error.is_none());
         assert!(dreamer.skill_proposals().is_empty());
+    }
+
+    #[test]
+    fn improve_runs_rsi_curator_job_normal() {
+        let tmp = TempDir::new().unwrap();
+        let mut trace = crate::rsi_curator::RsiTrace::new("s1");
+        trace.outcome = Some(crate::rsi_curator::RsiOutcome::UserCorrected);
+        trace.user_correction = Some("actually verify first".to_owned());
+        let job = RsiCuratorJob {
+            traces: vec![trace],
+            config: crate::rsi_curator::RsiCuratorConfig::default(),
+            promotion_policy: crate::rsi_curator::RsiPromotionPolicy::default(),
+            project_key: None,
+            sandbox_enforcement: None,
+            worker: None,
+        };
+        let dreamer = Dreamer::new(tmp.path().join("d.lock")).with_rsi_curator(job);
+        let mut memories = Vec::new();
+
+        let report = dreamer
+            .run_cycle(&[DreamerTask::Improve], &mut memories)
+            .unwrap();
+
+        assert!(report.tasks_run[0].error.is_none());
+        assert!(report.tasks_run[0].actions_taken > 0);
+        assert_eq!(dreamer.rsi_reports().len(), 1);
     }
 
     #[test]

@@ -19,6 +19,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
+use jfc_config::McpServerConfig;
+
 use super::logs::{append_log_line, background_agent_log_path};
 use super::registry::{
     record_background_agent_finished_at_epoch, record_background_agent_heartbeat,
@@ -72,6 +74,21 @@ pub fn record_background_agent_launch_path(
         }
         save_state(paths, &state)
     })
+}
+
+async fn register_background_worker_mcp_registry_from_config(
+    configs: std::collections::HashMap<String, McpServerConfig>,
+) -> (usize, usize) {
+    let configured = configs.len();
+    let registry = crate::mcp::McpRegistry::new();
+    crate::tools::register_mcp_registry(registry.clone());
+    crate::mcp::register_servers_from_config(&registry, &configs).await;
+    let active = registry.list_active().await.len();
+    (configured, active)
+}
+
+async fn register_background_worker_mcp_registry() -> (usize, usize) {
+    register_background_worker_mcp_registry_from_config(crate::config::load_arc().mcp.clone()).await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +173,16 @@ pub async fn run_background_agent_worker(launch_path: PathBuf) -> std::io::Resul
             }
         }
     });
+    let (configured_mcp_servers, active_mcp_servers) =
+        register_background_worker_mcp_registry().await;
+    if configured_mcp_servers > 0 {
+        append_log_line(
+            &background_agent_log_path(&paths, &launch.task_id),
+            &format!(
+                "[worker-mcp] configured={configured_mcp_servers} active={active_mcp_servers}"
+            ),
+        );
+    }
 
     let (worktree_info, cwd_override) = match prepare_background_worktree(&launch).await {
         BackgroundIsolation::Proceed(wt, cwd) => (wt, cwd),
@@ -201,6 +228,7 @@ pub async fn run_background_agent_worker(launch_path: PathBuf) -> std::io::Resul
                 crate::runtime::EngineEvent::Task(crate::runtime::TaskEvent::Progress {
                     task_id,
                     last_tool,
+                    last_tool_info,
                     tool_use_count,
                     input_tokens,
                     cache_read_tokens,
@@ -212,6 +240,7 @@ pub async fn run_background_agent_worker(launch_path: PathBuf) -> std::io::Resul
                         &event_task_id,
                         worker_epoch,
                         last_tool.as_deref(),
+                        last_tool_info.as_deref(),
                         tool_use_count,
                         input_tokens,
                         cache_read_tokens,
@@ -445,5 +474,22 @@ async fn finish_background_worktree(task_id: &str, worktree_info: Option<Backgro
             task_id,
             &format!("[worktree] cleanup failed for {}: {e}", wt.path),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn background_worker_mcp_bootstrap_installs_registry_normal() {
+        let (configured, active) =
+            register_background_worker_mcp_registry_from_config(std::collections::HashMap::new())
+                .await;
+
+        assert_eq!(configured, 0);
+        assert_eq!(active, 0);
+        assert!(crate::tools::snapshot_mcp_registry().is_some());
     }
 }

@@ -608,45 +608,6 @@ async fn handle_command_keys(
             app.show_diagnostic_panel = false;
             Some(Ok(false))
         }
-        // ─── Vim-style transcript navigation (input empty) ────────────────
-        // h/j/k/l for scroll, g/G for top/bottom. Only fire when the
-        // input bar is empty — typing actual prose with `j` shouldn't
-        // jump the transcript.
-        (KeyModifiers::NONE, KeyCode::Char('j')) if !input_has_text(app) && app.vim.is_none() => {
-            app.scroll_down(1);
-            Some(Ok(false))
-        }
-        (KeyModifiers::NONE, KeyCode::Char('k')) if !input_has_text(app) && app.vim.is_none() => {
-            app.scroll_up(1);
-            Some(Ok(false))
-        }
-        (KeyModifiers::NONE, KeyCode::Char('G')) if !input_has_text(app) && app.vim.is_none() => {
-            app.scroll_to_bottom();
-            app.follow_bottom = true;
-            Some(Ok(false))
-        }
-        (KeyModifiers::NONE, KeyCode::Char('g')) if !input_has_text(app) && app.vim.is_none() => {
-            // Lone `g` jumps to top. v126 / Vim use `gg` (double-g)
-            // for safety, but the input-empty gate already prevents
-            // typos here so a single `g` is fine.
-            app.scroll_offset = 0;
-            app.follow_bottom = false;
-            Some(Ok(false))
-        }
-
-        (KeyModifiers::NONE, KeyCode::Char('?')) if !input_has_text(app) && app.vim.is_none() => {
-            // `?` toggles the help overlay. Gated on empty input so
-            // the user can still type a literal `?` mid-message.
-            app.show_help = !app.show_help;
-            Some(Ok(false))
-        }
-        (KeyModifiers::SHIFT, KeyCode::Char('?')) if !input_has_text(app) && app.vim.is_none() => {
-            app.show_help = !app.show_help;
-            Some(Ok(false))
-        }
-        (KeyModifiers::NONE, KeyCode::Char('o')) if !input_has_text(app) && app.vim.is_none() => {
-            cmd_toggle_expand_recent(app)
-        }
         // ─── Task view: sticky arrow navigation ──────────────────────────
         // Once you're inside the task view (Ctrl+X then ↓ to enter, or you
         // typed something equivalent) plain ←/→ cycle through running
@@ -953,59 +914,6 @@ fn cmd_paste_clipboard_image(app: &mut App) -> Option<anyhow::Result<bool>> {
             Some(Ok(false))
         }
     }
-}
-
-/// `o` (no input, non-vim) — toggle expansion of the most recent collapsible
-/// entry: subagent task-view message if viewing a task, else the latest
-/// `LargeText`/tool block in the main transcript.
-fn cmd_toggle_expand_recent(app: &mut App) -> Option<anyhow::Result<bool>> {
-    if let Some(ref task_id) = app.viewing_task_id.clone() {
-        if let Some(bt) = app.engine.background_tasks.get(task_id) {
-            let threshold_lines = crate::render::TASK_VIEW_COLLAPSE_LINES;
-            let threshold_bytes = crate::render::TASK_VIEW_COLLAPSE_BYTES;
-            let last_collapsible = bt
-                .messages
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, m)| m.lines().count() > threshold_lines || m.len() > threshold_bytes)
-                .map(|(i, _)| i);
-            if let Some(idx) = last_collapsible {
-                let entry = app
-                    .viewing_task_expanded
-                    .entry(task_id.clone())
-                    .or_default();
-                if !entry.insert(idx) {
-                    entry.remove(&idx);
-                }
-            }
-        }
-        return Some(Ok(false));
-    }
-    'toggle: {
-        let messages = &mut app.engine.messages;
-        for msg in messages.iter_mut().rev() {
-            for part in msg.parts.iter_mut().rev() {
-                if let MessagePart::Tool(tc) = part {
-                    match &tc.output {
-                        ToolOutput::LargeText(lt)
-                            if lt.line_count > jfc_core::LargeText::COLLAPSE_LINES
-                                || lt.content.len() > jfc_core::LargeText::COLLAPSE_BYTES =>
-                        {
-                            tc.display.toggle_collapsed();
-                            break 'toggle;
-                        }
-                        ToolOutput::Empty => {}
-                        _ => {
-                            tc.display.toggle_expanded();
-                            break 'toggle;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Some(Ok(false))
 }
 
 /// Esc (no input) — the dismiss/interrupt cascade: vim-mode exit, clear a

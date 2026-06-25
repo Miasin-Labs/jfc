@@ -219,19 +219,23 @@ async fn load_usage_from_db(path: &Path) -> Option<BTreeMap<String, SkillUsage>>
     serde_json::from_str(&row.value_json).ok()
 }
 
-async fn save_usage_to_db(path: &Path, skills: &BTreeMap<String, SkillUsage>) -> std::io::Result<()> {
+async fn save_usage_to_db(
+    path: &Path,
+    skills: &BTreeMap<String, SkillUsage>,
+) -> std::io::Result<()> {
     let json = serde_json::to_string(skills).map_err(std::io::Error::other)?;
     let store = jfc_knowledge::KnowledgeStore::open_default()
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    store.upsert_session_artifact(
-        SKILL_USAGE_SESSION_ID,
-        SKILL_USAGE_KIND,
-        &usage_key(path),
-        &json,
-    )
-    .await
-    .map_err(|e| std::io::Error::other(e.to_string()))
+    store
+        .upsert_session_artifact(
+            SKILL_USAGE_SESSION_ID,
+            SKILL_USAGE_KIND,
+            &usage_key(path),
+            &json,
+        )
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// Best-effort: record a skill invocation for a project without the caller

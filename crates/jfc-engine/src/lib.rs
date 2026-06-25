@@ -636,7 +636,8 @@ pub fn knowledge_maintain(
             sessions_dir,
             user_memory_dir,
             project_memory_dir,
-        ).await
+        )
+        .await
     })
 }
 

@@ -4,8 +4,8 @@ use super::core::{diagnostics_for_input, diagnostics_for_path};
 use super::detection::detect_background_task_notification;
 use super::detection::looks_like_git_diff_output;
 use super::file_tool::{
-    diff_counts_for_header, diff_view_line_count, file_mutation_success_body_is_redundant,
-    is_file_mutation_tool, render_diff_skip,
+    diff_view_line_count, file_mutation_success_body_is_redundant, is_file_mutation_tool,
+    render_diff_skip,
 };
 use super::formatters::{
     produce_cat_markdown_output_line_count, produce_cat_markdown_output_lines,
@@ -715,22 +715,6 @@ pub(super) fn build_title_spans<'a>(
         .min(tool_title_width_cap())
         .saturating_sub(4 + badge_w);
     spans.extend(build_header_inner_spans(tool, t, effective));
-    if let Some((additions, deletions)) = diff_counts_for_header(tool) {
-        if additions > 0 {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                format!("+{additions}"),
-                Style::default().fg(t.success),
-            ));
-        }
-        if deletions > 0 {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                format!("-{deletions}"),
-                Style::default().fg(t.error),
-            ));
-        }
-    }
     if let Some(code) = exit_badge {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
@@ -1000,6 +984,40 @@ pub(super) fn build_header_inner_spans<'a>(
                 Span::styled(mode.to_owned(), Style::default().fg(t.text_secondary)),
                 Span::styled(")", Style::default().fg(t.text_muted)),
             ]
+        }
+        ToolInput::Task(task_input) => {
+            let meta = [
+                task_input
+                    .subagent_type
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty()),
+                task_input
+                    .category
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty()),
+                task_input.model.as_deref().filter(|s| !s.trim().is_empty()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+            let meta_w = if meta.is_empty() { 0 } else { meta.len() + 3 };
+            let desc = truncate_str(&task_input.description, max_w.saturating_sub(6 + meta_w));
+            let label = if task_input.is_teammate_spawn() {
+                "Teammate"
+            } else {
+                "Agent"
+            };
+            let mut spans = vec![
+                Span::styled(label, kind_style),
+                Span::styled(" ", Style::default().fg(t.text_muted)),
+                Span::styled(desc, Style::default().fg(t.text_primary)),
+            ];
+            if !meta.is_empty() {
+                spans.push(Span::styled(" · ", Style::default().fg(t.text_muted)));
+                spans.push(Span::styled(meta, Style::default().fg(t.text_secondary)));
+            }
+            spans
         }
         ToolInput::BashOutput { task_id, .. } => {
             let id = truncate_str(task_id, max_w.saturating_sub(11));
@@ -1350,6 +1368,7 @@ pub fn provider_style_for_model(model: &str) -> ProviderStyle {
 /// as queued rather than frozen, but muted so it does not look like an active
 /// warning.
 const PENDING_FRAMES: &[&str] = &["○", "◌"];
+const TASK_RUNNING_FRAMES: &[&str] = &["◌", "◎", "◉", "◎"];
 
 /// Per-frame animated icon. Running tools rotate through the same status-frame
 /// spinner as the main turn row, so Bash/Write/Read do not appear to have a
@@ -1368,6 +1387,18 @@ pub fn tool_status_icon_animated(
 ) -> (&'static str, Style) {
     match tool.status {
         ToolStatus::Running => {
+            if matches!(tool.kind, ToolKind::Task) || matches!(tool.input, ToolInput::Task(_)) {
+                let glyph = TASK_RUNNING_FRAMES[(frame / 2) % TASK_RUNNING_FRAMES.len()];
+                let bright = (frame / 8).is_multiple_of(2);
+                let style = if bright {
+                    Style::default()
+                        .fg(t.accent)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.text_muted)
+                };
+                return (glyph, style);
+            }
             // Two-layer animation: the shared glyph rotates, and the color
             // pulse sits on a slower cadence so running tools remain legible
             // in dense transcripts.

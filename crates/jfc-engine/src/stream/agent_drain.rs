@@ -68,10 +68,9 @@ pub enum AgentDrainEvent {
         cache_write_tokens: u64,
         output_delta: u64,
     },
-    /// A completed tool-use block (name only — the full call lands in
-    /// [`AgentTurn::tool_uses`]).
     ToolUse {
         name: String,
+        input_json: String,
     },
 }
 
@@ -197,6 +196,7 @@ async fn apply_event(
         } => {
             sink(AgentDrainEvent::ToolUse {
                 name: tool_name.clone(),
+                input_json: input_json.clone(),
             })
             .await;
             turn.tool_uses.push(AgentToolUse {
@@ -312,11 +312,15 @@ mod tests {
         ];
         let deltas = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let last_tool = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-        let (d2, t2) = (deltas.clone(), last_tool.clone());
+        let last_tool_input = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let (d2, t2, i2) = (deltas.clone(), last_tool.clone(), last_tool_input.clone());
         let mut sink = move |ev: AgentDrainEvent| -> futures::future::BoxFuture<'static, ()> {
             match ev {
                 AgentDrainEvent::TextDelta(d) => d2.lock().unwrap().push_str(&d),
-                AgentDrainEvent::ToolUse { name } => *t2.lock().unwrap() = Some(name),
+                AgentDrainEvent::ToolUse { name, input_json } => {
+                    *t2.lock().unwrap() = Some(name);
+                    *i2.lock().unwrap() = Some(input_json);
+                }
                 AgentDrainEvent::Usage { .. } => {}
             }
             Box::pin(async {})
@@ -332,6 +336,10 @@ mod tests {
         assert_eq!(turn.tool_uses.len(), 1);
         assert_eq!(turn.tool_uses[0].name, "Bash");
         assert_eq!(last_tool.lock().unwrap().as_deref(), Some("Bash"));
+        assert_eq!(
+            last_tool_input.lock().unwrap().as_deref(),
+            Some(r#"{"command":"ls"}"#)
+        );
         assert_eq!(turn.stop_reason, Some(StopReason::ToolUse));
         assert!(turn.saw_usage);
         assert_eq!(turn.input_tokens, 100);

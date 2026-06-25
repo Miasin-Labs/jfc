@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
-use super::{ExecutionResult, execute_tool, model_tool_defs};
+use super::{ExecutionResult, all_tool_defs_with_mcp, execute_tool};
 use crate::types::{ToolInput, ToolKind};
 use jfc_provider::ToolDef;
 
@@ -88,12 +88,29 @@ pub fn filter_tools_for_agent(
             if !allow_nested_task && t.name.eq_ignore_ascii_case("Task") {
                 return false;
             }
-            if !allow_all && !allowed.iter().any(|a| a.eq_ignore_ascii_case(&t.name)) {
+            if !allow_all && !allowed.iter().any(|a| tool_policy_matches(a, &t.name)) {
                 return false;
             }
-            !disallowed.iter().any(|d| d.eq_ignore_ascii_case(&t.name))
+            !disallowed.iter().any(|d| tool_policy_matches(d, &t.name))
         })
         .collect()
+}
+
+fn tool_policy_matches(policy_name: &str, tool_name: &str) -> bool {
+    if policy_name.eq_ignore_ascii_case(tool_name) {
+        return true;
+    }
+    if !super::is_code_navigation_tool_name(policy_name)
+        || !super::is_code_navigation_tool_name(tool_name)
+    {
+        return false;
+    }
+    code_navigation_leaf(policy_name).eq_ignore_ascii_case(code_navigation_leaf(tool_name))
+}
+
+fn code_navigation_leaf(name: &str) -> &str {
+    let trimmed = name.trim();
+    trimmed.rsplit("__").next().unwrap_or(trimmed)
 }
 
 fn scoped_allowed_tools(agent_allowed: &[String], task_allowed: &[String]) -> Vec<String> {
@@ -397,6 +414,43 @@ pub fn selected_subagent_provider_model(
     }
 }
 
+fn tool_info_from_raw_json(name: &str, input_json: &str) -> Option<String> {
+    let value = serde_json::from_str(input_json).ok()?;
+    let input = ToolInput::from_value(name, value).ok()?;
+    Some(tool_progress_info(name, &input))
+}
+
+fn tool_progress_info(name: &str, input: &ToolInput) -> String {
+    let summary = input.summary();
+    let summary = summary.lines().next().unwrap_or_default().trim();
+    if summary.is_empty() {
+        return name.to_owned();
+    }
+    format!("{name}({})", truncate_tool_progress_summary(summary))
+}
+
+fn truncate_tool_progress_summary(summary: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let mut chars = summary.chars();
+    let mut out = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
+fn append_code_navigation_guidance(system_prompt: &mut Option<String>) {
+    const GUIDANCE: &str = "\n\n# Source Code Navigation\n\
+        When a visible CodeGraph tool fits the task, use it before broad Read \
+        or Grep. Use the exact visible tool name and schema; installs may expose \
+        names like `mcp__codegraph__codegraph_explore` instead of \
+        `codegraph_explore`.";
+    match system_prompt {
+        Some(prompt) => prompt.push_str(GUIDANCE),
+        None => *system_prompt = Some(GUIDANCE.trim_start().to_owned()),
+    }
+}
+
 /// Run a subagent. The agent gets its own system prompt, tool catalogue
 /// (filtered by the agent's allow/disallow lists), an optional cwd
 /// override (used for worktree isolation), and a turn cap from
@@ -552,9 +606,6 @@ async fn execute_task_inner(
         }
     }
 
-    // Tool catalogue: full list filtered by the agent's allow/disallow.
-    // When there's no agent definition we still drop `Task` to avoid
-    // recursive subagent spawning, but otherwise pass everything.
     let (agent_allowed, agent_disallowed): (&[String], &[String]) = match agent_def {
         Some(a) => (&a.allowed_tools, &a.disallowed_tools),
         None => (&[], &[]),
@@ -572,7 +623,7 @@ async fn execute_task_inner(
         );
     }
     let allow_nested_task = depth < 2;
-    let all_tools = model_tool_defs();
+    let all_tools = all_tool_defs_with_mcp().await;
     let structured_output_def = all_tools
         .iter()
         .find(|tool| tool.name.eq_ignore_ascii_case("StructuredOutput"))
@@ -590,6 +641,12 @@ async fn execute_task_inner(
         }
     } else {
         tools.retain(|tool| !tool.name.eq_ignore_ascii_case("StructuredOutput"));
+    }
+    if tools
+        .iter()
+        .any(|tool| super::is_code_navigation_tool_name(&tool.name))
+    {
+        append_code_navigation_guidance(&mut system_prompt);
     }
 
     let max_turns: Option<u32> = agent_def
@@ -619,6 +676,7 @@ async fn execute_task_inner(
     let emit_progress = |tx: Option<&tokio::sync::mpsc::Sender<crate::runtime::EngineEvent>>,
                          id: Option<&str>,
                          last_tool: Option<String>,
+                         last_tool_info: Option<String>,
                          tool_use_count: Option<u32>,
                          input_tokens: Option<u64>,
                          cache_read_tokens: Option<u64>,
@@ -630,6 +688,7 @@ async fn execute_task_inner(
                 crate::runtime::TaskEvent::Progress {
                     task_id: crate::ids::TaskId::from(id),
                     last_tool,
+                    last_tool_info,
                     elapsed_ms: started_at.elapsed().as_millis() as u64,
                     tool_use_count,
                     input_tokens,
@@ -826,13 +885,27 @@ async fn execute_task_inner(
                             task_id,
                             None,
                             None,
+                            None,
                             input_update.map(|(input, _, _)| input),
                             input_update.map(|(_, cache_read, _)| cache_read),
                             input_update.map(|(_, _, cache_write)| cache_write),
                             Some(output_delta),
                         );
                     }
-                    AgentDrainEvent::ToolUse { .. } => {}
+                    AgentDrainEvent::ToolUse { name, input_json } => {
+                        let tool_info = tool_info_from_raw_json(&name, &input_json);
+                        emit_progress(
+                            tx,
+                            task_id,
+                            Some(name),
+                            tool_info,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        );
+                    }
                 }
                 Box::pin(async {})
             };
@@ -970,6 +1043,7 @@ async fn execute_task_inner(
                         tx,
                         task_id,
                         Some(name.clone()),
+                        tool_info_from_raw_json(&name, &input_json),
                         Some(total_tool_uses),
                         None,
                         None,
@@ -983,6 +1057,7 @@ async fn execute_task_inner(
                 ToolInput::StructuredOutput { data } => Some(data.clone()),
                 _ => None,
             };
+            let tool_info = tool_progress_info(&name, &input);
             let result = if let ToolInput::StructuredOutput { .. } = &input {
                 if schema_required {
                     execute_tool(
@@ -1053,6 +1128,7 @@ async fn execute_task_inner(
                 tx,
                 task_id,
                 Some(name.clone()),
+                Some(tool_info),
                 Some(total_tool_uses),
                 None,
                 None,
@@ -1856,6 +1932,46 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("provider switching for subagents is not wired yet"));
+    }
+
+    #[test]
+    fn tool_progress_info_formats_read_path_normal() {
+        let info = tool_progress_info(
+            "Read",
+            &ToolInput::Read {
+                file_path: "crates/jfc/src/render/roster.rs".into(),
+                offset: None,
+                limit: None,
+            },
+        );
+        assert_eq!(info, "Read(crates/jfc/src/render/roster.rs)");
+    }
+
+    #[test]
+    fn tool_progress_info_formats_bash_command_normal() {
+        let info = tool_progress_info(
+            "Bash",
+            &ToolInput::Bash {
+                command: "cargo test -p jfc\ncargo clippy".into(),
+                timeout: None,
+                workdir: None,
+                run_in_background: None,
+                suppress_output: None,
+            },
+        );
+        assert_eq!(info, "Bash(cargo test -p jfc)");
+    }
+
+    #[test]
+    fn append_code_navigation_guidance_names_mcp_codegraph_normal() {
+        let mut system_prompt = Some("base".to_owned());
+
+        append_code_navigation_guidance(&mut system_prompt);
+
+        let prompt = system_prompt.expect("prompt");
+        assert!(prompt.contains("CodeGraph"));
+        assert!(prompt.contains("mcp__codegraph__codegraph_explore"));
+        assert!(prompt.contains("before broad Read"));
     }
 
     /// Build a TaskInput carrying a `category` and no explicit model, to test

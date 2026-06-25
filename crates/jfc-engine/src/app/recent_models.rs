@@ -62,13 +62,14 @@ pub fn save_recent_models_to_store(store: &jfc_knowledge::KnowledgeStore, models
     let capped: Vec<String> = models.iter().take(5).cloned().collect();
     if let Ok(json) = serde_json::to_string(&capped) {
         let _ = jfc_knowledge::block_on_knowledge(async {
-            store.upsert_session_artifact(
-                RECENT_MODELS_SESSION_ID,
-                RECENT_MODELS_KIND,
-                RECENT_MODELS_KEY,
-                &json,
-            )
-            .await
+            store
+                .upsert_session_artifact(
+                    RECENT_MODELS_SESSION_ID,
+                    RECENT_MODELS_KIND,
+                    RECENT_MODELS_KEY,
+                    &json,
+                )
+                .await
         });
     }
 }

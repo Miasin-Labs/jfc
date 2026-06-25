@@ -22,11 +22,14 @@ fn project_session_id(cwd: &str) -> String {
 pub async fn on_session_start(cwd: &str) {
     let pending_count = match jfc_knowledge::KnowledgeStore::open_default().await {
         Ok(store) => {
-            match store.list_session_artifacts(
-                &project_session_id(cwd),
-                LEARN_PENDING_TRANSCRIPT_KIND,
-                10_000,
-            ).await {
+            match store
+                .list_session_artifacts(
+                    &project_session_id(cwd),
+                    LEARN_PENDING_TRANSCRIPT_KIND,
+                    10_000,
+                )
+                .await
+            {
                 Ok(rows) => rows.len(),
                 Err(_) => 0,
             }
@@ -79,12 +82,15 @@ pub async fn on_session_end(messages: &[ChatMessage], cwd: &str) {
             let session_id = project_session_id(cwd);
             match jfc_knowledge::KnowledgeStore::open_default().await {
                 Ok(store) => {
-                    match store.upsert_session_artifact(
-                        &session_id,
-                        LEARN_PENDING_TRANSCRIPT_KIND,
-                        &key,
-                        &json,
-                    ).await {
+                    match store
+                        .upsert_session_artifact(
+                            &session_id,
+                            LEARN_PENDING_TRANSCRIPT_KIND,
+                            &key,
+                            &json,
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             debug!(target: "jfc::learn", key, "on_session_end: queued transcript for historian");
                         }

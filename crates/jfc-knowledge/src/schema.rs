@@ -6,8 +6,8 @@
 //! Adding a new version = append a `&str` to [`MIGRATIONS`]; never edit or
 //! reorder existing entries.
 
-use sqlx::Row;
 use sqlx::AssertSqlSafe;
+use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
 use crate::error::{KnowledgeError, Result};

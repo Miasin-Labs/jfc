@@ -235,6 +235,7 @@ impl EconomyAgentInvoker {
                             crate::runtime::TaskEvent::Progress {
                                 task_id: crate::ids::TaskId::from(id),
                                 last_tool: None,
+                                last_tool_info: None,
                                 elapsed_ms: 0,
                                 tool_use_count: None,
                                 input_tokens: Some(i as u64),

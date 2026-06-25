@@ -202,7 +202,7 @@ pub fn write_agent_skill(
             )
             .await
     })?
-        .is_some()
+    .is_some()
     {
         return Err(SkillWriteError::AlreadyExists(
             name.to_owned(),
@@ -216,25 +216,27 @@ pub fn write_agent_skill(
     );
     let uri = format!("db:definition:skill:{name}");
     jfc_knowledge::block_on_knowledge(async {
-        store.upsert_definition(&NewDefinition {
-            kind: DEF_KIND_SKILL.to_owned(),
-            scope: DefinitionScope::Project,
-            project_key: Some(project_key),
-            namespace: None,
-            name: name.to_owned(),
-            title: None,
-            description: Some(description.to_owned()),
-            body: contents.clone(),
-            metadata_json: serde_json::json!({
-                "fallback_name": name,
-                "precedence": 10_000,
+        store
+            .upsert_definition(&NewDefinition {
+                kind: DEF_KIND_SKILL.to_owned(),
+                scope: DefinitionScope::Project,
+                project_key: Some(project_key),
+                namespace: None,
+                name: name.to_owned(),
+                title: None,
+                description: Some(description.to_owned()),
+                body: contents.clone(),
+                metadata_json: serde_json::json!({
+                    "fallback_name": name,
+                    "precedence": 10_000,
+                })
+                .to_string(),
+                source_path: Some(uri.clone()),
+                source_hash: Some(content_hash(&contents)),
+                status: DefinitionStatus::Active,
+                created_by: "agent".to_owned(),
             })
-            .to_string(),
-            source_path: Some(uri.clone()),
-            source_hash: Some(content_hash(&contents)),
-            status: DefinitionStatus::Active,
-            created_by: "agent".to_owned(),
-        }).await
+            .await
     })?;
     tracing::info!(target: "jfc::agents", skill = name, path = %uri, "wrote agent-created skill definition");
     Ok(PathBuf::from(uri))
@@ -405,7 +407,9 @@ fn import_legacy_skill_definitions(store: &KnowledgeStore, project_root: &Path, 
                 status: DefinitionStatus::Active,
                 created_by: "legacy_import".to_owned(),
             };
-            if let Err(err) = jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await }) {
+            if let Err(err) =
+                jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await })
+            {
                 tracing::warn!(
                     target: "jfc::agents",
                     path = %md_path.display(),
@@ -673,7 +677,9 @@ fn import_legacy_agent_definitions(store: &KnowledgeStore, project_root: &Path, 
                 status: DefinitionStatus::Active,
                 created_by: "legacy_import".to_owned(),
             };
-            if let Err(err) = jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await }) {
+            if let Err(err) =
+                jfc_knowledge::block_on_knowledge(async { store.upsert_definition(&def).await })
+            {
                 tracing::warn!(
                     target: "jfc::agents",
                     path = %path.display(),

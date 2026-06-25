@@ -25,14 +25,18 @@ fn artifact_key(path: &Path) -> String {
 fn artifact_store(path: &Path) -> std::io::Result<jfc_knowledge::KnowledgeStore> {
     let default_base = crate::state::DaemonPaths::default_user().base_dir;
     if path.starts_with(&default_base) {
-        return jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open_default()).map_err(std::io::Error::other);
+        return jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open_default())
+            .map_err(std::io::Error::other);
     }
     let db_dir = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     std::fs::create_dir_all(&db_dir)?;
-    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(&db_dir.join("knowledge.db"))).map_err(std::io::Error::other)
+    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(
+        &db_dir.join("knowledge.db"),
+    ))
+    .map_err(std::io::Error::other)
 }
 
 /// A saved prompt template.
@@ -230,7 +234,7 @@ impl ShortcutStore {
                 .get_session_artifact(SHORTCUTS_SESSION_ID, SHORTCUTS_KIND, &key)
                 .await
         })
-            .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)?
         {
             let mut loaded: Self = serde_json::from_str(&row.value_json)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -250,7 +254,7 @@ impl ShortcutStore {
                 .upsert_session_artifact(SHORTCUTS_SESSION_ID, SHORTCUTS_KIND, &key, &json)
                 .await
         })
-            .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)?;
         Ok(legacy.with_loaded_json(json))
     }
 
@@ -263,8 +267,8 @@ impl ShortcutStore {
                 .get_session_artifact(SHORTCUTS_SESSION_ID, SHORTCUTS_KIND, &key)
                 .await
         })
-            .map_err(std::io::Error::other)?
-            .map(|row| row.value_json);
+        .map_err(std::io::Error::other)?
+        .map(|row| row.value_json);
         let to_save =
             if current_json.as_deref() == self.loaded_json.as_deref() || current_json.is_none() {
                 self.clone()
@@ -281,7 +285,7 @@ impl ShortcutStore {
                 .upsert_session_artifact(SHORTCUTS_SESSION_ID, SHORTCUTS_KIND, &key, &json)
                 .await
         })
-            .map_err(std::io::Error::other)
+        .map_err(std::io::Error::other)
     }
 
     fn with_loaded_json(mut self, json: String) -> Self {

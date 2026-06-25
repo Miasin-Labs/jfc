@@ -98,6 +98,7 @@ fn test_background_info(id: &str, parent_session_id: Option<&str>) -> Background
         latest_cache_write_tokens: 0,
         cumulative_output_tokens: 0,
         last_tool: None,
+        last_tool_info: None,
     }
 }
 
@@ -287,6 +288,7 @@ fn worker_epoch_rejects_stale_worker_updates_robust() {
             "task-epoch",
             1,
             Some("Bash"),
+            Some("Bash(cargo test)"),
             Some(9),
             None,
             None,
@@ -639,6 +641,7 @@ fn background_agent_state_roundtrip_normal() {
             latest_cache_write_tokens: 0,
             cumulative_output_tokens: 25,
             last_tool: None,
+            last_tool_info: None,
         },
     );
     save_state(&paths, &state).unwrap();
@@ -684,6 +687,7 @@ fn background_agent_cancel_request_normal() {
             latest_cache_write_tokens: 0,
             cumulative_output_tokens: 0,
             last_tool: None,
+            last_tool_info: None,
         },
     );
     save_state(&paths, &state).unwrap();
@@ -729,6 +733,7 @@ fn background_agent_stale_owner_marked_failed_robust() {
             latest_cache_write_tokens: 0,
             cumulative_output_tokens: 0,
             last_tool: None,
+            last_tool_info: None,
         },
     );
     save_state(&paths, &state).unwrap();
@@ -827,6 +832,7 @@ fn terminal_agent(id: &str, log_path: PathBuf, completed_at: SystemTime) -> Back
         latest_cache_write_tokens: 0,
         cumulative_output_tokens: 0,
         last_tool: None,
+        last_tool_info: None,
     }
 }
 

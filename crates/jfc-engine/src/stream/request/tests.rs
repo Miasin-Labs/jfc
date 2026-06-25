@@ -7,6 +7,7 @@ mod budget;
 mod intent;
 mod memory;
 mod prepare;
+mod rsi_runtime;
 mod thinking;
 
 pub(super) struct TestProvider {

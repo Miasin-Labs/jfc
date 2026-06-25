@@ -1011,7 +1011,9 @@ pub(super) async fn cmd_bashes(
         } else {
             match crate::tools::cancel_bash_task(target).await {
                 crate::tools::CancelOutcome::Cancelled => {
-                    format!("Cancelled background shell `{target}` (SIGKILL sent to its process tree).")
+                    format!(
+                        "Cancelled background shell `{target}` (SIGKILL sent to its process tree)."
+                    )
                 }
                 crate::tools::CancelOutcome::AlreadyFinished => {
                     format!("Background shell `{target}` had already finished.")
@@ -1185,8 +1187,8 @@ mod recall_command_tests {
 mod bashes_tests {
     use super::*;
     use futures::stream::empty;
-    use jfc_provider::{CompletionResponse, ModelInfo, Provider, ProviderMessage, StreamOptions};
     use jfc_provider::TokenUsage;
+    use jfc_provider::{CompletionResponse, ModelInfo, Provider, ProviderMessage, StreamOptions};
     use std::sync::Arc;
 
     struct NoopProvider;

@@ -8,7 +8,10 @@
 //! The structured `MessageView` path (rich tool blocks, reasoning collapse,
 //! etc.) is used when `bt.chat_messages` is non-empty.
 
-use ratatui::{style::Style, text::Line};
+use ratatui::{
+    style::{Modifier, Style},
+    text::{Line, Span},
+};
 
 use super::terminal_output;
 use crate::markdown;
@@ -85,9 +88,55 @@ pub fn task_view_body_lines(
                 Style::default().fg(theme.text_muted),
             ));
         } else {
+            if let Some(line) = task_progress_activity_line(raw, theme) {
+                out.push(line);
+                continue;
+            }
             let mut lines = markdown::to_lines(raw, theme, inner_width);
             out.append(&mut lines);
         }
     }
     out
+}
+
+fn task_progress_activity_line(raw: &str, theme: &Theme) -> Option<Line<'static>> {
+    let raw = raw.trim();
+    let rest = raw.strip_prefix('[')?;
+    let (elapsed, tool) = rest.split_once("] ")?;
+    if elapsed.is_empty()
+        || tool.trim().is_empty()
+        || !elapsed
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, 's' | 'm' | 'h'))
+    {
+        return None;
+    }
+    let verb = task_progress_tool_verb(tool.trim());
+    Some(Line::from(vec![
+        Span::styled("  ◌ ", Style::default().fg(theme.accent)),
+        Span::styled(
+            format!("[{elapsed}] "),
+            Style::default().fg(theme.text_muted),
+        ),
+        Span::styled(
+            verb,
+            Style::default()
+                .fg(theme.text_secondary)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ]))
+}
+
+fn task_progress_tool_verb(tool: &str) -> String {
+    if tool.contains('(') {
+        return tool.to_owned();
+    }
+    match tool {
+        "Bash" => "Running shell".to_owned(),
+        "Read" | "NotebookRead" => "Reading".to_owned(),
+        "Write" => "Writing".to_owned(),
+        "Edit" | "MultiEdit" | "NotebookEdit" => "Editing".to_owned(),
+        "Glob" | "Grep" | "Search" => "Searching".to_owned(),
+        other => other.to_owned(),
+    }
 }

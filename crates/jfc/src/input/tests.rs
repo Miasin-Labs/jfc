@@ -154,6 +154,7 @@ fn make_background_task(
         summary: None,
         error: None,
         last_tool: None,
+        last_tool_info: None,
         messages: Vec::new(),
         chat_messages: Vec::new(),
         tool_use_count: 0,
@@ -1774,56 +1775,21 @@ async fn diagnostic_panel_esc_closes_normal() {
     assert!(!app.show_diagnostic_panel);
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Vim-style transcript navigation (input empty)
-// ─────────────────────────────────────────────────────────────────────
-
 #[tokio::test]
-async fn vim_j_scrolls_down_normal() {
-    let mut app = test_app();
-    app.scroll_offset = 0;
-    app.total_lines = 100;
-    let (tx, _rx) = channel();
-    handle_key(&mut app, key(KeyCode::Char('j')), &tx)
-        .await
-        .unwrap();
-    // Some scroll happened (or 0 if at top with no clamp); just validate
-    // behaviour didn't panic and doesn't move down beyond bounds.
-    let _ = app.scroll_offset;
-}
-
-#[tokio::test]
-async fn vim_k_scrolls_up_robust() {
-    let mut app = test_app();
-    app.scroll_offset = 5;
-    let (tx, _rx) = channel();
-    handle_key(&mut app, key(KeyCode::Char('k')), &tx)
-        .await
-        .unwrap();
-    assert!(app.scroll_offset <= 5);
-}
-
-#[tokio::test]
-async fn vim_capital_g_jumps_bottom_normal() {
-    let mut app = test_app();
-    app.follow_bottom = false;
-    let (tx, _rx) = channel();
-    handle_key(&mut app, key(KeyCode::Char('G')), &tx)
-        .await
-        .unwrap();
-    assert!(app.follow_bottom);
-}
-
-#[tokio::test]
-async fn vim_g_jumps_top_normal() {
+async fn empty_input_plain_letters_type_instead_of_navigating_regression() {
     let mut app = test_app();
     app.scroll_offset = 50;
-    app.follow_bottom = true;
+    app.follow_bottom = false;
     let (tx, _rx) = channel();
-    handle_key(&mut app, key(KeyCode::Char('g')), &tx)
-        .await
-        .unwrap();
-    assert_eq!(app.scroll_offset, 0);
+
+    for ch in ['j', 'k', 'g', 'G', 'o'] {
+        handle_key(&mut app, key(KeyCode::Char(ch)), &tx)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(app.textarea.lines()[0], "jkgGo");
+    assert_eq!(app.scroll_offset, 50);
     assert!(!app.follow_bottom);
 }
 
@@ -1834,15 +1800,12 @@ async fn question_toggles_help_normal() {
     handle_key(&mut app, key(KeyCode::Char('?')), &tx)
         .await
         .unwrap();
-    assert!(app.show_help);
-    handle_key(&mut app, key(KeyCode::Char('?')), &tx)
-        .await
-        .unwrap();
     assert!(!app.show_help);
+    assert_eq!(app.textarea.lines()[0], "?");
 }
 
 #[tokio::test]
-async fn shift_question_toggles_help_robust() {
+async fn shift_question_types_literal_question_robust() {
     let mut app = test_app();
     let (tx, _rx) = channel();
     handle_key(
@@ -1852,11 +1815,12 @@ async fn shift_question_toggles_help_robust() {
     )
     .await
     .unwrap();
-    assert!(app.show_help);
+    assert!(!app.show_help);
+    assert_eq!(app.textarea.lines()[0], "?");
 }
 
 #[tokio::test]
-async fn lower_o_toggles_tool_expand_normal() {
+async fn lower_o_starts_prompt_instead_of_toggling_tool_regression() {
     let mut app = test_app();
     app.engine
         .messages
@@ -1884,7 +1848,8 @@ async fn lower_o_toggles_tool_expand_normal() {
     let MessagePart::Tool(tc) = &app.engine.messages[0].parts[0] else {
         panic!("tool not found")
     };
-    assert!(tc.display.is_expanded());
+    assert!(!tc.display.is_expanded());
+    assert_eq!(app.textarea.lines()[0], "o");
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -691,6 +691,23 @@ pub async fn execute_tool_with_runtime_id(
         (ToolKind::LearnDream, ToolInput::LearnDream {}) => {
             crate::tools::learn::execute_learn_dream()
         }
+        (ToolKind::LearnRsiList, ToolInput::LearnRsiList { status, limit }) => {
+            crate::tools::learn::execute_learn_rsi_list(
+                std::path::Path::new(&cwd),
+                status.as_deref(),
+                limit,
+            )
+        }
+        (ToolKind::LearnRsiPromote, ToolInput::LearnRsiPromote { kind, name }) => {
+            crate::tools::learn::execute_learn_rsi_promote(std::path::Path::new(&cwd), &kind, &name)
+        }
+        (ToolKind::LearnRsiRollback, ToolInput::LearnRsiRollback { kind, name }) => {
+            crate::tools::learn::execute_learn_rsi_rollback(
+                std::path::Path::new(&cwd),
+                &kind,
+                &name,
+            )
+        }
         (ToolKind::LearnKeyFilesList, ToolInput::LearnKeyFilesList {}) => {
             crate::tools::learn::execute_learn_key_files_list(std::path::Path::new(&cwd))
         }

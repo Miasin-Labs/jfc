@@ -105,6 +105,7 @@ pub struct BackgroundTask {
     pub summary: Option<String>,
     pub error: Option<String>,
     pub last_tool: Option<String>,
+    pub last_tool_info: Option<String>,
     /// Raw string log (kept for daemon log compat and the collapse/expand UI).
     pub messages: Vec<String>,
     /// Structured message history mirroring the main chat's Vec<ChatMessage>.
@@ -2286,6 +2287,7 @@ mod background_task_cap_tests {
             summary: None,
             error: None,
             last_tool: None,
+            last_tool_info: None,
             messages: Vec::new(),
             chat_messages: Vec::new(),
             tool_use_count: 0,

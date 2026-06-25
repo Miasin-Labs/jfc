@@ -56,7 +56,8 @@ fn project_store(project_root: &Path) -> std::io::Result<jfc_knowledge::Knowledg
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(&db_path)).map_err(std::io::Error::other)
+    jfc_knowledge::block_on_knowledge(jfc_knowledge::KnowledgeStore::open(&db_path))
+        .map_err(std::io::Error::other)
 }
 
 /// Load the catch-up state from the project DB.
@@ -67,11 +68,13 @@ pub fn load_catch_up_state(project_root: &Path) -> CatchUpState {
         return CatchUpState::default();
     };
     if let Ok(Some(row)) = jfc_knowledge::block_on_knowledge(async {
-        store.get_session_artifact(
-            &project_session_id(project_root),
-            CATCH_UP_KIND,
-            CATCH_UP_KEY,
-        ).await
+        store
+            .get_session_artifact(
+                &project_session_id(project_root),
+                CATCH_UP_KIND,
+                CATCH_UP_KEY,
+            )
+            .await
     }) {
         return serde_json::from_str::<CatchUpState>(&row.value_json).unwrap_or_default();
     }

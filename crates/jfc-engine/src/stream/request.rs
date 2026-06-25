@@ -6,6 +6,7 @@ mod messages;
 mod prepare;
 mod project_context;
 mod prompt_seed;
+mod rsi_runtime;
 mod runtime_prompt;
 mod thinking;
 mod tool_catalog;

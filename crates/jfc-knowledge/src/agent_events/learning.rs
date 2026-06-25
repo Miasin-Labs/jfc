@@ -39,20 +39,20 @@ impl KnowledgeStore {
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
              ON CONFLICT(id) DO UPDATE SET \
                 status=excluded.status, verifier_evidence=excluded.verifier_evidence, \
-                recurrence_count=excluded.recurrence_count, updated_at_ms=excluded.updated_at_ms"
+                recurrence_count=excluded.recurrence_count, updated_at_ms=excluded.updated_at_ms",
         )
-            .bind(&row.id)
-            .bind(&row.source_session_id)
-            .bind(&row.source_turn_id)
-            .bind(&row.source_tool_run_id)
-            .bind(&row.candidate_rule)
-            .bind(&row.status)
-            .bind(&row.verifier_evidence)
-            .bind(row.recurrence_count)
-            .bind(row.created_at_ms)
-            .bind(row.updated_at_ms)
-            .execute(&self.pool)
-            .await?;
+        .bind(&row.id)
+        .bind(&row.source_session_id)
+        .bind(&row.source_turn_id)
+        .bind(&row.source_tool_run_id)
+        .bind(&row.candidate_rule)
+        .bind(&row.status)
+        .bind(&row.verifier_evidence)
+        .bind(row.recurrence_count)
+        .bind(row.created_at_ms)
+        .bind(row.updated_at_ms)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -67,12 +67,12 @@ impl KnowledgeStore {
             let rows = sqlx::query(
                 "SELECT id, source_session_id, source_turn_id, source_tool_run_id, candidate_rule, \
                         status, verifier_evidence, recurrence_count, created_at_ms, updated_at_ms \
-                 FROM learning_events WHERE status = ?1 ORDER BY updated_at_ms DESC LIMIT ?2"
+                 FROM learning_events WHERE status = ?1 ORDER BY updated_at_ms DESC LIMIT ?2",
             )
-                .bind(status)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await?;
+            .bind(status)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
             for row in rows {
                 out.push(learning_event_from(&row)?);
             }
@@ -80,11 +80,11 @@ impl KnowledgeStore {
             let rows = sqlx::query(
                 "SELECT id, source_session_id, source_turn_id, source_tool_run_id, candidate_rule, \
                         status, verifier_evidence, recurrence_count, created_at_ms, updated_at_ms \
-                 FROM learning_events ORDER BY updated_at_ms DESC LIMIT ?1"
+                 FROM learning_events ORDER BY updated_at_ms DESC LIMIT ?1",
             )
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await?;
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
             for row in rows {
                 out.push(learning_event_from(&row)?);
             }
@@ -93,7 +93,10 @@ impl KnowledgeStore {
     }
 }
 
-pub(crate) async fn delete_session_scoped_rows(tx: &mut sqlx::sqlite::SqliteConnection, session_id: &str) -> Result<usize> {
+pub(crate) async fn delete_session_scoped_rows(
+    tx: &mut sqlx::sqlite::SqliteConnection,
+    session_id: &str,
+) -> Result<usize> {
     let context = sqlx::query("DELETE FROM context_events WHERE session_id = ?1")
         .bind(session_id)
         .execute(&mut *tx)
