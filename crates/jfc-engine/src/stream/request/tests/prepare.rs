@@ -195,6 +195,27 @@ async fn prepare_injects_total_tokens_reminder_countdown_normal() {
 }
 
 #[tokio::test]
+async fn prepare_uses_smaller_runtime_context_window_regression() {
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider {
+        name: "anthropic",
+        convention: StreamConvention::AnthropicNative,
+    });
+    let overrides = crate::runtime::StreamRequestOverrides {
+        context_window_tokens: Some(200_000),
+        ..Default::default()
+    };
+    let request = prepare_stream_request(
+        provider,
+        &[user_text("write a small function")],
+        &ModelId::new("claude-opus-4-8"),
+        overrides,
+    )
+    .await;
+
+    assert_eq!(request.context_pressure.window_tokens, Some(200_000));
+}
+
+#[tokio::test]
 #[serial_test::serial]
 async fn prepare_applies_temperature_when_thinking_absent_normal() {
     let _guard = TemperatureGlobalGuard::set(0.8);

@@ -1575,6 +1575,24 @@ mod render_snapshot_tests {
     }
 
     #[test]
+    fn status_row_renders_active_goal_elapsed_badge_normal() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.engine.goal = Some(jfc_engine::goal::ActiveGoal::new("finish this".to_owned()));
+
+        let backend = TestBackend::new(80, 1);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::status::status(f, &app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(text.contains("/goal active"), "goal badge missing:\n{text}");
+    }
+
+    #[test]
     fn status_row_counts_request_overhead_for_no_usage_resume_regression() {
         let mut app = App::new(Arc::new(TestProvider), "test-model");
         app.engine.task_store = jfc_session::TaskStore::in_memory();

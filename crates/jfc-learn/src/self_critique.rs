@@ -137,7 +137,14 @@ const HEDGES: &[&str] = &[
 ];
 
 /// Output phrases that claim completion/verification.
-const DONE_CLAIMS: &[&str] = &["done", "fixed", "verified", "tested", "all passing", "works now"];
+const DONE_CLAIMS: &[&str] = &[
+    "done",
+    "fixed",
+    "verified",
+    "tested",
+    "all passing",
+    "works now",
+];
 
 impl CritiqueJudge for HeuristicJudge {
     fn critique(&self, s: &TurnSample) -> Vec<ImprovementProposal> {
@@ -243,8 +250,9 @@ mod tests {
         };
         let props = HeuristicJudge.critique(&s);
         assert!(
-            props.iter().any(|p| p.kind == CandidateKind::ReasoningPolicy
-                && p.title.contains("Verify")),
+            props
+                .iter()
+                .any(|p| p.kind == CandidateKind::ReasoningPolicy && p.title.contains("Verify")),
             "expected a verify-assumptions reasoning policy, got {props:?}"
         );
     }

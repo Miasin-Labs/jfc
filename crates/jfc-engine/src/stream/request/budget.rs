@@ -1,35 +1,5 @@
-use jfc_provider::{ProviderContent, ProviderMessage, ToolDef};
-
-fn chars_to_tokens(chars: usize) -> u64 {
-    (chars / 4).try_into().unwrap_or(u64::MAX)
-}
-
-fn provider_content_chars(content: &ProviderContent) -> usize {
-    match content {
-        ProviderContent::Text(text) => text.len(),
-        ProviderContent::Thinking { text, signature } => {
-            text.len() + signature.as_deref().map_or(0, str::len)
-        }
-        ProviderContent::ToolResult { content, .. } => content.len(),
-        ProviderContent::ToolUse { name, input, .. }
-        | ProviderContent::ServerToolUse { name, input, .. } => {
-            name.len() + input.to_string().len()
-        }
-        ProviderContent::ServerToolResult { content, .. } => content.to_string().len(),
-        ProviderContent::Attachment(attachment) => attachment.bytes.len(),
-        ProviderContent::RedactedThinking { data } => data.len(),
-    }
-}
-
-fn provider_messages_tokens(messages: &[ProviderMessage]) -> u64 {
-    chars_to_tokens(
-        messages
-            .iter()
-            .flat_map(|message| message.content.iter())
-            .map(provider_content_chars)
-            .sum(),
-    )
-}
+use crate::context_accounting::{chars_to_tokens, provider_messages_tokens};
+use jfc_provider::{ProviderMessage, ToolDef};
 
 fn tool_definition_tokens(tool: &ToolDef) -> u64 {
     chars_to_tokens(

@@ -1271,7 +1271,11 @@ mod tests {
         b.save(&dir.join("bob.json")).unwrap();
         std::fs::write(dir.join("notes.txt"), "ignore me").unwrap();
         let loaded = load_profiles_dir(&dir);
-        assert_eq!(loaded.len(), 2, "should load both json profiles, skip the txt");
+        assert_eq!(
+            loaded.len(),
+            2,
+            "should load both json profiles, skip the txt"
+        );
         // Missing dir → empty, not a panic.
         assert!(load_profiles_dir(&dir.join("nope")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);

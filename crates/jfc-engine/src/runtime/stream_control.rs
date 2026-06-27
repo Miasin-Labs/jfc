@@ -10,6 +10,48 @@ use std::sync::Arc;
 
 use jfc_provider::{ModelId, Provider, ProviderMessage};
 
+pub fn materialize_terminal_transcript_boundary(state: &mut EngineState) -> bool {
+    let overhead_tokens = crate::context_accounting::request_overhead_tokens(state);
+    let result = crate::context_accounting::materialize_transcript_boundary(
+        &mut state.messages,
+        crate::context_accounting::TranscriptBoundaryBudget {
+            window_tokens: state.max_context_tokens,
+            max_output_tokens: state.max_output_tokens,
+            overhead_tokens,
+        },
+    );
+    let Some(result) = result else {
+        return false;
+    };
+
+    state.tool_ctx.approx_tokens = result.post_tokens;
+    if let Some(saved) = result.pre_tokens.checked_sub(result.post_tokens)
+        && saved > 0
+    {
+        state.pending_context_hint_tokens_saved = Some(saved as u64);
+    }
+    tracing::warn!(
+        target: "jfc::context",
+        omitted_messages = result.omitted_messages,
+        kept_messages = result.kept_messages,
+        pre_tokens = result.pre_tokens,
+        post_tokens = result.post_tokens,
+        archive_id = ?result.archive_id,
+        "materialized durable transcript boundary after terminal turn"
+    );
+    crate::toast::push_with_cap(
+        &mut state.toasts,
+        crate::toast::Toast::new(
+            crate::toast::ToastKind::Info,
+            format!(
+                "Context archived {} old messages after the turn",
+                result.omitted_messages
+            ),
+        ),
+    );
+    true
+}
+
 pub fn spawn_stream_response_scoped(
     state: &mut EngineState,
     tx: &EventSender,
@@ -119,11 +161,14 @@ pub fn restart_stream_in_place_with_overrides(
     if overrides.context_window_tokens.is_none() {
         overrides.context_window_tokens = Some(state.max_context_tokens as u64);
     }
+    if overrides.provider_history_archive_seen.is_empty() {
+        overrides.provider_history_archive_seen = state.provider_history_archive_seen();
+    }
 
-    let msg = state
-        .messages
-        .get_mut(assistant_idx)
-        .expect("validated above");
+    let assistant_idx = maybe_materialize_transcript_boundary(state, assistant_idx, &overrides);
+    let Some(msg) = state.messages.get_mut(assistant_idx) else {
+        return;
+    };
     // Preserve tool calls that already EXECUTED in the failed turn. Wiping
     // them (the old behavior) erased Edits/Writes/Bash that had really run
     // from both the transcript and the provider rebuild, so the retried
@@ -207,3 +252,71 @@ pub fn restart_stream_in_place_with_overrides(
         state, tx, provider, messages, model, interrupt, cancel, None, overrides,
     );
 }
+
+fn maybe_materialize_transcript_boundary(
+    state: &mut EngineState,
+    assistant_idx: usize,
+    overrides: &StreamRequestOverrides,
+) -> usize {
+    let Some(window_tokens) = overrides
+        .context_window_tokens
+        .and_then(|tokens| usize::try_from(tokens).ok())
+        .filter(|tokens| *tokens > 0)
+    else {
+        return assistant_idx;
+    };
+    if assistant_idx == 0 || assistant_idx > state.messages.len() {
+        return assistant_idx;
+    }
+
+    let mut history = state.messages[..assistant_idx].to_vec();
+    let result = crate::context_accounting::materialize_transcript_boundary(
+        &mut history,
+        crate::context_accounting::TranscriptBoundaryBudget {
+            window_tokens,
+            max_output_tokens: None,
+            overhead_tokens: crate::context_accounting::request_overhead_tokens(state),
+        },
+    );
+    let Some(result) = result else {
+        return assistant_idx;
+    };
+
+    let suffix: Vec<_> = state.messages[assistant_idx..].to_vec();
+    state.messages.clear();
+    state.messages.extend(history);
+    let new_assistant_idx = state.messages.len();
+    state.messages.extend(suffix);
+    state.tool_ctx.approx_tokens = result.post_tokens;
+    if let Some(saved) = result.pre_tokens.checked_sub(result.post_tokens)
+        && saved > 0
+    {
+        state.pending_context_hint_tokens_saved = Some(saved as u64);
+    }
+    tracing::warn!(
+        target: "jfc::context",
+        old_assistant_idx = assistant_idx,
+        new_assistant_idx,
+        omitted_messages = result.omitted_messages,
+        kept_messages = result.kept_messages,
+        pre_tokens = result.pre_tokens,
+        post_tokens = result.post_tokens,
+        archive_id = ?result.archive_id,
+        "materialized durable transcript boundary before stream"
+    );
+    crate::toast::push_with_cap(
+        &mut state.toasts,
+        crate::toast::Toast::new(
+            crate::toast::ToastKind::Info,
+            format!(
+                "Context archived {} old messages before streaming",
+                result.omitted_messages
+            ),
+        ),
+    );
+    crate::runtime::session_save::force_save(state);
+    new_assistant_idx
+}
+
+#[cfg(test)]
+mod tests;

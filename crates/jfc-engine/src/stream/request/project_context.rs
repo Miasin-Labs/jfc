@@ -9,11 +9,12 @@ use super::memory::{
 };
 use super::messages::last_user_text;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ProjectContextStats {
     pub(super) memory_context_chars: usize,
     pub(super) fresh_recall_chars: usize,
     pub(super) project_instructions_chars: usize,
+    pub(super) provider_history_archive_recall_ids: Vec<String>,
 }
 
 /// First agent turn ⇔ at most one user message in the transcript so far. Used to
@@ -189,6 +190,30 @@ pub(super) async fn append_project_context(
             );
             stats.memory_context_chars += block.len();
             system_prompt.push_str(&block);
+        }
+        if let Some(query) = last_user_text(messages) {
+            let trimmed = query.trim();
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('/')
+                && let Some(recall) =
+                    crate::context_accounting::provider_history_archive_recall_block(
+                        trimmed,
+                        3,
+                        &overrides.provider_history_archive_seen,
+                    )
+            {
+                tracing::debug!(
+                    target: "jfc::stream",
+                    provider_history_archive_recall_chars = recall.block.len(),
+                    provider_history_archive_recall_count = recall.archive_ids.len(),
+                    "appending provider-history archive recall block"
+                );
+                stats.memory_context_chars += recall.block.len();
+                stats
+                    .provider_history_archive_recall_ids
+                    .extend(recall.archive_ids);
+                system_prompt.push_str(&recall.block);
+            }
         }
 
         // t221 — AutoSearchHints: scan the user's prompt for code-path /

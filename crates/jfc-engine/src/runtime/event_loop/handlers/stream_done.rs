@@ -818,6 +818,7 @@ pub async fn handle_stream_done(
     let needs_dynamic_loop_keepalive = turn_genuinely_done && dynamic_loop_keepalive_needed(state);
     if turn_genuinely_done {
         state.turn_started_at = None;
+        crate::runtime::materialize_terminal_transcript_boundary(state);
     }
 
     // Auto-save session after each assistant turn completes. Turn
@@ -2125,6 +2126,7 @@ mod stream_done_lifecycle_tests {
             action_expected: true,
             tool_choice: crate::runtime::StreamToolChoice::Auto,
             resolved_model: None,
+            provider_history_archive_recall_ids: Vec::new(),
         });
         let hidden_reasoning = "private diagnostic chain";
         let (visible, reasoning_chars) = {

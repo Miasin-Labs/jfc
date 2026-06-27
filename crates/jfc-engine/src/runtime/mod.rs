@@ -43,5 +43,7 @@ pub use jfc_core::{
 pub use jfc_core::{DiagnosticLevel, ToolOutcome};
 pub use network::record_network_recovery;
 pub use queue::drain_queued_prompts;
-pub use stream_control::{restart_stream_in_place, spawn_stream_response_scoped};
+pub use stream_control::{
+    materialize_terminal_transcript_boundary, restart_stream_in_place, spawn_stream_response_scoped,
+};
 pub use task_activity::{task_drift_reminder, update_task_activities};

@@ -109,6 +109,7 @@ Use the MemoryCreate tool for new memories and MemoryDelete for stale ones.{cron
     state.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = state.cancel_token.clone();
     let overrides = crate::runtime::StreamRequestOverrides {
+        provider_history_archive_seen: state.provider_history_archive_seen(),
         background_reminders: state.take_background_reminders(),
         disallowed_tools: state.effective_disallowed_tools(),
         allowed_tools: state.allowed_tools.clone(),
@@ -309,6 +310,7 @@ Then immediately execute the prompt now (do not wait for the first cron fire)."
     state.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = state.cancel_token.clone();
     let overrides = crate::runtime::StreamRequestOverrides {
+        provider_history_archive_seen: state.provider_history_archive_seen(),
         background_reminders: state.take_background_reminders(),
         disallowed_tools: state.effective_disallowed_tools(),
         allowed_tools: state.allowed_tools.clone(),
@@ -454,6 +456,7 @@ and display the results in a readable table with columns: id, schedule, command,
     state.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = state.cancel_token.clone();
     let overrides = crate::runtime::StreamRequestOverrides {
+        provider_history_archive_seen: state.provider_history_archive_seen(),
         background_reminders: state.take_background_reminders(),
         disallowed_tools: state.effective_disallowed_tools(),
         allowed_tools: state.allowed_tools.clone(),

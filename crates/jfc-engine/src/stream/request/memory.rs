@@ -84,7 +84,11 @@ async fn append_cross_project_knowledge_inner(
         // Log the recall (which lessons surfaced this turn) for impact metrics —
         // best-effort, only inside a session, never alters the prompt.
         if let Some(sid) = session_id {
-            let source = if is_brief { "session_brief" } else { "cross_project" };
+            let source = if is_brief {
+                "session_brief"
+            } else {
+                "cross_project"
+            };
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)

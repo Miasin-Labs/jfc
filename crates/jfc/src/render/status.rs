@@ -138,6 +138,13 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
             87,
         );
     }
+    if let Some(goal) = app.engine.goal.as_ref() {
+        push1!(
+            super::status_goal::goal_status_badge(goal),
+            activity.add_modifier(Modifier::BOLD),
+            92,
+        );
+    }
 
     if app.engine.fast_mode {
         push1!("fast".to_owned(), activity, 60);

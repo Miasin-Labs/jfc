@@ -1485,7 +1485,12 @@ impl KnowledgeStore {
             delta,
             band,
             significant: delta >= band,
-            better: if a.mean >= b.mean { variant_a } else { variant_b }.to_owned(),
+            better: if a.mean >= b.mean {
+                variant_a
+            } else {
+                variant_b
+            }
+            .to_owned(),
         }))
     }
 
@@ -1542,9 +1547,12 @@ impl KnowledgeStore {
     /// existing label so recurring gaps rise to the top of the curriculum.
     pub async fn record_knowledge_gap(&self, label: &str, reason: &str) -> Result<()> {
         let now = record::now_ms();
-        let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, format!("gap:{label}").as_bytes())
-            .simple()
-            .to_string();
+        let id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("gap:{label}").as_bytes(),
+        )
+        .simple()
+        .to_string();
         sqlx::query(
             "INSERT INTO knowledge_gaps (id, label, reason, ref_count, first_seen_ms, last_seen_ms)
              VALUES (?1,?2,?3,1,?4,?4)
@@ -1569,7 +1577,9 @@ impl KnowledgeStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(|r| Ok((r.try_get(0)?, r.try_get(1)?))).collect()
+        rows.iter()
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect()
     }
 
     /// CONSOLIDATE: supersede exact-duplicate-body preferences, keeping the

@@ -1086,6 +1086,7 @@ fn try_render_compaction_archive_by_id(query: &str) -> Option<String> {
         return None;
     }
     crate::compact_archive::render_archive_by_id(query)
+        .or_else(|| crate::context_accounting::render_provider_history_archive_by_id(query))
 }
 
 /// `/expand <archive-id>` — reopen the exact raw messages that were replaced by
@@ -1101,13 +1102,23 @@ pub(super) async fn cmd_expand(
 
     let body = if query.is_empty() {
         let archives = crate::compact_archive::list_archives(10);
-        if archives.is_empty() {
-            "No compaction archives found. Archives are created the next time `/compact` or auto-compaction replaces raw messages.".to_owned()
+        let provider_archives = crate::context_accounting::list_provider_history_archives(10);
+        if archives.is_empty() && provider_archives.is_empty() {
+            "No context archives found. Archives are created the next time `/compact` or provider-history overflow handling replaces raw messages.".to_owned()
         } else {
-            let mut s = String::from("Recent compaction archives (use `/expand <id>`):\n");
+            let mut s = String::from("Recent context archives (use `/expand <id>`):\n");
             for a in archives {
                 s.push_str(&format!(
-                    "  {}  {}  ({} msgs)\n    ...{}\n",
+                    "  compact  {}  {}  ({} msgs)\n    ...{}\n",
+                    a.id,
+                    a.created_at.chars().take(19).collect::<String>(),
+                    a.message_count,
+                    a.snippet.chars().take(120).collect::<String>(),
+                ));
+            }
+            for a in provider_archives {
+                s.push_str(&format!(
+                    "  provider-history  {}  {}  ({} msgs)\n    ...{}\n",
                     a.id,
                     a.created_at.chars().take(19).collect::<String>(),
                     a.message_count,
@@ -1120,13 +1131,24 @@ pub(super) async fn cmd_expand(
         rendered
     } else {
         let archives = crate::compact_archive::search_archives(query, 5);
-        if archives.is_empty() {
-            format!("No compaction archive matched `{query}`.")
+        let provider_archives =
+            crate::context_accounting::search_provider_history_archives(query, 5);
+        if archives.is_empty() && provider_archives.is_empty() {
+            format!("No context archive matched `{query}`.")
         } else {
-            let mut s = format!("Compaction archives matching `{query}`:\n");
+            let mut s = format!("Context archives matching `{query}`:\n");
             for a in archives {
                 s.push_str(&format!(
-                    "  {}  {}  ({} msgs)\n    ...{}\n",
+                    "  compact  {}  {}  ({} msgs)\n    ...{}\n",
+                    a.id,
+                    a.created_at.chars().take(19).collect::<String>(),
+                    a.message_count,
+                    a.snippet.chars().take(120).collect::<String>(),
+                ));
+            }
+            for a in provider_archives {
+                s.push_str(&format!(
+                    "  provider-history  {}  {}  ({} msgs)\n    ...{}\n",
                     a.id,
                     a.created_at.chars().take(19).collect::<String>(),
                     a.message_count,

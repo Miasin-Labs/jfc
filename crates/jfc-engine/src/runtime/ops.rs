@@ -7,6 +7,10 @@
 use std::sync::Arc;
 
 use crate::app::EngineState;
+use crate::context_accounting::{
+    load_session_detected_context_limit, load_session_provider_history_archive_seen,
+    pending_turn_tokens,
+};
 use crate::runtime::EventSender;
 use crate::types::ChatMessage;
 
@@ -429,6 +433,7 @@ pub async fn load_session(state: &mut EngineState, session_id: crate::ids::Sessi
             state.messages = messages;
             let id_for_toast = session_id.clone();
             state.switch_session(Some(session_id));
+            restore_session_context_state(state, id_for_toast.as_str()).await;
             state.streaming_text.clear();
             state.streaming_reasoning.clear();
             state.streaming_response_bytes = 0;
@@ -457,6 +462,49 @@ pub async fn load_session(state: &mut EngineState, session_id: crate::ids::Sessi
                 ),
             );
         }
+    }
+}
+
+pub(crate) async fn restore_session_context_state(state: &mut EngineState, session_id: &str) {
+    restore_detected_context_limit(state, session_id).await;
+    match load_session_provider_history_archive_seen(session_id).await {
+        Ok(seen) => {
+            let count = seen.len();
+            state.provider_history_archive_seen = seen;
+            if count > 0 {
+                tracing::info!(
+                    target: "jfc::stream::provider_history",
+                    session_id,
+                    count,
+                    "restored persisted provider-history archive recall ledger"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "jfc::stream::provider_history",
+                session_id,
+                error = %err,
+                "failed to restore provider-history archive recall ledger"
+            );
+        }
+    }
+}
+
+async fn restore_detected_context_limit(state: &mut EngineState, session_id: &str) {
+    if let Some(detected) =
+        load_session_detected_context_limit(session_id, state.model.as_str()).await
+    {
+        let changed = state.record_detected_context_limit(detected);
+        tracing::info!(
+            target: "jfc::stream::budget",
+            session_id,
+            model = %state.model,
+            limit_tokens = detected.limit_tokens,
+            actual_tokens = ?detected.actual_tokens,
+            changed = changed.is_some(),
+            "restored persisted detected context limit"
+        );
     }
 }
 
@@ -650,7 +698,8 @@ pub async fn submit_prompt(
     // then add the pending user text. The prompt is not pushed yet, but it is
     // part of the request we're about to send; ignoring it makes huge pastes
     // skip this gate and fall through to provider-side prompt_too_long.
-    let pending_prompt_tokens = crate::compact::estimate_tokens(&[ChatMessage::user(text.clone())]);
+    let pending_prompt_tokens =
+        pending_turn_tokens(text.clone(), &attachments, &mention_attachments);
     let mut est =
         crate::context_accounting::model_visible_tokens_for_request(state, pending_prompt_tokens);
     let mut level = crate::compact::compact_level_with_output(
@@ -1350,6 +1399,7 @@ pub async fn start_turn_from_transcript(
     state.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = state.cancel_token.clone();
     let overrides = crate::runtime::StreamRequestOverrides {
+        provider_history_archive_seen: state.provider_history_archive_seen(),
         background_reminders: state.take_background_reminders(),
         disallowed_tools: state.effective_disallowed_tools(),
         extra_dirs: state.extra_dirs.clone(),
@@ -1395,6 +1445,7 @@ mod submit_prompt_tests {
     //! halts the turn and surfaces a proposal (never a silent substitution),
     //! and a flag-on refusal blocks the turn without touching the transcript.
 
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use jfc_provider::{
@@ -1468,6 +1519,31 @@ mod submit_prompt_tests {
         EngineState::new(provider, "test-model")
     }
 
+    struct KnowledgeDbEnvGuard {
+        prior: Option<std::ffi::OsString>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl KnowledgeDbEnvGuard {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let prior = std::env::var_os("JFC_KNOWLEDGE_DB");
+            unsafe { std::env::set_var("JFC_KNOWLEDGE_DB", dir.path().join("knowledge.db")) };
+            Self { prior, _dir: dir }
+        }
+    }
+
+    impl Drop for KnowledgeDbEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prior {
+                    Some(prior) => std::env::set_var("JFC_KNOWLEDGE_DB", prior),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                }
+            }
+        }
+    }
+
     fn enabled_cfg() -> jfc_config::PromptRewriteConfig {
         jfc_config::PromptRewriteConfig {
             enabled: true,
@@ -1490,6 +1566,29 @@ mod submit_prompt_tests {
                     .collect::<Vec<_>>()
                     .join("")
             })
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn restore_session_context_state_loads_provider_history_seen_regression() {
+        let _env = KnowledgeDbEnvGuard::new();
+        let session_id = "ses_restore_provider_history_seen";
+        let expected = BTreeSet::from([
+            "provider-history-20260626-first".to_owned(),
+            "provider-history-20260626-second".to_owned(),
+        ]);
+        crate::context_accounting::persist_session_provider_history_archive_seen(
+            session_id, &expected,
+        )
+        .expect("seen archive ids should persist");
+        let mut state = state_with(Arc::new(ScriptProvider::inert()));
+        state
+            .provider_history_archive_seen
+            .insert("provider-history-stale-other-session".to_owned());
+
+        restore_session_context_state(&mut state, session_id).await;
+
+        assert_eq!(state.provider_history_archive_seen, expected);
     }
 
     #[tokio::test]

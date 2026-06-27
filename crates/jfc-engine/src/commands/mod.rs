@@ -8,6 +8,7 @@
 pub mod account;
 pub mod automation;
 pub mod context;
+pub mod context_search;
 pub mod council;
 pub mod delegating;
 pub mod github;
@@ -44,6 +45,7 @@ use prelude::*;
 
 use account::*;
 use context::*;
+use context_search::*;
 use delegating::*;
 use inbox::*;
 use info::*;
@@ -102,6 +104,7 @@ engine_commands! {
         "/check" [] "re-run cargo-check diagnostics" => cmd_check,
         "/compact" [] "summarize earlier messages to free context" => cmd_compact,
         "/expand" [] "open raw messages saved before compaction (`/expand <archive-id>`)" => cmd_expand,
+        "/ctx-search" ["/search-context", "/search-sessions"] "search prior sessions and git commits (`/ctx-search <query>`)" => cmd_ctx_search,
         "/advisor" [] "ask a parallel advisor without disturbing the main agent" => cmd_advisor,
         "/council" [] "council: one-shot fan-out (`/council <q>`) or a turn-based session (`/council start <topic>`, then continue/consensus/verdict)" => cmd_council,
         "/research" [] "deep research: plan sub-queries, search the web in steps, synthesise (`/research <question>`)" => cmd_research,
@@ -609,6 +612,7 @@ fn start_synthetic_user_turn(
     state.cancel_token = tokio_util::sync::CancellationToken::new();
     let cancel = state.cancel_token.clone();
     let overrides = crate::runtime::StreamRequestOverrides {
+        provider_history_archive_seen: state.provider_history_archive_seen(),
         background_reminders: state.take_background_reminders(),
         disallowed_tools: state.effective_disallowed_tools(),
         allowed_tools: state.allowed_tools.clone(),

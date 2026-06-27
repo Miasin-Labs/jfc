@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::context_accounting::RequestContextPressure;
 use crate::runtime::{StreamRequestMetadata, StreamRequestOverrides};
 use crate::tools;
 use jfc_provider::{
@@ -129,14 +130,6 @@ pub async fn prepare_stream_request(
         project_context.project_instructions_chars,
         messages,
     );
-    let request_raw_tokens = jfc_core::context_budget::raw_tokens(request_budget);
-    let request_effective_tokens = jfc_core::context_budget::effective_tokens(request_budget);
-    let request_overhead_tokens = request_budget
-        .system_prompt_tokens
-        .saturating_add(request_budget.tool_definition_tokens)
-        .saturating_add(request_budget.memory_tokens)
-        .saturating_add(request_budget.project_instructions_tokens)
-        .min(usize::MAX as u64) as usize;
     tracing::debug!(
         target: "jfc::stream::budget",
         system_prompt_tokens = request_budget.system_prompt_tokens,
@@ -144,8 +137,6 @@ pub async fn prepare_stream_request(
         memory_tokens = request_budget.memory_tokens,
         project_instructions_tokens = request_budget.project_instructions_tokens,
         replay_message_tokens = request_budget.user_message_tokens,
-        raw_tokens = request_raw_tokens,
-        effective_tokens = request_effective_tokens,
         advertised_tool_count,
         "proof-backed stream context budget estimate"
     );
@@ -208,6 +199,24 @@ pub async fn prepare_stream_request(
         provider.stream_convention(),
     );
     opts = model_profile.clamp_options(opts);
+    let request_pressure = RequestContextPressure::new(
+        request_budget,
+        effective_context_window_tokens(
+            model_profile.context_window_tokens(),
+            overrides
+                .context_window_tokens
+                .and_then(|tokens| usize::try_from(tokens).ok()),
+        ),
+        usize::try_from(opts.max_tokens).ok(),
+    );
+    tracing::debug!(
+        target: "jfc::stream::budget",
+        raw_tokens = request_pressure.raw_tokens,
+        effective_tokens = request_pressure.effective_tokens,
+        window_tokens = ?request_pressure.window_tokens,
+        max_output_tokens = ?request_pressure.max_output_tokens,
+        "resolved request context pressure"
+    );
     // Log the resolved request params after per-model clamping so every spawn's
     // actual reasoning_effort, max_tokens, and thinking mode are observable.
     // Critical for experiments comparing model tiers / effort levels — the
@@ -238,7 +247,8 @@ pub async fn prepare_stream_request(
 
     PreparedStreamRequest {
         opts,
-        system_prompt_tokens: request_overhead_tokens,
+        context_pressure: request_pressure,
+        system_prompt_tokens: request_pressure.overhead_tokens,
         metadata: StreamRequestMetadata {
             advertised_tool_count,
             action_expected,
@@ -249,7 +259,21 @@ pub async fn prepare_stream_request(
                 ModelResolutionReason::Requested,
                 selected_model_info.as_ref(),
             )),
+            provider_history_archive_recall_ids: project_context
+                .provider_history_archive_recall_ids,
         },
         recalled_memory_chars: project_context.fresh_recall_chars,
+    }
+}
+
+fn effective_context_window_tokens(
+    model_profile_tokens: Option<usize>,
+    override_tokens: Option<usize>,
+) -> Option<usize> {
+    match (model_profile_tokens, override_tokens) {
+        (Some(profile), Some(override_tokens)) => Some(profile.min(override_tokens)),
+        (Some(profile), None) => Some(profile),
+        (None, Some(override_tokens)) => Some(override_tokens),
+        (None, None) => None,
     }
 }

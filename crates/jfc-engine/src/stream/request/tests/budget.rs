@@ -1,4 +1,4 @@
-use jfc_provider::ToolDef;
+use jfc_provider::{ProviderContent, ProviderMessage, ProviderRole, ToolDef};
 
 use super::super::stream_context_budget;
 use super::user_text;
@@ -37,4 +37,23 @@ fn stream_context_budget_separates_memory_and_project_context_regression() {
     assert_eq!(budget.memory_tokens, 2);
     assert_eq!(budget.project_instructions_tokens, 3);
     assert!(budget.system_prompt_tokens > 0);
+}
+
+#[test]
+fn stream_context_budget_counts_provider_attachments_regression() {
+    let messages = vec![ProviderMessage {
+        role: ProviderRole::User,
+        content: vec![
+            ProviderContent::Text("abcd".into()),
+            ProviderContent::Attachment(crate::attachments::Attachment {
+                id: 1,
+                kind: crate::attachments::AttachmentKind::ImagePng,
+                bytes: vec![0; 12],
+            }),
+        ],
+    }];
+
+    let budget = stream_context_budget("", &[], 0, 0, &messages);
+
+    assert_eq!(budget.user_message_tokens, 4);
 }

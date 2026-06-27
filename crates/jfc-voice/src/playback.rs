@@ -99,8 +99,18 @@ fn ffplay_pcm_command() -> PlaybackCommand {
     PlaybackCommand::new(
         "ffplay",
         [
-            "-nodisp", "-autoexit", "-loglevel", "quiet", "-f", "s16le", "-ar", "16000",
-            "-ch_layout", "mono", "-i", "pipe:0",
+            "-nodisp",
+            "-autoexit",
+            "-loglevel",
+            "quiet",
+            "-f",
+            "s16le",
+            "-ar",
+            "16000",
+            "-ch_layout",
+            "mono",
+            "-i",
+            "pipe:0",
         ],
     )
 }

@@ -130,8 +130,7 @@ fn parse_mermaid_node(token: &str) -> Option<Node> {
             return None;
         }
         // Strip the matching shape delimiters greedily from both ends.
-        let inner = token[pos..]
-            .trim_matches(|c| matches!(c, '[' | ']' | '(' | ')' | '{' | '}'));
+        let inner = token[pos..].trim_matches(|c| matches!(c, '[' | ']' | '(' | ')' | '{' | '}'));
         let label = clean_label(inner);
         let label = if label.is_empty() { id.clone() } else { label };
         Some(Node { id, label })
@@ -193,8 +192,7 @@ fn parse_mermaid(src: &str) -> Option<Graph> {
                 .filter(|s| !s.is_empty());
             let arrow = caps.name("arrow").map(|m| m.as_str()).unwrap_or("-->");
             let directed = arrow.contains('>') || arrow.contains('<');
-            let (Some(fnode), Some(tnode)) =
-                (parse_mermaid_node(left), parse_mermaid_node(right))
+            let (Some(fnode), Some(tnode)) = (parse_mermaid_node(left), parse_mermaid_node(right))
             else {
                 continue;
             };
@@ -209,7 +207,11 @@ fn parse_mermaid(src: &str) -> Option<Graph> {
             });
         } else if let Some(node) = parse_mermaid_node(line) {
             // A standalone node declaration (no edge).
-            if node.id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            if node
+                .id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
                 upsert(&mut nodes, &mut order, node);
             }
         }
@@ -236,7 +238,10 @@ fn parse_mermaid_sequence(src: &str) -> Option<Graph> {
     let mut order: Vec<String> = Vec::new();
     let mut messages: Vec<Edge> = Vec::new();
 
-    let add_participant = |id: &str, label: Option<&str>, order: &mut Vec<String>, participants: &mut BTreeMap<String, Node>| {
+    let add_participant = |id: &str,
+                           label: Option<&str>,
+                           order: &mut Vec<String>,
+                           participants: &mut BTreeMap<String, Node>| {
         let id = id.trim().to_string();
         if id.is_empty() {
             return;
@@ -334,7 +339,10 @@ fn parse_dot(src: &str) -> Option<Graph> {
     let mut order: Vec<String> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();
 
-    let upsert = |nodes: &mut BTreeMap<String, Node>, order: &mut Vec<String>, id: String, label: Option<String>| {
+    let upsert = |nodes: &mut BTreeMap<String, Node>,
+                  order: &mut Vec<String>,
+                  id: String,
+                  label: Option<String>| {
         if !nodes.contains_key(&id) {
             order.push(id.clone());
             nodes.insert(
@@ -506,8 +514,10 @@ fn draw_flow(
         out.push(Line::default());
     }
 
-    let label_of: BTreeMap<&str, &str> =
-        nodes.iter().map(|n| (n.id.as_str(), n.label.as_str())).collect();
+    let label_of: BTreeMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.label.as_str()))
+        .collect();
     let ranks = rank_nodes(nodes, edges);
     let max_rank = ranks.values().copied().max().unwrap_or(0);
     let box_w = (width / 3).clamp(10, 40);
@@ -546,8 +556,14 @@ fn draw_flow(
             muted.add_modifier(Modifier::BOLD),
         )));
         for e in drawable {
-            let from = label_of.get(e.from.as_str()).copied().unwrap_or(e.from.as_str());
-            let to = label_of.get(e.to.as_str()).copied().unwrap_or(e.to.as_str());
+            let from = label_of
+                .get(e.from.as_str())
+                .copied()
+                .unwrap_or(e.from.as_str());
+            let to = label_of
+                .get(e.to.as_str())
+                .copied()
+                .unwrap_or(e.to.as_str());
             let arrow = if e.directed { "→" } else { "—" };
             let mut spans = vec![
                 Span::styled("  ", muted),
@@ -556,7 +572,10 @@ fn draw_flow(
                 Span::styled(truncate(to, width / 3), node_style),
             ];
             if let Some(lbl) = &e.label {
-                spans.push(Span::styled(format!("  ({})", truncate(lbl, width / 4)), muted));
+                spans.push(Span::styled(
+                    format!("  ({})", truncate(lbl, width / 4)),
+                    muted,
+                ));
             }
             out.push(Line::from(spans));
         }
@@ -586,7 +605,10 @@ fn draw_sequence(
         if i > 0 {
             header.push(Span::styled("  │  ", border));
         }
-        header.push(Span::styled(truncate(&p.label, 18), node_style.add_modifier(Modifier::BOLD)));
+        header.push(Span::styled(
+            truncate(&p.label, 18),
+            node_style.add_modifier(Modifier::BOLD),
+        ));
     }
     out.push(Line::from(header));
     out.push(Line::default());
@@ -596,8 +618,14 @@ fn draw_sequence(
         .map(|n| (n.id.as_str(), n.label.as_str()))
         .collect();
     for (i, m) in messages.iter().enumerate() {
-        let from = label_of.get(m.from.as_str()).copied().unwrap_or(m.from.as_str());
-        let to = label_of.get(m.to.as_str()).copied().unwrap_or(m.to.as_str());
+        let from = label_of
+            .get(m.from.as_str())
+            .copied()
+            .unwrap_or(m.from.as_str());
+        let to = label_of
+            .get(m.to.as_str())
+            .copied()
+            .unwrap_or(m.to.as_str());
         let mut spans = vec![
             Span::styled(format!("  {:>2}. ", i + 1), muted),
             Span::styled(truncate(from, width / 4), node_style),
@@ -605,7 +633,10 @@ fn draw_sequence(
             Span::styled(truncate(to, width / 4), node_style),
         ];
         if let Some(lbl) = &m.label {
-            spans.push(Span::styled(format!(": {}", truncate(lbl, width / 2)), muted));
+            spans.push(Span::styled(
+                format!(": {}", truncate(lbl, width / 2)),
+                muted,
+            ));
         }
         out.push(Line::from(spans));
     }
@@ -782,7 +813,10 @@ mod tests {
         let b = nodes.iter().find(|n| n.id == "B").unwrap();
         assert_eq!(b.label, "Choice");
         assert_eq!(edges.len(), 3);
-        let labelled = edges.iter().find(|e| e.label.as_deref() == Some("yes")).unwrap();
+        let labelled = edges
+            .iter()
+            .find(|e| e.label.as_deref() == Some("yes"))
+            .unwrap();
         assert_eq!(labelled.from, "B");
         assert_eq!(labelled.to, "C");
         assert!(labelled.directed);
@@ -802,7 +836,11 @@ mod tests {
     fn parse_sequence_participants_and_messages_normal() {
         let src = "sequenceDiagram\n  participant U as User\n  participant S as Server\n  U->>S: hello\n  S-->>U: hi";
         let g = parse_mermaid(src).expect("parse seq");
-        let Graph::Sequence { participants, messages } = g else {
+        let Graph::Sequence {
+            participants,
+            messages,
+        } = g
+        else {
             panic!("expected sequence");
         };
         assert_eq!(participants.len(), 2);
@@ -817,7 +855,12 @@ mod tests {
     fn parse_dot_digraph_edges_and_labels_normal() {
         let src = "digraph G {\n  rankdir=LR;\n  a -> b [label=\"calls\"];\n  b -> c;\n  c [label=\"Sink\"];\n}";
         let g = parse_dot(src).expect("parse dot");
-        let Graph::Flow { title, nodes, edges } = g else {
+        let Graph::Flow {
+            title,
+            nodes,
+            edges,
+        } = g
+        else {
             panic!("expected flow");
         };
         assert_eq!(title.as_deref(), Some("G"));
@@ -865,13 +908,32 @@ mod tests {
     #[test]
     fn rank_nodes_orders_chain_normal() {
         let nodes = vec![
-            Node { id: "a".into(), label: "a".into() },
-            Node { id: "b".into(), label: "b".into() },
-            Node { id: "c".into(), label: "c".into() },
+            Node {
+                id: "a".into(),
+                label: "a".into(),
+            },
+            Node {
+                id: "b".into(),
+                label: "b".into(),
+            },
+            Node {
+                id: "c".into(),
+                label: "c".into(),
+            },
         ];
         let edges = vec![
-            Edge { from: "a".into(), to: "b".into(), label: None, directed: true },
-            Edge { from: "b".into(), to: "c".into(), label: None, directed: true },
+            Edge {
+                from: "a".into(),
+                to: "b".into(),
+                label: None,
+                directed: true,
+            },
+            Edge {
+                from: "b".into(),
+                to: "c".into(),
+                label: None,
+                directed: true,
+            },
         ];
         let ranks = rank_nodes(&nodes, &edges);
         assert_eq!(ranks["a"], 0);
@@ -882,12 +944,28 @@ mod tests {
     #[test]
     fn rank_nodes_terminates_on_cycle_robust() {
         let nodes = vec![
-            Node { id: "a".into(), label: "a".into() },
-            Node { id: "b".into(), label: "b".into() },
+            Node {
+                id: "a".into(),
+                label: "a".into(),
+            },
+            Node {
+                id: "b".into(),
+                label: "b".into(),
+            },
         ];
         let edges = vec![
-            Edge { from: "a".into(), to: "b".into(), label: None, directed: true },
-            Edge { from: "b".into(), to: "a".into(), label: None, directed: true },
+            Edge {
+                from: "a".into(),
+                to: "b".into(),
+                label: None,
+                directed: true,
+            },
+            Edge {
+                from: "b".into(),
+                to: "a".into(),
+                label: None,
+                directed: true,
+            },
         ];
         // Must not loop forever.
         let ranks = rank_nodes(&nodes, &edges);

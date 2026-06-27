@@ -86,6 +86,7 @@ pub(super) async fn cmd_continue(
             state.messages = messages;
             let session_id_for_msg = session_id.clone();
             state.switch_session(Some(session_id.clone()));
+            crate::runtime::ops::restore_session_context_state(state, session_id.as_str()).await;
             state.streaming_text.clear();
             state.streaming_reasoning.clear();
             state.streaming_response_bytes = 0;
@@ -188,6 +189,8 @@ pub(super) async fn cmd_resume(
             }
             state.messages = messages;
             state.switch_session(Some(typed_session_id.clone()));
+            crate::runtime::ops::restore_session_context_state(state, typed_session_id.as_str())
+                .await;
             state.streaming_text.clear();
             state.streaming_reasoning.clear();
             state.streaming_response_bytes = 0;

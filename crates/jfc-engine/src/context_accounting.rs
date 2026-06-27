@@ -1,6 +1,35 @@
 use crate::app::EngineState;
 use crate::types::ChatMessage;
 
+mod detected_limit;
+mod message_pressure;
+mod provider_archive;
+mod provider_history;
+mod provider_payload;
+mod request_pressure;
+mod transcript_boundary;
+
+pub(crate) use detected_limit::{
+    DetectedContextLimit, load_session_detected_context_limit, parse_detected_context_limit,
+    persist_session_detected_context_limit,
+};
+pub(crate) use message_pressure::{
+    estimate_transcript_tokens, pending_turn_tokens, transcript_visible_chars,
+};
+pub(crate) use provider_archive::{
+    archive_provider_history_current_project, list_provider_history_archives,
+    load_session_provider_history_archive_seen, persist_session_provider_history_archive_seen,
+    provider_history_archive_recall_block, render_provider_history_archive_by_id,
+    search_provider_history_archives,
+};
+pub(crate) use provider_history::{
+    ProviderHistoryBudget, ProviderHistoryTransform, compact_provider_history,
+    compact_provider_history_with_archive,
+};
+pub(crate) use provider_payload::{chars_to_tokens, provider_messages_tokens};
+pub(crate) use request_pressure::RequestContextPressure;
+pub(crate) use transcript_boundary::{TranscriptBoundaryBudget, materialize_transcript_boundary};
+
 pub fn fallback_request_overhead_tokens() -> usize {
     let budget = jfc_core::context_budget::typical_initial_budget();
     budget

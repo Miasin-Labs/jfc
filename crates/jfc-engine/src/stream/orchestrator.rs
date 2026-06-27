@@ -2,6 +2,10 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
 
+use crate::context_accounting::{
+    ProviderHistoryBudget, ProviderHistoryTransform, archive_provider_history_current_project,
+    compact_provider_history, compact_provider_history_with_archive,
+};
 use crate::runtime::{
     EngineEvent, StreamEvent, StreamLifecyclePhase, StreamLifecycleStatus, StreamRequestOverrides,
 };
@@ -35,9 +39,31 @@ fn is_prompt_too_long_error(err_lower: &str) -> bool {
     }
     err_lower.contains("prompt is too long")
         || err_lower.contains("prompt_too_long")
+        || err_lower.contains("request_too_large")
+        || err_lower.contains("payload too large")
+        || err_lower.contains("request body too large")
+        || err_lower.contains("request exceeds the maximum size")
         || err_lower.contains("input length")
         || err_lower.contains("context window")
         || (err_lower.contains("max_tokens") && err_lower.contains("context limit"))
+}
+
+fn log_provider_history_transform(
+    transform: &ProviderHistoryTransform,
+    raw_tokens: u64,
+    window_tokens: usize,
+) {
+    tracing::warn!(
+        target: "jfc::stream::context",
+        raw_tokens,
+        window_tokens,
+        omitted_messages = transform.omitted_messages,
+        kept_messages = transform.kept_messages,
+        omitted_tokens = transform.omitted_tokens,
+        transformed_tokens = transform.kept_tokens,
+        archive_id = transform.archive_id.as_deref().unwrap_or(""),
+        "provider-visible history transformed before request assembly"
+    );
 }
 
 #[tracing::instrument(
@@ -70,7 +96,79 @@ pub async fn stream_response(
         ),
     )));
 
-    let prepared = prepare_stream_request(provider.clone(), &messages, &model, overrides).await;
+    let mut messages = messages;
+    let mut prepared =
+        prepare_stream_request(provider.clone(), &messages, &model, overrides.clone()).await;
+    if let Some(overflow) = prepared.context_pressure.preflight_overflow() {
+        if let Some(transform) = compact_provider_history(
+            &messages,
+            ProviderHistoryBudget {
+                window_tokens: overflow.window_tokens,
+                max_output_tokens: prepared.context_pressure.max_output_tokens,
+                overhead_tokens: prepared.context_pressure.overhead_tokens,
+            },
+        ) {
+            let budget = ProviderHistoryBudget {
+                window_tokens: overflow.window_tokens,
+                max_output_tokens: prepared.context_pressure.max_output_tokens,
+                overhead_tokens: prepared.context_pressure.overhead_tokens,
+            };
+            let archive_id = messages
+                .get(..transform.omitted_messages)
+                .and_then(|omitted| {
+                    match archive_provider_history_current_project(
+                        omitted,
+                        overflow.raw_tokens,
+                        "Provider-visible replay compacted before request assembly.",
+                    ) {
+                        Ok(Some(meta)) => {
+                            tracing::debug!(
+                                target: "jfc::stream::context",
+                                archive_id = %meta.id,
+                                path = %meta.path.display(),
+                                message_count = meta.message_count,
+                                "archived omitted provider-visible history"
+                            );
+                            Some(meta.id)
+                        }
+                        Ok(None) => None,
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "jfc::stream::context",
+                                error = %error,
+                                "failed to archive omitted provider-visible history"
+                            );
+                            None
+                        }
+                    }
+                });
+            let transform = archive_id
+                .as_deref()
+                .and_then(|id| compact_provider_history_with_archive(&messages, budget, Some(id)))
+                .unwrap_or(transform);
+            log_provider_history_transform(&transform, overflow.raw_tokens, overflow.window_tokens);
+            messages = transform.messages;
+            prepared = prepare_stream_request(provider.clone(), &messages, &model, overrides).await;
+        } else {
+            tracing::warn!(
+                target: "jfc::stream",
+                raw_tokens = overflow.raw_tokens,
+                effective_tokens = overflow.effective_tokens,
+                window_tokens = overflow.window_tokens,
+                level = ?overflow.level,
+                "prepared request exceeds context pressure threshold and provider history transform could not reduce it"
+            );
+            let _ = tx
+                .send(EngineEvent::Stream(StreamEvent::Error(format!(
+                    "auto-compact: prepared request is too large ({raw} raw tokens, {effective} effective tokens for {window} token window)",
+                    raw = overflow.raw_tokens,
+                    effective = overflow.effective_tokens,
+                    window = overflow.window_tokens
+                ))))
+                .await;
+            return;
+        }
+    }
     let mut opts = prepared.opts;
     if let Some(id) = previous_message_id {
         // Claude Code 2.1.177 pairs diagnostics.previous_message_id with the
@@ -106,6 +204,25 @@ pub async fn stream_response(
         .await
         .is_err()
     {
+        return;
+    }
+    if let Some(overflow) = prepared.context_pressure.preflight_overflow() {
+        tracing::warn!(
+            target: "jfc::stream",
+            raw_tokens = overflow.raw_tokens,
+            effective_tokens = overflow.effective_tokens,
+            window_tokens = overflow.window_tokens,
+            level = ?overflow.level,
+            "prepared request exceeds context pressure threshold — requesting auto-compact before provider call"
+        );
+        let _ = tx
+            .send(EngineEvent::Stream(StreamEvent::Error(format!(
+                "auto-compact: prepared request is too large ({raw} raw tokens, {effective} effective tokens for {window} token window)",
+                raw = overflow.raw_tokens,
+                effective = overflow.effective_tokens,
+                window = overflow.window_tokens
+            ))))
+            .await;
         return;
     }
     // (was: inject `previous_response_id` into provider_options for OpenAI.
@@ -590,6 +707,9 @@ async fn try_nonstreaming_fallback(
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+    use std::sync::{Mutex, atomic::AtomicBool};
+
+    use jfc_provider::{EventStream, ModelInfo, ProviderContent, ProviderRole};
 
     #[test]
     fn output_token_cap_error_is_not_prompt_too_long_regression() {
@@ -605,6 +725,11 @@ mod fallback_tests {
         ));
         assert!(is_prompt_too_long_error("prompt is too long"));
         assert!(is_prompt_too_long_error("prompt_too_long"));
+        assert!(is_prompt_too_long_error("request_too_large"));
+        assert!(is_prompt_too_long_error(
+            "anthropic api error 413 payload too large: request body too large"
+        ));
+        assert!(is_prompt_too_long_error("request exceeds the maximum size"));
         assert!(is_prompt_too_long_error("context window exceeded"));
     }
 
@@ -669,5 +794,132 @@ mod fallback_tests {
             false,
             0
         ));
+    }
+
+    #[derive(Clone)]
+    struct CapturingProvider {
+        seen_messages: Arc<Mutex<Option<Vec<ProviderMessage>>>>,
+    }
+
+    impl jfc_provider::seal::Sealed for CapturingProvider {}
+
+    #[async_trait::async_trait]
+    impl Provider for CapturingProvider {
+        fn name(&self) -> &str {
+            "capturing"
+        }
+
+        fn available_models(&self) -> Vec<ModelInfo> {
+            vec![
+                ModelInfo::new("test-model", "Test Model", "capturing")
+                    .with_context_window_tokens(50_000usize)
+                    .with_max_output_tokens(4_096usize),
+            ]
+        }
+
+        async fn stream(
+            &self,
+            messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            *self.seen_messages.lock().expect("seen messages lock") = Some(messages);
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                jfc_provider::StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                },
+            )])))
+        }
+    }
+
+    fn large_text_message(role: ProviderRole, label: &str, index: usize) -> ProviderMessage {
+        ProviderMessage {
+            role,
+            content: vec![ProviderContent::Text(format!(
+                "{label} {index}: {}",
+                "payload ".repeat(250)
+            ))],
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_response_transforms_provider_history_before_overflow_error_regression() {
+        let seen_messages = Arc::new(Mutex::new(None));
+        let provider = Arc::new(CapturingProvider {
+            seen_messages: Arc::clone(&seen_messages),
+        });
+        let mut messages = Vec::new();
+        for index in 0..90 {
+            messages.push(large_text_message(
+                ProviderRole::User,
+                "/synthetic-user",
+                index,
+            ));
+            messages.push(large_text_message(
+                ProviderRole::Assistant,
+                "assistant",
+                index,
+            ));
+        }
+
+        let original_message_count = messages.len();
+        let (tx, mut rx) = mpsc::channel(64);
+        stream_response(
+            provider,
+            messages,
+            ModelId::new("test-model"),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            StreamRequestOverrides::default(),
+        )
+        .await;
+
+        let captured = seen_messages
+            .lock()
+            .expect("seen messages lock")
+            .clone()
+            .expect("provider should be called after provider-history transform");
+        assert!(captured.len() < original_message_count);
+        let captured_text = captured
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|content| match content {
+                ProviderContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            captured_text.contains("<session-history compacted=\"true\""),
+            "captured provider text did not include compacted history block: {}",
+            captured_text.chars().take(1_000).collect::<String>()
+        );
+        let archive_marker = "Provider-visible archive: `";
+        let archive_start = captured_text
+            .find(archive_marker)
+            .expect("compacted history should include an archive handle")
+            + archive_marker.len();
+        let archive_tail = &captured_text[archive_start..];
+        let archive_end = archive_tail
+            .find('`')
+            .expect("archive handle should be backtick-delimited");
+        let archive_id = &archive_tail[..archive_end];
+        let rendered = crate::context_accounting::render_provider_history_archive_by_id(archive_id)
+            .expect("provider-history archive should render via expand path");
+        assert!(rendered.contains("Provider-history archive"));
+        assert!(rendered.contains("/synthetic-user 0"));
+
+        let mut saw_done = false;
+        let mut saw_error = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineEvent::Stream(StreamEvent::Done(_)) => saw_done = true,
+                EngineEvent::Stream(StreamEvent::Error(_)) => saw_error = true,
+                _ => {}
+            }
+        }
+        assert!(saw_done);
+        assert!(!saw_error);
     }
 }

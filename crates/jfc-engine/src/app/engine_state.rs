@@ -709,7 +709,13 @@ pub struct EngineState {
     /// arrives; cleared when the turn truly ends. Used to detect narration-only
     /// EndTurn responses on prompts that were expected to call tools.
     pub current_stream_request: Option<StreamRequestMetadata>,
+    pub provider_history_archive_seen: std::collections::BTreeSet<String>,
     pub max_context_tokens: usize,
+    /// Provider-reported context limit learned from an overflow rejection.
+    /// Catalog/model metadata can overstate the real deployment limit, so this
+    /// per-model floor wins until the user switches away from the model.
+    pub detected_context_limit_tokens: Option<usize>,
+    pub detected_context_limit_model: Option<String>,
     /// Max output tokens for the current model. Used by compact threshold
     /// calculation to match CC 177's behavior (subtract min(output, 20k) from
     /// window before applying headroom).
@@ -1235,6 +1241,7 @@ impl EngineState {
             in_flight_eager_dispatches: 0,
             in_flight_tool_batches: 0,
             current_stream_request: None,
+            provider_history_archive_seen: std::collections::BTreeSet::new(),
             force_compact_pending: false,
             pending_pause_turn_resume: false,
             compact_suppressed: false,
@@ -1244,6 +1251,8 @@ impl EngineState {
             compacting_attempt_baseline: 0,
             compacting_last_progress: 0,
             max_context_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            detected_context_limit_tokens: None,
+            detected_context_limit_model: None,
             max_output_tokens: None,
             provider_models: HashMap::new(),
             seat_tier: None,
@@ -1855,8 +1864,12 @@ impl EngineState {
         self.deferred_tool_uses.clear();
         self.in_progress_tool_use_ids.clear();
         self.tool_use_summaries.clear();
+        self.provider_history_archive_seen.clear();
         self.compact_suppressed = false;
         self.speculative_compact_fired = false;
+        self.detected_context_limit_tokens = None;
+        self.detected_context_limit_model = None;
+        self.max_context_tokens = self.baseline_context_window_tokens();
     }
 
     pub fn selected_model_info(&self) -> Option<ModelInfo> {
@@ -1878,8 +1891,24 @@ impl EngineState {
     }
 
     pub fn selected_context_window_tokens(&self) -> usize {
+        let baseline = self.baseline_context_window_tokens();
         let result = self
-            .selected_model_info()
+            .detected_context_limit_for_selected_model()
+            .map(|detected| baseline.min(detected))
+            .unwrap_or(baseline);
+        tracing::trace!(
+            target: "jfc::app",
+            model = %self.model,
+            baseline,
+            detected_context_limit = ?self.detected_context_limit_for_selected_model(),
+            result,
+            "selected_context_window_tokens"
+        );
+        result
+    }
+
+    fn baseline_context_window_tokens(&self) -> usize {
+        self.selected_model_info()
             .and_then(|model| model.context_window_tokens)
             .unwrap_or_else(|| {
                 // Model info not yet loaded (async fetch_models hasn't completed).
@@ -1889,14 +1918,30 @@ impl EngineState {
                     self.model.as_str(),
                     None,
                 )
-            });
-        tracing::trace!(
-            target: "jfc::app",
-            model = %self.model,
-            result,
-            "selected_context_window_tokens"
-        );
-        result
+            })
+    }
+
+    pub fn detected_context_limit_for_selected_model(&self) -> Option<usize> {
+        let model = self.detected_context_limit_model.as_deref()?;
+        (model == self.model.as_str())
+            .then_some(self.detected_context_limit_tokens)
+            .flatten()
+    }
+
+    pub fn provider_history_archive_seen(&self) -> std::collections::BTreeSet<String> {
+        self.provider_history_archive_seen.clone()
+    }
+
+    pub(crate) fn record_detected_context_limit(
+        &mut self,
+        detected: crate::context_accounting::DetectedContextLimit,
+    ) -> Option<(usize, usize)> {
+        let limit = detected.limit_tokens;
+        let old = self.max_context_tokens;
+        self.detected_context_limit_tokens = Some(limit);
+        self.detected_context_limit_model = Some(self.model.as_str().to_owned());
+        self.max_context_tokens = self.baseline_context_window_tokens().min(limit);
+        (self.max_context_tokens < old).then_some((old, self.max_context_tokens))
     }
 
     pub fn sync_selected_context_window(&mut self) {

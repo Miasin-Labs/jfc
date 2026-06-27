@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
@@ -210,6 +211,7 @@ pub struct StreamRequestOverrides {
     /// session (`session_retrieval_events`). `None` outside a session → the
     /// recall path logs no event and behaves identically.
     pub session_id: Option<String>,
+    pub provider_history_archive_seen: BTreeSet<String>,
     /// System reminders queued by background events (file watcher,
     /// MCP refresh, …) and drained into `prepare_stream_request` so
     /// they land in the next outbound request's system prompt exactly
@@ -267,6 +269,7 @@ pub struct StreamRequestMetadata {
     pub action_expected: bool,
     pub tool_choice: StreamToolChoice,
     pub resolved_model: Option<ResolvedModel>,
+    pub provider_history_archive_recall_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

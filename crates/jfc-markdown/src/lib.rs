@@ -1343,7 +1343,9 @@ where
                 // raw body and lay it out at TagEnd::CodeBlock. Skipped during
                 // per-chunk streaming renders (skip_syntect) so a half-written
                 // diagram doesn't flicker; the final to_lines pass draws it.
-                if !self.skip_syntect && !diagram_rendering_disabled() && diagram::is_diagram_lang(lang)
+                if !self.skip_syntect
+                    && !diagram_rendering_disabled()
+                    && diagram::is_diagram_lang(lang)
                 {
                     self.diagram_lang = Some(lang.to_owned());
                     self.diagram_buf.clear();

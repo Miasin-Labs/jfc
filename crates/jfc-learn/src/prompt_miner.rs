@@ -12,11 +12,12 @@ use std::collections::HashMap;
 /// Words too generic to characterize an intent (english + JFC chat filler).
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "you", "your", "can", "could", "would", "please", "this", "that", "with",
-    "from", "what", "when", "where", "which", "into", "right", "like", "just", "really", "actually",
-    "stuff", "thing", "things", "want", "need", "make", "made", "does", "done", "here", "there",
-    "then", "than", "they", "them", "have", "has", "had", "not", "but", "all", "any", "our", "out",
-    "get", "got", "see", "let", "its", "are", "was", "were", "will", "should", "also", "about",
-    "over", "more", "some", "very", "much", "etc", "idk", "able", "even", "give", "find",
+    "from", "what", "when", "where", "which", "into", "right", "like", "just", "really",
+    "actually", "stuff", "thing", "things", "want", "need", "make", "made", "does", "done", "here",
+    "there", "then", "than", "they", "them", "have", "has", "had", "not", "but", "all", "any",
+    "our", "out", "get", "got", "see", "let", "its", "are", "was", "were", "will", "should",
+    "also", "about", "over", "more", "some", "very", "much", "etc", "idk", "able", "even", "give",
+    "find",
 ];
 
 /// A cluster of user prompts that share an intent signature.

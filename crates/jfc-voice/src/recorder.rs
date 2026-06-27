@@ -740,9 +740,7 @@ impl VoiceRecorder {
         // Enter lands AFTER speech end (server endpoint / SpeechEnd) but during
         // transcription, the state is already Processing — a `Recording`-only
         // check missed it and the in-flight Final still auto-submitted.
-        if self.cfg.mode == VoiceMode::Vad
-            && *self.state.lock().await != VoiceState::Idle
-        {
+        if self.cfg.mode == VoiceMode::Vad && *self.state.lock().await != VoiceState::Idle {
             info!(target: "jfc::voice::vad", "discard_recording (manual submit, VAD utterance)");
             self.vad_discard
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1950,7 +1948,8 @@ mod tests {
         };
 
         let tts = synth_pcm(150.0, 2.0, 1.3, 5);
-        let path = save_reject_profile_from_pcm(&cfg, "buttery", &tts).expect("save reject profile");
+        let path =
+            save_reject_profile_from_pcm(&cfg, "buttery", &tts).expect("save reject profile");
         assert_eq!(path, reject_profile_path(&cfg, "buttery"));
         assert!(path.exists(), "reject profile file must be written");
 

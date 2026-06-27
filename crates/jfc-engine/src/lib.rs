@@ -693,11 +693,7 @@ pub fn self_critique_proposals_to_backlog(
             project_key: None,
             // The DEFINITION kind (so promotion can reconstruct the definition
             // id); falls back to the candidate slug for non-definition kinds.
-            category: p
-                .kind
-                .definition_kind()
-                .unwrap_or(p.kind.slug())
-                .to_owned(),
+            category: p.kind.definition_kind().unwrap_or(p.kind.slug()).to_owned(),
             title: p.title.clone(),
             body: p.body.clone(),
             evidence: p.evidence.clone(),
@@ -845,7 +841,10 @@ pub async fn mine_user_prompt_skills_from_store(
     store: &jfc_knowledge::KnowledgeStore,
     min_count: usize,
 ) -> usize {
-    let sessions = store.list_sessions(None, 1_000_000).await.unwrap_or_default();
+    let sessions = store
+        .list_sessions(None, 1_000_000)
+        .await
+        .unwrap_or_default();
     let mut prompts: Vec<String> = Vec::new();
     for s in &sessions {
         if let Ok(messages) = store.load_transcript(&s.id).await {
@@ -1205,7 +1204,9 @@ mod knowledge_maintenance_tests {
         );
         // No reasoning / unparsable / absent → None.
         assert_eq!(
-            super::session_message_reasoning(Some(r#"{"role":"user","parts":[{"type":"text","content":"hi"}]}"#)),
+            super::session_message_reasoning(Some(
+                r#"{"role":"user","parts":[{"type":"text","content":"hi"}]}"#
+            )),
             None
         );
         assert_eq!(super::session_message_reasoning(Some("not json")), None);
@@ -1242,7 +1243,10 @@ mod knowledge_maintenance_tests {
             &jfc_learn::self_critique::HeuristicJudge,
             &samples,
         );
-        assert!(!props.is_empty(), "hedge + correction should yield a proposal");
+        assert!(
+            !props.is_empty(),
+            "hedge + correction should yield a proposal"
+        );
     }
 
     #[test]
@@ -1253,7 +1257,9 @@ mod knowledge_maintenance_tests {
         assert!(super::meta_has_failed_tool(Some(
             r#"{"parts":[{"type":"tool","tool":{"status":"failed"}}]}"#
         )));
-        assert!(!super::meta_has_failed_tool(Some(r#"{"status":"complete"}"#)));
+        assert!(!super::meta_has_failed_tool(Some(
+            r#"{"status":"complete"}"#
+        )));
         assert!(!super::meta_has_failed_tool(None));
     }
 

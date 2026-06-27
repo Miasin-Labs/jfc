@@ -30,6 +30,7 @@ pub(crate) mod session_picker;
 mod session_sidebar;
 mod sidebar;
 mod status;
+mod status_goal;
 mod task_panel;
 mod teammates_panel;
 mod theme_picker;

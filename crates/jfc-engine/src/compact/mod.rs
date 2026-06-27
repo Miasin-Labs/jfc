@@ -20,12 +20,6 @@ use crate::types::ChatMessage;
 use tracing::{debug, trace};
 
 pub const CHARS_PER_TOKEN: usize = 4;
-/// Multiplier applied to the char-based estimate to account for wire overhead
-/// (system prompt, tool definitions, JSON framing, role markers) that is not
-/// visible in message text. Empirical measurement: API reports ~1.4–1.5× more
-/// tokens than naive char_count/4 on tool-heavy conversations.
-const OVERHEAD_MULTIPLIER_NUM: usize = 3;
-const OVERHEAD_MULTIPLIER_DEN: usize = 2; // 3/2 = 1.5×
 pub const MAX_ATTEMPTS: u32 = 8;
 pub const CIRCUIT_BREAKER_LIMIT: u32 = 3;
 /// If context refills within this many user turns after a compact, it counts
@@ -70,17 +64,9 @@ pub enum CompactLevel {
 }
 
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    let content_chars: usize = messages
-        .iter()
-        .map(|m| {
-            m.parts
-                .iter()
-                .map(|part| part.approx_text_len())
-                .sum::<usize>()
-        })
-        .sum();
+    let content_chars = crate::context_accounting::transcript_visible_chars(messages);
     let base = content_chars / CHARS_PER_TOKEN;
-    let est = base * OVERHEAD_MULTIPLIER_NUM / OVERHEAD_MULTIPLIER_DEN;
+    let est = crate::context_accounting::estimate_transcript_tokens(messages);
     trace!(target: "jfc::compact", message_count = messages.len(), content_chars, base, est, "estimate_tokens (with overhead)");
     est
 }

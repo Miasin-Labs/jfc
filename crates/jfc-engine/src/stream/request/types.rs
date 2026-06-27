@@ -1,3 +1,4 @@
+use crate::context_accounting::RequestContextPressure;
 use crate::runtime::StreamRequestMetadata;
 use jfc_provider::StreamOptions;
 
@@ -9,6 +10,7 @@ use jfc_provider::StreamOptions;
 /// for telemetry, compaction decisions, and user-visible recall indicators.
 pub struct PreparedStreamRequest {
     pub opts: StreamOptions,
+    pub context_pressure: RequestContextPressure,
     pub system_prompt_tokens: usize,
     pub metadata: StreamRequestMetadata,
     /// Byte length of the fresh memory-recall block injected into the system

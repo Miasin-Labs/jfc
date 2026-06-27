@@ -258,6 +258,7 @@ fn spawn_substream(
             .current_session_id
             .as_ref()
             .map(|s| s.as_str().to_owned()),
+        provider_history_archive_seen: state.provider_history_archive_seen(),
         background_reminders: state.take_background_reminders(),
         disallowed_tools: state.effective_disallowed_tools(),
         allowed_tools: state.allowed_tools.clone(),

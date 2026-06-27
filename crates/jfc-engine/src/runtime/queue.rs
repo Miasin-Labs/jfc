@@ -182,6 +182,7 @@ pub async fn drain_queued_prompts(state: &mut EngineState, tx: &EventSender) {
             .current_session_id
             .as_ref()
             .map(|s| s.as_str().to_owned()),
+        provider_history_archive_seen: state.provider_history_archive_seen(),
         background_reminders: state.take_background_reminders(),
         disallowed_tools: state.effective_disallowed_tools(),
         extra_dirs: state.extra_dirs.clone(),

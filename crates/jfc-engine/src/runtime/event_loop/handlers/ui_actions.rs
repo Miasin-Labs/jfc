@@ -106,8 +106,29 @@ pub fn handle_request_metadata(
         advertised_tool_count = meta.advertised_tool_count,
         action_expected = meta.action_expected,
         tool_choice = ?meta.tool_choice,
+        provider_history_archive_recall_count = meta.provider_history_archive_recall_ids.len(),
         "stream request metadata"
     );
+    let previous_seen_count = state.provider_history_archive_seen.len();
+    state
+        .provider_history_archive_seen
+        .extend(meta.provider_history_archive_recall_ids.iter().cloned());
+    if state.provider_history_archive_seen.len() != previous_seen_count
+        && let Some(session_id) = state.current_session_id.as_ref()
+    {
+        let session_id = session_id.as_str().to_owned();
+        if let Err(err) = crate::context_accounting::persist_session_provider_history_archive_seen(
+            &session_id,
+            &state.provider_history_archive_seen,
+        ) {
+            tracing::warn!(
+                target: "jfc::stream::provider_history",
+                session_id,
+                error = %err,
+                "failed to persist provider-history archive recall ledger"
+            );
+        }
+    }
     state.current_stream_request = Some(meta);
 }
 
@@ -194,5 +215,58 @@ pub fn handle_exit_plan_mode(state: &mut EngineState, plan: String) {
             "Permission mode flipped from `Plan` to `AcceptEdits`. \
              Edit/Write/Bash now auto-approve. Continue executing the plan.",
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
+
+    use super::*;
+
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn available_models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+
+        async fn stream(
+            &self,
+            _messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    impl jfc_provider::seal::Sealed for TestProvider {}
+
+    #[test]
+    fn request_metadata_marks_provider_history_archives_seen_regression() {
+        let mut state = EngineState::new(Arc::new(TestProvider), "test-model");
+        let meta = crate::runtime::StreamRequestMetadata {
+            advertised_tool_count: 1,
+            action_expected: false,
+            tool_choice: crate::runtime::StreamToolChoice::Auto,
+            resolved_model: None,
+            provider_history_archive_recall_ids: vec!["provider-history-1".to_owned()],
+        };
+
+        handle_request_metadata(&mut state, meta.clone());
+
+        assert!(
+            state
+                .provider_history_archive_seen
+                .contains("provider-history-1")
+        );
+        assert_eq!(state.current_stream_request, Some(meta));
     }
 }

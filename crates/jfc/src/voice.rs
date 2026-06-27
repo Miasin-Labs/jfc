@@ -491,7 +491,11 @@ fn take_first_chunk(buf: &mut String) -> Option<String> {
 fn take_chunk(buf: &mut String, clause: bool) -> Option<String> {
     const HARD_CAP_BYTES: usize = 240;
     const FIRST_CAP_BYTES: usize = 96;
-    let hard_cap = if clause { FIRST_CAP_BYTES } else { HARD_CAP_BYTES };
+    let hard_cap = if clause {
+        FIRST_CAP_BYTES
+    } else {
+        HARD_CAP_BYTES
+    };
     let mut split_at: Option<usize> = None;
     let mut chars = buf.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
@@ -501,8 +505,8 @@ fn take_chunk(buf: &mut String, clause: bool) -> Option<String> {
         }
         // Sentence enders always split; clause enders only for the first chunk.
         // The "followed by whitespace" guard keeps "3.14"/"1,000"/"3:1" intact.
-        let is_boundary = matches!(ch, '.' | '!' | '?')
-            || (clause && matches!(ch, ',' | ';' | ':' | '—' | '–'));
+        let is_boundary =
+            matches!(ch, '.' | '!' | '?') || (clause && matches!(ch, ',' | ';' | ':' | '—' | '–'));
         if is_boundary && chars.peek().is_some_and(|&(_, c)| c.is_whitespace()) {
             split_at = Some(idx + ch.len_utf8());
             break;

@@ -4,6 +4,9 @@
 use jfc_provider::FallbackReason;
 
 use crate::app::{EngineState, NetworkRecoveryProvider};
+use crate::context_accounting::{
+    parse_detected_context_limit, persist_session_detected_context_limit,
+};
 use crate::runtime::{
     ControlEvent, EngineEvent, EventSender, drain_queued_prompts, record_network_recovery,
     restart_stream_in_place,
@@ -224,6 +227,42 @@ pub async fn handle_stream_error(state: &mut EngineState, tx: &EventSender, e: S
     // time the estimator drifts.
     let auto_compact_signal = e.starts_with("auto-compact:");
     if auto_compact_signal {
+        if let Some(detected) = parse_detected_context_limit(visible_error) {
+            let changed = state.record_detected_context_limit(detected);
+            if let Some(session_id) = state.current_session_id.clone()
+                && let Err(error) = persist_session_detected_context_limit(
+                    session_id.as_str(),
+                    state.model.as_str(),
+                    detected,
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "jfc::stream::budget",
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to persist detected context limit"
+                );
+            }
+            tracing::warn!(
+                target: "jfc::stream::budget",
+                actual_tokens = ?detected.actual_tokens,
+                limit_tokens = detected.limit_tokens,
+                old_context_window = changed.map(|(old, _)| old),
+                new_context_window = state.max_context_tokens,
+                model = %state.model,
+                "provider overflow reported context limit"
+            );
+            if let Some((old, new)) = changed {
+                toast::push_with_cap(
+                    &mut state.toasts,
+                    toast::Toast::new(
+                        toast::ToastKind::Warning,
+                        format!("Detected provider context limit: {new} tokens (was {old})"),
+                    ),
+                );
+            }
+        }
         state.force_compact_pending = true;
         toast::push_with_cap(
             &mut state.toasts,
@@ -487,6 +526,7 @@ fn push_hard_stream_error(state: &mut EngineState, error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::app::EngineState;
+    use std::ffi::OsString;
     use std::sync::Arc;
 
     use jfc_provider::{EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions};
@@ -503,7 +543,10 @@ mod tests {
         }
 
         fn available_models(&self) -> Vec<ModelInfo> {
-            Vec::new()
+            vec![
+                ModelInfo::new("claude-opus-4-8", "Claude Opus", "test")
+                    .with_context_window_tokens(1_000_000usize),
+            ]
         }
 
         async fn stream(
@@ -517,8 +560,43 @@ mod tests {
 
     impl jfc_provider::seal::Sealed for TestProvider {}
 
+    struct KnowledgeDbEnvGuard {
+        previous: Option<OsString>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl KnowledgeDbEnvGuard {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp knowledge db dir");
+            let path = dir.path().join("knowledge.db");
+            let previous = std::env::var_os("JFC_KNOWLEDGE_DB");
+            unsafe { std::env::set_var("JFC_KNOWLEDGE_DB", &path) };
+            Self {
+                previous,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for KnowledgeDbEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => std::env::set_var("JFC_KNOWLEDGE_DB", previous),
+                    None => std::env::remove_var("JFC_KNOWLEDGE_DB"),
+                }
+            }
+        }
+    }
+
     fn test_app() -> EngineState {
         let mut state = EngineState::new(Arc::new(TestProvider), "test-model");
+        state.task_store = jfc_session::TaskStore::in_memory();
+        state
+    }
+
+    fn test_app_with_model(model: &str) -> EngineState {
+        let mut state = EngineState::new(Arc::new(TestProvider), model);
         state.task_store = jfc_session::TaskStore::in_memory();
         state
     }
@@ -537,6 +615,48 @@ mod tests {
         assert!(state.is_streaming);
         assert_eq!(state.streaming_assistant_idx, Some(1));
         assert_eq!(state.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn auto_compact_records_provider_detected_context_limit_regression() {
+        let _db = KnowledgeDbEnvGuard::new();
+        let mut state = test_app_with_model("claude-opus-4-8");
+        state.max_context_tokens = 1_000_000;
+        state.messages.push(ChatMessage::user("huge prompt".into()));
+        state.messages.push(ChatMessage::assistant(String::new()));
+        state.is_streaming = true;
+        state.streaming_assistant_idx = Some(1);
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_stream_error(
+            &mut state,
+            &tx,
+            r#"auto-compact: Anthropic API error 413 Payload Too Large: raw: {"error":{"type":"request_too_large","message":"Request exceeds the maximum size"},"actualTokens":900000,"limitTokens":200000}"#.to_owned(),
+        )
+        .await;
+
+        assert_eq!(state.max_context_tokens, 200_000);
+        assert_eq!(state.detected_context_limit_tokens, Some(200_000));
+        assert_eq!(
+            state.detected_context_limit_model.as_deref(),
+            Some("claude-opus-4-8")
+        );
+        assert!(state.force_compact_pending);
+        assert!(!state.is_streaming);
+        let session_id = state.current_session_id.as_ref().expect("session id");
+        let persisted = crate::context_accounting::load_session_detected_context_limit(
+            session_id.as_str(),
+            state.model.as_str(),
+        )
+        .await;
+        assert_eq!(
+            persisted,
+            Some(crate::context_accounting::DetectedContextLimit {
+                actual_tokens: Some(900_000),
+                limit_tokens: 200_000,
+            })
+        );
     }
 
     // Normal — REGRESSION (the "Stream cancelled before connection opened"

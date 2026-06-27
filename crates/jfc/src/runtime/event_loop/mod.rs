@@ -1927,7 +1927,11 @@ mod voice_event_tests {
             &tx,
         )
         .await;
-        assert_eq!(input_text(&app), "", "late Final injected after manual submit");
+        assert_eq!(
+            input_text(&app),
+            "",
+            "late Final injected after manual submit"
+        );
         assert_eq!(app.voice_interim, None);
 
         // Next utterance begins → suppression lifts, live typing resumes.
@@ -1937,7 +1941,10 @@ mod voice_event_tests {
             &tx,
         )
         .await;
-        assert!(!app.voice_suppress_input, "Recording onset must clear suppression");
+        assert!(
+            !app.voice_suppress_input,
+            "Recording onset must clear suppression"
+        );
 
         handle_voice_event(
             &mut app,
