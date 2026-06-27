@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use ratatui::{
     Frame,
@@ -9,45 +9,13 @@ use ratatui::{
 };
 
 use crate::app::App;
-use jfc_session::{DeletedFilter, Task, TaskStatus};
+use jfc_session::{DeletedFilter, TaskStatus};
 
-/// Build a tree-ordered list of tasks. Root tasks (no parent) come first,
-/// children are placed immediately after their parent with depth tracking.
-fn tree_order(tasks: &[Task]) -> Vec<(&Task, u8)> {
-    let mut children_of: HashMap<&str, Vec<&Task>> = HashMap::new();
-    let mut roots: Vec<&Task> = Vec::new();
-
-    for t in tasks {
-        if let Some(ref pid) = t.parent_id {
-            children_of.entry(pid.as_str()).or_default().push(t);
-        } else {
-            roots.push(t);
-        }
-    }
-
-    let mut result = Vec::with_capacity(tasks.len());
-    let mut stack: Vec<(&Task, u8)> = roots.into_iter().rev().map(|t| (t, 0u8)).collect();
-
-    while let Some((task, depth)) = stack.pop() {
-        result.push((task, depth));
-        if let Some(kids) = children_of.get(task.id.as_str()) {
-            for kid in kids.iter().rev() {
-                stack.push((kid, depth + 1));
-            }
-        }
-    }
-    result
-}
-
-/// Render a tree prefix for the given depth level.
-fn tree_prefix(depth: u8) -> String {
-    if depth == 0 {
-        String::new()
-    } else {
-        let indent = "  ".repeat((depth - 1) as usize);
-        format!("{indent}├ ")
-    }
-}
+use super::task_panel_detail::{render_task_detail, task_model_badge};
+use super::task_panel_order::{tree_order, tree_prefix};
+use super::task_panel_widgets::{
+    render_task_panel_widgets, split_widget_area, task_panel_widget_rows,
+};
 
 pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
     let t = app.theme;
@@ -60,6 +28,8 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
     let popup = Rect::new(x, y, w, h);
 
     f.render_widget(Clear, popup);
+    let widget_rows = task_panel_widget_rows(app);
+    let (content_area, widget_area) = split_widget_area(popup, widget_rows.len());
 
     let all_tasks = app.engine.task_store.list(DeletedFilter::Exclude);
     let counts = app.engine.task_store.counts();
@@ -157,10 +127,10 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
     // Clamp selection to valid range.
     if !ordered.is_empty() {
         let max = ordered.len().saturating_sub(1);
-        if app.task_panel_selected > max {
-            app.task_panel_selected = max;
+        if app.task_panel.selected > max {
+            app.task_panel.selected = max;
         }
-        app.task_panel_state.select(Some(app.task_panel_selected));
+        app.task_panel.table.select(Some(app.task_panel.selected));
     }
 
     // Empty state: show a useful hint instead of a header-only table
@@ -173,8 +143,8 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
             .title(Span::styled(title, t.style_accent_bold))
             .title_bottom(Span::styled(" Esc close ", t.style_text_muted))
             .style(Style::default().bg(t.surface));
-        let inner = block.inner(popup);
-        f.render_widget(block, popup);
+        let inner = block.inner(content_area);
+        f.render_widget(block, content_area);
         let placeholder = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -199,6 +169,9 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
         ])
         .style(Style::default().bg(t.surface));
         f.render_widget(placeholder, inner);
+        if let Some(widget_area) = widget_area {
+            render_task_panel_widgets(f, app, widget_area, &widget_rows);
+        }
         return;
     }
 
@@ -234,132 +207,23 @@ pub(super) fn task_panel(f: &mut Frame, app: &mut App) {
     .style(Style::default().bg(t.surface));
 
     // When detail mode is active, split the popup vertically: top = table, bottom = detail.
-    let ordered_tasks: Vec<&Task> = ordered.iter().map(|(t, _)| *t).collect();
-    if app.task_panel_detail && !ordered_tasks.is_empty() {
+    let ordered_tasks = ordered.iter().map(|(task, _)| *task).collect::<Vec<_>>();
+    if app.task_panel.detail && !ordered_tasks.is_empty() {
         use ratatui::layout::{Direction, Layout};
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(popup);
+            .split(content_area);
 
-        f.render_stateful_widget(table, chunks[0], &mut app.task_panel_state);
-        if let Some(task) = ordered_tasks.get(app.task_panel_selected) {
+        f.render_stateful_widget(table, chunks[0], &mut app.task_panel.table);
+        if let Some(task) = ordered_tasks.get(app.task_panel.selected) {
             render_task_detail(f, app, task, chunks[1]);
         }
     } else {
-        f.render_stateful_widget(table, popup, &mut app.task_panel_state);
+        f.render_stateful_widget(table, content_area, &mut app.task_panel.table);
     }
-}
-
-/// Render the detail pane for the currently-selected task.
-fn render_task_detail(f: &mut Frame, app: &App, task: &Task, area: Rect) {
-    let t = app.theme;
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Header: task ID + subject
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" {} ", task.id),
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            task.subject.clone(),
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::from(""));
-
-    // Description (truncated to fit)
-    if !task.description.is_empty() {
-        let max_desc_lines = 3usize;
-        for (i, line) in task.description.lines().enumerate() {
-            if i >= max_desc_lines {
-                lines.push(Line::from(Span::styled(
-                    "  …",
-                    Style::default().fg(t.text_muted),
-                )));
-                break;
-            }
-            let trimmed = super::truncate_str(line, area.width.saturating_sub(4) as usize);
-            lines.push(Line::from(Span::styled(
-                format!("  {trimmed}"),
-                Style::default().fg(t.text_secondary),
-            )));
-        }
-        lines.push(Line::from(""));
-    }
-
-    // Active form
-    if let Some(ref form) = task.active_form {
-        lines.push(Line::from(vec![
-            Span::styled("  Active: ", Style::default().fg(t.text_muted)),
-            Span::styled(form.clone(), Style::default().fg(t.text_primary)),
-        ]));
-    }
-
-    // Owner
-    if let Some(ref owner) = task.owner {
-        lines.push(Line::from(vec![
-            Span::styled("  Owner: ", Style::default().fg(t.text_muted)),
-            Span::styled(format!("@{owner}"), Style::default().fg(t.text_secondary)),
-        ]));
-    }
-
-    // Correlate with background_tasks to show agent-specific info
-    let agent_info = app.engine.background_tasks.values().find(|bt| {
-        bt.task_id.as_str() == task.id.as_str()
-            || task
-                .owner
-                .as_deref()
-                .is_some_and(|o| bt.description.contains(o))
-    });
-
-    if let Some(bt) = agent_info {
-        // ONE canonical detail body (render/roster.rs): Progress stats, last
-        // tool, model, and the Recent-activity transcript — shared with every
-        // other agent-detail surface.
-        lines.extend(super::roster::agent_detail_lines(bt, &t, area.width));
-    }
-
-    // Blocked by
-    if !task.blocked_by.is_empty() {
-        lines.push(Line::from(""));
-        let blockers: Vec<&str> = task.blocked_by.iter().map(|id| id.as_str()).collect();
-        lines.push(Line::from(vec![
-            Span::styled("  Blocked by: ", Style::default().fg(t.text_muted)),
-            Span::styled(blockers.join(", "), Style::default().fg(t.warning)),
-        ]));
-    }
-
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(t.style_border)
-        .title(Span::styled(
-            " Detail · Esc back · ↑↓ navigate ",
-            t.style_text_muted,
-        ))
-        .style(Style::default().bg(t.surface));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(t.surface)),
-        inner,
-    );
-}
-
-pub(super) fn task_model_badge(task: &Task) -> Option<String> {
-    let raw = task.metadata.as_ref()?.get("model")?.as_str()?;
-    let model = raw.trim();
-    if model.is_empty() {
-        None
-    } else {
-        // Route through the documented model-badge SSOT (`model_fqn`) so the
-        // Tasks table shows the same provider-trimmed, version-preserving id as
-        // the agents fan, instead of a raw char-truncated metadata string.
-        Some(super::truncate_str(&super::agents::model_fqn(model), 20))
+    if let Some(widget_area) = widget_area {
+        render_task_panel_widgets(f, app, widget_area, &widget_rows);
     }
 }

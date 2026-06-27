@@ -1,126 +1,79 @@
 use crate::app::App;
-use crate::runtime::EngineEvent;
-use tokio::sync::mpsc;
+use jfc_plugin_sdk::{ExtensionSlot, UiSlotDescriptor};
 
-use super::theme_picker::{apply_theme, open_theme_picker};
+const FALLBACK_PALETTE_ITEMS: &[&str] = &[
+    "Clear Messages (/clear)",
+    "Compact Conversation (/compact)",
+    "Continue Most Recent Session (/continue)",
+    "Toggle Sessions Sidebar (Ctrl+B)",
+    "Toggle Info Sidebar (Ctrl+S)",
+    "Open Model Picker (Ctrl+M)",
+    "Open Theme Picker (/theme)",
+    "Use Catppuccin Theme (/theme catppuccin)",
+    "Use Tokyo Night Theme (/theme tokyo-night)",
+    "Use Gruvbox Theme (/theme gruvbox)",
+    "Toggle Thinking (Ctrl+O)",
+    "Raise Reasoning Effort (Alt+.)",
+    "Lower Reasoning Effort (Alt+,)",
+    "Show Tasks (/tasks)",
+    "Show Help (/help)",
+    "Run /sessions",
+    "Run /config",
+    "Run /doctor",
+    "Run /diff",
+    "Run /memory",
+    "Run /skills",
+    "Run /commit",
+    "Run /review",
+    "Run /status",
+    "Run /agents",
+    "Run /claude-md",
+    "Run /market",
+    "Run /timeline",
+    "Run /export",
+];
 
-pub(super) async fn execute_palette_action(
-    app: &mut App,
-    label: &str,
-    tx: &mpsc::Sender<EngineEvent>,
-) {
-    match label {
-        "Clear Messages (/clear)" => {
-            app.engine.messages.clear();
-            app.engine.streaming_text.clear();
-            app.engine.streaming_reasoning.clear();
-            app.engine.streaming_response_bytes = 0;
-            app.engine.streaming_response_baseline = 0;
-            app.engine.streaming_thinking_tokens = 0;
-            app.engine.token_rate_samples.clear();
-            app.engine.token_rate_sample_thinking = None;
-            app.engine.streaming_assistant_idx = None;
-            app.switch_session(None);
-        }
-        "Compact Conversation (/compact)" => {
-            tracing::info!(
-                target: "jfc::compact",
-                model = %app.engine.model,
-                message_count = app.engine.messages.len(),
-                "palette: Compact Conversation triggered"
-            );
-            super::run_slash_command_with_tx(app, "/compact", tx).await;
-        }
-        "Toggle Sessions Sidebar (Ctrl+B)" => {
-            app.show_sidebar = !app.show_sidebar;
-            if app.show_sidebar {
-                app.session_meta = jfc_session::list_sessions_with_metadata().await;
-            }
-        }
-        "Toggle Info Sidebar (Ctrl+S)" => {
-            app.show_info_sidebar = !app.show_info_sidebar;
-        }
-        "Open Model Picker (Ctrl+M)" => {
-            app.show_model_picker = true;
-            app.model_picker_filter.clear();
-            app.model_picker_selected = 0;
-            app.model_picker_models = collect_all_models(app);
-        }
-        "Open Theme Picker (/theme)" => open_theme_picker(app),
-        "Use Catppuccin Theme (/theme catppuccin)" => apply_theme(app, "catppuccin"),
-        "Use Tokyo Night Theme (/theme tokyo-night)" => apply_theme(app, "tokyo-night"),
-        "Use Gruvbox Theme (/theme gruvbox)" => apply_theme(app, "gruvbox"),
-        "Toggle Thinking (Ctrl+O)" => {
-            if let Some(idx) = app.engine.messages.len().checked_sub(1) {
-                let entry = app.reasoning_expanded.entry(idx).or_insert(false);
-                *entry = !*entry;
-            }
-        }
-        "Raise Reasoning Effort (Alt+.)" => {
-            super::step_reasoning_effort(app, true);
-        }
-        "Lower Reasoning Effort (Alt+,)" => {
-            super::step_reasoning_effort(app, false);
-        }
-        "Continue Most Recent Session (/continue)" => {
-            super::run_slash_command_with_tx(app, "/continue", tx).await;
-        }
-        "Show Tasks (/tasks)" => {
-            super::run_slash_command_with_tx(app, "/tasks", tx).await;
-        }
-        "Show Help (/help)" => {
-            super::run_slash_command_with_tx(app, "/help", tx).await;
-        }
-        other if other.starts_with("Run /") => {
-            if let Some(command) = other.strip_prefix("Run ") {
-                super::run_slash_command_with_tx(app, command, tx).await;
-            }
-        }
-        _ => {}
+pub fn palette_items(app: &App) -> Vec<String> {
+    let all = command_palette_labels(&app.plugins.ui_slots);
+    let all = if all.is_empty() {
+        FALLBACK_PALETTE_ITEMS
+            .iter()
+            .map(|label| (*label).to_owned())
+            .collect()
+    } else {
+        all
+    };
+
+    if app.palette.input.is_empty() {
+        all
+    } else {
+        let needle = app.palette.input.to_lowercase();
+        all.into_iter()
+            .filter(|item| item.to_lowercase().contains(&needle))
+            .collect()
     }
 }
 
-pub fn palette_items(app: &App) -> Vec<&'static str> {
-    let all: &[&str] = &[
-        "Clear Messages (/clear)",
-        "Compact Conversation (/compact)",
-        "Continue Most Recent Session (/continue)",
-        "Toggle Sessions Sidebar (Ctrl+B)",
-        "Toggle Info Sidebar (Ctrl+S)",
-        "Open Model Picker (Ctrl+M)",
-        "Open Theme Picker (/theme)",
-        "Use Catppuccin Theme (/theme catppuccin)",
-        "Use Tokyo Night Theme (/theme tokyo-night)",
-        "Use Gruvbox Theme (/theme gruvbox)",
-        "Toggle Thinking (Ctrl+O)",
-        "Raise Reasoning Effort (Alt+.)",
-        "Lower Reasoning Effort (Alt+,)",
-        "Show Tasks (/tasks)",
-        "Show Help (/help)",
-        "Run /sessions",
-        "Run /config",
-        "Run /doctor",
-        "Run /diff",
-        "Run /memory",
-        "Run /skills",
-        "Run /commit",
-        "Run /review",
-        "Run /status",
-        "Run /agents",
-        "Run /claude-md",
-        "Run /market",
-        "Run /timeline",
-        "Run /export",
-    ];
-    if app.palette_input.is_empty() {
-        all.to_vec()
-    } else {
-        let needle = app.palette_input.to_lowercase();
-        all.iter()
-            .filter(|item| item.to_lowercase().contains(&needle))
-            .copied()
-            .collect()
-    }
+fn command_palette_labels(slots: &[UiSlotDescriptor]) -> Vec<String> {
+    let descriptors = command_palette_slots(slots);
+    descriptors
+        .into_iter()
+        .map(|slot| slot.label.clone())
+        .collect()
+}
+
+pub(super) fn command_palette_slots(slots: &[UiSlotDescriptor]) -> Vec<&UiSlotDescriptor> {
+    let mut descriptors = slots
+        .iter()
+        .filter(|slot| slot.slot == ExtensionSlot::CommandPalette)
+        .collect::<Vec<_>>();
+    descriptors.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    descriptors
 }
 
 pub fn collect_all_models(app: &App) -> Vec<jfc_provider::ModelInfo> {
@@ -157,7 +110,7 @@ pub fn collect_all_models(app: &App) -> Vec<jfc_provider::ModelInfo> {
         app.engine.seat_tier.as_deref(),
     )));
 
-    let all = app.model_picker_query_cache.get_or_insert_with(key, || {
+    let all = app.model_picker.query_cache.get_or_insert_with(key, || {
         let merged = fingerprint_input
             .iter()
             .flat_map(|(provider_name, _)| {

@@ -48,7 +48,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // Task view collapses the chat dock — when reading a background agent's
     // transcript you can't act on the input, pinned tasks, or the agent fan.
     // Keep only a one-line task tab strip plus the compact status line.
-    let in_task_view = app.viewing_task_id.is_some();
+    let in_task_view = app.task_panel.viewing_task_id.is_some();
 
     // Input box is now a flat strip with only top/bottom rules (no full
     // rounded box). Width chrome is 4 (2 padding + prompt strip), not 6
@@ -63,7 +63,11 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     };
     // One quiet task-view tab strip. Navigation hints fit on the same row when
     // there is room; the transcript gets the rest.
-    let subagent_footer_height: u16 = if app.viewing_task_id.is_some() { 1 } else { 0 };
+    let subagent_footer_height: u16 = if app.task_panel.viewing_task_id.is_some() {
+        1
+    } else {
+        0
+    };
     // v126 puts the "Fermenting…" spinner as a dedicated row above the input
     // (not as the input's border title) — so the input bar stays visually
     // stable during streaming and the spinner reads as part of the
@@ -202,7 +206,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // stat (Δ), and MCP/LSP health all live in the status bar now, so a
     // whole column of chrome bought nothing. The left sessions sidebar
     // still toggles, but never in task view (transcript wants the width).
-    let sidebar_progress: f32 = if app.show_sidebar && !in_task_view {
+    let sidebar_progress: f32 = if app.session_sidebar.visible && !in_task_view {
         1.0
     } else {
         0.0
@@ -225,7 +229,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     };
 
     // Tab strip at the top in task view (chunks[0]); collapsed otherwise.
-    if app.viewing_task_id.is_some() {
+    if app.task_panel.viewing_task_id.is_some() {
         subagent_footer(f, app, chunks[0]);
     }
 
@@ -285,31 +289,34 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     resolve_select_request(f, app);
     apply_text_selection(f, app);
 
-    if app.show_palette {
+    if app.palette.visible {
         palette(f, app);
     }
 
-    if app.show_theme_picker {
+    if app.theme_picker.visible {
         theme_picker(f, app);
     }
 
-    if app.show_model_picker {
+    if app.model_picker.visible {
         model_picker(f, app);
     }
 
-    if app.show_session_picker {
+    if app.session_picker.visible {
         session_picker(f, app);
     }
 
-    if app.show_bash_picker {
+    if app.bash_picker.visible {
         super::bash_picker::bash_picker(f, app);
     }
 
-    if app.show_task_panel {
+    if app.task_panel.visible {
         task_panel(f, app);
     }
 
-    if matches!(app.expanded_view, crate::app::ExpandedView::Teammates) {
+    if matches!(
+        app.task_panel.expanded_view,
+        crate::app::ExpandedView::Teammates
+    ) {
         teammates_panel(f, app);
     }
 

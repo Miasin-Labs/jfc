@@ -19,6 +19,8 @@ use tracing;
 
 use jfc_engine::runtime::event_loop::guards::{CONFIG_RELOAD_REMINDER, MCP_REFRESH_REMINDER};
 
+const PLUGIN_STATUS_REFRESH_SECS: u64 = 5;
+
 pub(crate) async fn handle_tick(
     app: &mut App,
     tx: &EventSender,
@@ -205,6 +207,23 @@ pub(crate) async fn handle_tick(
             maybe_continue_task_factory(&mut app.engine, tx).await;
         }
     }
+    let plugin_status_due = app
+        .plugins
+        .last_refresh_at
+        .map(|checked_at| {
+            checked_at.elapsed() >= std::time::Duration::from_secs(PLUGIN_STATUS_REFRESH_SECS)
+        })
+        .unwrap_or(true);
+    if plugin_status_due && app.refresh_plugin_status() {
+        needs_draw = true;
+    }
+    if app.refresh_due_ui_widget_snapshots().await {
+        needs_draw = true;
+    }
+    if app.refresh_due_ui_panel_snapshots().await {
+        needs_draw = true;
+    }
+
     // Auto-clear expired toasts every tick. Cheap (O(N) over
     // a tiny vec capped at MAX_TOASTS) and the only reliable
     // place to do it — toasts have no creation-time timer.

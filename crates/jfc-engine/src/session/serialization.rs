@@ -228,6 +228,8 @@ pub enum SerializedToolInput {
         #[serde(default)]
         model: Option<String>,
         #[serde(default)]
+        launcher: Option<String>,
+        #[serde(default)]
         effort: Option<String>,
         #[serde(default)]
         name: Option<String>,

@@ -24,9 +24,18 @@ pub async fn handle_team_event(state: &mut EngineState, tx: &EventSender, ev: Te
             color,
             agent_type,
             cwd,
+            backend_type,
             abort_tx,
         } => handle_spawned(
-            state, name, team_name, agent_id, color, agent_type, cwd, abort_tx,
+            state,
+            name,
+            team_name,
+            agent_id,
+            color,
+            agent_type,
+            cwd,
+            backend_type,
+            abort_tx,
         ),
     }
 }
@@ -418,6 +427,7 @@ fn handle_spawned(
     color: Option<String>,
     agent_type: Option<String>,
     cwd: String,
+    backend_type: crate::swarm::types::BackendType,
     abort_tx: Option<tokio::sync::watch::Sender<bool>>,
 ) {
     // Activate the team if this is the first teammate to
@@ -458,7 +468,7 @@ fn handle_spawned(
             color,
             cwd,
             spawned_at: std::time::Instant::now(),
-            backend: crate::swarm::types::BackendType::InProcess,
+            backend: backend_type,
             abort_tx,
         },
     );

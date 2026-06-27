@@ -45,6 +45,7 @@ pub mod council;
 pub mod council_directives;
 pub mod council_session;
 pub mod daemon;
+pub mod daemon_services;
 pub mod diagnostics;
 pub mod diagnostics_producer;
 pub mod document_formats;

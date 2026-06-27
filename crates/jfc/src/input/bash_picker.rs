@@ -19,19 +19,12 @@ use crate::runtime::{EngineEvent, send_critical};
 
 /// Refresh the roster snapshot and open the modal.
 pub(super) async fn open_bash_picker(app: &mut App) {
-    app.bash_picker_tasks = jfc_engine::tools::list_bash_tasks().await;
-    app.show_bash_picker = true;
-    let sel = if app.bash_picker_tasks.is_empty() {
-        None
-    } else {
-        Some(0)
-    };
-    app.bash_picker_state.select(sel);
+    let tasks = jfc_engine::tools::list_bash_tasks().await;
+    app.bash_picker.open_with_tasks(tasks);
 }
 
 fn close_bash_picker(app: &mut App) {
-    app.show_bash_picker = false;
-    app.bash_picker_state.select(Some(0));
+    app.bash_picker.close();
 }
 
 pub(super) fn handle_bash_picker_key(
@@ -39,24 +32,24 @@ pub(super) fn handle_bash_picker_key(
     key: crossterm::event::KeyEvent,
     tx: &mpsc::Sender<EngineEvent>,
 ) -> bool {
-    if !app.show_bash_picker {
+    if !app.bash_picker.visible {
         return false;
     }
-    let total = app.bash_picker_tasks.len();
-    let current = app.bash_picker_state.selected().unwrap_or(0);
+    let total = app.bash_picker.tasks.len();
+    let current = app.bash_picker.table.selected().unwrap_or(0);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => close_bash_picker(app),
         KeyCode::Up | KeyCode::Char('k') if current > 0 => {
-            app.bash_picker_state.select(Some(current - 1));
+            app.bash_picker.table.select(Some(current - 1));
         }
         KeyCode::Down | KeyCode::Char('j') => {
             let max = total.saturating_sub(1);
             if current < max {
-                app.bash_picker_state.select(Some(current + 1));
+                app.bash_picker.table.select(Some(current + 1));
             }
         }
-        KeyCode::Home => app.bash_picker_state.select(Some(0)),
-        KeyCode::End => app.bash_picker_state.select(Some(total.saturating_sub(1))),
+        KeyCode::Home => app.bash_picker.table.select(Some(0)),
+        KeyCode::End => app.bash_picker.table.select(Some(total.saturating_sub(1))),
         // Cancel the selected *running* shell.
         KeyCode::Char('x') | KeyCode::Char('d') => cancel_selected(app, current, tx),
         other => {
@@ -71,7 +64,7 @@ pub(super) fn handle_bash_picker_key(
 /// status settles via the toast + the next modal open). No-op for a finished
 /// task or an out-of-range index.
 fn cancel_selected(app: &mut App, index: usize, tx: &mpsc::Sender<EngineEvent>) {
-    let Some(task) = app.bash_picker_tasks.get_mut(index) else {
+    let Some(task) = app.bash_picker.tasks.get_mut(index) else {
         return;
     };
     if !task.running {
@@ -132,9 +125,7 @@ mod tests {
 
     fn app_with_tasks(tasks: Vec<BashTaskSnapshot>) -> App {
         let mut app = App::new(Arc::new(TestProvider), "test-model");
-        app.bash_picker_tasks = tasks;
-        app.show_bash_picker = true;
-        app.bash_picker_state.select(Some(0));
+        app.bash_picker.open_with_tasks(tasks);
         app
     }
 
@@ -149,15 +140,15 @@ mod tests {
 
         // Down moves to 1, then clamps.
         assert!(handle_bash_picker_key(&mut app, key(KeyCode::Down), &tx));
-        assert_eq!(app.bash_picker_state.selected(), Some(1));
+        assert_eq!(app.bash_picker.table.selected(), Some(1));
         handle_bash_picker_key(&mut app, key(KeyCode::Down), &tx);
-        assert_eq!(app.bash_picker_state.selected(), Some(1), "clamps at end");
+        assert_eq!(app.bash_picker.table.selected(), Some(1), "clamps at end");
 
         // Up moves back to 0, then clamps.
         handle_bash_picker_key(&mut app, key(KeyCode::Up), &tx);
-        assert_eq!(app.bash_picker_state.selected(), Some(0));
+        assert_eq!(app.bash_picker.table.selected(), Some(0));
         handle_bash_picker_key(&mut app, key(KeyCode::Up), &tx);
-        assert_eq!(app.bash_picker_state.selected(), Some(0), "clamps at start");
+        assert_eq!(app.bash_picker.table.selected(), Some(0), "clamps at start");
     }
 
     #[test]
@@ -180,7 +171,7 @@ mod tests {
             "expected CancelBashTask(bash_run)"
         );
         // The row is optimistically flipped to not-running.
-        assert!(!app.bash_picker_tasks[0].running);
+        assert!(!app.bash_picker.tasks[0].running);
     }
 
     #[test]
@@ -200,6 +191,6 @@ mod tests {
         let mut app = app_with_tasks(vec![snap("bash_a", true)]);
         let (tx, _rx) = mpsc::channel::<EngineEvent>(8);
         handle_bash_picker_key(&mut app, key(KeyCode::Esc), &tx);
-        assert!(!app.show_bash_picker);
+        assert!(!app.bash_picker.visible);
     }
 }

@@ -9,14 +9,16 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agents::AgentDef;
-use crate::ids::{TaskId, ToolId};
-use crate::runtime::{
-    EngineEvent, ExecutionResult, TaskEvent, TeamEvent, ToolEvent, send_critical,
+use crate::ids::ToolId;
+use crate::runtime::{EngineEvent, ExecutionResult, ToolEvent, send_critical};
+use crate::swarm::process_bridge_teammate::{
+    ProcessBridgeTeammateConfig, start_process_bridge_teammate,
 };
 use crate::swarm::runner::{
     TeammateEvent, TeammateRunnerConfig, assign_teammate_color, start_teammate, teammate_task_id,
 };
-use crate::swarm::types::{BackendType, TeamMember, TeammateIdentity, make_agent_id};
+use crate::swarm::spawn_lifecycle::{SpawnedTeammate, record_spawned_teammate};
+use crate::swarm::types::{BackendType, TeammateIdentity, make_agent_id};
 use jfc_core::TaskInput;
 use jfc_provider::{ModelId, Provider};
 
@@ -46,6 +48,48 @@ pub fn try_spawn_teammate(
 
     let tx_task = tx.clone();
     let task_id = task_id.to_owned();
+    let project_root = task_input
+        .cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+    let launch_plan =
+        match crate::agents::select_teammate_agent_launch_plan(task_input, &project_root) {
+            Ok(plan) => plan,
+            Err(error) => {
+                send_critical(
+                    &tx_task,
+                    EngineEvent::Tool(ToolEvent::Result {
+                        tool_id: ToolId::from(task_id),
+                        result: ExecutionResult::failure(format!(
+                            "Teammate launch descriptor unavailable: {error}"
+                        )),
+                    }),
+                );
+                done();
+                return true;
+            }
+        };
+    match &launch_plan.backend {
+        crate::agents::AgentLaunchBackend::InProcess => {}
+        crate::agents::AgentLaunchBackend::BackgroundWorker => {
+            send_critical(
+                &tx_task,
+                EngineEvent::Tool(ToolEvent::Result {
+                    tool_id: ToolId::from(task_id),
+                    result: ExecutionResult::failure(format!(
+                        "Teammate launcher {} resolved to a background-worker backend",
+                        launch_plan.descriptor.name
+                    )),
+                }),
+            );
+            done();
+            return true;
+        }
+        crate::agents::AgentLaunchBackend::ProcessBridge { .. } => {}
+    }
 
     let name = task_input.name.clone().unwrap_or_default();
     let team_name = task_input.team_name.clone().unwrap_or_default();
@@ -77,133 +121,87 @@ pub fn try_spawn_teammate(
     };
     let teammate_model_name = teammate_model.as_str().to_string();
 
-    let config = TeammateRunnerConfig {
-        identity: TeammateIdentity {
-            agent_id: agent_id.clone(),
-            agent_name: name.clone(),
-            team_name: team_name.clone(),
-            color: Some(color.clone()),
-            plan_mode_required: task_input.mode.as_deref() == Some("plan"),
-            parent_session_id: current_session_id.unwrap_or("").to_owned(),
-        },
-        prompt: task_input.prompt.clone(),
-        description: task_input.description.clone(),
-        model: Some(teammate_model_name.clone()),
-        agent_type: task_input.subagent_type.clone(),
-        provider: teammate_provider,
-        model_id: teammate_model,
-        system_prompt: None,
-        task_store: Some(jfc_session::TaskStore::open_team(&team_name)),
-    };
-
-    let (_runner_task_id, abort_tx) = start_teammate(config, teammate_event_tx);
-
-    // Mirror the teammate into the unified agent registry so it appears in the
-    // same roster as solo subagents, council seats, and economy solvers. The id
-    // is derived from the swarm `agent_id` via `from_label`, so the lifecycle
-    // bridge in `handlers/team.rs` can resolve it by name from `TeammateEvent`s.
-    {
-        let agent_id_label = agent_id.clone();
-        let name_label = name.clone();
-        let team = team_name.clone();
-        tokio::spawn(async move {
-            let registry = crate::tools::agent_registry();
-            // display_name == swarm agent_id so the team lifecycle bridge can
-            // resolve `TeammateEvent { agent_id }` back to this entry; the human
-            // name lives in the description for the roster.
-            let id = jfc_agent::AgentId::from_label(&agent_id_label);
-            registry
-                .register(jfc_agent::AgentState::new(
-                    id.clone(),
-                    jfc_agent::AgentRole::Teammate { team_name: team },
-                    name_label,
-                ))
-                .await;
-            registry
-                .update_status(&id, jfc_agent::AgentStatus::Running)
-                .await;
-        });
-    }
-
-    // Persist the new member into the team file so the team roster on disk
-    // matches the runtime spawn list.
-    let member = TeamMember {
-        agent_id: agent_id.clone(),
-        name: name.clone(),
-        agent_type: task_input.subagent_type.clone(),
-        model: Some(teammate_model_name.clone()),
-        color: Some(color.clone()),
-        plan_mode_required: Some(task_input.mode.as_deref() == Some("plan")),
-        joined_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-        cwd: None,
-        worktree_path: None,
-        backend_type: Some(BackendType::InProcess),
-        is_active: Some(true),
-        mode: task_input.mode.clone(),
-    };
-    {
-        let team_name_clone = team_name.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::swarm::team_helpers::add_member(&team_name_clone, member).await {
-                tracing::warn!(
-                    target: "jfc::swarm",
-                    error = %e,
-                    "failed to register spawned teammate in team file"
-                );
-            }
-        });
-    }
-
-    // Report spawn as a successful tool result
-    let result_json = serde_json::json!({
-        "status": "teammate_spawned",
-        "teammate_id": agent_id,
-        "name": name,
-        "team_name": team_name,
-        "color": color,
-        "message": format!("Spawned successfully.\nagent_id: {agent_id}\nname: {name}\nteam_name: {team_name}\nThe agent is now running and will receive instructions via mailbox.")
-    });
-
     let runner_task_id = teammate_task_id(&agent_id);
-    // Notify the leader's main loop that a teammate exists
-    send_critical(
+    let (abort_tx, launch_backend_type, launch_backend_label) = match &launch_plan.backend {
+        crate::agents::AgentLaunchBackend::InProcess => {
+            let config = TeammateRunnerConfig {
+                identity: TeammateIdentity {
+                    agent_id: agent_id.clone(),
+                    agent_name: name.clone(),
+                    team_name: team_name.clone(),
+                    color: Some(color.clone()),
+                    plan_mode_required: task_input.mode.as_deref() == Some("plan"),
+                    parent_session_id: current_session_id.unwrap_or("").to_owned(),
+                },
+                prompt: task_input.prompt.clone(),
+                description: task_input.description.clone(),
+                model: Some(teammate_model_name.clone()),
+                agent_type: task_input.subagent_type.clone(),
+                provider: teammate_provider.clone(),
+                model_id: teammate_model.clone(),
+                system_prompt: None,
+                task_store: Some(jfc_session::TaskStore::open_team(&team_name)),
+            };
+            let (_task_id, abort_tx) = start_teammate(config, teammate_event_tx);
+            (abort_tx, BackendType::InProcess, "in_process")
+        }
+        crate::agents::AgentLaunchBackend::ProcessBridge { command } => {
+            let launch = ProcessBridgeTeammateConfig {
+                descriptor: launch_plan.descriptor.clone(),
+                command: command.clone(),
+                task_input: task_input.clone(),
+                task_id: runner_task_id.clone(),
+                agent_id: agent_id.clone(),
+                cwd: project_root.clone(),
+                model_id: Some(teammate_model.clone()),
+                provider_name: Some(teammate_provider.name().to_owned()),
+                active_team_name: Some(team_name.clone()),
+            };
+            match start_process_bridge_teammate(launch, teammate_event_tx) {
+                Ok(abort_tx) => (abort_tx, BackendType::ProcessBridge, "process_bridge"),
+                Err(result) => {
+                    send_critical(
+                        &tx_task,
+                        EngineEvent::Tool(ToolEvent::Result {
+                            tool_id: ToolId::from(task_id),
+                            result,
+                        }),
+                    );
+                    done();
+                    return true;
+                }
+            }
+        }
+        crate::agents::AgentLaunchBackend::BackgroundWorker => unreachable!(),
+    };
+    tracing::debug!(
+        target: "jfc::swarm",
+        launcher = %launch_plan.descriptor.name,
+        handler = %launch_plan.descriptor.executor.handler,
+        "selected descriptor-owned teammate launch backend"
+    );
+
+    record_spawned_teammate(
         &tx_task,
-        EngineEvent::Team(TeamEvent::Spawned {
-            name: name.clone(),
+        SpawnedTeammate {
+            tool_task_id: task_id,
+            runner_task_id,
+            launcher_name: launch_plan.descriptor.name,
+            launch_backend_label,
+            name,
             team_name,
             agent_id,
-            color: Some(color),
+            color,
             agent_type: task_input.subagent_type.clone(),
-            cwd: std::env::current_dir()
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            abort_tx: Some(abort_tx),
-        }),
-    );
-    send_critical(
-        &tx_task,
-        EngineEvent::Task(TaskEvent::Started {
-            task_id: TaskId::from(runner_task_id),
-            description: format!("spawn teammate: {name}"),
-            model_used: Some(teammate_model_name),
+            model_name: teammate_model_name,
             max_input_tokens: agent_def.and_then(|a| a.max_input_tokens),
-            is_detached: false,
             parent_task_id: task_input.parent_task_id.clone(),
-        }),
-    );
-
-    send_critical(
-        &tx_task,
-        EngineEvent::Tool(ToolEvent::Result {
-            tool_id: ToolId::from(task_id),
-            result: ExecutionResult::success(
-                serde_json::to_string_pretty(&result_json).unwrap_or_default(),
-            ),
-        }),
+            project_root,
+            backend_type: launch_backend_type,
+            abort_tx,
+            plan_mode_required: task_input.mode.as_deref() == Some("plan"),
+            mode: task_input.mode.clone(),
+        },
     );
     done();
     true
@@ -228,73 +226,5 @@ fn bind_teammate_provider(
 }
 
 #[cfg(test)]
-mod teammate_provider_tests {
-    use super::*;
-    use async_trait::async_trait;
-    use jfc_provider::{
-        CompletionResponse, EventStream, ModelInfo, ProviderMessage as PMsg, StreamConvention,
-        StreamOptions as SOpts,
-    };
-
-    struct NamedProvider {
-        name: &'static str,
-    }
-
-    #[async_trait]
-    impl Provider for NamedProvider {
-        fn name(&self) -> &str {
-            self.name
-        }
-        fn available_models(&self) -> Vec<ModelInfo> {
-            Vec::new()
-        }
-        fn stream_convention(&self) -> StreamConvention {
-            StreamConvention::AnthropicNative
-        }
-        async fn stream(&self, _m: Vec<PMsg>, _o: &SOpts) -> anyhow::Result<EventStream> {
-            anyhow::bail!("unused")
-        }
-        async fn complete(&self, _m: Vec<PMsg>, _o: &SOpts) -> anyhow::Result<CompletionResponse> {
-            anyhow::bail!("unused")
-        }
-    }
-    impl jfc_provider::seal::Sealed for NamedProvider {}
-
-    fn registry() -> Vec<Arc<dyn Provider>> {
-        vec![
-            Arc::new(NamedProvider { name: "openai" }) as Arc<dyn Provider>,
-            Arc::new(NamedProvider { name: "anthropic" }) as Arc<dyn Provider>,
-        ]
-    }
-
-    #[test]
-    fn teammate_bound_to_its_own_provider_normal() {
-        // A `openai/gpt-5.5` teammate spawned from a Claude (anthropic) leader
-        // resolves to the openai provider, not the leader's.
-        let leader = Arc::new(NamedProvider { name: "anthropic" }) as Arc<dyn Provider>;
-        let (provider, model) =
-            bind_teammate_provider(&registry(), leader, ModelId::new("openai/gpt-5.5"));
-        assert_eq!(provider.name(), "openai");
-        // The provider prefix is stripped from the model id before sending.
-        assert_eq!(model.as_str(), "gpt-5.5");
-    }
-
-    #[test]
-    fn teammate_falls_back_to_leader_when_unresolved_robust() {
-        // An unknown/unqualified model that no registry provider claims falls
-        // back to the leader's provider and unchanged id.
-        let leader = Arc::new(NamedProvider { name: "anthropic" }) as Arc<dyn Provider>;
-        let (provider, model) =
-            bind_teammate_provider(&registry(), leader, ModelId::new("mystery-model"));
-        assert_eq!(provider.name(), "anthropic");
-        assert_eq!(model.as_str(), "mystery-model");
-    }
-
-    #[test]
-    fn teammate_falls_back_with_empty_registry_robust() {
-        let leader = Arc::new(NamedProvider { name: "openai" }) as Arc<dyn Provider>;
-        let (provider, model) = bind_teammate_provider(&[], leader, ModelId::new("openai/gpt-5.5"));
-        assert_eq!(provider.name(), "openai");
-        assert_eq!(model.as_str(), "openai/gpt-5.5");
-    }
-}
+#[path = "dispatch_tests.rs"]
+mod teammate_provider_tests;

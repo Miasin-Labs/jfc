@@ -1623,6 +1623,7 @@ impl ToolInput {
                 category: opt_str_field("category"),
                 run_in_background: bool_field("run_in_background"),
                 model: opt_str_field("model"),
+                launcher: opt_str_field("launcher"),
                 effort: opt_str_field("effort"),
                 name: opt_str_field("name"),
                 team_name: opt_str_field("team_name"),
@@ -1878,6 +1879,9 @@ impl ToolInput {
                 }
                 if let Some(model) = &task_input.model {
                     value["model"] = json!(model);
+                }
+                if let Some(launcher) = &task_input.launcher {
+                    value["launcher"] = json!(launcher);
                 }
                 if let Some(effort) = &task_input.effort {
                     value["effort"] = json!(effort);

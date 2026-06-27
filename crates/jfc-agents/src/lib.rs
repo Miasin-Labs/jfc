@@ -7,6 +7,7 @@
 mod builtins;
 pub mod evals;
 mod lifecycle;
+mod plugin_resources;
 mod registry;
 mod state;
 

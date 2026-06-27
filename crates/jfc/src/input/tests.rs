@@ -630,27 +630,27 @@ async fn remote_orphaned_permission_response_recovers_unresolved_tool_robust() {
 #[tokio::test]
 async fn task_panel_esc_closes_normal() {
     let mut app = test_app();
-    app.show_task_panel = true;
+    app.task_panel.visible = true;
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Esc), &tx).await.unwrap();
-    assert!(!app.show_task_panel);
+    assert!(!app.task_panel.visible);
 }
 
 #[tokio::test]
 async fn task_panel_arrows_robust_no_tasks() {
     let mut app = test_app();
-    app.show_task_panel = true;
+    app.task_panel.visible = true;
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Down), &tx).await.unwrap();
     handle_key(&mut app, key(KeyCode::Up), &tx).await.unwrap();
-    assert_eq!(app.task_panel_selected, 0);
+    assert_eq!(app.task_panel.selected, 0);
 }
 
 #[tokio::test]
 async fn task_panel_ctrl_t_cycles_to_teammates_when_agents_exist_regression() {
     let mut app = test_app();
-    app.show_task_panel = true;
-    app.expanded_view = crate::app::ExpandedView::Tasks;
+    app.task_panel.visible = true;
+    app.task_panel.expanded_view = crate::app::ExpandedView::Tasks;
     app.engine.background_tasks.insert(
         "agent-1".into(),
         make_background_task("agent-1", "inspect ui", TaskLifecycle::Running),
@@ -665,14 +665,17 @@ async fn task_panel_ctrl_t_cycles_to_teammates_when_agents_exist_regression() {
     .await
     .unwrap();
 
-    assert!(!app.show_task_panel);
-    assert_eq!(app.expanded_view, crate::app::ExpandedView::Teammates);
+    assert!(!app.task_panel.visible);
+    assert_eq!(
+        app.task_panel.expanded_view,
+        crate::app::ExpandedView::Teammates
+    );
 }
 
 #[tokio::test]
 async fn teammates_panel_ctrl_t_closes_regression() {
     let mut app = test_app();
-    app.expanded_view = crate::app::ExpandedView::Teammates;
+    app.task_panel.expanded_view = crate::app::ExpandedView::Teammates;
     let (tx, _rx) = channel();
 
     handle_key(
@@ -683,13 +686,13 @@ async fn teammates_panel_ctrl_t_closes_regression() {
     .await
     .unwrap();
 
-    assert_eq!(app.expanded_view, crate::app::ExpandedView::None);
+    assert_eq!(app.task_panel.expanded_view, crate::app::ExpandedView::None);
 }
 
 #[tokio::test]
 async fn teammates_panel_down_selects_agent_normal() {
     let mut app = test_app();
-    app.expanded_view = crate::app::ExpandedView::Teammates;
+    app.task_panel.expanded_view = crate::app::ExpandedView::Teammates;
     app.engine.background_tasks.insert(
         "agent-1".into(),
         make_background_task("agent-1", "inspect ui", TaskLifecycle::Running),
@@ -698,7 +701,7 @@ async fn teammates_panel_down_selects_agent_normal() {
 
     handle_key(&mut app, key(KeyCode::Down), &tx).await.unwrap();
 
-    assert_eq!(app.viewing_task_id.as_deref(), Some("agent-1"));
+    assert_eq!(app.task_panel.viewing_task_id.as_deref(), Some("agent-1"));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -716,7 +719,7 @@ async fn ctrl_b_toggles_sidebar_normal() {
     )
     .await
     .unwrap();
-    assert!(app.show_sidebar);
+    assert!(app.session_sidebar.visible);
     handle_key(
         &mut app,
         key_mod(KeyCode::Char('b'), KeyModifiers::CONTROL),
@@ -724,18 +727,18 @@ async fn ctrl_b_toggles_sidebar_normal() {
     )
     .await
     .unwrap();
-    assert!(!app.show_sidebar);
+    assert!(!app.session_sidebar.visible);
 }
 
 #[tokio::test]
 async fn sidebar_arrows_consumed_robust() {
     let mut app = test_app();
-    app.show_sidebar = true;
+    app.session_sidebar.visible = true;
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Down), &tx).await.unwrap();
     handle_key(&mut app, key(KeyCode::Up), &tx).await.unwrap();
     // No sessions exist → selected stays at 0
-    assert_eq!(app.session_selected, 0);
+    assert_eq!(app.session_sidebar.selected, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -753,75 +756,208 @@ async fn ctrl_p_opens_palette_normal() {
     )
     .await
     .unwrap();
-    assert!(app.show_palette);
-    assert_eq!(app.palette_selected, 0);
+    assert!(app.palette.visible);
+    assert_eq!(app.palette.selected, 0);
 }
 
 #[tokio::test]
 async fn palette_typing_filters_normal() {
     let mut app = test_app();
-    app.show_palette = true;
+    app.palette.visible = true;
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Char('c')), &tx)
         .await
         .unwrap();
-    assert_eq!(app.palette_input, "c");
+    assert_eq!(app.palette.input, "c");
     handle_key(&mut app, key(KeyCode::Backspace), &tx)
         .await
         .unwrap();
-    assert_eq!(app.palette_input, "");
+    assert_eq!(app.palette.input, "");
 }
 
 #[tokio::test]
 async fn palette_arrows_change_selection_normal() {
     let mut app = test_app();
-    app.show_palette = true;
+    app.palette.visible = true;
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Down), &tx).await.unwrap();
-    assert_eq!(app.palette_selected, 1);
+    assert_eq!(app.palette.selected, 1);
     handle_key(&mut app, key(KeyCode::Up), &tx).await.unwrap();
-    assert_eq!(app.palette_selected, 0);
+    assert_eq!(app.palette.selected, 0);
 }
 
 #[tokio::test]
 async fn palette_home_end_jump_selection_robust() {
     let mut app = test_app();
-    app.show_palette = true;
+    app.palette.visible = true;
     let (tx, _rx) = channel();
     // End jumps to the last item; Home back to the first. Parity with the
     // theme/model/session pickers, which already support these keys.
     handle_key(&mut app, key(KeyCode::End), &tx).await.unwrap();
     let last = palette_items(&app).len().saturating_sub(1);
     assert!(last > 0, "fixture should have multiple palette items");
-    assert_eq!(app.palette_selected, last);
+    assert_eq!(app.palette.selected, last);
     handle_key(&mut app, key(KeyCode::Home), &tx).await.unwrap();
-    assert_eq!(app.palette_selected, 0);
+    assert_eq!(app.palette.selected, 0);
 }
 
 #[tokio::test]
 async fn palette_esc_closes_robust() {
     let mut app = test_app();
-    app.show_palette = true;
-    app.palette_input = "x".into();
+    app.palette.visible = true;
+    app.palette.input = "x".into();
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Esc), &tx).await.unwrap();
-    assert!(!app.show_palette);
-    assert!(app.palette_input.is_empty());
+    assert!(!app.palette.visible);
+    assert!(app.palette.input.is_empty());
 }
 
 #[tokio::test]
 async fn palette_enter_executes_action_normal() {
     let mut app = test_app();
-    app.show_palette = true;
+    app.palette.visible = true;
     // First palette item: "Clear Messages (/clear)"
     let (tx, _rx) = channel();
     app.engine.messages.push(ChatMessage::user("hi".into()));
     handle_key(&mut app, key(KeyCode::Enter), &tx)
         .await
         .unwrap();
-    assert!(!app.show_palette);
+    assert!(!app.palette.visible);
     // /clear via palette wipes messages
     assert!(app.engine.messages.is_empty());
+}
+
+#[tokio::test]
+async fn palette_enter_executes_descriptor_host_action_normal() {
+    let mut app = test_app();
+    app.palette.visible = true;
+    app.plugins.ui_slots = vec![
+        jfc_plugin_sdk::UiSlotDescriptor::new(
+            jfc_plugin_sdk::PluginId::new("plugin.palette"),
+            jfc_plugin_sdk::ExtensionSlot::CommandPalette,
+            "plugin.palette.info",
+            "Plugin-owned Info Toggle",
+        )
+        .with_priority(100)
+        .with_host_action("open_model_picker"),
+    ];
+    let (tx, _rx) = channel();
+    assert!(!app.model_picker.visible);
+
+    handle_key(&mut app, key(KeyCode::Enter), &tx)
+        .await
+        .unwrap();
+
+    assert!(!app.palette.visible);
+    assert!(app.model_picker.visible);
+}
+
+#[tokio::test]
+async fn palette_enter_executes_runtime_action_host_descriptor_normal() {
+    let mut app = test_app();
+    app.palette.visible = true;
+    let plugin_id = jfc_plugin_sdk::PluginId::new("plugin.palette");
+    app.plugins.ui_slots = vec![
+        jfc_plugin_sdk::UiSlotDescriptor::new(
+            plugin_id.clone(),
+            jfc_plugin_sdk::ExtensionSlot::CommandPalette,
+            "plugin.palette.model",
+            "Plugin Runtime Model Picker",
+        )
+        .with_priority(100),
+    ];
+    app.plugins.runtime_action_descriptors = vec![
+        jfc_plugin_sdk::RuntimeActionDescriptor::new(
+            plugin_id,
+            "plugin.palette.model",
+            "Plugin Runtime Model Picker",
+            "Open model picker from plugin runtime action",
+            jfc_plugin_sdk::RuntimeActionKind::HostAction,
+        )
+        .with_priority(100)
+        .with_payload(serde_json::json!({ "action": "open_model_picker" })),
+    ];
+    let (tx, _rx) = channel();
+    assert!(!app.model_picker.visible);
+
+    handle_key(&mut app, key(KeyCode::Enter), &tx)
+        .await
+        .unwrap();
+
+    assert!(!app.palette.visible);
+    assert!(app.model_picker.visible);
+}
+
+#[tokio::test]
+async fn palette_enter_executes_runtime_action_slash_descriptor_normal() {
+    let mut app = test_app();
+    app.palette.visible = true;
+    let plugin_id = jfc_plugin_sdk::PluginId::new("plugin.palette");
+    app.plugins.ui_slots = vec![
+        jfc_plugin_sdk::UiSlotDescriptor::new(
+            plugin_id.clone(),
+            jfc_plugin_sdk::ExtensionSlot::CommandPalette,
+            "plugin.palette.help",
+            "Plugin Runtime Help",
+        )
+        .with_priority(100),
+    ];
+    app.plugins.runtime_action_descriptors = vec![
+        jfc_plugin_sdk::RuntimeActionDescriptor::new(
+            plugin_id,
+            "plugin.palette.help",
+            "Plugin Runtime Help",
+            "Open help from plugin runtime action",
+            jfc_plugin_sdk::RuntimeActionKind::SlashCommand,
+        )
+        .with_priority(100)
+        .with_payload(serde_json::json!({ "command": "/help" })),
+    ];
+    let (tx, _rx) = channel();
+    assert!(!app.show_help);
+
+    handle_key(&mut app, key(KeyCode::Enter), &tx)
+        .await
+        .unwrap();
+
+    assert!(!app.palette.visible);
+    assert!(app.show_help);
+}
+
+#[tokio::test]
+async fn palette_enter_executes_runtime_action_panel_descriptor_normal() {
+    let mut app = test_app();
+    app.palette.visible = true;
+    app.info_sidebar.visible = false;
+    let plugin_id = jfc_plugin_sdk::PluginId::new("plugin.palette");
+    app.plugins.ui_slots = vec![
+        jfc_plugin_sdk::UiSlotDescriptor::new(
+            plugin_id.clone(),
+            jfc_plugin_sdk::ExtensionSlot::CommandPalette,
+            "plugin.palette.panel",
+            "Plugin Runtime Info Panel",
+        )
+        .with_priority(100),
+    ];
+    app.plugins.runtime_action_descriptors = vec![
+        jfc_plugin_sdk::RuntimeActionDescriptor::new(
+            plugin_id,
+            "plugin.palette.panel",
+            "Plugin Runtime Info Panel",
+            "Open info panel from plugin runtime action",
+            jfc_plugin_sdk::RuntimeActionKind::OpenPanel,
+        )
+        .with_priority(100)
+        .with_payload(serde_json::json!({ "panel": "info_sidebar" })),
+    ];
+    let (tx, _rx) = channel();
+
+    handle_key(&mut app, key(KeyCode::Enter), &tx)
+        .await
+        .unwrap();
+
+    assert!(!app.palette.visible);
+    assert!(app.info_sidebar.visible);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -839,7 +975,7 @@ async fn ctrl_m_opens_model_picker_normal() {
     )
     .await
     .unwrap();
-    assert!(app.show_model_picker);
+    assert!(app.model_picker.visible);
 }
 
 #[test]
@@ -859,33 +995,33 @@ fn collect_all_models_empty_cache_falls_back_to_static_robust() {
 #[tokio::test]
 async fn model_picker_esc_closes_robust() {
     let mut app = test_app();
-    app.show_model_picker = true;
-    app.model_picker_filter = "x".into();
+    app.model_picker.visible = true;
+    app.model_picker.filter = "x".into();
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Esc), &tx).await.unwrap();
-    assert!(!app.show_model_picker);
-    assert!(app.model_picker_filter.is_empty());
+    assert!(!app.model_picker.visible);
+    assert!(app.model_picker.filter.is_empty());
 }
 
 #[tokio::test]
 async fn model_picker_typing_appends_filter_normal() {
     let mut app = test_app();
-    app.show_model_picker = true;
+    app.model_picker.visible = true;
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Char('o')), &tx)
         .await
         .unwrap();
-    assert_eq!(app.model_picker_filter, "o");
+    assert_eq!(app.model_picker.filter, "o");
     handle_key(&mut app, key(KeyCode::Backspace), &tx)
         .await
         .unwrap();
-    assert!(app.model_picker_filter.is_empty());
+    assert!(app.model_picker.filter.is_empty());
 }
 
 #[tokio::test]
 async fn model_picker_paging_keys_robust_empty_list() {
     let mut app = test_app();
-    app.show_model_picker = true;
+    app.model_picker.visible = true;
     let (tx, _rx) = channel();
     // Each navigation key is consumed without panicking on empty list.
     for code in [
@@ -898,7 +1034,7 @@ async fn model_picker_paging_keys_robust_empty_list() {
     ] {
         handle_key(&mut app, key(code), &tx).await.unwrap();
     }
-    assert_eq!(app.model_picker_selected, 0);
+    assert_eq!(app.model_picker.selected, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1159,12 +1295,12 @@ async fn leader_then_k_exits_task_view_robust() {
     let mut app = test_app();
     app.leader_key_active = true;
     app.leader_key_timeout = Some(std::time::Instant::now());
-    app.viewing_task_id = Some("t1".into());
+    app.task_panel.viewing_task_id = Some("t1".into());
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Char('k')), &tx)
         .await
         .unwrap();
-    assert!(app.viewing_task_id.is_none());
+    assert!(app.task_panel.viewing_task_id.is_none());
     assert!(!app.leader_key_active);
 }
 
@@ -1602,7 +1738,7 @@ async fn ctrl_shift_z_redo_robust() {
 #[tokio::test]
 async fn ctrl_i_toggles_info_sidebar_normal() {
     let mut app = test_app();
-    let initial = app.show_info_sidebar;
+    let initial = app.info_sidebar.visible;
     let (tx, _rx) = channel();
     handle_key(
         &mut app,
@@ -1611,13 +1747,13 @@ async fn ctrl_i_toggles_info_sidebar_normal() {
     )
     .await
     .unwrap();
-    assert_ne!(app.show_info_sidebar, initial);
+    assert_ne!(app.info_sidebar.visible, initial);
 }
 
 #[tokio::test]
 async fn ctrl_s_toggles_info_sidebar_normal() {
     let mut app = test_app();
-    let initial = app.show_info_sidebar;
+    let initial = app.info_sidebar.visible;
     let (tx, _rx) = channel();
     handle_key(
         &mut app,
@@ -1626,7 +1762,7 @@ async fn ctrl_s_toggles_info_sidebar_normal() {
     )
     .await
     .unwrap();
-    assert_ne!(app.show_info_sidebar, initial);
+    assert_ne!(app.info_sidebar.visible, initial);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1878,10 +2014,10 @@ async fn esc_cancels_edit_mode_robust() {
 #[tokio::test]
 async fn esc_exits_task_view_robust() {
     let mut app = test_app();
-    app.viewing_task_id = Some("abc".into());
+    app.task_panel.viewing_task_id = Some("abc".into());
     let (tx, _rx) = channel();
     handle_key(&mut app, key(KeyCode::Esc), &tx).await.unwrap();
-    assert!(app.viewing_task_id.is_none());
+    assert!(app.task_panel.viewing_task_id.is_none());
 }
 
 #[tokio::test]
@@ -2839,16 +2975,16 @@ async fn slash_dump_context_normal() {
 async fn slash_theme_opens_picker_when_no_arg_robust() {
     let mut app = test_app();
     run_slash_command(&mut app, "/theme").await;
-    assert!(app.show_theme_picker);
-    assert!(app.theme_picker_input.is_empty());
+    assert!(app.theme_picker.visible);
+    assert!(app.theme_picker.input.is_empty());
     // Opening highlights the active theme (revert-on-cancel preview), so the
     // selection is whichever row matches the current theme — always a valid
     // in-bounds index, not hard-coded to 0.
     let n = crate::theme::Theme::choices().len();
     assert!(
-        app.theme_picker_selected < n,
+        app.theme_picker.selected < n,
         "selection {} out of bounds (n={n})",
-        app.theme_picker_selected
+        app.theme_picker.selected
     );
 }
 
@@ -2861,7 +2997,7 @@ fn theme_picker_highlights_active_theme_regression() {
     super::theme_picker::open_theme_picker(&mut app);
 
     let selected = crate::theme::Theme::choices()
-        .get(app.theme_picker_selected)
+        .get(app.theme_picker.selected)
         .expect("theme selection should be in bounds");
     assert_eq!(selected.name, "light");
 }
@@ -3138,7 +3274,7 @@ fn update_mention_state_dismisses_on_whitespace_robust() {
 #[test]
 fn filtered_models_unfiltered_returns_all_normal() {
     let mut app = test_app();
-    app.model_picker_models = vec![ModelInfo::new("m1", "M1", "test")];
+    app.model_picker.models = vec![ModelInfo::new("m1", "M1", "test")];
     let v = filtered_models(&app);
     assert_eq!(v.len(), 1);
 }
@@ -3146,11 +3282,11 @@ fn filtered_models_unfiltered_returns_all_normal() {
 #[test]
 fn filtered_models_filter_robust() {
     let mut app = test_app();
-    app.model_picker_models = vec![
+    app.model_picker.models = vec![
         ModelInfo::new("alpha", "Alpha", "test"),
         ModelInfo::new("beta", "Beta", "test"),
     ];
-    app.model_picker_filter = "alp".into();
+    app.model_picker.filter = "alp".into();
     let v = filtered_models(&app);
     assert_eq!(v.len(), 1);
     assert_eq!(v[0].id.as_str(), "alpha");
@@ -3159,7 +3295,7 @@ fn filtered_models_filter_robust() {
 #[test]
 fn palette_items_filter_normal() {
     let mut app = test_app();
-    app.palette_input = "compact".into();
+    app.palette.input = "compact".into();
     let v = palette_items(&app);
     assert!(v.iter().any(|s| s.contains("Compact")));
 }
@@ -3169,6 +3305,31 @@ fn palette_items_unfiltered_robust() {
     let app = test_app();
     let v = palette_items(&app);
     assert!(!v.is_empty());
+}
+
+#[test]
+fn palette_items_read_command_palette_ui_slots_normal() {
+    let mut app = test_app();
+    app.plugins.ui_slots = vec![
+        jfc_plugin_sdk::UiSlotDescriptor::new(
+            jfc_plugin_sdk::PluginId::new("plugin.palette"),
+            jfc_plugin_sdk::ExtensionSlot::CommandPalette,
+            "plugin.palette.inspect",
+            "Inspect Plugin State (/plugin-inspect)",
+        )
+        .with_priority(50),
+        jfc_plugin_sdk::UiSlotDescriptor::new(
+            jfc_plugin_sdk::PluginId::new("plugin.status"),
+            jfc_plugin_sdk::ExtensionSlot::StatusLine,
+            "plugin.status.hidden_from_palette",
+            "Status-only item",
+        )
+        .with_priority(100),
+    ];
+
+    let v = palette_items(&app);
+
+    assert_eq!(v, vec!["Inspect Plugin State (/plugin-inspect)".to_owned()]);
 }
 
 // ─────────────────────────────────────────────────────────────────────

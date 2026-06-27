@@ -258,6 +258,8 @@ mod tests {
             tool_choice: crate::runtime::StreamToolChoice::Auto,
             resolved_model: None,
             provider_history_archive_recall_ids: vec!["provider-history-1".to_owned()],
+            rsi_prompt_sections: 0,
+            rsi_tool_visibility_rules: 0,
         };
 
         handle_request_metadata(&mut state, meta.clone());

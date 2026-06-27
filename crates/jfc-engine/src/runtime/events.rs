@@ -270,6 +270,8 @@ pub struct StreamRequestMetadata {
     pub tool_choice: StreamToolChoice,
     pub resolved_model: Option<ResolvedModel>,
     pub provider_history_archive_recall_ids: Vec<String>,
+    pub rsi_prompt_sections: usize,
+    pub rsi_tool_visibility_rules: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -633,6 +635,7 @@ pub enum TeamEvent {
         color: Option<String>,
         agent_type: Option<String>,
         cwd: String,
+        backend_type: crate::swarm::types::BackendType,
         /// Abort handle returned by `swarm::runner::start_teammate`. The
         /// event handler must move this into
         /// `app.engine.team_context.teammates[agent_id].abort_tx` so the channel

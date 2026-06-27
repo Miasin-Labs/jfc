@@ -57,6 +57,9 @@ impl PermissionMode {
     /// [`ToolCall`]. Used by non-interactive executors (e.g. background
     /// subagents) that need the same gate but don't have a `ToolCall` in hand.
     pub fn decide_parts(self, kind: &ToolKind, input: &ToolInput) -> PermissionDecision {
+        if let Some(policy) = crate::tools::external_tool_policy(kind) {
+            return self.decide_external_tool(policy.approval_policy);
+        }
         // Unknown tools are denied in every permission mode (including
         // BypassPermissions) — we don't dispatch a name we don't know,
         // because the input schema is unknown and `execute_tool` would
@@ -213,6 +216,37 @@ impl PermissionMode {
                 | ToolKind::DesignServe => PermissionDecision::Approved,
                 _ => PermissionDecision::NeedsPrompt,
             },
+            Self::BypassPermissions => PermissionDecision::Approved,
+            Self::Auto => PermissionDecision::NeedsClassifier,
+        }
+    }
+
+    fn decide_external_tool(
+        self,
+        approval_policy: jfc_plugin_sdk::ToolApprovalPolicy,
+    ) -> PermissionDecision {
+        match self {
+            Self::Default => {
+                if approval_policy.needs_interactive_approval() {
+                    PermissionDecision::NeedsPrompt
+                } else {
+                    PermissionDecision::Approved
+                }
+            }
+            Self::Plan => {
+                if approval_policy.plan_mode_allowed() {
+                    PermissionDecision::Approved
+                } else {
+                    PermissionDecision::Denied("Plan mode: plugin mutating tool blocked")
+                }
+            }
+            Self::AcceptEdits => {
+                if approval_policy.mutates_user_state() {
+                    PermissionDecision::NeedsPrompt
+                } else {
+                    PermissionDecision::Approved
+                }
+            }
             Self::BypassPermissions => PermissionDecision::Approved,
             Self::Auto => PermissionDecision::NeedsClassifier,
         }

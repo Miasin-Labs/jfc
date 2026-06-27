@@ -56,6 +56,7 @@ pub struct TeamMember {
 #[serde(rename_all = "kebab-case")]
 pub enum BackendType {
     InProcess,
+    ProcessBridge,
     Tmux,
     Iterm,
 }
@@ -463,6 +464,8 @@ mod tests {
         assert_eq!(json, "\"in-process\"");
         let parsed: BackendType = serde_json::from_str("\"tmux\"").unwrap();
         assert_eq!(parsed, BackendType::Tmux);
+        let bridge_json = serde_json::to_string(&BackendType::ProcessBridge).unwrap();
+        assert_eq!(bridge_json, "\"process-bridge\"");
     }
 
     #[test]

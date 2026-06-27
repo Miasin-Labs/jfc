@@ -477,28 +477,13 @@ and display the results in a readable table with columns: id, schedule, command,
 }
 
 /// `/schedule tasks [list|archived|add <cron> <prompt>|pause|resume|archive <id>]`
-/// — manage recurring agentic-task definitions in the persisted
-/// [`crate::daemon::ScheduledTaskRegistry`]. Mirrors Perplexity's
-/// list_scheduled / list_archived computer-task surface. Runs inline (no model
-/// turn): these are data operations on the registry file under `~/.config/jfc`.
+/// — manage recurring agentic-task definitions through the daemon service
+/// boundary. Mirrors Perplexity's list_scheduled / list_archived computer-task
+/// surface. Runs inline (no model turn).
 fn handle_scheduled_tasks_subcommand(state: &mut EngineState, args: &str) {
-    use crate::daemon::{DaemonPaths, ScheduledTaskRegistry};
-
     state.messages.push(ChatMessage::user(
         format!("/schedule tasks {args}").trim_end().to_owned(),
     ));
-
-    let path = ScheduledTaskRegistry::default_path(&DaemonPaths::default_user().base_dir);
-    let mut registry = match ScheduledTaskRegistry::load(&path) {
-        Ok(r) => r,
-        Err(e) => {
-            state.messages.push(ChatMessage::assistant(format!(
-                "Could not load scheduled tasks: {e}"
-            )));
-            state.push_effect(crate::app::EngineEffect::ScrollToBottom);
-            return;
-        }
-    };
 
     let (verb, rest) = match args.split_once(char::is_whitespace) {
         Some((v, r)) => (v.trim(), r.trim()),
@@ -506,16 +491,13 @@ fn handle_scheduled_tasks_subcommand(state: &mut EngineState, args: &str) {
     };
 
     let reply = match verb {
-        "" | "list" => render_scheduled_tasks(&registry, false),
-        "archived" => render_scheduled_tasks(&registry, true),
-        "add" => match add_scheduled_task(&mut registry, rest) {
-            Ok(id) => match registry.save(&path) {
-                Ok(()) => format!("Scheduled agentic task `{id}` created."),
-                Err(e) => format!("Created but failed to persist: {e}"),
-            },
+        "" | "list" => list_scheduled_tasks(false),
+        "archived" => list_scheduled_tasks(true),
+        "add" => match add_scheduled_task(rest) {
+            Ok(id) => format!("Scheduled agentic task `{id}` created."),
             Err(e) => format!("Usage: `/schedule tasks add <cron-expr> <prompt>` — {e}"),
         },
-        "pause" | "archive" | "resume" => mutate_scheduled_task(&mut registry, verb, rest, &path),
+        "pause" | "archive" | "resume" => mutate_scheduled_task(verb, rest),
         other => format!("Unknown `/schedule tasks` subcommand: `{other}`."),
     };
 
@@ -523,15 +505,17 @@ fn handle_scheduled_tasks_subcommand(state: &mut EngineState, args: &str) {
     state.push_effect(crate::app::EngineEffect::ScrollToBottom);
 }
 
+fn list_scheduled_tasks(archived: bool) -> String {
+    match crate::daemon_services::list_scheduled_tasks(archived) {
+        Ok(tasks) => render_scheduled_tasks(&tasks, archived),
+        Err(e) => format!("Could not load scheduled tasks: {e}"),
+    }
+}
+
 fn render_scheduled_tasks(
-    registry: &crate::daemon::ScheduledTaskRegistry,
+    tasks: &[crate::daemon_services::DaemonScheduledTaskSnapshot],
     archived: bool,
 ) -> String {
-    let tasks = if archived {
-        registry.list_archived()
-    } else {
-        registry.list_scheduled()
-    };
     if tasks.is_empty() {
         return if archived {
             "No archived agentic tasks.".to_owned()
@@ -551,10 +535,14 @@ fn render_scheduled_tasks(
     out
 }
 
-fn add_scheduled_task(
-    registry: &mut crate::daemon::ScheduledTaskRegistry,
+fn add_scheduled_task(rest: &str) -> Result<String, String> {
+    let request = scheduled_task_create_request(rest)?;
+    crate::daemon_services::create_scheduled_task(request)
+}
+
+fn scheduled_task_create_request(
     rest: &str,
-) -> Result<String, String> {
+) -> Result<crate::daemon_services::DaemonScheduledTaskCreate, String> {
     // `<cron-expr> <prompt>` — the cron expression is the first 5 fields.
     let tokens: Vec<&str> = rest.split_whitespace().collect();
     if tokens.len() < 6 {
@@ -562,20 +550,14 @@ fn add_scheduled_task(
     }
     let cron_expr = tokens[..5].join(" ");
     let prompt = tokens[5..].join(" ");
-    let schedule =
-        crate::daemon::parse_schedule(&cron_expr).map_err(|e| format!("bad cron: {e}"))?;
-
     let id = new_scheduled_task_id();
     let title = prompt.chars().take(48).collect::<String>();
-    let task = crate::daemon::ScheduledTask::new(
-        id.clone(),
+    Ok(crate::daemon_services::DaemonScheduledTaskCreate {
+        id,
         title,
+        cron_expr,
         prompt,
-        schedule,
-        std::time::SystemTime::now(),
-    );
-    registry.create(task)?;
-    Ok(id)
+    })
 }
 
 fn new_scheduled_task_id() -> String {
@@ -588,22 +570,17 @@ fn new_scheduled_task_id() -> String {
     format!("task-{nanos}-{seq}")
 }
 
-fn mutate_scheduled_task(
-    registry: &mut crate::daemon::ScheduledTaskRegistry,
-    verb: &str,
-    id: &str,
-    path: &std::path::Path,
-) -> String {
+fn mutate_scheduled_task(verb: &str, id: &str) -> String {
     if id.is_empty() {
         return format!("Usage: `/schedule tasks {verb} <id>`.");
     }
-    let result = match verb {
-        "pause" => registry.pause(id),
-        "resume" => registry.resume(id),
-        "archive" => registry.archive(id),
-        _ => Err("unknown verb".to_owned()),
+    let lifecycle = match verb {
+        "pause" => crate::daemon_services::DaemonScheduledTaskLifecycle::Paused,
+        "resume" => crate::daemon_services::DaemonScheduledTaskLifecycle::Active,
+        "archive" => crate::daemon_services::DaemonScheduledTaskLifecycle::Archived,
+        _ => return format!("Could not {verb} `{id}`: unknown verb"),
     };
-    match result.and_then(|()| registry.save(path).map_err(|e| e.to_string())) {
+    match crate::daemon_services::set_scheduled_task_lifecycle(id, lifecycle) {
         Ok(()) => format!("Task `{id}` {verb}d."),
         Err(e) => format!("Could not {verb} `{id}`: {e}"),
     }
@@ -611,7 +588,7 @@ fn mutate_scheduled_task(
 
 #[cfg(test)]
 mod tests {
-    use super::{add_scheduled_task, parse_loop_interval};
+    use super::{parse_loop_interval, scheduled_task_create_request};
 
     #[test]
     fn parse_loop_interval_accepts_ascii_interval_normal() {
@@ -628,12 +605,10 @@ mod tests {
 
     #[test]
     fn scheduled_task_add_generates_unique_ids_within_one_second_regression() {
-        let mut registry = crate::daemon::ScheduledTaskRegistry::new();
+        let first = scheduled_task_create_request("* * * * * check one").unwrap();
+        let second = scheduled_task_create_request("* * * * * check two").unwrap();
 
-        let first = add_scheduled_task(&mut registry, "* * * * * check one").unwrap();
-        let second = add_scheduled_task(&mut registry, "* * * * * check two").unwrap();
-
-        assert_ne!(first, second);
-        assert_eq!(registry.len(), 2);
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.title, "check one");
     }
 }

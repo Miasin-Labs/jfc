@@ -179,6 +179,19 @@ pub fn build_providers() -> ProvidersInit {
         prefer.get_or_insert("gemini");
     }
 
+    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let plugin_provider_count = super::provider_descriptors::append_discovered_provider_plugins(
+        &mut providers,
+        &project_root,
+    );
+    if plugin_provider_count > 0 {
+        tracing::info!(
+            target: "jfc::startup",
+            count = plugin_provider_count,
+            "registered plugin provider descriptors"
+        );
+    }
+
     if providers.is_empty() {
         // Last-resort fallback so we don't panic on empty list — OAuth provider will
         // surface a clean "no accounts" error on first stream.

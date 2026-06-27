@@ -1,7 +1,7 @@
 use crate::{app::App, theme::Theme};
 
 pub(crate) fn filtered_theme_choices(app: &App) -> Vec<&'static crate::theme::ThemeChoice> {
-    let query = app.theme_picker_input.trim().to_ascii_lowercase();
+    let query = app.theme_picker.input.trim().to_ascii_lowercase();
     Theme::choices()
         .iter()
         .filter(|choice| {
@@ -28,23 +28,17 @@ pub(super) fn open_theme_picker(app: &mut App) {
         );
         return;
     }
-    app.theme_preview_original = Some(app.theme);
-    app.theme_preview_original_name = Some(app.active_theme_name.clone());
-    app.theme_picker_input.clear();
-    app.theme_picker_selected = Some(app.active_theme_name.as_str())
+    let selected = Some(app.active_theme_name.as_str())
         .and_then(Theme::choice_by_name)
         .and_then(|choice| Theme::choices().iter().position(|c| c.name == choice.name))
         .unwrap_or(0);
-    app.show_theme_picker = true;
+    app.theme_picker
+        .open(app.theme, app.active_theme_name.as_str(), selected);
 }
 
 /// Close the picker and drop the preview snapshot.
 pub(super) fn close_theme_picker(app: &mut App) {
-    app.show_theme_picker = false;
-    app.theme_picker_input.clear();
-    app.theme_picker_selected = 0;
-    app.theme_preview_original = None;
-    app.theme_preview_original_name = None;
+    app.theme_picker.close();
 }
 
 /// Apply a theme for LIVE PREVIEW only — swap the active theme and bust the

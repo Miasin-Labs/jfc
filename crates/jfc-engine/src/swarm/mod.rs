@@ -24,7 +24,13 @@ pub mod dispatch;
 pub mod executor;
 pub mod mailbox;
 pub mod permission_sync;
+pub mod process_bridge_teammate;
+pub mod process_bridge_teammate_events;
+mod process_bridge_teammate_host_requests;
+mod process_bridge_teammate_io;
+mod process_bridge_teammate_loop;
 pub mod runner;
+pub mod spawn_lifecycle;
 pub mod team_helpers;
 pub mod teleport;
 pub mod types;
@@ -34,3 +40,12 @@ pub use types::*;
 
 #[cfg(test)]
 pub mod test_support;
+
+#[cfg(test)]
+mod process_bridge_teammate_test_support;
+
+#[cfg(test)]
+mod process_bridge_teammate_host_requests_tests;
+
+#[cfg(test)]
+mod process_bridge_teammate_tests;

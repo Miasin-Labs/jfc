@@ -7,11 +7,10 @@
 //! shadows it.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-
-use serde::Deserialize;
 
 use super::meta::{WorkflowMeta, parse_meta};
+use super::plugin_discovery::{WorkflowResource, plugin_workflow_resources_for};
+pub use super::plugin_discovery::{plugin_discovery_options_for, register_extra_plugin_dir};
 
 /// Where a workflow came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,113 +22,6 @@ pub enum WorkflowSource {
     Project,
 }
 
-// ── Plugin manifest ────────────────────────────────────────────────────────
-
-/// Deserialized form of a `.jfc-plugin.toml` manifest file.
-#[derive(Debug, Deserialize)]
-struct PluginManifest {
-    plugin: PluginMeta,
-}
-
-#[derive(Debug, Deserialize)]
-struct PluginMeta {
-    name: String,
-    workflows_dir: String,
-}
-
-static EXTRA_PLUGIN_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
-
-/// Register a plugin/workflow directory for the current process. This backs
-/// CLI `--plugin-dir` and the local-first equivalent of upstream `--plugin-url`.
-pub fn register_extra_plugin_dir(path: PathBuf) {
-    let slot = EXTRA_PLUGIN_DIRS.get_or_init(|| Mutex::new(Vec::new()));
-    let mut dirs = slot.lock().unwrap_or_else(|e| e.into_inner());
-    if !dirs.iter().any(|p| p == &path) {
-        dirs.push(path);
-    }
-}
-
-fn extra_plugin_dirs() -> Vec<PathBuf> {
-    EXTRA_PLUGIN_DIRS
-        .get()
-        .and_then(|slot| slot.lock().ok().map(|dirs| dirs.clone()))
-        .unwrap_or_default()
-}
-
-fn workflow_dir_for_plugin_root(path: &Path) -> PathBuf {
-    let manifest_path = path.join(".jfc-plugin.toml");
-    if let Ok(text) = std::fs::read_to_string(&manifest_path)
-        && let Ok(manifest) = toml::from_str::<PluginManifest>(&text)
-    {
-        let plugin = manifest.plugin;
-        let workflow_dir = plugin.workflows_dir;
-        let _plugin_name = plugin.name;
-        return path.join(workflow_dir);
-    }
-    let workflows = path.join("workflows");
-    if workflows.is_dir() {
-        workflows
-    } else {
-        path.to_path_buf()
-    }
-}
-
-fn plugin_name_for_root(path: &Path) -> Option<String> {
-    let manifest_path = path.join(".jfc-plugin.toml");
-    if let Ok(text) = std::fs::read_to_string(&manifest_path)
-        && let Ok(manifest) = toml::from_str::<PluginManifest>(&text)
-    {
-        return Some(manifest.plugin.name);
-    }
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.starts_with('.'))
-        .map(str::to_owned)
-}
-
-pub fn plugin_workflow_dirs_for(project_root: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let settings = crate::config::claude_settings::load_merged(project_root);
-    if let Some(home) = dirs::home_dir() {
-        push_plugin_workflow_dirs_in(&home.join(".claude/plugins"), &settings, &mut dirs);
-    }
-    if let Some(config) = dirs::config_dir() {
-        push_plugin_workflow_dirs_in(&config.join("jfc/plugins"), &settings, &mut dirs);
-    }
-    push_plugin_workflow_dirs_in(&project_root.join("plugins"), &settings, &mut dirs);
-    push_plugin_workflow_dirs_in(&project_root.join(".claude/plugins"), &settings, &mut dirs);
-    for path in extra_plugin_dirs() {
-        if plugin_name_for_root(&path)
-            .as_deref()
-            .is_none_or(|plugin| settings.plugin_enabled(plugin))
-        {
-            dirs.push(workflow_dir_for_plugin_root(&path));
-        }
-    }
-    dirs.sort();
-    dirs.dedup();
-    dirs
-}
-
-fn push_plugin_workflow_dirs_in(
-    plugins_root: &Path,
-    settings: &crate::config::ClaudeCompatibilityConfig,
-    dirs: &mut Vec<PathBuf>,
-) {
-    let Ok(entries) = std::fs::read_dir(plugins_root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if plugin_name_for_root(&path)
-            .as_deref()
-            .is_none_or(|plugin| settings.plugin_enabled(plugin))
-        {
-            dirs.push(workflow_dir_for_plugin_root(&path));
-        }
-    }
-}
-
 /// A discovered workflow: its metadata, source, and full script text.
 #[derive(Debug, Clone)]
 pub struct RegisteredWorkflow {
@@ -138,6 +30,7 @@ pub struct RegisteredWorkflow {
     pub source: WorkflowSource,
     pub script: String,
     pub path: Option<PathBuf>,
+    pub resource_path: Option<String>,
 }
 
 /// Built-in bundled workflows, embedded at compile time.
@@ -554,6 +447,25 @@ pub fn project_workflows_dir(project_root: &Path) -> PathBuf {
 
 /// Load all `*.js` workflows from a directory. Invalid scripts are skipped.
 fn load_dir(dir: &Path, source: WorkflowSource) -> Vec<RegisteredWorkflow> {
+    load_dir_with_resource_path(dir, source, None)
+}
+
+fn load_resource_dir(
+    resource: &WorkflowResource,
+    source: WorkflowSource,
+) -> Vec<RegisteredWorkflow> {
+    load_dir_with_resource_path(
+        resource.path.as_path(),
+        source,
+        Some(resource.resource_path.as_str()),
+    )
+}
+
+fn load_dir_with_resource_path(
+    dir: &Path,
+    source: WorkflowSource,
+    resource_path: Option<&str>,
+) -> Vec<RegisteredWorkflow> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -573,6 +485,7 @@ fn load_dir(dir: &Path, source: WorkflowSource) -> Vec<RegisteredWorkflow> {
                 source,
                 script,
                 path: Some(path),
+                resource_path: resource_path.map(str::to_owned),
             });
         }
     }
@@ -581,6 +494,7 @@ fn load_dir(dir: &Path, source: WorkflowSource) -> Vec<RegisteredWorkflow> {
 
 /// Built-in workflows as registered entries.
 fn builtins() -> Vec<RegisteredWorkflow> {
+    let resource_path = builtin_workflow_resource_path();
     BUILTINS
         .iter()
         .filter_map(|(_name, script)| {
@@ -591,9 +505,17 @@ fn builtins() -> Vec<RegisteredWorkflow> {
                 source: WorkflowSource::BuiltIn,
                 script: (*script).to_owned(),
                 path: None,
+                resource_path: resource_path.clone(),
             })
         })
         .collect()
+}
+
+fn builtin_workflow_resource_path() -> Option<String> {
+    super::plugin_discovery::builtin_workflow_resource_descriptors()
+        .into_iter()
+        .next()
+        .map(|descriptor| descriptor.path)
 }
 
 /// Discover all workflows, applying precedence project > user > plugin > built-in.
@@ -609,8 +531,8 @@ pub fn discover(project_root: &Path) -> Vec<RegisteredWorkflow> {
     for wf in builtins() {
         by_name.insert(wf.name.clone(), wf);
     }
-    for plugin_dir in plugin_workflow_dirs_for(project_root) {
-        for wf in load_dir(&plugin_dir, WorkflowSource::Plugin) {
+    for plugin_resource in plugin_workflow_resources_for(project_root) {
+        for wf in load_resource_dir(&plugin_resource, WorkflowSource::Plugin) {
             by_name.insert(wf.name.clone(), wf);
         }
     }
@@ -670,6 +592,10 @@ mod tests {
         let wf = resolve(tmp.path(), "bughunt").unwrap();
         assert_eq!(wf.name, "bughunt");
         assert_eq!(wf.source, WorkflowSource::BuiltIn);
+        assert_eq!(
+            wf.resource_path.as_deref(),
+            Some(jfc_plugin_host::BUILTIN_WORKFLOW_RESOURCE_PATH)
+        );
         assert!(wf.script.contains("export const meta"));
     }
 
@@ -753,7 +679,31 @@ mod tests {
         assert_eq!(wf.name, "plugin-demo");
         assert_eq!(wf.description, "Plugin demo workflow");
         assert_eq!(wf.source, WorkflowSource::Plugin);
+        assert_eq!(wf.resource_path, None);
         assert!(wf.script.contains("return 42"));
+    }
+
+    #[test]
+    fn resolve_plugin_workflow_keeps_resource_descriptor_path_normal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("my-plugin");
+        let workflows_dir = plugin_dir.join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join(".jfc-plugin.toml"),
+            "[plugin]\nname = \"my-plugin\"\nworkflows_dir = \"workflows\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workflows_dir.join("plugin-demo.js"),
+            "export const meta = { name: 'plugin-demo', description: 'Plugin demo workflow' }\nreturn 42",
+        )
+        .unwrap();
+
+        let wf = resolve(tmp.path(), "plugin-demo").unwrap();
+        let expected = workflows_dir.to_string_lossy().into_owned();
+        assert_eq!(wf.source, WorkflowSource::Plugin);
+        assert_eq!(wf.resource_path.as_deref(), Some(expected.as_str()));
     }
 
     #[test]

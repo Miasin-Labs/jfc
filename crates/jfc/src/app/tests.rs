@@ -682,9 +682,10 @@ fn app_new_resolves_cwd_normal() {
 fn switch_session_resets_state_normal() {
     let mut app = new_app();
     app.engine.compact_suppressed = true;
-    app.task_panel_selected = 5;
-    app.viewing_task_id = Some("t1".into());
-    app.viewing_task_expanded
+    app.task_panel.selected = 5;
+    app.task_panel.viewing_task_id = Some("t1".into());
+    app.task_panel
+        .viewing_expanded
         .insert("t1".into(), std::collections::HashSet::new());
     app.engine
         .task_completion_times
@@ -693,9 +694,9 @@ fn switch_session_resets_state_normal() {
     app.switch_session(Some(jfc_engine::ids::SessionId::new("ses_test_switch")));
 
     assert!(!app.engine.compact_suppressed);
-    assert_eq!(app.task_panel_selected, 0);
-    assert!(app.viewing_task_id.is_none());
-    assert!(app.viewing_task_expanded.is_empty());
+    assert_eq!(app.task_panel.selected, 0);
+    assert!(app.task_panel.viewing_task_id.is_none());
+    assert!(app.task_panel.viewing_expanded.is_empty());
     assert!(app.engine.task_completion_times.is_empty());
     assert_eq!(
         app.engine.current_session_id.as_ref().map(|s| s.as_str()),

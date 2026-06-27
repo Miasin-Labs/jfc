@@ -1256,7 +1256,7 @@ mod pure_helper_tests {
     fn ordered_sidebar_sessions_empty_app_normal() {
         let app = fake_app();
         // No saved sessions means empty result (the helper just orders
-        // app.session_meta which starts empty).
+        // app.session_sidebar.meta which starts empty).
         let sessions = ordered_sidebar_sessions(&app);
         assert!(sessions.is_empty());
     }
@@ -1590,6 +1590,162 @@ mod render_snapshot_tests {
 
         let text = buffer_text(&term);
         assert!(text.contains("/goal active"), "goal badge missing:\n{text}");
+    }
+
+    #[test]
+    fn status_row_renders_plugin_health_slot_normal() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+
+        let backend = TestBackend::new(80, 1);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::status::status(f, &app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("plugins 1 ok"),
+            "plugin badge missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn info_sidebar_renders_plugin_reload_digest_state_normal() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.plugins.reload_report = Some(jfc_plugin_host::PluginReloadReport {
+            diagnostics: jfc_plugin_host::PluginHostDiagnostics {
+                health: jfc_plugin_host::PluginHealthSummary {
+                    total: 1,
+                    active: 1,
+                    registered: 0,
+                    disabled: 0,
+                    failed: 0,
+                    error_count: 0,
+                },
+                counts: jfc_plugin_host::PluginDescriptorCounts {
+                    plugins: 1,
+                    active_plugins: 1,
+                    failed_plugins: 0,
+                    hooks: 0,
+                    services: 0,
+                    tools: 1,
+                    providers: 0,
+                    resources: 3,
+                    commands: 1,
+                    ui_slots: 1,
+                    ui_panels: 0,
+                    ui_widgets: 0,
+                    runtime_actions: 4,
+                    runtime_extensions: 2,
+                    agent_launches: 1,
+                    metrics: 1,
+                    errors: 0,
+                },
+                descriptor_digest: "bbbbbbbbbbbbbbbb".to_owned(),
+                descriptor_issues: vec![jfc_plugin_host::PluginDescriptorIssue {
+                    kind: jfc_plugin_host::PluginDescriptorIssueKind::MissingRuntimeAction,
+                    severity: jfc_plugin_host::PluginDescriptorIssueSeverity::Error,
+                    actionability:
+                        jfc_plugin_host::PluginDescriptorIssueActionability::AddRuntimeAction,
+                    plugin_id: jfc_plugin_sdk::PluginId::new("acme"),
+                    descriptor_kind: jfc_plugin_host::PluginDescriptorKind::UiWidget,
+                    descriptor_id: "q".to_owned(),
+                    target_plugin_id: jfc_plugin_sdk::PluginId::new("acme"),
+                    target_kind: jfc_plugin_host::PluginDescriptorTargetKind::RuntimeAction,
+                    target_id: "q.run".to_owned(),
+                    message: "descriptor references a missing runtime action".to_owned(),
+                    repair_action: jfc_plugin_host::PluginDescriptorRepairAction::AddRuntimeAction {
+                        plugin_id: jfc_plugin_sdk::PluginId::new("acme"),
+                        action_id: "q.run".to_owned(),
+                    },
+                    repair_hint:
+                        "Add runtime action 'q.run' to plugin 'acme', or point UI widget 'q' in plugin 'acme' at an existing runtime action."
+                            .to_owned(),
+                }],
+                active_plugins: Vec::new(),
+                failed_plugins: Vec::new(),
+            },
+            previous_descriptor_digest: Some("aaaaaaaaaaaaaaaa".to_owned()),
+            changed: Some(true),
+        });
+
+        let backend = TestBackend::new(64, 32);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::sidebar::info_sidebar(f, &mut app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(text.contains("Plugins"), "plugin section missing:\n{text}");
+        assert!(
+            text.contains("descriptors changed"),
+            "reload state missing:\n{text}"
+        );
+        assert!(
+            text.contains("digest bbbbbbbbbbbbbbbb"),
+            "descriptor digest missing:\n{text}"
+        );
+        assert!(
+            text.contains("actions 4"),
+            "runtime action count missing:\n{text}"
+        );
+        assert!(
+            text.contains("descriptor issues 1"),
+            "descriptor issue count missing:\n{text}"
+        );
+        assert!(
+            text.contains("error add_runtime_action"),
+            "descriptor issue severity missing:\n{text}"
+        );
+        assert!(
+            text.contains("diagnostics action Run Plugin Diagnostics"),
+            "plugin diagnostics action missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn info_sidebar_renders_plugin_widget_rows_normal() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.plugins.ui_widget_descriptors = vec![
+            jfc_plugin_sdk::UiWidgetDescriptor::new(
+                jfc_plugin_sdk::PluginId::new("demo"),
+                jfc_plugin_sdk::UiMutationScope::InfoSidebar,
+                "review.queue",
+                "Review Queue",
+                jfc_plugin_sdk::UiWidgetKind::Text,
+            )
+            .with_body("3 open reviews")
+            .with_priority(50),
+        ];
+
+        let backend = TestBackend::new(80, 36);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::sidebar::info_sidebar(f, &mut app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("Plugin widgets"),
+            "widgets section missing:\n{text}"
+        );
+        assert!(
+            text.contains("Review Queue"),
+            "widget label missing:\n{text}"
+        );
+        assert!(
+            text.contains("3 open reviews"),
+            "widget body missing:\n{text}"
+        );
     }
 
     #[test]
@@ -2601,7 +2757,7 @@ mod render_snapshot_tests {
             bt.messages = vec!["[worker-started] pid=1\n".into()];
             bt.chat_messages.clear();
         }
-        app.viewing_task_id = Some("tx".to_string());
+        app.task_panel.viewing_task_id = Some("tx".to_string());
 
         let backend = TestBackend::new(90, 24);
         let mut term = Terminal::new(backend).expect("terminal");
@@ -2629,7 +2785,7 @@ mod render_snapshot_tests {
             bt.messages = vec!["[17s] Bash".into(), "[18s] Read".into()];
             bt.chat_messages.clear();
         }
-        app.viewing_task_id = Some("tx".to_string());
+        app.task_panel.viewing_task_id = Some("tx".to_string());
 
         let backend = TestBackend::new(90, 24);
         let mut term = Terminal::new(backend).expect("terminal");
@@ -2670,7 +2826,7 @@ mod render_snapshot_tests {
             ));
             bt.chat_messages.clear();
         }
-        app.viewing_task_id = Some("tx".to_string());
+        app.task_panel.viewing_task_id = Some("tx".to_string());
 
         let backend = TestBackend::new(100, 24);
         let mut term = Terminal::new(backend).expect("terminal");
@@ -2862,8 +3018,8 @@ mod render_snapshot_tests {
             .insert(task.id.as_str().to_string(), bt);
 
         // Enter detail mode on the first task.
-        app.task_panel_detail = true;
-        app.task_panel_selected = 0;
+        app.task_panel.detail = true;
+        app.task_panel.selected = 0;
         let _ = app.engine.task_store.list(DeletedFilter::Exclude);
 
         let backend = TestBackend::new(100, 30);
@@ -2921,8 +3077,8 @@ mod render_snapshot_tests {
             .background_tasks
             .insert(task.id.as_str().to_string(), bt);
 
-        app.task_panel_detail = true;
-        app.task_panel_selected = 0;
+        app.task_panel.detail = true;
+        app.task_panel.selected = 0;
         let _ = app.engine.task_store.list(DeletedFilter::Exclude);
 
         let backend = TestBackend::new(100, 30);

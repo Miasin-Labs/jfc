@@ -3367,6 +3367,7 @@ async fn execute_tool_task_kind_rejects_with_streaming_message_robust() {
             category: None,
             run_in_background: false,
             model: None,
+            launcher: None,
             effort: None,
             name: None,
             team_name: None,

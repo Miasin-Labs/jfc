@@ -77,6 +77,20 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     if plugins_disabled {
         push1!("plugins off".to_owned(), muted, 62);
     }
+    if super::status_plugins::has_status_line_slot(
+        &app.plugins.ui_slots,
+        jfc_plugin_host::BUILTIN_PLUGIN_HEALTH_SLOT_ID,
+    ) && let Some(label) = super::status_plugins::plugin_health_badge(&app.plugins.health)
+    {
+        let style = if super::status_plugins::plugin_health_is_alert(&app.plugins.health) {
+            Style::default().fg(t.error)
+        } else if super::status_plugins::plugin_health_is_warning(&app.plugins.health) {
+            alert
+        } else {
+            muted
+        };
+        push1!(label, style, 63);
+    }
     // Problems / actionable state get the highest priority.
     let mcp_down: Vec<&str> = app
         .engine
@@ -118,7 +132,7 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
     }
     if app.leader_key_active {
         push1!("leader key".to_owned(), Style::default().fg(t.accent), 90);
-    } else if app.viewing_task_id.is_some() {
+    } else if app.task_panel.viewing_task_id.is_some() {
         push1!("agent view".to_owned(), Style::default().fg(t.accent), 86);
     }
     if !app.engine.queued_prompts.is_empty() {
@@ -138,7 +152,11 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
             87,
         );
     }
-    if let Some(goal) = app.engine.goal.as_ref() {
+    if super::status_plugins::has_status_line_slot(
+        &app.plugins.ui_slots,
+        jfc_plugin_host::BUILTIN_GOAL_STATUS_SLOT_ID,
+    ) && let Some(goal) = app.engine.goal.as_ref()
+    {
         push1!(
             super::status_goal::goal_status_badge(goal),
             activity.add_modifier(Modifier::BOLD),
@@ -148,6 +166,12 @@ pub(super) fn status(f: &mut Frame, app: &App, area: Rect) {
 
     if app.engine.fast_mode {
         push1!("fast".to_owned(), activity, 60);
+    }
+    if let Some(label) = super::status_plugins::cache_hit_badge(
+        &app.plugins.metric_descriptors,
+        &app.engine.usage_by_model,
+    ) {
+        push1!(label, muted, 58);
     }
     if app.engine.effort_state.current.is_some() {
         push1!(effort_status_badge(app), muted, 45);

@@ -5,7 +5,10 @@
 //! everything and adds the worker execution entry point that depends on
 //! the full jfc runtime (providers, tools, worktrees).
 
+mod background_worktree;
 pub mod worker;
+mod worker_mcp;
+mod worker_state;
 
 // Re-export the full jfc-daemon public API so existing callsites keep working.
 pub use jfc_daemon::*;

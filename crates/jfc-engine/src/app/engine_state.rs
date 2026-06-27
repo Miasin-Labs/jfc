@@ -2037,6 +2037,17 @@ impl EngineState {
             );
             return false;
         }
+        if let Some(policy) = crate::tools::external_tool_policy(&tool.kind) {
+            let result = policy.approval_policy.needs_interactive_approval();
+            tracing::debug!(
+                target: "jfc::app",
+                tool_kind = name,
+                plugin_id = %policy.plugin_id,
+                result,
+                "tool_needs_approval"
+            );
+            return result;
+        }
         let result = matches!(
             tool.kind,
             ToolKind::Bash | ToolKind::Write | ToolKind::Edit | ToolKind::ApplyPatch

@@ -37,10 +37,10 @@ pub(super) fn theme_picker(f: &mut Frame, app: &mut App) {
         ])
         .split(inner);
 
-    let query = if app.theme_picker_input.is_empty() {
+    let query = if app.theme_picker.input.is_empty() {
         "type to filter themes".to_string()
     } else {
-        app.theme_picker_input.clone()
+        app.theme_picker.input.clone()
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -58,7 +58,8 @@ pub(super) fn theme_picker(f: &mut Frame, app: &mut App) {
     let filtered = filtered_theme_choices(app);
     let visible_rows = chunks[1].height.max(1) as usize;
     let offset = app
-        .theme_picker_selected
+        .theme_picker
+        .selected
         .saturating_sub(visible_rows.saturating_sub(1));
     let rows: Vec<Line<'static>> = filtered
         .iter()
@@ -66,7 +67,7 @@ pub(super) fn theme_picker(f: &mut Frame, app: &mut App) {
         .skip(offset)
         .take(visible_rows)
         .map(|(idx, choice)| {
-            let selected = idx == app.theme_picker_selected;
+            let selected = idx == app.theme_picker.selected;
             let marker = if selected { "▶" } else { " " };
             let sample_theme = crate::theme::Theme::by_name(choice.name).unwrap_or(t);
             Line::from(vec![
@@ -97,7 +98,7 @@ pub(super) fn theme_picker(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(rows), chunks[1]);
 
     let description = filtered
-        .get(app.theme_picker_selected)
+        .get(app.theme_picker.selected)
         .map(|choice| choice.description)
         .unwrap_or("No themes match the current filter.");
     f.render_widget(

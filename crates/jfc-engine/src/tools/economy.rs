@@ -597,6 +597,7 @@ impl jfc_economy::reporting::AgentInvoker for EconomyAgentInvoker {
             category: None,
             run_in_background: false,
             model: Some(self.model.as_str().to_string()),
+            launcher: None,
             effort: None,
             name: Some(prompt.agent_id.label().to_string()),
             team_name: None,

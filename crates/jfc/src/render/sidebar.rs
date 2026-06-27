@@ -1,7 +1,5 @@
 use super::*;
 pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
-    use jfc_core::LspStatus;
-
     let t = app.theme;
 
     let block = Block::default()
@@ -41,7 +39,8 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         Some(id) => {
             let id_str = id.as_str().to_owned();
             let title = app
-                .session_meta
+                .session_sidebar
+                .meta
                 .iter()
                 .find(|m| m.id == *id)
                 .map(|m| m.display_title())
@@ -150,162 +149,50 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
 
-    let total_cache_read: u64 = app
-        .engine
-        .usage_by_model
-        .values()
-        .map(|u| u.cache_read_tokens)
-        .sum();
-    let total_input: u64 = app
-        .engine
-        .usage_by_model
-        .values()
-        .map(|u| u.input_tokens)
-        .sum();
-    if total_cache_read > 0 && total_input > 0 {
-        let global_hit_pct = (total_cache_read as f64 / total_input as f64 * 100.0).min(100.0);
-        lines.push(Line::from(vec![
-            Span::styled("cache hit: ", Style::default().fg(t.text_muted)),
-            Span::styled(
-                format!("{:.0}%", global_hit_pct),
-                Style::default().fg(t.success),
-            ),
-        ]));
-    }
-
     lines.push(Line::from(""));
 
-    if !app.engine.usage_by_model.is_empty() {
-        lines.push(section("Usage by model"));
+    super::sidebar_panels::push_metrics_section(&mut lines, app, inner.width, t);
+    super::sidebar_panels::push_plugin_panels_section(&mut lines, app, inner.width, t);
+    super::sidebar_panels::push_plugin_widgets_section(&mut lines, app, inner.width, t);
+    super::sidebar_panels::push_usage_by_model_section(&mut lines, app, inner.width, t);
+    super::sidebar_panels::push_lsp_section(&mut lines, app, inner.width, t);
+    super::sidebar_panels::push_mcp_section(&mut lines, app, inner.width, t);
 
-        let mut model_entries: Vec<(&String, &jfc_core::ModelUsage)> =
-            app.engine.usage_by_model.iter().collect();
-        model_entries.sort_by_key(|(k, _)| k.as_str());
-
-        for (model_name, usage) in &model_entries {
-            // Model name is a sub-heading: accent color (cyan) but
-            // NOT bold, so it visibly demotes below the section
-            // header (`Usage by model` in white bold). Three weights
-            // — section / sub / body — read as a clear ladder.
+    let plugin_rows = super::status_plugins::plugin_health_detail_render_rows(
+        &app.plugins.health,
+        app.plugins.reload_report.as_ref(),
+        &app.plugins.runtime_action_descriptors,
+    );
+    if !plugin_rows.is_empty() {
+        lines.push(section("Plugins"));
+        let plugin_health = super::status_plugins::plugin_detail_health(
+            &app.plugins.health,
+            app.plugins.reload_report.as_ref(),
+        );
+        let plugin_color = if super::status_plugins::plugin_health_is_alert(plugin_health) {
+            t.error
+        } else if super::status_plugins::plugin_health_is_warning(plugin_health) {
+            t.warning
+        } else {
+            t.success
+        };
+        for row in &plugin_rows {
+            let color = match row.tone {
+                super::status_plugins::PluginDetailRowTone::Health => plugin_color,
+                super::status_plugins::PluginDetailRowTone::Muted => t.text_muted,
+                super::status_plugins::PluginDetailRowTone::Error => t.error,
+                super::status_plugins::PluginDetailRowTone::Warning => t.warning,
+            };
             lines.push(Line::from(vec![Span::styled(
                 format!(
-                    " {}:",
-                    truncate_str(model_name, inner.width.saturating_sub(2) as usize)
+                    "  {}",
+                    truncate_str(&row.text, inner.width.saturating_sub(2) as usize)
                 ),
-                Style::default().fg(t.accent),
-            )]));
-
-            lines.push(Line::from(vec![Span::styled(
-                format!(
-                    "  {} in, {} out",
-                    fmt_number(usage.input_tokens),
-                    fmt_number(usage.output_tokens),
-                ),
-                Style::default().fg(t.text_muted),
-            )]));
-
-            if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
-                lines.push(Line::from(vec![Span::styled(
-                    format!(
-                        "  {} cache read, {} write",
-                        fmt_number(usage.cache_read_tokens),
-                        fmt_number(usage.cache_write_tokens),
-                    ),
-                    Style::default().fg(t.text_muted),
-                )]));
-
-                let hit_pct = usage.cache_hit_pct();
-                if hit_pct > 0.0 {
-                    lines.push(Line::from(vec![
-                        Span::styled("  cache hit: ", Style::default().fg(t.text_muted)),
-                        Span::styled(format!("{:.0}%", hit_pct), Style::default().fg(t.success)),
-                    ]));
-                }
-            }
-
-            if let Some(cost) = usage.cost_usd {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  ${:.2} spent", cost),
-                    Style::default().fg(t.text_secondary),
-                )]));
-            }
-        }
-
-        let total = jfc_engine::cost::total_cost(&app.engine.usage_by_model);
-        // Hide the cost line on free / unauthenticated runs (matches
-        // the status bar's gate at >$0.001). Showing `Total cost:
-        // $0.00` on every fresh session was visual noise — the line
-        // only earns its row once there's a cost to talk about.
-        if total > 0.001 {
-            lines.push(Line::from(vec![Span::styled(
-                format!("Total cost: {}", jfc_engine::cost::fmt_cost(total)),
-                Style::default().fg(t.text_muted),
+                Style::default().fg(color),
             )]));
         }
-
         lines.push(Line::from(""));
     }
-
-    lines.push(section("LSP"));
-
-    if app.engine.lsp_servers.is_empty() {
-        // Wrap the placeholder line manually based on the inner
-        // sidebar width — the parent Paragraph doesn't wrap, so a
-        // verbose hint like "LSPs will activate as files are read"
-        // got hard-clipped at the column boundary as `… are rea`.
-        // Word-wrap into one or more rows so the message is readable.
-        for row in wrap_text_to_width("LSPs will activate as files are read", inner.width as usize)
-        {
-            lines.push(Line::from(vec![Span::styled(
-                row,
-                Style::default().fg(t.text_muted),
-            )]));
-        }
-    } else {
-        for srv in &app.engine.lsp_servers {
-            let (dot_color, label) = match srv.status {
-                LspStatus::Active => (t.success, "Active"),
-                LspStatus::Inactive => (t.text_muted, "Inactive"),
-            };
-            lines.push(Line::from(vec![
-                Span::styled("• ", Style::default().fg(dot_color)),
-                Span::styled(
-                    truncate_str(&srv.name, inner.width.saturating_sub(12) as usize),
-                    Style::default().fg(t.accent),
-                ),
-                Span::raw(" "),
-                Span::styled(label, Style::default().fg(dot_color)),
-            ]));
-        }
-    }
-
-    lines.push(Line::from(""));
-
-    // MCP section — v126 cli.js renders MCP server status alongside LSP.
-    // Layout mirrors the LSP block above: bold header, one row per server
-    // formatted as `<dot> <name>`, blank separator below.
-    lines.push(section("MCP"));
-
-    if app.engine.mcp_servers.is_empty() {
-        for row in wrap_text_to_width("No MCP servers configured", inner.width as usize) {
-            lines.push(Line::from(vec![Span::styled(
-                row,
-                Style::default().fg(t.text_muted),
-            )]));
-        }
-    } else {
-        for srv in &app.engine.mcp_servers {
-            lines.push(Line::from(vec![
-                Span::styled("● ", Style::default().fg(mcp_status_color(srv.status, t))),
-                Span::styled(
-                    truncate_str(&srv.name, inner.width.saturating_sub(2) as usize),
-                    Style::default().fg(t.text_secondary),
-                ),
-            ]));
-        }
-    }
-
-    lines.push(Line::from(""));
 
     // Team section - show active teammates. Single-blank separator
     // is enough; the section() helper's gutter glyph already gives
@@ -407,10 +294,10 @@ pub(super) fn info_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Clamp scroll so at least one row stays visible.
     let total_body_rows = lines.len() as u16;
     let max_scroll = total_body_rows.saturating_sub(body_area.height.max(1));
-    if app.info_sidebar_scroll > max_scroll {
-        app.info_sidebar_scroll = max_scroll;
+    if app.info_sidebar.scroll > max_scroll {
+        app.info_sidebar.scroll = max_scroll;
     }
-    let scroll_y = app.info_sidebar_scroll;
+    let scroll_y = app.info_sidebar.scroll;
     f.render_widget(
         Paragraph::new(lines)
             .scroll((scroll_y, 0))

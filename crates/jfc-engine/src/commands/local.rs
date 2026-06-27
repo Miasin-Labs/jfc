@@ -812,3 +812,115 @@ pub(super) fn handle_rewind_command(state: &mut EngineState, n_str: &str) {
     );
     state.messages.push(jfc_core::ChatMessage::assistant(body));
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::stream::empty;
+    use jfc_provider::{
+        CompletionResponse, EventStream, ModelInfo, Provider, ProviderMessage, StreamOptions,
+        TokenUsage,
+    };
+
+    use super::*;
+
+    struct NoopProvider;
+
+    impl jfc_provider::seal::Sealed for NoopProvider {}
+
+    #[async_trait::async_trait]
+    impl Provider for NoopProvider {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        fn available_models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+
+        async fn stream(
+            &self,
+            _messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<EventStream> {
+            Ok(Box::pin(empty()))
+        }
+
+        async fn complete(
+            &self,
+            _messages: Vec<ProviderMessage>,
+            _options: &StreamOptions,
+        ) -> anyhow::Result<CompletionResponse> {
+            Ok(CompletionResponse {
+                content: String::new(),
+                usage: TokenUsage::default(),
+                context_signals: None,
+                reasoning: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dump_context_uses_descriptor_backed_plugin_agent_skill_roots_normal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let util_skill = tmp.path().join("plugins/util/skills/format");
+        let util_agent = tmp.path().join("plugins/util/agents");
+        let sec_root = tmp.path().join("plugins/sec");
+        let sec_skill = sec_root.join("skills/audit");
+        let sec_agent = sec_root.join("agents");
+        std::fs::create_dir_all(&util_skill).expect("create util skill");
+        std::fs::create_dir_all(&util_agent).expect("create util agent");
+        std::fs::create_dir_all(&sec_skill).expect("create sec skill");
+        std::fs::create_dir_all(&sec_agent).expect("create sec agent");
+        std::fs::create_dir_all(tmp.path().join(".claude")).expect("create settings dir");
+
+        std::fs::write(
+            tmp.path().join("plugins/util/.jfc-plugin.toml"),
+            "[plugin]\nname = \"util-plugin\"\n",
+        )
+        .expect("write util manifest");
+        std::fs::write(
+            sec_root.join(".jfc-plugin.toml"),
+            "[plugin]\nname = \"sec-plugin\"\n",
+        )
+        .expect("write sec manifest");
+        std::fs::write(util_skill.join("SKILL.md"), "---\nname: format\n---\nbody")
+            .expect("write util skill");
+        std::fs::write(
+            util_agent.join("helper.md"),
+            "---\nname: helper\n---\nHelp format things.",
+        )
+        .expect("write util agent");
+        std::fs::write(sec_skill.join("SKILL.md"), "---\nname: audit\n---\nbody")
+            .expect("write sec skill");
+        std::fs::write(
+            sec_agent.join("reviewer.md"),
+            "---\nname: reviewer\n---\nReview things.",
+        )
+        .expect("write sec agent");
+        std::fs::write(
+            tmp.path().join(".claude/settings.json"),
+            r#"{ "enabledPlugins": { "sec-plugin@local": false } }"#,
+        )
+        .expect("write settings");
+
+        let mut state = EngineState::new(Arc::new(NoopProvider), "test-model");
+        state.cwd = tmp.path().to_string_lossy().into_owned();
+
+        crate::commands::run_command(&mut state, "/dump-context", None).await;
+
+        let report = state
+            .messages
+            .last()
+            .expect("dump report")
+            .parts
+            .iter()
+            .map(jfc_core::MessagePart::text_only)
+            .collect::<String>();
+        assert!(report.contains("`util:format`"), "{report}");
+        assert!(report.contains("**util:helper**"), "{report}");
+        assert!(!report.contains("`sec:audit`"), "{report}");
+        assert!(!report.contains("**sec:reviewer**"), "{report}");
+    }
+}

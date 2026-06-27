@@ -5,6 +5,25 @@ mod catalog;
 mod code_navigation;
 mod daemon;
 mod defs;
+mod descriptor_builtin_route_kind;
+mod descriptor_builtin_routes;
+mod descriptor_catalog;
+#[cfg(test)]
+mod descriptor_discovery_tests;
+mod descriptor_external_routes;
+#[cfg(test)]
+mod descriptor_external_tests;
+mod descriptor_filesystem_defs;
+mod descriptor_filesystem_routes;
+mod descriptor_process_bridge;
+mod descriptor_router;
+#[cfg(test)]
+mod descriptor_router_tests;
+mod descriptor_search_defs;
+mod descriptor_shell_defs;
+mod descriptor_shell_routes;
+#[cfg(test)]
+mod descriptor_shell_tests;
 mod design;
 mod discovery;
 mod dispatch;
@@ -49,6 +68,12 @@ pub use bash::{
     BashTaskSnapshot, CancelOutcome, background_running_foreground_bash, bash_task_command,
     bash_task_is_running, cancel_bash_task, list_bash_tasks,
 };
+pub use descriptor_catalog::{
+    ExternalToolDescriptorReload, register_discovered_plugin_tool_descriptors,
+    register_external_tool_descriptors, reload_discovered_plugin_tool_descriptors,
+};
+pub use descriptor_router::builtin_tool_descriptors;
+pub(crate) use descriptor_router::external_tool_policy;
 pub use dispatch::{execute_tool, execute_tool_with_runtime_id};
 
 // plan↔task linkage hook, shared by the manual TaskDone path and the

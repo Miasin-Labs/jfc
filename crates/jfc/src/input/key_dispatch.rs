@@ -165,6 +165,10 @@ pub async fn handle_key(
         return result;
     }
 
+    if let Some(result) = focused_widgets::handle_focused_widget_key(app, key, tx).await {
+        return result;
+    }
+
     // ─── User-configured keybindings (keybindings.toml) ──────────────────
     // Check before built-in bindings so users can override defaults.
     // Uses run_slash_command so actions stay in sync with their slash
@@ -426,9 +430,7 @@ async fn handle_command_keys(
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
-            app.show_palette = true;
-            app.palette_input.clear();
-            app.palette_selected = 0;
+            app.palette.open();
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('m')) => {
@@ -436,11 +438,11 @@ async fn handle_command_keys(
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
-            app.show_sidebar = !app.show_sidebar;
-            if app.show_sidebar {
-                app.session_meta = jfc_session::list_sessions_with_metadata().await;
-                app.session_selected = 0;
-                app.session_list_state.select(Some(0));
+            app.session_sidebar.visible = !app.session_sidebar.visible;
+            if app.session_sidebar.visible {
+                app.session_sidebar.meta = jfc_session::list_sessions_with_metadata().await;
+                app.session_sidebar.selected = 0;
+                app.session_sidebar.list.select(Some(0));
             }
             Some(Ok(false))
         }
@@ -450,11 +452,11 @@ async fn handle_command_keys(
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('i')) => {
-            app.show_info_sidebar = !app.show_info_sidebar;
+            app.info_sidebar.visible = !app.info_sidebar.visible;
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-            app.show_info_sidebar = !app.show_info_sidebar;
+            app.info_sidebar.visible = !app.info_sidebar.visible;
             Some(Ok(false))
         }
         // Ctrl+T cycles the expanded view: none → tasks → teammates → none.
@@ -476,14 +478,14 @@ async fn handle_command_keys(
                     .background_tasks
                     .values()
                     .any(|bt| bt.status.is_alive());
-            app.expanded_view = match app.expanded_view {
+            app.task_panel.expanded_view = match app.task_panel.expanded_view {
                 ExpandedView::None => ExpandedView::Tasks,
                 ExpandedView::Tasks if has_teammates => ExpandedView::Teammates,
                 ExpandedView::Tasks => ExpandedView::None,
                 ExpandedView::Teammates => ExpandedView::None,
             };
-            // Sync the legacy show_task_panel bool for backward compat
-            app.show_task_panel = app.expanded_view == ExpandedView::Tasks;
+            // Keep the task panel's visibility aligned with the expanded view.
+            app.task_panel.visible = app.task_panel.expanded_view == ExpandedView::Tasks;
             Some(Ok(false))
         }
         // Alt+S opens the session picker popup — same shape as the
@@ -499,20 +501,20 @@ async fn handle_command_keys(
         // Alt+Up / Alt+Down scroll the right-side info sidebar when it's
         // visible — surfaces overflow rows from the Tasks section without
         // stealing the main transcript scroll keys.
-        (KeyModifiers::ALT, KeyCode::Up) if app.show_info_sidebar => {
-            app.info_sidebar_scroll = app.info_sidebar_scroll.saturating_sub(2);
+        (KeyModifiers::ALT, KeyCode::Up) if app.info_sidebar.visible => {
+            app.info_sidebar.scroll = app.info_sidebar.scroll.saturating_sub(2);
             Some(Ok(false))
         }
-        (KeyModifiers::ALT, KeyCode::Down) if app.show_info_sidebar => {
-            app.info_sidebar_scroll = app.info_sidebar_scroll.saturating_add(2);
+        (KeyModifiers::ALT, KeyCode::Down) if app.info_sidebar.visible => {
+            app.info_sidebar.scroll = app.info_sidebar.scroll.saturating_add(2);
             Some(Ok(false))
         }
-        (KeyModifiers::ALT, KeyCode::PageUp) if app.show_info_sidebar => {
-            app.info_sidebar_scroll = app.info_sidebar_scroll.saturating_sub(10);
+        (KeyModifiers::ALT, KeyCode::PageUp) if app.info_sidebar.visible => {
+            app.info_sidebar.scroll = app.info_sidebar.scroll.saturating_sub(10);
             Some(Ok(false))
         }
-        (KeyModifiers::ALT, KeyCode::PageDown) if app.show_info_sidebar => {
-            app.info_sidebar_scroll = app.info_sidebar_scroll.saturating_add(10);
+        (KeyModifiers::ALT, KeyCode::PageDown) if app.info_sidebar.visible => {
+            app.info_sidebar.scroll = app.info_sidebar.scroll.saturating_add(10);
             Some(Ok(false))
         }
         (KeyModifiers::CONTROL, KeyCode::Char('v')) => cmd_paste_clipboard_image(app),
@@ -616,13 +618,14 @@ async fn handle_command_keys(
         // needed to *enter* the view. Without this the user had to type
         // Ctrl+X → → → → → to walk through five running agents.
         (KeyModifiers::NONE, KeyCode::Right) | (KeyModifiers::NONE, KeyCode::Left)
-            if app.viewing_task_id.is_some() && !input_has_text(app) =>
+            if app.task_panel.viewing_task_id.is_some() && !input_has_text(app) =>
         {
             let task_ids: Vec<String> = crate::render::fleet_ordered_task_ids(app);
             if task_ids.is_empty() {
                 return Some(Ok(false));
             }
             let pos = app
+                .task_panel
                 .viewing_task_id
                 .as_ref()
                 .and_then(|id| task_ids.iter().position(|t| t == id))
@@ -633,32 +636,32 @@ async fn handle_command_keys(
                 _ => pos,
             };
             if next != pos {
-                app.viewing_task_id = Some(task_ids[next].clone());
+                app.task_panel.viewing_task_id = Some(task_ids[next].clone());
                 app.scroll_to_bottom();
             }
             Some(Ok(false))
         }
         (KeyModifiers::NONE, KeyCode::Up)
-            if app.viewing_task_id.is_some() && !input_has_text(app) =>
+            if app.task_panel.viewing_task_id.is_some() && !input_has_text(app) =>
         {
             // Up exits the task view back to the main transcript —
             // matches the leader-mode `k` behavior so muscle memory is
             // consistent across modes. Per-task expansion state stays
-            // in `app.viewing_task_expanded` so re-entering the same
+            // in `app.task_panel.viewing_expanded` so re-entering the same
             // task restores what was expanded.
-            app.viewing_task_id = None;
+            app.task_panel.viewing_task_id = None;
             app.scroll_to_bottom();
             Some(Ok(false))
         }
         (KeyModifiers::NONE, KeyCode::Down)
-            if app.viewing_task_id.is_some() && !input_has_text(app) =>
+            if app.task_panel.viewing_task_id.is_some() && !input_has_text(app) =>
         {
             // Down jumps to the most recently spawned task — useful
             // when several agents are running and you want the one
             // that just kicked off.
             let task_ids: Vec<String> = crate::render::fleet_ordered_task_ids(app);
             if let Some(last) = task_ids.last() {
-                app.viewing_task_id = Some(last.clone());
+                app.task_panel.viewing_task_id = Some(last.clone());
                 app.scroll_to_bottom();
             }
             Some(Ok(false))
@@ -961,8 +964,8 @@ fn cmd_handle_escape(
         );
         return Some(Ok(false));
     }
-    if app.viewing_task_id.is_some() {
-        app.viewing_task_id = None;
+    if app.task_panel.viewing_task_id.is_some() {
+        app.task_panel.viewing_task_id = None;
         return Some(Ok(false));
     }
 
@@ -1440,7 +1443,7 @@ fn handle_arrow_history_keys(app: &mut App, key: event::KeyEvent) -> Option<anyh
             // memory as VS Code's command-palette `↓` to reach the
             // results list.
             if !input_has_text(app)
-                && app.viewing_task_id.is_none()
+                && app.task_panel.viewing_task_id.is_none()
                 && app
                     .engine
                     .background_tasks
@@ -1459,7 +1462,7 @@ fn handle_arrow_history_keys(app: &mut App, key: event::KeyEvent) -> Option<anyh
                     .collect();
                 alive_ids.sort();
                 if let Some(latest) = alive_ids.last().cloned() {
-                    app.viewing_task_id = Some(latest);
+                    app.task_panel.viewing_task_id = Some(latest);
                     app.scroll_to_bottom();
                 }
                 return Some(Ok(false));
@@ -1489,6 +1492,7 @@ fn handle_leader_key_keys(
             KeyCode::Down | KeyCode::Char('j') => {
                 if task_count > 0 {
                     let current_pos = app
+                        .task_panel
                         .viewing_task_id
                         .as_ref()
                         .and_then(|id| task_ids.iter().position(|t| t == id));
@@ -1496,27 +1500,27 @@ fn handle_leader_key_keys(
                         None => 0,
                         Some(i) => (i + 1).min(task_count - 1),
                     };
-                    app.viewing_task_id = task_ids.into_iter().nth(next);
+                    app.task_panel.viewing_task_id = task_ids.into_iter().nth(next);
                     app.scroll_to_bottom();
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                app.viewing_task_id = None;
+                app.task_panel.viewing_task_id = None;
                 app.scroll_to_bottom();
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                if let Some(ref id) = app.viewing_task_id.clone() {
+                if let Some(ref id) = app.task_panel.viewing_task_id.clone() {
                     let pos = task_ids.iter().position(|t| t == id).unwrap_or(0);
                     if pos > 0 {
-                        app.viewing_task_id = task_ids.into_iter().nth(pos - 1);
+                        app.task_panel.viewing_task_id = task_ids.into_iter().nth(pos - 1);
                     }
                 }
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                if let Some(ref id) = app.viewing_task_id.clone() {
+                if let Some(ref id) = app.task_panel.viewing_task_id.clone() {
                     let pos = task_ids.iter().position(|t| t == id).unwrap_or(0);
                     if pos + 1 < task_count {
-                        app.viewing_task_id = task_ids.into_iter().nth(pos + 1);
+                        app.task_panel.viewing_task_id = task_ids.into_iter().nth(pos + 1);
                     }
                 }
             }
@@ -1527,7 +1531,7 @@ fn handle_leader_key_keys(
             // BackgroundTask status drives the fan UI, so flipping it
             // stops the visual bleed and lets the user move on.
             KeyCode::Char('x') => {
-                if let Some(id) = app.viewing_task_id.clone()
+                if let Some(id) = app.task_panel.viewing_task_id.clone()
                     && let Some(bt) = app.engine.background_tasks.get_mut(&id)
                     && matches!(
                         bt.status,
@@ -1548,7 +1552,7 @@ fn handle_leader_key_keys(
             // `r` retries: re-queue the original task description as a
             // fresh user prompt so the leader dispatches a new agent.
             KeyCode::Char('r') => {
-                if let Some(id) = app.viewing_task_id.clone()
+                if let Some(id) = app.task_panel.viewing_task_id.clone()
                     && let Some(bt) = app.engine.background_tasks.get(&id)
                 {
                     let prompt = bt.description.clone();

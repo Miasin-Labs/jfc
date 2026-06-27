@@ -14,7 +14,7 @@ pub struct TaskStatusPart {
     pub model: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TaskInput {
     pub description: String,
     pub prompt: String,
@@ -22,6 +22,11 @@ pub struct TaskInput {
     pub category: Option<String>,
     pub run_in_background: bool,
     pub model: Option<String>,
+    /// Optional agent launch descriptor name. When set, Task execution chooses
+    /// that launcher from active plugin descriptors instead of the default
+    /// in-process launcher.
+    #[serde(default)]
+    pub launcher: Option<String>,
     /// Reasoning effort override for this subagent (e.g. "low", "high", "max").
     /// Precedence: Task.effort > AgentDef.effort > global effort.
     pub effort: Option<String>,
@@ -99,6 +104,7 @@ mod tests {
             category: None,
             run_in_background: false,
             model: None,
+            launcher: None,
             effort: None,
             name: None,
             team_name: None,

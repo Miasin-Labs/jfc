@@ -5,15 +5,12 @@ use crossterm::event::KeyCode;
 use crate::app::App;
 
 pub(super) fn open_model_picker(app: &mut App) {
-    app.show_model_picker = true;
-    app.model_picker_filter.clear();
-    app.model_picker_selected = 0;
-    app.model_picker_state.select(Some(0));
-    app.model_picker_models = super::collect_all_models(app);
+    let models = super::collect_all_models(app);
+    app.model_picker.open(models);
 }
 
 pub(super) fn handle_model_picker_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
-    if !app.show_model_picker {
+    if !app.model_picker.visible {
         return false;
     }
 
@@ -24,7 +21,7 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: crossterm::event::KeyE
         }
         KeyCode::Enter => {
             let filtered = filtered_models(app);
-            if let Some(model) = filtered.get(app.model_picker_selected) {
+            if let Some(model) = filtered.get(app.model_picker.selected) {
                 let chosen_id = model.id.clone();
                 let chosen_provider_name = model.provider.clone();
                 let old_model = app.engine.model.clone();
@@ -54,48 +51,38 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: crossterm::event::KeyE
                 close_model_picker(app);
             }
         }
-        KeyCode::Up if app.model_picker_selected > 0 => {
-            app.model_picker_selected -= 1;
-            app.model_picker_state
-                .select(Some(app.model_picker_selected));
+        KeyCode::Up if app.model_picker.selected > 0 => {
+            app.model_picker.select(app.model_picker.selected - 1);
         }
         KeyCode::Down => {
             let max = total.saturating_sub(1);
-            if app.model_picker_selected < max {
-                app.model_picker_selected += 1;
-                app.model_picker_state
-                    .select(Some(app.model_picker_selected));
+            if app.model_picker.selected < max {
+                app.model_picker.select(app.model_picker.selected + 1);
             }
         }
         KeyCode::Home => {
-            app.model_picker_selected = 0;
-            app.model_picker_state.select(Some(0));
+            app.model_picker.select(0);
         }
         KeyCode::End => {
             let max = total.saturating_sub(1);
-            app.model_picker_selected = max;
-            app.model_picker_state.select(Some(max));
+            app.model_picker.select(max);
         }
         KeyCode::PageUp => {
-            app.model_picker_selected = app.model_picker_selected.saturating_sub(10);
-            app.model_picker_state
-                .select(Some(app.model_picker_selected));
+            app.model_picker
+                .select(app.model_picker.selected.saturating_sub(10));
         }
         KeyCode::PageDown => {
             let max = total.saturating_sub(1);
-            app.model_picker_selected = (app.model_picker_selected + 10).min(max);
-            app.model_picker_state
-                .select(Some(app.model_picker_selected));
+            app.model_picker
+                .select((app.model_picker.selected + 10).min(max));
         }
         KeyCode::Char(c) => {
-            app.model_picker_filter.push(c);
-            app.model_picker_selected = 0;
-            app.model_picker_state.select(Some(0));
+            app.model_picker.filter.push(c);
+            app.model_picker.reset_selection();
         }
         KeyCode::Backspace => {
-            app.model_picker_filter.pop();
-            app.model_picker_selected = 0;
-            app.model_picker_state.select(Some(0));
+            app.model_picker.filter.pop();
+            app.model_picker.reset_selection();
         }
         _ => {}
     }
@@ -103,18 +90,16 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: crossterm::event::KeyE
 }
 
 fn close_model_picker(app: &mut App) {
-    app.show_model_picker = false;
-    app.model_picker_filter.clear();
-    app.model_picker_selected = 0;
-    app.model_picker_state.select(Some(0));
+    app.model_picker.close();
 }
 
 pub fn filtered_models(app: &App) -> Vec<jfc_provider::ModelInfo> {
-    if app.model_picker_filter.is_empty() {
-        app.model_picker_models.clone()
+    if app.model_picker.filter.is_empty() {
+        app.model_picker.models.clone()
     } else {
-        let q = app.model_picker_filter.to_lowercase();
-        app.model_picker_models
+        let q = app.model_picker.filter.to_lowercase();
+        app.model_picker
+            .models
             .iter()
             .filter(|m| {
                 m.display_name.to_lowercase().contains(&q) || m.id.to_lowercase().contains(&q)

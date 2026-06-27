@@ -17,6 +17,14 @@ const DEF_KIND_TOOL: &str = "tool_definition";
 pub fn all_tool_defs() -> Vec<ToolDef> {
     let mut defs = Vec::with_capacity(72);
     defs.extend(filesystem::filesystem_tool_defs());
+    defs.extend(super::descriptor_router::builtin_tool_defs());
+    let descriptor_owned_names = defs
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    defs.extend(super::descriptor_catalog::external_tool_defs(
+        &descriptor_owned_names,
+    ));
     defs.extend(tasks::task_tool_defs());
     defs.extend(plan::plan_tool_defs());
     defs.extend(agents::agent_tool_defs());

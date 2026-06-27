@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::builtins;
+use crate::plugin_resources;
 use crate::state::{Skill, SkillFile, parse_agent, parse_skill};
 pub use jfc_core::{AgentCost, AgentDef};
 use jfc_knowledge::{
@@ -16,69 +17,6 @@ use jfc_knowledge::{
 
 const DEF_KIND_AGENT: &str = "agent";
 const DEF_KIND_SKILL: &str = "skill";
-
-#[derive(Debug, Clone)]
-struct PluginRoot {
-    path: PathBuf,
-    namespace: Option<String>,
-}
-
-fn plugin_roots(project_root: &Path) -> Vec<PluginRoot> {
-    let mut roots = Vec::new();
-    let mut seen = HashSet::new();
-    let settings = jfc_config::claude_settings::load_merged(project_root);
-    let mut push_root = |path: PathBuf, namespace: Option<String>| {
-        if let Some(plugin) = namespace.as_deref()
-            && !settings.plugin_enabled(plugin)
-        {
-            tracing::debug!(
-                target: "jfc::agents",
-                plugin,
-                path = %path.display(),
-                "plugin disabled by enabledPlugins setting"
-            );
-            return;
-        }
-        if seen.insert((path.clone(), namespace.clone())) {
-            roots.push(PluginRoot { path, namespace });
-        }
-    };
-
-    if let Some(home) = dirs::home_dir() {
-        push_plugin_roots_in(&home.join(".claude/plugins"), &mut push_root);
-    }
-    if let Some(config) = dirs::config_dir() {
-        push_plugin_roots_in(&config.join("jfc/plugins"), &mut push_root);
-    }
-
-    push_plugin_roots_in(&project_root.join(".claude/plugins"), &mut push_root);
-    push_plugin_roots_in(&project_root.join("plugins"), &mut push_root);
-    push_plugin_roots_in(&project_root.join(".agents/plugins"), &mut push_root);
-    push_plugin_roots_in(&project_root.join(".codex/plugins"), &mut push_root);
-
-    roots
-}
-
-fn push_plugin_roots_in(plugins_dir: &Path, push_root: &mut impl FnMut(PathBuf, Option<String>)) {
-    let Ok(entries) = std::fs::read_dir(plugins_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(plugin) = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.starts_with('.'))
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        push_root(path, Some(plugin));
-    }
-}
 
 // ─── Skill loading ────────────────────────────────────────────────────────────
 
@@ -273,8 +211,8 @@ fn skill_roots(project_root: &Path) -> Vec<SkillRoot> {
     push_root(project_root.join(".claude/skills"), None);
     push_root(project_root.join(".codex/skills"), None);
     push_root(project_root.join(".agents/skills"), None);
-    for plugin in plugin_roots(project_root) {
-        push_root(plugin.path.join("skills"), plugin.namespace);
+    for plugin in plugin_resources::skill_resource_roots(project_root) {
+        push_root(plugin.path, plugin.namespace);
     }
 
     roots
@@ -580,8 +518,8 @@ fn agent_roots(project_root: &Path) -> Vec<AgentRoot> {
         push_root(home.join(".claude/agents"), None);
     }
     push_root(project_root.join(".claude/agents"), None);
-    for plugin in plugin_roots(project_root) {
-        push_root(plugin.path.join("agents"), plugin.namespace);
+    for plugin in plugin_resources::agent_resource_roots(project_root) {
+        push_root(plugin.path, plugin.namespace);
     }
 
     roots
@@ -711,7 +649,7 @@ pub fn find_skill_by_name<'a>(all_skills: &'a [Skill], name: &str) -> Option<&'a
 fn builtin(name: &str, prompt_file: &str) -> AgentDef {
     AgentDef {
         name: name.into(),
-        source: PathBuf::from("built-in"),
+        source: PathBuf::from(jfc_plugin_host::BUILTIN_AGENT_RESOURCE_PATH),
         model: None,
         isolation: None,
         skills: Vec::new(),
@@ -1180,6 +1118,45 @@ mod tests {
     }
 
     #[test]
+    fn enabled_plugins_false_disables_plugin_by_manifest_identity_normal() {
+        let tmp = std::env::temp_dir().join(format!(
+            "jfc_plugin_manifest_disabled_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plugin_root = tmp.join("plugins/sec");
+        let plugin_skill = plugin_root.join("skills/audit");
+        let plugin_agent = plugin_root.join("agents");
+        std::fs::create_dir_all(&plugin_skill).unwrap();
+        std::fs::create_dir_all(&plugin_agent).unwrap();
+        std::fs::create_dir_all(tmp.join(".claude")).unwrap();
+        std::fs::write(
+            plugin_root.join(".jfc-plugin.toml"),
+            "[plugin]\nname = \"sec-plugin\"\n",
+        )
+        .unwrap();
+        std::fs::write(plugin_skill.join("SKILL.md"), "---\nname: audit\n---\nbody").unwrap();
+        std::fs::write(
+            plugin_agent.join("reviewer.md"),
+            "---\nname: reviewer\n---\nReview things.",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join(".claude/settings.json"),
+            r#"{ "enabledPlugins": { "sec-plugin@local": false } }"#,
+        )
+        .unwrap();
+
+        let skills = load_skills(&tmp);
+        let agents = load_agents(&tmp);
+        assert!(!skills.iter().any(|skill| skill.name == "sec:audit"));
+        assert!(!agents.iter().any(|agent| agent.name == "sec:reviewer"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn built_in_agents_includes_canonical_set_normal() {
         let agents = built_in_agents();
         let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
@@ -1190,6 +1167,10 @@ mod tests {
             );
         }
         let explore = agents.iter().find(|a| a.name == "Explore").unwrap();
+        assert_eq!(
+            explore.source,
+            PathBuf::from(jfc_plugin_host::BUILTIN_AGENT_RESOURCE_PATH)
+        );
         assert_eq!(explore.model.as_deref(), Some("haiku"));
         assert!(explore.allowed_tools.iter().any(|t| t == "Read"));
         assert!(explore.disallowed_tools.iter().any(|t| t == "Edit"));

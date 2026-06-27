@@ -523,6 +523,48 @@ pub async fn execute_task(
     task_store: Option<std::sync::Arc<jfc_session::TaskStore>>,
     active_team_name: Option<&str>,
 ) -> ExecutionResult {
+    let project_root = cwd_override
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let launch_plan = match crate::agents::select_task_agent_launch_plan(task_input, project_root) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return ExecutionResult::failure(format!(
+                "Task agent launch descriptor unavailable: {error}"
+            ));
+        }
+    };
+    match launch_plan.backend {
+        crate::agents::AgentLaunchBackend::InProcess => {}
+        crate::agents::AgentLaunchBackend::BackgroundWorker => {
+            return ExecutionResult::failure(format!(
+                "Task launcher {} resolved to a background-worker backend for foreground execution",
+                launch_plan.descriptor.name
+            ));
+        }
+        crate::agents::AgentLaunchBackend::ProcessBridge { ref command } => {
+            return crate::agents::execute_process_bridge_agent_launch(
+                crate::agents::ProcessBridgeAgentLaunchInvocation {
+                    descriptor: &launch_plan.descriptor,
+                    command,
+                    task_input,
+                    task_id,
+                    cwd: cwd_override.as_deref(),
+                    model_id: Some(&model_id),
+                    provider_name: Some(provider.name()),
+                    active_team_name,
+                },
+            )
+            .await;
+        }
+    }
+    tracing::debug!(
+        target: "jfc::tools::subagent",
+        launcher = %launch_plan.descriptor.name,
+        handler = %launch_plan.descriptor.executor.handler,
+        "selected descriptor-owned agent launch backend"
+    );
+
     // StructuredOutput schema: when the parent provides a schema, install it
     // as a task-local for the subagent's whole run so its StructuredOutput
     // tool call validates against it (work-stealing-safe; see
@@ -1619,6 +1661,7 @@ mod tests {
             category: None,
             run_in_background: false,
             model: model.map(str::to_string),
+            launcher: None,
             effort: None,
             name: None,
             team_name: None,
@@ -2279,6 +2322,76 @@ mod tests {
         );
         assert_eq!(result.output, "recovered");
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_task_uses_selected_process_bridge_launcher_normal() {
+        // Given: a project plugin declares a process-bridge agent launcher.
+        jfc_plugin_host::clear_discovered_plugin_state_cache_for_tests();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let plugin = dir.path().join("plugins").join("agent-plugin");
+        std::fs::create_dir_all(plugin.join("workflows")).expect("plugin dirs");
+        let launcher = plugin.join("variant-agent.sh");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\n\
+             line=$(cat)\n\
+             id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+             printf '{\"type\":\"response\",\"id\":\"%s\",\"response\":{\"kind\":\"agent_launch_result\",\"result\":{\"output\":\"selected launcher ran\",\"is_error\":false}}}\\n' \"$id\"\n",
+        )
+        .expect("write launcher script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&launcher)
+                .expect("launcher metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&launcher, permissions).expect("launcher permissions");
+        }
+        std::fs::write(
+            plugin.join(".jfc-plugin.toml"),
+            format!(
+                r#"[plugin]
+name = "agent-plugin"
+workflows_dir = "workflows"
+
+[[agent_launches]]
+name = "variant-agent"
+label = "Variant Agent"
+description = "Launches a plugin-defined variant agent."
+
+[agent_launches.executor]
+kind = "process_bridge"
+handler = "{}"
+"#,
+                launcher.display()
+            ),
+        )
+        .expect("write plugin manifest");
+        let mut input = task_input(None);
+        input.launcher = Some("variant-agent".to_owned());
+        let provider = ScriptedProvider::new(Vec::new());
+
+        // When: foreground Task execution receives the launcher selection.
+        let result = execute_task(
+            &input,
+            &provider,
+            jfc_provider::ModelId::new("claude-opus-4-7"),
+            None,
+            Some("task_1"),
+            Some(&agent_model(None)),
+            Some(dir.path().to_path_buf()),
+            None,
+            None,
+        )
+        .await;
+
+        // Then: the selected process bridge owns the observable Task result.
+        assert!(!result.is_error(), "{}", result.output);
+        assert_eq!(result.output, "selected launcher ran");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

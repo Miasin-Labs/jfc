@@ -356,6 +356,7 @@ pub async fn skill_fallthrough(
                 category: Some("skill".to_owned()),
                 run_in_background: false,
                 model: None,
+                launcher: None,
                 effort: None,
                 name: None,
                 team_name: None,

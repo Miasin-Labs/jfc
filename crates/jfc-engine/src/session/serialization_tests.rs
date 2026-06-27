@@ -61,6 +61,7 @@ mod tests {
             category: Some("audit".into()),
             run_in_background: false,
             model: None,
+            launcher: Some("variant-agent".into()),
             effort: None,
             name: Some("reader".into()),
             team_name: Some("review".into()),
@@ -88,6 +89,7 @@ mod tests {
         );
         assert_eq!(task.allowed_tools, vec!["Read", "Grep"]);
         assert_eq!(task.disallowed_tools, vec!["Bash"]);
+        assert_eq!(task.launcher.as_deref(), Some("variant-agent"));
         assert_eq!(task.name.as_deref(), Some("reader"));
         assert_eq!(task.team_name.as_deref(), Some("review"));
         assert_eq!(task.isolation.as_deref(), Some("worktree"));

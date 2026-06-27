@@ -4,9 +4,22 @@
 //! - `lifecycle`, `registry` — v126 skill/agent loaders from `jfc-agents`.
 
 pub mod in_process;
+pub mod launch;
+pub mod process_bridge;
+#[cfg(test)]
+mod process_bridge_tests;
 pub mod registry_impl;
 pub mod team;
 pub use in_process::{InProcessBackend, WorkOutcome};
+pub use launch::{
+    AgentLaunchBackend, AgentLaunchError, AgentLaunchPlan, background_worker_execution_task_input,
+    plan_from_agent_launch_descriptor, select_agent_launch_plan_by_name,
+    select_background_agent_launch_plan, select_background_task_agent_launch_plan,
+    select_builtin_agent_launch_plan, select_default_agent_launch_plan,
+    select_default_background_agent_launch_plan, select_project_agent_launch_plan,
+    select_task_agent_launch_plan, select_teammate_agent_launch_plan,
+};
+pub use process_bridge::{ProcessBridgeAgentLaunchInvocation, execute_process_bridge_agent_launch};
 pub use registry_impl::AgentRegistryImpl;
 pub use team::TeamBackend;
 

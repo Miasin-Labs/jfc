@@ -16,79 +16,26 @@
 //!   `record_background_agent_worker_pid`, `reap_worker_process`) are
 //!   `pub(super)` so `reconcile` can use them on respawn.
 
-use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::path::PathBuf;
+use std::time::Instant;
 
-use jfc_config::McpServerConfig;
-
+use super::background_worktree::{
+    BackgroundIsolation, finish_background_worktree, prepare_background_worktree,
+};
 use super::logs::{append_log_line, background_agent_log_path};
 use super::registry::{
     record_background_agent_finished_at_epoch, record_background_agent_heartbeat,
-    record_background_agent_log, record_background_agent_log_at_epoch,
-    record_background_agent_progress_at_epoch, record_background_agent_started_at,
+    record_background_agent_log_at_epoch, record_background_agent_progress_at_epoch,
+    record_background_agent_started_at,
 };
-use super::state::{
-    BackgroundAgentLaunch, BackgroundAgentStatus, DaemonPaths, load_state, save_state,
-    with_state_lock,
+use super::state::{BackgroundAgentLaunch, BackgroundAgentStatus, DaemonPaths};
+use super::worker_mcp::register_background_worker_mcp_registry;
+use super::worker_state::{
+    mark_background_agent_spawn_failed, record_background_agent_launch_path,
 };
-
-pub fn mark_background_agent_spawn_failed(
-    paths: &DaemonPaths,
-    id: &str,
-    error: &str,
-) -> std::io::Result<()> {
-    let log_path = with_state_lock(paths, || -> std::io::Result<Option<PathBuf>> {
-        let mut state = load_state(paths).unwrap_or_default();
-        let now = SystemTime::now();
-        let Some(agent) = state.background_agents.get_mut(id) else {
-            return Ok(None);
-        };
-        agent.status = BackgroundAgentStatus::Failed;
-        agent.updated_at = now;
-        agent.completed_at = Some(now);
-        agent.error = Some(error.to_owned());
-        let log_path = agent.log_path.clone();
-        save_state(paths, &state)?;
-        Ok(Some(log_path))
-    })?;
-    if let Some(log_path) = log_path {
-        append_log_line(&log_path, &format!("[Failed] {error}"));
-    }
-    Ok(())
-}
 
 pub fn spawn_background_agent_worker(launch: BackgroundAgentLaunch) -> std::io::Result<u32> {
     jfc_daemon::spawn_background_agent_worker(launch)
-}
-
-pub fn record_background_agent_launch_path(
-    paths: &DaemonPaths,
-    id: &str,
-    launch_path: &Path,
-) -> std::io::Result<()> {
-    with_state_lock(paths, || -> std::io::Result<()> {
-        let mut state = load_state(paths).unwrap_or_default();
-        if let Some(agent) = state.background_agents.get_mut(id) {
-            agent.launch_path = Some(launch_path.to_path_buf());
-            agent.updated_at = SystemTime::now();
-        }
-        save_state(paths, &state)
-    })
-}
-
-async fn register_background_worker_mcp_registry_from_config(
-    configs: std::collections::HashMap<String, McpServerConfig>,
-) -> (usize, usize) {
-    let configured = configs.len();
-    let registry = crate::mcp::McpRegistry::new();
-    crate::tools::register_mcp_registry(registry.clone());
-    crate::mcp::register_servers_from_config(&registry, &configs).await;
-    let active = registry.list_active().await.len();
-    (configured, active)
-}
-
-async fn register_background_worker_mcp_registry() -> (usize, usize) {
-    register_background_worker_mcp_registry_from_config(crate::config::load_arc().mcp.clone()).await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,19 +214,32 @@ pub async fn run_background_agent_worker(launch_path: PathBuf) -> std::io::Resul
         (None, Some(session_id)) => Some(jfc_session::TaskStore::open(session_id)),
         (None, None) => None,
     };
+    let project_root = cwd_override.as_deref().unwrap_or(&launch.cwd);
     let started = Instant::now();
-    let result = crate::tools::execute_task(
+    let result = match crate::agents::select_background_task_agent_launch_plan(
         &launch.task_input,
-        provider.as_ref(),
-        launch.model.clone(),
-        Some(&tx),
-        Some(&launch.task_id),
-        launch.agent_def.as_ref(),
-        cwd_override.clone(),
-        task_store,
-        launch.active_team_name.as_deref(),
-    )
-    .await;
+        project_root,
+    ) {
+        Ok(plan) => {
+            let worker_task_input =
+                crate::agents::background_worker_execution_task_input(&launch.task_input, &plan);
+            crate::tools::execute_task(
+                &worker_task_input,
+                provider.as_ref(),
+                launch.model.clone(),
+                Some(&tx),
+                Some(&launch.task_id),
+                launch.agent_def.as_ref(),
+                cwd_override.clone(),
+                task_store,
+                launch.active_team_name.as_deref(),
+            )
+            .await
+        }
+        Err(error) => crate::runtime::ExecutionResult::failure(format!(
+            "background agent launch descriptor unavailable: {error}"
+        )),
+    };
     drop(tx);
     let _ = event_collector.await;
     heartbeat.abort();
@@ -328,168 +288,4 @@ pub async fn run_background_agent_worker(launch_path: PathBuf) -> std::io::Resul
         &format!("[worker-exited] elapsed_ms={elapsed_ms}"),
     );
     Ok(())
-}
-
-type BackgroundWorktree = (crate::worktrees::WorktreeInfo, PathBuf, Option<String>);
-
-/// Outcome of attempting worktree isolation for a background agent.
-enum BackgroundIsolation {
-    /// No isolation requested, or isolation failed but the policy allows the
-    /// cwd fall-back. Carries the optional worktree handle + cwd override.
-    Proceed(Option<BackgroundWorktree>, Option<PathBuf>),
-    /// Isolation was requested, creation failed, and the policy is
-    /// fail-closed: the worker must NOT run in the main checkout.
-    FailClosed(String),
-}
-
-async fn prepare_background_worktree(launch: &BackgroundAgentLaunch) -> BackgroundIsolation {
-    if launch.task_input.isolation.as_deref() != Some("worktree") {
-        return BackgroundIsolation::Proceed(None, None);
-    }
-
-    let name = format!(
-        "agent-{}",
-        launch
-            .task_id
-            .replace("toolu_", "")
-            .chars()
-            .take(8)
-            .collect::<String>()
-    );
-    let repo_root = match crate::worktrees::find_repo_root_async(&launch.cwd).await {
-        Ok(root) => root,
-        Err(e) => {
-            record_background_agent_log(
-                &launch.task_id,
-                &format!(
-                    "[worktree] failed to resolve git root from {}: {e}; using cwd",
-                    launch.cwd.display()
-                ),
-            );
-            launch.cwd.clone()
-        }
-    };
-    match crate::worktrees::create_worktree_async(&repo_root, &name).await {
-        Ok(info) => {
-            let path = PathBuf::from(&info.path);
-            record_background_agent_log(
-                &launch.task_id,
-                &format!("[worktree] created {}", path.display()),
-            );
-            // Open a change-set so the background agent's isolated run is a
-            // durable, reviewable proposal — same as the foreground Task path.
-            let origin = crate::changeset::ChangeOrigin {
-                task_id: Some(launch.task_id.clone()),
-                agent_id: launch
-                    .task_input
-                    .subagent_type
-                    .clone()
-                    .or_else(|| Some("background".to_string())),
-                session_id: launch.parent_session_id.clone(),
-            };
-            let change_id =
-                crate::changeset::open_for_worktree(&repo_root, &info.path, &info.branch, &origin)
-                    .await;
-            BackgroundIsolation::Proceed(Some((info, repo_root, change_id)), Some(path))
-        }
-        Err(e) => match crate::changeset::isolation_fallback() {
-            crate::changeset::IsolationFallback::FailClosed => {
-                let msg = format!(
-                    "[worktree] creation failed ({e}); isolation is fail-closed — \
-                     refusing to run in the main checkout"
-                );
-                record_background_agent_log(&launch.task_id, &msg);
-                BackgroundIsolation::FailClosed(msg)
-            }
-            crate::changeset::IsolationFallback::AllowCwd => {
-                record_background_agent_log(
-                    &launch.task_id,
-                    &format!("[worktree] failed to create worktree: {e}; using cwd (fail-open)"),
-                );
-                BackgroundIsolation::Proceed(None, None)
-            }
-        },
-    }
-}
-
-async fn finish_background_worktree(task_id: &str, worktree_info: Option<BackgroundWorktree>) {
-    let Some((wt, repo_root, change_id)) = worktree_info else {
-        return;
-    };
-    // Finalize the change-set (diff vs base → Ready, or Abandoned if clean)
-    // while the worktree still exists to diff against.
-    if let Some(ref cid) = change_id {
-        crate::changeset::finalize_for_worktree(&repo_root, cid, &wt.path).await;
-    }
-    let dirty = match tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(&wt.path)
-        .arg("status")
-        .arg("--porcelain")
-        .output()
-        .await
-    {
-        Ok(out) if out.status.success() => !out.stdout.is_empty(),
-        Ok(out) => {
-            record_background_agent_log(
-                task_id,
-                &format!(
-                    "[worktree] git status failed; preserving {}: {}",
-                    wt.path,
-                    String::from_utf8_lossy(&out.stderr)
-                ),
-            );
-            true
-        }
-        Err(e) => {
-            record_background_agent_log(
-                task_id,
-                &format!(
-                    "[worktree] git status spawn failed; preserving {}: {e}",
-                    wt.path
-                ),
-            );
-            true
-        }
-    };
-    if dirty {
-        record_background_agent_log(
-            task_id,
-            &format!(
-                "[worktree-preserved] path={} branch={} inspect=\"cd {} && git diff\"",
-                wt.path, wt.branch, wt.path
-            ),
-        );
-        return;
-    }
-    let wt_name = Path::new(&wt.path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    match crate::worktrees::remove_worktree_async(&repo_root, wt_name).await {
-        Ok(_) => {
-            record_background_agent_log(task_id, &format!("[worktree-removed] path={}", wt.path))
-        }
-        Err(e) => record_background_agent_log(
-            task_id,
-            &format!("[worktree] cleanup failed for {}: {e}", wt.path),
-        ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn background_worker_mcp_bootstrap_installs_registry_normal() {
-        let (configured, active) =
-            register_background_worker_mcp_registry_from_config(std::collections::HashMap::new())
-                .await;
-
-        assert_eq!(configured, 0);
-        assert_eq!(active, 0);
-        assert!(crate::tools::snapshot_mcp_registry().is_some());
-    }
 }

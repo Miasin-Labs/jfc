@@ -216,11 +216,8 @@ impl App {
     /// with it (task panel selection, task drill-down state, token gauge).
     pub fn switch_session(&mut self, id: Option<jfc_engine::ids::SessionId>) {
         self.engine.switch_session(id);
-        self.task_panel_selected = 0;
-        self.task_panel_state = ratatui::widgets::TableState::default().with_selected(Some(0));
-        self.task_panel_detail = false;
-        self.viewing_task_id = None;
-        self.viewing_task_expanded.clear();
+        self.task_panel.reset_selection();
+        self.task_panel.reset_drilldown();
         self.recompute_token_estimate();
     }
 

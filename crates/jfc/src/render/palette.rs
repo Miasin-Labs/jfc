@@ -38,7 +38,7 @@ pub(super) fn palette(f: &mut Frame, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().fg(t.accent)),
             Span::styled(
-                app.palette_input.clone(),
+                app.palette.input.clone(),
                 Style::default().fg(t.text_primary),
             ),
         ])),
@@ -46,15 +46,15 @@ pub(super) fn palette(f: &mut Frame, app: &App) {
     );
 
     let items: Vec<ListItem> = palette_items(app)
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, label)| {
-            let style = if i == app.palette_selected {
+            let style = if i == app.palette.selected {
                 t.style_accent_bold.bg(t.surface_raised)
             } else {
                 t.style_text_primary
             };
-            ListItem::new(Line::from(Span::styled(*label, style)))
+            ListItem::new(Line::from(Span::styled(label, style)))
         })
         .collect();
 

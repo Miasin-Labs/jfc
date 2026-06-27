@@ -13,6 +13,7 @@ pub mod journal;
 pub mod legacy;
 pub mod meta;
 pub mod permissions;
+mod plugin_discovery;
 pub mod registry;
 pub mod runner;
 pub mod task;

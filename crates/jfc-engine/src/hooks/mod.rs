@@ -16,6 +16,12 @@
 //! - **Tasks**: task created, task completed
 //! - **Extensions**: skill invoked, bounty posted, bounty settled
 
+use std::sync::{Arc, Mutex, OnceLock};
+
+use jfc_plugin_host::{HookValue, PluginHost, PluginHostError, PluginRegistration};
+use jfc_plugin_sdk::{HookName, PluginId, PluginManifest, PluginSource, PluginVersion};
+use serde_json::{Value, json};
+
 /// Points in the lifecycle where hooks can fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPoint {
@@ -176,7 +182,7 @@ pub struct HookMetadata {
 }
 
 /// Context passed to hooks — expanded with richer lifecycle data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HookContext {
     pub tool_name: String,
     pub tool_input: String,
@@ -190,6 +196,186 @@ pub struct HookContext {
     pub extra: Vec<(String, String)>,
     /// Environment variables to inject into shell hook commands.
     pub env_vars: Vec<(String, String)>,
+}
+
+fn hook_name_for_point(point: HookPoint) -> Option<HookName> {
+    match point {
+        HookPoint::BeforeToolDispatch => Some(HookName::PreToolUse),
+        HookPoint::AfterToolDispatch => Some(HookName::PostToolUse),
+        HookPoint::PostToolUseFailure => Some(HookName::PostToolUseFailure),
+        HookPoint::OnUserPromptSubmit => Some(HookName::UserPromptSubmit),
+        HookPoint::OnSessionStart => Some(HookName::SessionStart),
+        HookPoint::OnSessionEnd => Some(HookName::SessionEnd),
+        HookPoint::Stop => Some(HookName::Stop),
+        HookPoint::OnSetup => Some(HookName::Setup),
+        HookPoint::OnUserPromptExpansion => Some(HookName::UserPromptExpansion),
+        HookPoint::OnFileChanged => Some(HookName::FileChanged),
+        HookPoint::OnCwdChanged => Some(HookName::CwdChanged),
+        HookPoint::SubagentStart => Some(HookName::SubagentStart),
+        HookPoint::SubagentStop => Some(HookName::SubagentStop),
+        HookPoint::OnUserInterrupt => Some(HookName::UserInterrupt),
+        HookPoint::OnModelResponse => Some(HookName::ModelResponseChunk),
+        HookPoint::OnUserInputRequired => Some(HookName::UserInputRequired),
+        HookPoint::PostToolBatch | HookPoint::AfterToolBatch => Some(HookName::PostToolBatch),
+        HookPoint::BeforeCompact => Some(HookName::BeforeCompact),
+        HookPoint::PostCompact => Some(HookName::PostCompact),
+        HookPoint::AfterCompact => Some(HookName::AfterCompact),
+        HookPoint::OnPermissionRequest => Some(HookName::OnPermissionRequest),
+        HookPoint::OnPermissionDenied => Some(HookName::OnPermissionDenied),
+        HookPoint::OnMessageDisplay => Some(HookName::OnMessageDisplay),
+        HookPoint::OnElicitation => Some(HookName::OnElicitation),
+        HookPoint::OnElicitationResult => Some(HookName::OnElicitationResult),
+        HookPoint::OnTaskCreated => Some(HookName::OnTaskCreated),
+        HookPoint::OnTaskCompleted => Some(HookName::OnTaskCompleted),
+        HookPoint::WorktreeCreate => Some(HookName::WorktreeCreate),
+        HookPoint::WorktreeRemove => Some(HookName::WorktreeRemove),
+        HookPoint::ConfigChange | HookPoint::OnConfigChanged => Some(HookName::ConfigChange),
+        HookPoint::OnInstructionsLoaded => Some(HookName::OnInstructionsLoaded),
+        HookPoint::OnTeammateIdle => Some(HookName::OnTeammateIdle),
+        HookPoint::StopFailure => Some(HookName::StopFailure),
+        HookPoint::BeforeStream => Some(HookName::BeforeStream),
+        HookPoint::AfterStream => Some(HookName::AfterStream),
+        HookPoint::BeforeToolBatch
+        | HookPoint::OnToolError
+        | HookPoint::OnToolApproval
+        | HookPoint::OnPermissionGranted
+        | HookPoint::OnAgentSpawned
+        | HookPoint::OnAgentTerminated
+        | HookPoint::OnMessageSent
+        | HookPoint::OnMessageReceived
+        | HookPoint::OnMemoryCreated
+        | HookPoint::OnMemoryDeleted
+        | HookPoint::OnHeartbeat => None,
+    }
+}
+
+fn point_for_hook_name(name: HookName) -> Option<HookPoint> {
+    match name {
+        HookName::PreToolUse => Some(HookPoint::BeforeToolDispatch),
+        HookName::PostToolUse => Some(HookPoint::AfterToolDispatch),
+        HookName::PostToolUseFailure => Some(HookPoint::PostToolUseFailure),
+        HookName::UserPromptSubmit => Some(HookPoint::OnUserPromptSubmit),
+        HookName::SessionStart => Some(HookPoint::OnSessionStart),
+        HookName::SessionEnd => Some(HookPoint::OnSessionEnd),
+        HookName::Stop => Some(HookPoint::Stop),
+        HookName::Setup => Some(HookPoint::OnSetup),
+        HookName::UserPromptExpansion => Some(HookPoint::OnUserPromptExpansion),
+        HookName::FileChanged => Some(HookPoint::OnFileChanged),
+        HookName::CwdChanged => Some(HookPoint::OnCwdChanged),
+        HookName::SubagentStart => Some(HookPoint::SubagentStart),
+        HookName::SubagentStop => Some(HookPoint::SubagentStop),
+        HookName::UserInterrupt => Some(HookPoint::OnUserInterrupt),
+        HookName::ModelResponseChunk => Some(HookPoint::OnModelResponse),
+        HookName::UserInputRequired => Some(HookPoint::OnUserInputRequired),
+        HookName::PostToolBatch => Some(HookPoint::PostToolBatch),
+        HookName::BeforeCompact => Some(HookPoint::BeforeCompact),
+        HookName::PostCompact => Some(HookPoint::PostCompact),
+        HookName::AfterCompact => Some(HookPoint::AfterCompact),
+        HookName::OnPermissionRequest => Some(HookPoint::OnPermissionRequest),
+        HookName::OnPermissionDenied => Some(HookPoint::OnPermissionDenied),
+        HookName::OnMessageDisplay => Some(HookPoint::OnMessageDisplay),
+        HookName::OnElicitation => Some(HookPoint::OnElicitation),
+        HookName::OnElicitationResult => Some(HookPoint::OnElicitationResult),
+        HookName::OnTaskCreated => Some(HookPoint::OnTaskCreated),
+        HookName::OnTaskCompleted => Some(HookPoint::OnTaskCompleted),
+        HookName::WorktreeCreate => Some(HookPoint::WorktreeCreate),
+        HookName::WorktreeRemove => Some(HookPoint::WorktreeRemove),
+        HookName::ConfigChange => Some(HookPoint::ConfigChange),
+        HookName::OnInstructionsLoaded => Some(HookPoint::OnInstructionsLoaded),
+        HookName::OnTeammateIdle => Some(HookPoint::OnTeammateIdle),
+        HookName::StopFailure => Some(HookPoint::StopFailure),
+        HookName::BeforeStream => Some(HookPoint::BeforeStream),
+        HookName::AfterStream => Some(HookPoint::AfterStream),
+        HookName::Notification | HookName::CommandExecuteBefore | HookName::ToolDefinition => None,
+    }
+}
+
+fn hook_context_value(ctx: &HookContext) -> Value {
+    json!({
+        "tool_name": ctx.tool_name,
+        "tool_input": ctx.tool_input,
+        "session_id": ctx.session_id,
+        "intent": ctx.intent,
+        "file_path": ctx.file_path,
+        "agent_name": ctx.agent_name,
+        "extra": ctx.extra,
+        "env_vars": ctx.env_vars,
+    })
+}
+
+fn hook_value_for_action(action: HookAction, context: Value) -> HookValue {
+    let payload = match action {
+        HookAction::Continue => json!({ "action": "continue", "context": context }),
+        HookAction::Skip => json!({ "action": "skip", "context": context }),
+        HookAction::Replace(value) => {
+            json!({ "action": "replace", "value": value, "context": context })
+        }
+        HookAction::Abort(message) => {
+            json!({ "action": "abort", "message": message, "context": context })
+        }
+        HookAction::Emit(metadata) => json!({
+            "action": "emit",
+            "metadata": {
+                "key": metadata.key,
+                "value": metadata.value,
+            },
+            "context": context,
+        }),
+    };
+    HookValue::json(payload)
+}
+
+fn action_from_hook_value(value: &HookValue) -> HookAction {
+    let payload = value.payload();
+    match payload.get("action").and_then(Value::as_str) {
+        Some("skip") => HookAction::Skip,
+        Some("replace") => HookAction::Replace(
+            payload
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        ),
+        Some("abort") => HookAction::Abort(
+            payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Plugin hook aborted")
+                .to_owned(),
+        ),
+        Some("emit") => {
+            let metadata = payload.get("metadata").unwrap_or(&Value::Null);
+            HookAction::Emit(HookMetadata {
+                key: metadata
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                value: metadata
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        }
+        _ => HookAction::Continue,
+    }
+}
+
+fn terminal_hook_value(value: &HookValue) -> bool {
+    matches!(
+        value.payload().get("action").and_then(Value::as_str),
+        Some("skip" | "replace" | "abort")
+    )
+}
+
+fn context_from_hook_value(value: &HookValue) -> Result<HookContext, PluginHostError> {
+    let context = value
+        .payload()
+        .get("context")
+        .ok_or_else(|| PluginHostError::plugin("missing hook context"))?;
+    serde_json::from_value(context.clone())
+        .map_err(|error| PluginHostError::plugin(format!("invalid hook context: {error}")))
 }
 
 impl HookContext {
@@ -576,6 +762,7 @@ fn contains_comment_slop(tool_input: &str) -> bool {
 /// Registry of hooks, fired in registration order (FIFO).
 pub struct HookRegistry {
     hooks: Vec<(HookPoint, HookHandler)>,
+    plugin_host: Option<Arc<Mutex<PluginHost>>>,
     /// Per-handler activation metrics, keyed by `"<HookPoint:?>#<index>"`.
     metrics: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookMetrics>>>,
 }
@@ -584,6 +771,7 @@ impl HookRegistry {
     pub fn new() -> Self {
         Self {
             hooks: Vec::new(),
+            plugin_host: None,
             metrics: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -640,7 +828,7 @@ impl HookRegistry {
                 }
             }
         }
-        HookAction::Continue
+        self.fire_plugin_host(point, ctx)
     }
 
     /// Fire hooks for the given point in registration order, ignoring all
@@ -666,14 +854,15 @@ impl HookRegistry {
                 Self::record_metric(&self.metrics, &key, dur);
             }
         }
+        let _ = self.fire_plugin_host(point, ctx);
     }
 
     /// Number of registered hooks.
     pub fn len(&self) -> usize {
-        self.hooks.len()
+        self.hooks.len() + self.plugin_host_hook_count()
     }
     pub fn is_empty(&self) -> bool {
-        self.hooks.is_empty()
+        self.hooks.is_empty() && self.plugin_host_hook_count() == 0
     }
 
     /// Whether at least one handler is registered for `point`. This is used by
@@ -683,11 +872,13 @@ impl HookRegistry {
         self.hooks
             .iter()
             .any(|(hook_point, _)| *hook_point == point)
+            || self.plugin_host_has_hook(point)
     }
 
     /// Get all registered hook points (unique).
     pub fn registered_points(&self) -> Vec<HookPoint> {
         let mut points: Vec<HookPoint> = self.hooks.iter().map(|(p, _)| *p).collect();
+        points.extend(self.plugin_host_points());
         points.dedup();
         points
     }
@@ -700,6 +891,123 @@ impl HookRegistry {
     /// Remove all hooks.
     pub fn clear_all(&mut self) {
         self.hooks.clear();
+        self.plugin_host = None;
+    }
+
+    fn fire_plugin_host(&self, point: HookPoint, ctx: &HookContext) -> HookAction {
+        let Some(name) = hook_name_for_point(point) else {
+            return HookAction::Continue;
+        };
+        let Some(host) = &self.plugin_host else {
+            return HookAction::Continue;
+        };
+        let mut host = host.lock().unwrap_or_else(|error| error.into_inner());
+        let result = host.trigger_hook_until(
+            name,
+            hook_value_for_action(HookAction::Continue, hook_context_value(ctx)),
+            terminal_hook_value,
+        );
+        match result {
+            Ok(value) => action_from_hook_value(&value),
+            Err(error) => HookAction::Abort(format!("Plugin hook error: {error}")),
+        }
+    }
+
+    fn plugin_host_has_hook(&self, point: HookPoint) -> bool {
+        let Some(name) = hook_name_for_point(point) else {
+            return false;
+        };
+        let Some(host) = &self.plugin_host else {
+            return false;
+        };
+        host.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .has_hook(name)
+    }
+
+    fn plugin_host_hook_count(&self) -> usize {
+        let Some(host) = &self.plugin_host else {
+            return 0;
+        };
+        host.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .status_snapshot()
+            .plugins
+            .iter()
+            .map(|plugin| plugin.hooks.len())
+            .sum()
+    }
+
+    fn plugin_host_points(&self) -> Vec<HookPoint> {
+        let Some(host) = &self.plugin_host else {
+            return Vec::new();
+        };
+        host.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .status_snapshot()
+            .plugins
+            .iter()
+            .flat_map(|plugin| plugin.hooks.iter())
+            .filter_map(|hook| point_for_hook_name(hook.name))
+            .collect()
+    }
+
+    fn register_config_shell_hooks<I>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = (HookPoint, crate::config::ShellHookEntry)>,
+    {
+        let hooks = entries
+            .into_iter()
+            .filter_map(|(point, entry)| {
+                hook_name_for_point(point).map(|name| (point, name, entry))
+            })
+            .collect::<Vec<_>>();
+        if hooks.is_empty() {
+            return;
+        }
+
+        let mut registration = PluginRegistration::new(
+            PluginManifest::new(
+                PluginId::new("jfc.config.shell-hooks"),
+                PluginVersion::new("0.1.0"),
+                PluginSource::built_in("jfc-engine"),
+            )
+            .with_display_name("Configured shell hooks"),
+        );
+        for (idx, (point, name, entry)) in hooks.into_iter().enumerate() {
+            let handler = HookHandler::Shell {
+                command: entry.command,
+                async_mode: entry.async_mode,
+                matcher: entry.matcher,
+            };
+            registration = registration.with_hook(name, idx as i32, move |invocation| {
+                let context = context_from_hook_value(invocation.value())?;
+                let context_payload = invocation
+                    .value()
+                    .payload()
+                    .get("context")
+                    .cloned()
+                    .unwrap_or_else(|| hook_context_value(&context));
+                Ok(hook_value_for_action(
+                    handler.execute(point, &context),
+                    context_payload,
+                ))
+            });
+        }
+
+        let mut host = PluginHost::new();
+        let result = host
+            .register_internal(registration)
+            .and_then(|()| host.activate_all());
+        if let Err(error) = result {
+            tracing::warn!(
+                target: "jfc::hooks",
+                error = %error,
+                "failed to activate configured shell-hook plugin"
+            );
+            return;
+        }
+        self.plugin_host = Some(Arc::new(Mutex::new(host)));
     }
 
     /// Register shell hooks from the user config's `[hooks]` section.
@@ -708,326 +1016,52 @@ impl HookRegistry {
         let Some(hooks_cfg) = &config.hooks else {
             return;
         };
-        for entry in &hooks_cfg.pre_tool_use {
-            self.register(
-                HookPoint::BeforeToolDispatch,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
+        let mut entries = Vec::new();
+        macro_rules! add_hooks {
+            ($point:expr, $field:ident) => {
+                entries.extend(
+                    hooks_cfg
+                        .$field
+                        .iter()
+                        .cloned()
+                        .map(|entry| ($point, entry)),
+                );
+            };
         }
-        for entry in &hooks_cfg.post_tool_use {
-            self.register(
-                HookPoint::AfterToolDispatch,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.post_tool_use_failure {
-            self.register(
-                HookPoint::PostToolUseFailure,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.user_prompt_submit {
-            self.register(
-                HookPoint::OnUserPromptSubmit,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.session_start {
-            self.register(
-                HookPoint::OnSessionStart,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.session_end {
-            self.register(
-                HookPoint::OnSessionEnd,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.stop {
-            self.register(
-                HookPoint::Stop,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.subagent_stop {
-            self.register(
-                HookPoint::SubagentStop,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.setup {
-            self.register(
-                HookPoint::OnSetup,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.user_prompt_expansion {
-            self.register(
-                HookPoint::OnUserPromptExpansion,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.message_display {
-            self.register(
-                HookPoint::OnMessageDisplay,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.elicitation {
-            self.register(
-                HookPoint::OnElicitation,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.elicitation_result {
-            self.register(
-                HookPoint::OnElicitationResult,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.post_tool_batch {
-            self.register(
-                HookPoint::PostToolBatch,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.pre_compact {
-            self.register(
-                HookPoint::BeforeCompact,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.post_compact {
-            self.register(
-                HookPoint::PostCompact,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.subagent_start {
-            self.register(
-                HookPoint::SubagentStart,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.permission_request {
-            self.register(
-                HookPoint::OnPermissionRequest,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.permission_denied {
-            self.register(
-                HookPoint::OnPermissionDenied,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.task_created {
-            self.register(
-                HookPoint::OnTaskCreated,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.task_completed {
-            self.register(
-                HookPoint::OnTaskCompleted,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.worktree_create {
-            self.register(
-                HookPoint::WorktreeCreate,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.worktree_remove {
-            self.register(
-                HookPoint::WorktreeRemove,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.config_change {
-            self.register(
-                HookPoint::ConfigChange,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.instructions_loaded {
-            self.register(
-                HookPoint::OnInstructionsLoaded,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.cwd_changed {
-            self.register(
-                HookPoint::OnCwdChanged,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.file_changed {
-            self.register(
-                HookPoint::OnFileChanged,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.teammate_idle {
-            self.register(
-                HookPoint::OnTeammateIdle,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.stop_failure {
-            self.register(
-                HookPoint::StopFailure,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.user_interrupt {
-            self.register(
-                HookPoint::OnUserInterrupt,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.model_response_chunk {
-            self.register(
-                HookPoint::OnModelResponse,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
-        for entry in &hooks_cfg.user_input_required {
-            self.register(
-                HookPoint::OnUserInputRequired,
-                HookHandler::Shell {
-                    command: entry.command.clone(),
-                    async_mode: entry.async_mode,
-                    matcher: entry.matcher.clone(),
-                },
-            );
-        }
+
+        add_hooks!(HookPoint::BeforeToolDispatch, pre_tool_use);
+        add_hooks!(HookPoint::AfterToolDispatch, post_tool_use);
+        add_hooks!(HookPoint::PostToolUseFailure, post_tool_use_failure);
+        add_hooks!(HookPoint::OnUserPromptSubmit, user_prompt_submit);
+        add_hooks!(HookPoint::OnSessionStart, session_start);
+        add_hooks!(HookPoint::OnSessionEnd, session_end);
+        add_hooks!(HookPoint::Stop, stop);
+        add_hooks!(HookPoint::SubagentStop, subagent_stop);
+        add_hooks!(HookPoint::OnSetup, setup);
+        add_hooks!(HookPoint::OnUserPromptExpansion, user_prompt_expansion);
+        add_hooks!(HookPoint::OnMessageDisplay, message_display);
+        add_hooks!(HookPoint::OnElicitation, elicitation);
+        add_hooks!(HookPoint::OnElicitationResult, elicitation_result);
+        add_hooks!(HookPoint::PostToolBatch, post_tool_batch);
+        add_hooks!(HookPoint::BeforeCompact, pre_compact);
+        add_hooks!(HookPoint::PostCompact, post_compact);
+        add_hooks!(HookPoint::SubagentStart, subagent_start);
+        add_hooks!(HookPoint::OnPermissionRequest, permission_request);
+        add_hooks!(HookPoint::OnPermissionDenied, permission_denied);
+        add_hooks!(HookPoint::OnTaskCreated, task_created);
+        add_hooks!(HookPoint::OnTaskCompleted, task_completed);
+        add_hooks!(HookPoint::WorktreeCreate, worktree_create);
+        add_hooks!(HookPoint::WorktreeRemove, worktree_remove);
+        add_hooks!(HookPoint::ConfigChange, config_change);
+        add_hooks!(HookPoint::OnInstructionsLoaded, instructions_loaded);
+        add_hooks!(HookPoint::OnCwdChanged, cwd_changed);
+        add_hooks!(HookPoint::OnFileChanged, file_changed);
+        add_hooks!(HookPoint::OnTeammateIdle, teammate_idle);
+        add_hooks!(HookPoint::StopFailure, stop_failure);
+        add_hooks!(HookPoint::OnUserInterrupt, user_interrupt);
+        add_hooks!(HookPoint::OnModelResponse, model_response_chunk);
+        add_hooks!(HookPoint::OnUserInputRequired, user_input_required);
+        self.register_config_shell_hooks(entries);
     }
 }
 
@@ -1055,8 +1089,6 @@ pub fn default_registry() -> HookRegistry {
 }
 
 // ─── Process-global registry ────────────────────────────────────────────────
-
-use std::sync::OnceLock;
 
 static GLOBAL_REGISTRY: OnceLock<HookRegistry> = OnceLock::new();
 
@@ -1113,11 +1145,18 @@ pub fn registered_hooks_summary() -> Vec<(HookPoint, usize)> {
     GLOBAL_REGISTRY
         .get()
         .map(|reg| {
-            reg.hooks
+            let mut summary = reg
+                .hooks
                 .iter()
                 .enumerate()
                 .map(|(idx, (point, _))| (*point, idx))
-                .collect()
+                .collect::<Vec<_>>();
+            let mut next_index = reg.hooks.len();
+            for point in reg.plugin_host_points() {
+                summary.push((point, next_index));
+                next_index = next_index.saturating_add(1);
+            }
+            summary
         })
         .unwrap_or_default()
 }
@@ -1278,6 +1317,7 @@ pub enum HookDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, ShellHookEntry, ShellHooksConfig};
 
     fn context() -> HookContext {
         HookContext::for_tool("bash", "cargo test", "session-1")
@@ -1285,6 +1325,36 @@ mod tests {
 
     fn assert_continue(action: HookAction) {
         assert!(matches!(action, HookAction::Continue));
+    }
+
+    #[test]
+    fn config_shell_hook_runs_through_plugin_host_normal() {
+        let mut hooks = ShellHooksConfig::default();
+        hooks.pre_tool_use.push(ShellHookEntry {
+            matcher: Some("bash".to_owned()),
+            command: "printf '%s' '{\"decision\":\"block\",\"reason\":\"host blocked\"}'"
+                .to_owned(),
+            async_mode: false,
+        });
+        let config = Config {
+            hooks: Some(hooks),
+            ..Config::default()
+        };
+        let mut registry = HookRegistry::new();
+
+        registry.register_from_config(&config);
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.has_hooks(HookPoint::BeforeToolDispatch));
+        assert!(
+            registry
+                .registered_points()
+                .contains(&HookPoint::BeforeToolDispatch)
+        );
+        match registry.fire(HookPoint::BeforeToolDispatch, &context()) {
+            HookAction::Abort(message) => assert_eq!(message, "host blocked"),
+            action => panic!("expected abort, got {action:?}"),
+        }
     }
 
     #[test]

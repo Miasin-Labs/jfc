@@ -7,14 +7,29 @@ mod approval;
 mod bash_picker;
 mod editing;
 mod elicitation;
+mod focused_panels;
+mod focused_widgets;
+mod host_palette_action;
 mod key_dispatch;
 mod mentions;
 mod modal_handlers;
 mod model_picker;
 mod navigation;
 mod palette;
+mod palette_actions;
+mod palette_slash_action;
 mod prompt_rewrite;
 mod question;
+mod runtime_action_metrics;
+mod runtime_action_open_panel;
+mod runtime_action_panels;
+mod runtime_action_plugin_diagnostics;
+mod runtime_action_prompt_context;
+mod runtime_action_refresh;
+mod runtime_action_router;
+mod runtime_action_smoke;
+mod runtime_action_teammate;
+mod runtime_action_widgets;
 mod session_picker;
 mod slash_commands;
 mod submit;
@@ -22,6 +37,14 @@ mod theme_picker;
 mod view_commands;
 pub(crate) mod vim;
 
+#[cfg(test)]
+mod focused_panel_key_tests;
+#[cfg(test)]
+mod focused_widget_key_tests;
+#[cfg(test)]
+mod runtime_action_refresh_tests;
+#[cfg(test)]
+mod runtime_action_router_tests;
 #[cfg(test)]
 mod tests;
 

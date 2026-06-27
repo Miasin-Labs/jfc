@@ -20,7 +20,7 @@ use crate::theme::Theme;
 /// Per-entry collapse threshold for the subagent task view. A single
 /// `BackgroundTask.messages[i]` longer than this (line count) renders as a
 /// 5-line preview + a muted "ctrl+o to expand" footer until the user toggles
-/// it via `viewing_task_expanded`. Smaller than `LargeText::COLLAPSE_LINES`
+/// it via `task_panel.viewing_expanded`. Smaller than `LargeText::COLLAPSE_LINES`
 /// because subagent entries are *individual* turn outputs, not whole tool
 /// results — 80 lines is already a wall in a narrow drilled-in pane.
 pub const TASK_VIEW_COLLAPSE_LINES: usize = 80;

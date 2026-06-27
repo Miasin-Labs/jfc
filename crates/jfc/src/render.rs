@@ -29,13 +29,29 @@ pub(crate) mod roster;
 pub(crate) mod session_picker;
 mod session_sidebar;
 mod sidebar;
+mod sidebar_panels;
 mod status;
 mod status_goal;
+mod status_panels;
+mod status_plugins;
+mod status_widgets;
 mod task_panel;
+mod task_panel_detail;
+mod task_panel_order;
+mod task_panel_widgets;
 mod teammates_panel;
 mod theme_picker;
 pub(crate) mod visual;
 pub(crate) mod voice_cursor;
+
+#[cfg(test)]
+mod plugin_widget_scope_tests;
+#[cfg(test)]
+mod status_panels_tests;
+#[cfg(test)]
+mod status_plugins_tests;
+#[cfg(test)]
+mod status_widgets_tests;
 
 #[cfg(test)]
 mod teammates_panel_tests;

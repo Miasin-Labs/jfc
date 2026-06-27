@@ -55,16 +55,16 @@ pub(super) fn model_picker(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Clear, picker_area);
 
-    let total = app.model_picker_models.len();
+    let total = app.model_picker.models.len();
     let visible = filtered_models(app);
-    let title = if app.model_picker_filter.is_empty() {
+    let title = if app.model_picker.filter.is_empty() {
         format!(" Select Model · {} models ", total)
     } else {
         format!(
             " Select Model · {}/{} matching '{}' ",
             visible.len(),
             total,
-            app.model_picker_filter
+            app.model_picker.filter
         )
     };
 
@@ -98,7 +98,7 @@ pub(super) fn model_picker(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(inner);
 
-    let filter_line = if app.model_picker_filter.is_empty() {
+    let filter_line = if app.model_picker.filter.is_empty() {
         Line::from(vec![
             Span::styled("  ⌕ ", Style::default().fg(t.accent)),
             Span::styled(
@@ -112,7 +112,7 @@ pub(super) fn model_picker(f: &mut Frame, app: &mut App) {
         Line::from(vec![
             Span::styled("  ⌕ ", Style::default().fg(t.accent)),
             Span::styled(
-                app.model_picker_filter.clone(),
+                app.model_picker.filter.clone(),
                 Style::default()
                     .fg(t.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -203,5 +203,5 @@ pub(super) fn model_picker(f: &mut Frame, app: &mut App) {
         .highlight_symbol("▶ ")
         .style(Style::default().bg(t.surface));
 
-    f.render_stateful_widget(table, chunks[1], &mut app.model_picker_state);
+    f.render_stateful_widget(table, chunks[1], &mut app.model_picker.table);
 }

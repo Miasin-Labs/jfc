@@ -386,10 +386,10 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
         // Inside borders: subtract 1 row top/bottom.
         let local_row = mouse.row.saturating_sub(rect.y + 1);
         // Skip the empty/no-sessions placeholder row.
-        if !app.session_meta.is_empty() {
+        if !app.session_sidebar.meta.is_empty() {
             let cwd = app.engine.cwd.clone();
             let (this_project, other) =
-                jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
+                jfc_session::group_by_cwd(app.session_sidebar.meta.clone(), Some(cwd.as_str()));
             // Walk rows: header rows are 1 each; rest are sessions.
             let mut row = 0u16;
             let mut session_idx: Option<usize> = None;
@@ -430,8 +430,8 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
                     app.engine.token_rate_samples.clear();
                     app.engine.token_rate_sample_thinking = None;
                     app.engine.streaming_assistant_idx = None;
-                    app.session_selected = idx;
-                    app.session_list_state.select(Some(idx));
+                    app.session_sidebar.selected = idx;
+                    app.session_sidebar.list.select(Some(idx));
                     app.scroll_to_bottom();
                     handled_in_sidebar = true;
                 }

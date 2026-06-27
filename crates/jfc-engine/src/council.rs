@@ -687,6 +687,7 @@ async fn deliberate_agentic_member(
             category: Some("audit".to_owned()),
             run_in_background: false,
             model: Some("inherit".to_owned()),
+            launcher: None,
             effort: None,
             name: None,
             team_name: None,

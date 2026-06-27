@@ -3,7 +3,8 @@ use crossterm::event::{self, KeyCode, KeyModifiers};
 use crate::app::App;
 use crate::runtime::EngineEvent;
 
-use super::palette::{execute_palette_action, palette_items};
+use super::palette::palette_items;
+use super::palette_actions::execute_palette_action;
 use super::theme_picker::{apply_theme, close_theme_picker, filtered_theme_choices, preview_theme};
 
 pub(super) async fn handle_modal_key(
@@ -30,7 +31,7 @@ pub(super) async fn handle_modal_key(
 }
 
 fn handle_task_panel_key(app: &mut App, key: event::KeyEvent) -> bool {
-    if !app.show_task_panel {
+    if !app.task_panel.visible {
         return false;
     }
     if is_ctrl_t(key) {
@@ -44,27 +45,27 @@ fn handle_task_panel_key(app: &mut App, key: event::KeyEvent) -> bool {
         .len();
     match key.code {
         KeyCode::Esc => {
-            if app.task_panel_detail {
-                app.task_panel_detail = false;
+            if app.task_panel.detail {
+                app.task_panel.detail = false;
             } else {
-                app.show_task_panel = false;
-                app.expanded_view = crate::app::ExpandedView::None;
+                app.task_panel.visible = false;
+                app.task_panel.expanded_view = crate::app::ExpandedView::None;
             }
         }
         KeyCode::Enter => {
-            app.task_panel_detail = !app.task_panel_detail;
+            app.task_panel.detail = !app.task_panel.detail;
         }
-        KeyCode::Up if app.task_panel_selected > 0 => {
-            app.task_panel_selected -= 1;
-            app.task_panel_state.select(Some(app.task_panel_selected));
-            app.task_panel_detail = false;
+        KeyCode::Up if app.task_panel.selected > 0 => {
+            app.task_panel.selected -= 1;
+            app.task_panel.table.select(Some(app.task_panel.selected));
+            app.task_panel.detail = false;
         }
         KeyCode::Down => {
             let max = total.saturating_sub(1);
-            if app.task_panel_selected < max {
-                app.task_panel_selected += 1;
-                app.task_panel_state.select(Some(app.task_panel_selected));
-                app.task_panel_detail = false;
+            if app.task_panel.selected < max {
+                app.task_panel.selected += 1;
+                app.task_panel.table.select(Some(app.task_panel.selected));
+                app.task_panel.detail = false;
             }
         }
         _ => {}
@@ -74,12 +75,12 @@ fn handle_task_panel_key(app: &mut App, key: event::KeyEvent) -> bool {
 
 fn handle_teammates_panel_key(app: &mut App, key: event::KeyEvent) -> bool {
     use crate::app::ExpandedView;
-    if app.expanded_view != ExpandedView::Teammates {
+    if app.task_panel.expanded_view != ExpandedView::Teammates {
         return false;
     }
     match key.code {
         KeyCode::Esc => {
-            app.expanded_view = ExpandedView::None;
+            app.task_panel.expanded_view = ExpandedView::None;
         }
         KeyCode::Char('t') if key.modifiers == KeyModifiers::CONTROL => {
             cycle_expanded_view(app);
@@ -90,8 +91,8 @@ fn handle_teammates_panel_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Up | KeyCode::Char('k') => {
             move_agent_selection(app, -1);
         }
-        KeyCode::Enter if app.viewing_task_id.is_some() => {
-            app.expanded_view = ExpandedView::None;
+        KeyCode::Enter if app.task_panel.viewing_task_id.is_some() => {
+            app.task_panel.expanded_view = ExpandedView::None;
             app.scroll_to_bottom();
         }
         _ => {}
@@ -114,13 +115,13 @@ fn cycle_expanded_view(app: &mut App) {
             .background_tasks
             .values()
             .any(|bt| bt.status.is_alive());
-    app.expanded_view = match app.expanded_view {
+    app.task_panel.expanded_view = match app.task_panel.expanded_view {
         ExpandedView::None => ExpandedView::Tasks,
         ExpandedView::Tasks if has_teammates => ExpandedView::Teammates,
         ExpandedView::Tasks => ExpandedView::None,
         ExpandedView::Teammates => ExpandedView::None,
     };
-    app.show_task_panel = app.expanded_view == ExpandedView::Tasks;
+    app.task_panel.visible = app.task_panel.expanded_view == ExpandedView::Tasks;
 }
 
 fn sorted_agent_task_ids(app: &App) -> Vec<String> {
@@ -134,11 +135,12 @@ fn sorted_agent_task_ids(app: &App) -> Vec<String> {
 fn move_agent_selection(app: &mut App, delta: isize) {
     let task_ids = sorted_agent_task_ids(app);
     if task_ids.is_empty() {
-        app.viewing_task_id = None;
+        app.task_panel.viewing_task_id = None;
         return;
     }
 
     let current = app
+        .task_panel
         .viewing_task_id
         .as_ref()
         .and_then(|id| task_ids.iter().position(|task_id| task_id == id));
@@ -149,11 +151,11 @@ fn move_agent_selection(app: &mut App, delta: isize) {
         (None, std::cmp::Ordering::Less) => task_ids.len() - 1,
         (None, _) => 0,
     };
-    app.viewing_task_id = Some(task_ids[next].clone());
+    app.task_panel.viewing_task_id = Some(task_ids[next].clone());
 }
 
 async fn handle_sidebar_key(app: &mut App, key: event::KeyEvent) -> bool {
-    if !(app.show_sidebar
+    if !(app.session_sidebar.visible
         && matches!(
             (key.modifiers, key.code),
             (KeyModifiers::NONE, KeyCode::Up)
@@ -165,25 +167,29 @@ async fn handle_sidebar_key(app: &mut App, key: event::KeyEvent) -> bool {
     }
 
     // The sidebar reorders sessions visually (this-project first, others
-    // below) but `session_meta` itself stays in recency order. Build a
+    // below) but `session_sidebar.meta` itself stays in recency order. Build a
     // resolved order each navigation tick so Up/Down/Enter walk the
     // user-visible list, not the underlying vec.
     let ordered = crate::render::ordered_sidebar_sessions(app);
     let total = ordered.len();
     match key.code {
-        KeyCode::Up if app.session_selected > 0 => {
-            app.session_selected -= 1;
-            app.session_list_state.select(Some(app.session_selected));
+        KeyCode::Up if app.session_sidebar.selected > 0 => {
+            app.session_sidebar.selected -= 1;
+            app.session_sidebar
+                .list
+                .select(Some(app.session_sidebar.selected));
         }
         KeyCode::Down => {
             let max = total.saturating_sub(1);
-            if app.session_selected < max {
-                app.session_selected += 1;
-                app.session_list_state.select(Some(app.session_selected));
+            if app.session_sidebar.selected < max {
+                app.session_sidebar.selected += 1;
+                app.session_sidebar
+                    .list
+                    .select(Some(app.session_sidebar.selected));
             }
         }
         KeyCode::Enter => {
-            if let Some(id) = ordered.get(app.session_selected).cloned()
+            if let Some(id) = ordered.get(app.session_sidebar.selected).cloned()
                 && let Some(messages) = jfc_engine::session::load_session(&id).await
             {
                 app.engine.messages = messages;
@@ -209,49 +215,45 @@ async fn handle_palette_key(
     key: event::KeyEvent,
     tx: &tokio::sync::mpsc::Sender<EngineEvent>,
 ) -> bool {
-    if !app.show_palette {
+    if !app.palette.visible {
         return false;
     }
     match key.code {
         KeyCode::Esc => {
-            app.show_palette = false;
-            app.palette_input.clear();
-            app.palette_selected = 0;
+            app.palette.close();
         }
         KeyCode::Enter => {
             let items = palette_items(app);
-            if let Some(label) = items.get(app.palette_selected) {
+            if let Some(label) = items.get(app.palette.selected) {
                 let label = label.to_string();
-                app.show_palette = false;
-                app.palette_input.clear();
-                app.palette_selected = 0;
+                app.palette.close();
                 execute_palette_action(app, &label, tx).await;
             }
         }
-        KeyCode::Up if app.palette_selected > 0 => {
-            app.palette_selected -= 1;
+        KeyCode::Up if app.palette.selected > 0 => {
+            app.palette.selected -= 1;
         }
         KeyCode::Down => {
             let max = palette_items(app).len().saturating_sub(1);
-            if app.palette_selected < max {
-                app.palette_selected += 1;
+            if app.palette.selected < max {
+                app.palette.selected += 1;
             }
         }
         // Jump navigation, parity with the theme/model/session pickers.
-        KeyCode::Home => app.palette_selected = 0,
-        KeyCode::End => app.palette_selected = palette_items(app).len().saturating_sub(1),
-        KeyCode::PageUp => app.palette_selected = app.palette_selected.saturating_sub(5),
+        KeyCode::Home => app.palette.selected = 0,
+        KeyCode::End => app.palette.selected = palette_items(app).len().saturating_sub(1),
+        KeyCode::PageUp => app.palette.selected = app.palette.selected.saturating_sub(5),
         KeyCode::PageDown => {
             let max = palette_items(app).len().saturating_sub(1);
-            app.palette_selected = (app.palette_selected + 5).min(max);
+            app.palette.selected = (app.palette.selected + 5).min(max);
         }
         KeyCode::Char(c) => {
-            app.palette_input.push(c);
-            app.palette_selected = 0;
+            app.palette.input.push(c);
+            app.palette.reset_selection();
         }
         KeyCode::Backspace => {
-            app.palette_input.pop();
-            app.palette_selected = 0;
+            app.palette.input.pop();
+            app.palette.reset_selection();
         }
         _ => {}
     }
@@ -259,16 +261,16 @@ async fn handle_palette_key(
 }
 
 fn handle_theme_picker_key(app: &mut App, key: event::KeyEvent) -> bool {
-    if !app.show_theme_picker {
+    if !app.theme_picker.visible {
         return false;
     }
     let total = filtered_theme_choices(app).len();
     match key.code {
         KeyCode::Esc => {
             // Cancel: revert to the theme that was active before previewing.
-            if let Some(orig) = app.theme_preview_original.take() {
+            if let Some(orig) = app.theme_picker.preview_original.take() {
                 app.theme = orig;
-                if let Some(name) = app.theme_preview_original_name.take() {
+                if let Some(name) = app.theme_picker.preview_original_name.take() {
                     app.active_theme_name = name;
                 }
                 app.render_cache.borrow_mut().clear();
@@ -281,7 +283,7 @@ fn handle_theme_picker_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Enter => {
             // Commit: persist the highlighted theme (apply_theme toasts + saves).
             let name = filtered_theme_choices(app)
-                .get(app.theme_picker_selected)
+                .get(app.theme_picker.selected)
                 .map(|choice| choice.name);
             if let Some(name) = name {
                 apply_theme(app, name);
@@ -289,42 +291,42 @@ fn handle_theme_picker_key(app: &mut App, key: event::KeyEvent) -> bool {
             close_theme_picker(app);
             return true;
         }
-        KeyCode::Up if app.theme_picker_selected > 0 => {
-            app.theme_picker_selected -= 1;
+        KeyCode::Up if app.theme_picker.selected > 0 => {
+            app.theme_picker.selected -= 1;
         }
         KeyCode::Down => {
             let max = total.saturating_sub(1);
-            if app.theme_picker_selected < max {
-                app.theme_picker_selected += 1;
+            if app.theme_picker.selected < max {
+                app.theme_picker.selected += 1;
             }
         }
-        KeyCode::Home => app.theme_picker_selected = 0,
-        KeyCode::End => app.theme_picker_selected = total.saturating_sub(1),
-        KeyCode::Char('j') if app.theme_picker_input.is_empty() => {
+        KeyCode::Home => app.theme_picker.selected = 0,
+        KeyCode::End => app.theme_picker.selected = total.saturating_sub(1),
+        KeyCode::Char('j') if app.theme_picker.input.is_empty() => {
             let max = total.saturating_sub(1);
-            if app.theme_picker_selected < max {
-                app.theme_picker_selected += 1;
+            if app.theme_picker.selected < max {
+                app.theme_picker.selected += 1;
             }
         }
         KeyCode::Char('k')
-            if app.theme_picker_input.is_empty() && app.theme_picker_selected > 0 =>
+            if app.theme_picker.input.is_empty() && app.theme_picker.selected > 0 =>
         {
-            app.theme_picker_selected -= 1;
+            app.theme_picker.selected -= 1;
         }
         KeyCode::Char(c) => {
-            app.theme_picker_input.push(c);
-            app.theme_picker_selected = 0;
+            app.theme_picker.input.push(c);
+            app.theme_picker.reset_selection();
         }
         KeyCode::Backspace => {
-            app.theme_picker_input.pop();
-            app.theme_picker_selected = 0;
+            app.theme_picker.input.pop();
+            app.theme_picker.reset_selection();
         }
         _ => {}
     }
     // Live preview: apply whatever is now highlighted (no persist, no toast),
     // so the whole UI re-themes as the user moves through the list. Esc reverts.
     if let Some(name) = filtered_theme_choices(app)
-        .get(app.theme_picker_selected)
+        .get(app.theme_picker.selected)
         .map(|choice| choice.name)
     {
         preview_theme(app, name);

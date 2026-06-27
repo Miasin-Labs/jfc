@@ -131,6 +131,7 @@ pub(crate) async fn run(
         } else {
             app.engine.cwd = cwd_override.display().to_string();
         }
+        let _ = app.reload_plugin_status_fresh();
     }
     app.engine.local_advisor_provider = cli_config.local_advisor_provider.clone();
     app.engine.local_advisor_model = cli_config.local_advisor_model.clone();
@@ -1283,18 +1284,15 @@ pub(crate) fn apply_engine_effects(app: &mut App, tx: Option<&EventSender>) {
                 app.path_yank_cursor = 0;
             }
             crate::app::EngineEffect::SessionSwitched => {
-                app.task_panel_selected = 0;
-                app.task_panel_state =
-                    ratatui::widgets::TableState::default().with_selected(Some(0));
-                app.task_panel_detail = false;
-                app.viewing_task_id = None;
-                app.viewing_task_expanded.clear();
+                app.task_panel.reset_selection();
+                app.task_panel.reset_drilldown();
                 app.recompute_token_estimate();
             }
             crate::app::EngineEffect::ModelsRefreshed => {
-                app.model_picker_query_cache.clear();
-                if app.show_model_picker {
-                    app.model_picker_models = crate::input::collect_all_models(app);
+                app.model_picker.query_cache.clear();
+                if app.model_picker.visible {
+                    let models = crate::input::collect_all_models(app);
+                    app.model_picker.models = models;
                 }
             }
             crate::app::EngineEffect::PromptRewriteProposed {

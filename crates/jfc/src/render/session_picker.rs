@@ -16,12 +16,13 @@ use crate::app::App;
 
 /// Sessions whose `display_title()` (case-insensitive) contains the
 /// current filter substring. Returns metadata refs in the same order as
-/// `app.session_meta` (which the loader sorts newest-first), so the
+/// `app.session_sidebar.meta` (which the loader sorts newest-first), so the
 /// freshest match always lands at the top.
 pub fn filtered_sessions(app: &App) -> Vec<&jfc_session::SessionMetadata> {
-    let filter = app.session_picker_filter.to_ascii_lowercase();
+    let filter = app.session_picker.filter.to_ascii_lowercase();
     let filter = filter.trim();
-    app.session_meta
+    app.session_sidebar
+        .meta
         .iter()
         .filter(|m| {
             if filter.is_empty() {
@@ -50,16 +51,16 @@ pub(super) fn session_picker(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Clear, picker_area);
 
-    let total = app.session_meta.len();
+    let total = app.session_sidebar.meta.len();
     let visible = filtered_sessions(app);
-    let title = if app.session_picker_filter.is_empty() {
+    let title = if app.session_picker.filter.is_empty() {
         format!(" Switch Session · {total} sessions ")
     } else {
         format!(
             " Switch Session · {}/{} matching '{}' ",
             visible.len(),
             total,
-            app.session_picker_filter
+            app.session_picker.filter
         )
     };
 
@@ -93,7 +94,7 @@ pub(super) fn session_picker(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(inner);
 
-    let filter_line = if app.session_picker_filter.is_empty() {
+    let filter_line = if app.session_picker.filter.is_empty() {
         Line::from(vec![
             Span::styled("  ⌕ ", Style::default().fg(t.accent)),
             Span::styled(
@@ -107,7 +108,7 @@ pub(super) fn session_picker(f: &mut Frame, app: &mut App) {
         Line::from(vec![
             Span::styled("  ⌕ ", Style::default().fg(t.accent)),
             Span::styled(
-                app.session_picker_filter.clone(),
+                app.session_picker.filter.clone(),
                 Style::default()
                     .fg(t.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -176,5 +177,5 @@ pub(super) fn session_picker(f: &mut Frame, app: &mut App) {
         .highlight_symbol("▶ ")
         .style(Style::default().bg(t.surface));
 
-    f.render_stateful_widget(table, chunks[1], &mut app.session_picker_state);
+    f.render_stateful_widget(table, chunks[1], &mut app.session_picker.table);
 }

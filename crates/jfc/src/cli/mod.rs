@@ -552,6 +552,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     // registered handlers. User-defined shell hooks come from config.toml
     // plus Claude-compatible .claude/settings*.json overlays.
     jfc_engine::command_spec::register_slash_commands(crate::input::slash_commands_table());
+    crate::daemon_service::install();
     let cwd_for_config = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let startup_config = jfc_engine::config::load_with_project(&cwd_for_config);
     let mut hook_registry = jfc_engine::hooks::default_registry();
@@ -624,6 +625,21 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
                 ),
             }
         }
+    }
+    let plugin_tool_options =
+        jfc_engine::workflows::registry::plugin_discovery_options_for(&cwd_for_config);
+    match jfc_engine::tools::register_discovered_plugin_tool_descriptors(plugin_tool_options) {
+        Ok(count) if count > 0 => tracing::info!(
+            target: "jfc::plugins",
+            tool_descriptors = count,
+            "registered plugin tool descriptors"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            target: "jfc::plugins",
+            error = %error,
+            "failed to register plugin tool descriptors"
+        ),
     }
 
     // One-shot startup compaction of `daemon-state.json`. Long-lived users

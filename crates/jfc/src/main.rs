@@ -2,6 +2,7 @@ pub mod app;
 
 pub mod attachments;
 pub mod cli;
+mod daemon_service;
 
 pub mod file_watcher;
 pub mod input;
@@ -10,6 +11,8 @@ use jfc_markdown as markdown;
 pub mod glyphs;
 pub mod mentions;
 pub mod message_view;
+pub(crate) mod plugin_paths;
+pub(crate) mod plugin_smoke;
 pub mod query;
 pub mod render;
 pub mod render_cache;

@@ -490,6 +490,76 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
         }
 
         if task_input.run_in_background {
+            let project_root = task_input
+                .cwd
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or(cwd.as_path());
+            let background_launch_plan =
+                match crate::agents::select_background_task_agent_launch_plan(
+                    &task_input,
+                    project_root,
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        let error =
+                            format!("background agent launch descriptor unavailable: {error}");
+                        send_critical(
+                            &tx_task,
+                            EngineEvent::Task(TaskEvent::Failed {
+                                task_id: crate::ids::TaskId::from(task_id.clone()),
+                                error: error.clone(),
+                            }),
+                        );
+                        send_critical(
+                            &tx_task,
+                            EngineEvent::Tool(ToolEvent::Result {
+                                tool_id: crate::ids::ToolId::from(task_id.clone()),
+                                result: crate::runtime::ExecutionResult::failure(error),
+                            }),
+                        );
+                        done();
+                        continue;
+                    }
+                };
+            let launch_backend = match &background_launch_plan.backend {
+                crate::agents::AgentLaunchBackend::BackgroundWorker => "background_worker",
+                crate::agents::AgentLaunchBackend::InProcess => "in_process",
+                crate::agents::AgentLaunchBackend::ProcessBridge { .. } => "process_bridge",
+            };
+            match background_launch_plan.backend {
+                crate::agents::AgentLaunchBackend::BackgroundWorker => {}
+                crate::agents::AgentLaunchBackend::InProcess => {
+                    let error = format!(
+                        "background agent launcher {} resolved to an in-process backend",
+                        background_launch_plan.descriptor.name
+                    );
+                    send_critical(
+                        &tx_task,
+                        EngineEvent::Task(TaskEvent::Failed {
+                            task_id: crate::ids::TaskId::from(task_id.clone()),
+                            error: error.clone(),
+                        }),
+                    );
+                    send_critical(
+                        &tx_task,
+                        EngineEvent::Tool(ToolEvent::Result {
+                            tool_id: crate::ids::ToolId::from(task_id.clone()),
+                            result: crate::runtime::ExecutionResult::failure(error),
+                        }),
+                    );
+                    done();
+                    continue;
+                }
+                crate::agents::AgentLaunchBackend::ProcessBridge { .. } => {}
+            }
+            tracing::debug!(
+                target: "jfc::stream",
+                task_id = %task_id,
+                launcher = %background_launch_plan.descriptor.name,
+                handler = %background_launch_plan.descriptor.executor.handler,
+                "selected descriptor-owned background agent launch backend"
+            );
             let launch = crate::daemon::BackgroundAgentLaunch {
                 task_id: task_id.clone(),
                 task_input: task_input.clone(),
@@ -550,6 +620,8 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
                             "status": "background_task_started",
                             "task_id": task_id.clone(),
                             "worker_pid": pid,
+                            "launcher": background_launch_plan.descriptor.name,
+                            "launch_backend": launch_backend,
                             "description": description.clone(),
                             "message": "Task is running in a detached worker. Use `jfc daemon agents`, `jfc daemon attach <task_id>`, `jfc daemon wait <task_id>`, or `jfc daemon kill <task_id>`."
                         });
@@ -1625,6 +1697,7 @@ mod isolation_inheritance_tests {
             category: None,
             run_in_background: false,
             model: None,
+            launcher: None,
             effort: None,
             name: None,
             team_name: None,
@@ -1741,112 +1814,8 @@ mod spawn_fallback_tests {
 }
 
 #[cfg(test)]
-mod task_fanout_tests {
-    use super::*;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use jfc_provider::{EventStream, ModelInfo, ProviderMessage, StreamConvention, StreamOptions};
-    use std::time::Duration;
-
-    struct EmptyProvider;
-
-    #[async_trait]
-    impl Provider for EmptyProvider {
-        fn name(&self) -> &str {
-            "empty"
-        }
-
-        fn available_models(&self) -> Vec<ModelInfo> {
-            Vec::new()
-        }
-
-        fn stream_convention(&self) -> StreamConvention {
-            StreamConvention::AnthropicNative
-        }
-
-        async fn stream(
-            &self,
-            _messages: Vec<ProviderMessage>,
-            _options: &StreamOptions,
-        ) -> Result<EventStream> {
-            Ok(Box::pin(futures::stream::empty()))
-        }
-    }
-
-    impl jfc_provider::seal::Sealed for EmptyProvider {}
-
-    fn task_call(id: &str, description: &str) -> ToolCall {
-        ToolCall::new_pending(
-            crate::ids::ToolId::from(id),
-            ToolKind::Task,
-            ToolInput::Task(crate::types::TaskInput {
-                description: description.to_owned(),
-                prompt: description.to_owned(),
-                subagent_type: None,
-                category: None,
-                run_in_background: false,
-                model: None,
-                effort: None,
-                name: None,
-                team_name: None,
-                mode: None,
-                isolation: Some("none".to_owned()),
-                parent_task_id: None,
-                schema: None,
-                allowed_tools: Vec::new(),
-                disallowed_tools: Vec::new(),
-                cwd: None,
-            }),
-        )
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn dispatch_tools_batched_starts_every_task_in_batch_regression() {
-        let (tx, mut rx) = mpsc::channel(32);
-        let (teammate_tx, _teammate_rx) = mpsc::unbounded_channel();
-        let provider = Arc::new(EmptyProvider) as Arc<dyn Provider>;
-
-        dispatch_tools_batched(
-            vec![
-                task_call("task_a", "inspect a"),
-                task_call("task_b", "inspect b"),
-            ],
-            ToolBatchDispatch {
-                tx,
-                dedup: Arc::new(Mutex::new(ReadDedupCache::default())),
-                task_store: Some(jfc_session::TaskStore::in_memory()),
-                active_team_name: None,
-                current_session_id: None,
-                provider,
-                model: ModelId::new("empty-model"),
-                providers: Vec::new(),
-                teammate_event_tx: teammate_tx,
-                local_advisor: None,
-                cancel: CancellationToken::new(),
-            },
-        );
-
-        let started = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut ids = Vec::new();
-            while ids.len() < 2 {
-                match rx.recv().await {
-                    Some(EngineEvent::Task(TaskEvent::Started { task_id, .. })) => {
-                        ids.push(task_id.as_str().to_owned());
-                    }
-                    Some(_) => {}
-                    None => break,
-                }
-            }
-            ids
-        })
-        .await
-        .expect("dispatcher should emit two TaskStarted events");
-
-        assert_eq!(started.len(), 2, "expected one TaskStarted per Task tool");
-        assert!(started.contains(&"task_a".to_owned()));
-        assert!(started.contains(&"task_b".to_owned()));
-    }
-}
+#[path = "tool_dispatch_task_fanout_tests.rs"]
+mod task_fanout_tests;
 
 #[cfg(test)]
 mod council_member_tests {

@@ -8,6 +8,11 @@ mod intent;
 mod memory;
 mod prepare;
 mod rsi_runtime;
+mod runtime_builtin_prompt_context;
+mod runtime_builtin_prompt_context_advisor;
+mod runtime_builtin_prompt_context_behavior;
+mod runtime_extensions;
+mod runtime_extensions_support;
 mod thinking;
 
 pub(super) struct TestProvider {

@@ -10,7 +10,7 @@ use crate::app::App;
 use crate::theme::Theme;
 
 /// Sessions sidebar — toggled with Ctrl+B. Renders the saved-session metadata
-/// from `~/.config/jfc/sessions/` (cached on `App::session_meta` so render()
+/// from `~/.config/jfc/sessions/` (cached on `App::session_sidebar.meta` so render()
 /// does no disk I/O). Sessions whose `cwd` matches `app.engine.cwd` are shown first
 /// under a `── This project ──` separator; everything else (including
 /// legacy `cwd: None` entries) lands below `── Other projects ──`.
@@ -30,18 +30,20 @@ pub(super) fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         .title_bottom(Line::from(Span::styled(" ↑↓ · Enter ", t.style_text_muted)).right_aligned())
         .style(Style::default().bg(t.surface));
 
-    let items: Vec<ListItem> = if app.session_meta.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
+    let items: Vec<ListItem> = if app.session_sidebar.meta.is_empty() {
+        let mut items = vec![ListItem::new(Line::from(Span::styled(
             "  (no saved sessions)",
             Style::default()
                 .fg(t.text_muted)
                 .add_modifier(Modifier::ITALIC),
-        )))]
+        )))];
+        append_widget_rows(&mut items, app, t);
+        items
     } else {
         let now = chrono::Utc::now();
         let cwd = app.engine.cwd.clone();
         let (this_project, other) =
-            jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
+            jfc_session::group_by_cwd(app.session_sidebar.meta.clone(), Some(cwd.as_str()));
 
         let mut items: Vec<ListItem> = Vec::new();
         if !this_project.is_empty() {
@@ -56,8 +58,9 @@ pub(super) fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 items.push(session_row(s, app, &now, t));
             }
         }
+        append_widget_rows(&mut items, app, t);
         // Headers aren't selectable; `visible_selected_row` walks the same
-        // grouping to translate `app.session_selected` (session-only index)
+        // grouping to translate `app.session_sidebar.selected` (session-only index)
         // into a row index that includes the header rows.
         items
     };
@@ -81,9 +84,9 @@ pub(super) fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list, area, &mut state);
-    // Keep `app.session_list_state` aligned for any code that introspects it
+    // Keep `app.session_sidebar.list` aligned for any code that introspects it
     // (mostly historical; the renderer owns the live state above).
-    app.session_list_state.select(highlight_row);
+    app.session_sidebar.list.select(highlight_row);
 }
 
 /// Return the user-visible session id list, in the order rendered by the
@@ -92,7 +95,7 @@ pub(super) fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 pub fn ordered_sidebar_sessions(app: &App) -> Vec<jfc_engine::ids::SessionId> {
     let cwd = app.engine.cwd.clone();
     let (this_project, other) =
-        jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
+        jfc_session::group_by_cwd(app.session_sidebar.meta.clone(), Some(cwd.as_str()));
     this_project
         .into_iter()
         .chain(other)
@@ -100,17 +103,17 @@ pub fn ordered_sidebar_sessions(app: &App) -> Vec<jfc_engine::ids::SessionId> {
         .collect()
 }
 
-/// Map the `session_selected` index (which counts sessions, not headers)
+/// Map the `session_sidebar.selected` index (which counts sessions, not headers)
 /// to the `List`'s row index (which includes separator rows). Returns
 /// `None` when there are no sessions yet.
 fn visible_selected_row(app: &App) -> Option<usize> {
-    if app.session_meta.is_empty() {
+    if app.session_sidebar.meta.is_empty() {
         return None;
     }
     let cwd = app.engine.cwd.clone();
     let (this_project, other) =
-        jfc_session::group_by_cwd(app.session_meta.clone(), Some(cwd.as_str()));
-    let sel = app.session_selected;
+        jfc_session::group_by_cwd(app.session_sidebar.meta.clone(), Some(cwd.as_str()));
+    let sel = app.session_sidebar.selected;
     // Rows: [hdr1, this_project..., hdr2, other...]
     if !this_project.is_empty() && sel < this_project.len() {
         // 1 header above the this-project block.
@@ -164,4 +167,22 @@ fn session_row(
     ]);
     let line2 = Line::from(Span::styled(secondary, t.style_text_muted));
     ListItem::new(vec![line1, line2])
+}
+
+fn append_widget_rows(items: &mut Vec<ListItem<'static>>, app: &App, t: Theme) {
+    let rows = super::status_widgets::session_sidebar_widget_rows(
+        &app.plugins.ui_widget_descriptors,
+        &app.plugins.ui_widget_snapshots,
+        &app.plugins.ui_widget_refresh_status,
+    );
+    if rows.is_empty() {
+        return;
+    }
+    items.push(separator_row("── Plugin widgets ──", t));
+    items.extend(rows.into_iter().map(|row| {
+        ListItem::new(Line::from(Span::styled(
+            format!("  {row}"),
+            Style::default().fg(t.text_muted),
+        )))
+    }));
 }

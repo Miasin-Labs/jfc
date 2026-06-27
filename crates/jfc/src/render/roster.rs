@@ -101,6 +101,7 @@ pub(crate) fn roster_row(
     // Selection pointer column (accent). Selected = the row whose task_id
     // matches viewing_task_id (what ↵ opens).
     let is_selected = app
+        .task_panel
         .viewing_task_id
         .as_deref()
         .map(|id| id == bt.task_id.as_str())

@@ -10,11 +10,12 @@ use jfc_provider::{
 };
 
 use super::PreparedStreamRequest;
+use super::behavior_prompt::resolve_behavioral_prompt_state;
 use super::budget::stream_context_budget;
 use super::project_context::append_project_context;
 use super::prompt_seed::{PromptSeed, build_prompt_seed};
 use super::rsi_runtime::append_active_rsi_prompt_sections;
-use super::runtime_prompt::{append_runtime_prompt_sections, append_turn_prompt_sections};
+use super::runtime_prompt::append_runtime_prompt_sections;
 use super::thinking::{enforce_thinking_budget_fits_max_tokens, requested_thinking_display};
 use super::tool_catalog::prepare_advertised_tools;
 use super::tools::anthropic_tool_choice_value;
@@ -40,9 +41,16 @@ pub async fn prepare_stream_request(
         model,
     )
     .await;
-    let runtime_prompt = append_runtime_prompt_sections(&mut system_prompt, &provider);
+    let behavior_prompt = resolve_behavioral_prompt_state(&overrides, model);
     let rsi_runtime = append_active_rsi_prompt_sections(&mut system_prompt).await;
-    append_turn_prompt_sections(&mut system_prompt, &overrides, messages);
+    let runtime_prompt = append_runtime_prompt_sections(
+        &mut system_prompt,
+        &provider,
+        messages,
+        &overrides,
+        behavior_prompt,
+    )
+    .await;
 
     let provider_name = provider.name().to_owned();
     let selected_model_info = provider
@@ -83,41 +91,14 @@ pub async fn prepare_stream_request(
     let max_out = model_profile
         .max_output_tokens()
         .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
-    let pewter_owl_header = crate::feature_gates::pewter_owl_header_enabled(model.as_str(), false);
-    let pewter_owl_tool = crate::feature_gates::pewter_owl_tool_enabled(model.as_str(), false);
-    let pewter_owl_brief = crate::feature_gates::pewter_owl_brief_enabled(model.as_str(), false);
-    let effective_brief_mode = overrides.brief_mode || pewter_owl_brief;
-    if effective_brief_mode {
-        system_prompt.push_str(
-            "\n\n## Brief User Messages\n\nPlain assistant text is hidden from \
-             the main chat view. Put every substantive user-facing reply in \
-             `SendUserMessage`; use normal assistant text only for internal \
-             reasoning that can be omitted from the user's visible transcript.",
-        );
-    } else if pewter_owl_tool {
-        system_prompt.push_str(
-            "\n\n## Pewter Owl Messaging\n\n`SendUserMessage` is available for \
-             exact user-visible content between tool calls, such as generated \
-             snippets, specific values, and direct replies to mid-task user \
-             messages. Routine narration and final answers may remain normal \
-             assistant text.",
-        );
-    }
-    // Interaction-mode guidance (Junie-style behavioral mode). Pure additive
-    // prompt text, exactly like the brief-mode block above. `Code` (the default)
-    // returns None, so the default request is byte-identical to before.
-    if let Some(section) = overrides.interaction_mode.prompt_section() {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(section);
-    }
     let tool_catalog = prepare_advertised_tools(
         &mut system_prompt,
         messages,
         &overrides,
         runtime_prompt.hcom_available,
         runtime_prompt.local_advisor_model.is_none(),
-        effective_brief_mode,
-        pewter_owl_tool,
+        behavior_prompt.effective_brief_mode,
+        behavior_prompt.pewter_owl_tool,
     )
     .await;
     let advertised_tool_count = tool_catalog.advertised_tool_count;
@@ -161,7 +142,7 @@ pub async fn prepare_stream_request(
     if crate::effort::active_fast_mode() {
         base = base.fast_mode(true);
     }
-    if pewter_owl_header {
+    if behavior_prompt.pewter_owl_header {
         base = base.narration_summaries(true);
     }
     let thinking_display = requested_thinking_display(&overrides);
@@ -261,6 +242,8 @@ pub async fn prepare_stream_request(
             )),
             provider_history_archive_recall_ids: project_context
                 .provider_history_archive_recall_ids,
+            rsi_prompt_sections: rsi_runtime.prompt_sections,
+            rsi_tool_visibility_rules: rsi_runtime.tool_visibility_rules,
         },
         recalled_memory_chars: project_context.fresh_recall_chars,
     }

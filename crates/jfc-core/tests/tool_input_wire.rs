@@ -42,6 +42,7 @@ mod tests {
             category: None,
             run_in_background: false,
             model: None,
+            launcher: None,
             effort: None,
             name: None,
             team_name: None,
@@ -71,6 +72,7 @@ mod tests {
             category: None,
             run_in_background: true,
             model: None,
+            launcher: Some("variant-agent".into()),
             effort: None,
             name: None,
             team_name: None,
@@ -86,6 +88,7 @@ mod tests {
         assert_eq!(v["description"], "research");
         assert_eq!(v["subagent_type"], "explore");
         assert_eq!(v["run_in_background"], true);
+        assert_eq!(v["launcher"], "variant-agent");
         assert_eq!(v["allowed_tools"], serde_json::json!(["Read", "Grep"]));
         assert_eq!(v["disallowed_tools"], serde_json::json!(["Bash"]));
         assert!(v.get("category").is_none() || v["category"].is_null());
@@ -253,6 +256,7 @@ mod tests {
             category: None,
             run_in_background: false,
             model: None,
+            launcher: None,
             effort: None,
             name: None,
             team_name: None,
@@ -553,6 +557,7 @@ mod tests {
             "run_in_background": true,
             "name": "alice",
             "team_name": "alpha",
+            "launcher": "variant-agent",
             "mode": "plan",
             "isolation": "worktree",
         });
@@ -565,6 +570,7 @@ mod tests {
                 assert!(ti.run_in_background);
                 assert_eq!(ti.name.as_deref(), Some("alice"));
                 assert_eq!(ti.team_name.as_deref(), Some("alpha"));
+                assert_eq!(ti.launcher.as_deref(), Some("variant-agent"));
                 assert_eq!(ti.mode.as_deref(), Some("plan"));
                 assert_eq!(ti.isolation.as_deref(), Some("worktree"));
             }

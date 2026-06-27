@@ -53,47 +53,14 @@ use super::worktree::{
     execute_enter_plan_mode, execute_enter_worktree, execute_exit_worktree, execute_set_goal,
 };
 
+pub(crate) use super::descriptor_shell_routes::resolve_bash_workdir;
+use super::descriptor_shell_routes::{neutralize_unknown_bash_output, suppress_bash_output};
 use super::registry::{
     collusion_detector, market_orchestrator, snapshot_event_sender, snapshot_mcp_registry,
 };
 #[cfg(feature = "permission-automation")]
 use super::safe_tools::tool_permission_path;
 use super::safe_tools::{execute_tool_search, execute_tool_suggest, maybe_run_slop_guard};
-
-pub fn resolve_bash_workdir(cwd: &Path, workdir: Option<&str>) -> PathBuf {
-    let Some(workdir) = workdir.map(str::trim).filter(|workdir| !workdir.is_empty()) else {
-        return cwd.to_path_buf();
-    };
-    let path = Path::new(workdir);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
-}
-
-fn suppress_bash_output(mut result: ExecutionResult) -> ExecutionResult {
-    if result.is_error() {
-        return result;
-    }
-    let first_line = result.output.lines().next().unwrap_or_default();
-    result.output = if first_line.starts_with("[exit ") {
-        format!("{first_line}\n(output suppressed)")
-    } else {
-        "(output suppressed)".to_owned()
-    };
-    result
-}
-
-fn neutralize_unknown_bash_output(result: ExecutionResult) -> ExecutionResult {
-    if !result.is_error() || !result.output.starts_with("Unknown Bash task id") {
-        return result;
-    }
-    ExecutionResult::success(
-        "Background Bash output is attached to the original Bash tool automatically; \
-         BashOutput polling is ignored for compatibility.",
-    )
-}
 
 fn checkpoint_before_mutation(path: &Path, tool: &str) {
     match crate::file_checkpoint::checkpoint_file(path) {
@@ -152,24 +119,44 @@ pub async fn execute_tool_with_runtime_id(
         tracing::trace!(target: "jfc::hooks", "hook integration point: BeforeToolDispatch");
     }
 
+    let external_tool_policy = super::descriptor_router::external_tool_policy(&kind);
+
     #[cfg(feature = "permission-automation")]
     {
         use crate::permissions::{PermissionAction, check_tool_permission};
 
         let config = crate::config::feature_config::FeatureConfig::load(&cwd);
         let rules = crate::permissions::RuleSet::from_config(&config);
-        let decision = check_tool_permission(&rules, kind.api_name(), tool_permission_path(&input));
+        let tool_name = external_tool_policy
+            .as_ref()
+            .map_or_else(|| kind.api_name(), |policy| policy.tool_name.as_str());
+        let decision = check_tool_permission(&rules, tool_name, tool_permission_path(&input));
 
         if matches!(decision.action, PermissionAction::Deny) {
             let reason = decision
                 .reason
                 .as_deref()
                 .unwrap_or("permission rule denied tool invocation");
-            return ExecutionResult::failure(format!(
-                "Permission denied for {}: {reason}",
-                kind.api_name()
-            ));
+            return ExecutionResult::structured_failure(
+                format!("Permission denied for {tool_name}: {reason}"),
+                ToolErrorCategory::Permission,
+                false,
+            );
         }
+    }
+
+    if let Some(policy) = &external_tool_policy
+        && policy.approval_policy.mutates_user_state()
+        && crate::config::safe_mode_enabled()
+    {
+        return ExecutionResult::structured_failure(
+            format!(
+                "Plugin tool `{}` from `{}` is blocked in safe mode because it is mutating.",
+                policy.tool_name, policy.plugin_id
+            ),
+            ToolErrorCategory::Permission,
+            false,
+        );
     }
 
     // AI-access exclusion: `.jfcignore` / `.claudeignore` hide intentionally
@@ -193,9 +180,20 @@ pub async fn execute_tool_with_runtime_id(
     // hand-maintained match here. Read-only tools are skipped to keep ledger
     // volume meaningful. Offloaded to a blocking thread so the locked
     // line-append never stalls dispatch.
-    if crate::command_spec::tool_is_mutating(kind.clone()) {
-        let tool = kind.api_name().to_string();
-        let detail = crate::changeset::ledger_detail_for(&kind, &input);
+    if crate::command_spec::tool_is_mutating(kind.clone())
+        || external_tool_policy
+            .as_ref()
+            .is_some_and(|policy| policy.approval_policy.mutates_user_state())
+    {
+        let (tool, detail) = external_tool_policy.as_ref().map_or_else(
+            || {
+                (
+                    kind.api_name().to_string(),
+                    crate::changeset::ledger_detail_for(&kind, &input),
+                )
+            },
+            |policy| (policy.audit_tool_name(), policy.audit_detail(&input)),
+        );
         tokio::task::spawn_blocking(move || {
             crate::changeset::record_tool_call(&tool, detail, None, None);
         });
@@ -225,6 +223,21 @@ pub async fn execute_tool_with_runtime_id(
         (_, _, Some(store)) => Some(store),
         _ => task_store,
     };
+
+    let descriptor_context = super::descriptor_router::DescriptorExecutionContext::new(
+        &cwd,
+        dedup.as_ref(),
+        runtime_tool_id.as_deref(),
+    );
+    if let Some(result) = super::descriptor_router::execute_descriptor_tool_with_context(
+        &kind,
+        &input,
+        descriptor_context,
+    )
+    .await
+    {
+        return result;
+    }
 
     match (kind, input) {
         (

@@ -6,12 +6,18 @@ use super::*;
 pub(crate) use crate::message_view::task_body::task_view_body_lines;
 
 fn modal_overlay_locks_scroll(app: &App) -> bool {
-    app.show_palette
-        || app.show_model_picker
-        || app.show_session_picker
-        || app.show_task_panel
-        || matches!(app.expanded_view, crate::app::ExpandedView::Tasks)
-        || matches!(app.expanded_view, crate::app::ExpandedView::Teammates)
+    app.palette.visible
+        || app.model_picker.visible
+        || app.session_picker.visible
+        || app.task_panel.visible
+        || matches!(
+            app.task_panel.expanded_view,
+            crate::app::ExpandedView::Tasks
+        )
+        || matches!(
+            app.task_panel.expanded_view,
+            crate::app::ExpandedView::Teammates
+        )
         || app.show_help
         || (app.show_diagnostic_panel && !app.engine.diagnostics.is_empty())
         || app.engine.pending_approval.is_some()
@@ -245,7 +251,7 @@ pub(super) fn messages(f: &mut Frame, app: &mut App, area: Rect) {
     *app.messages_rect.borrow_mut() = Some(area);
     let t = app.theme;
 
-    if let Some(ref task_id) = app.viewing_task_id.clone() {
+    if let Some(ref task_id) = app.task_panel.viewing_task_id.clone() {
         messages_task_view(f, app, area, task_id);
         return;
     }
@@ -593,7 +599,11 @@ pub(super) fn messages_task_view(f: &mut Frame, app: &mut App, area: Rect, task_
                 static EMPTY: std::sync::OnceLock<std::collections::HashSet<usize>> =
                     std::sync::OnceLock::new();
                 let empty = EMPTY.get_or_init(std::collections::HashSet::new);
-                let expanded = app.viewing_task_expanded.get(task_id).unwrap_or(empty);
+                let expanded = app
+                    .task_panel
+                    .viewing_expanded
+                    .get(task_id)
+                    .unwrap_or(empty);
                 let task_done = matches!(bt.status, jfc_core::TaskLifecycle::Completed);
                 // Lead with the canonical agent-detail body (render/roster.rs)
                 // — the same Progress/last-tool/model header the Tasks detail
@@ -865,6 +875,7 @@ pub(super) fn subagent_footer(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let selected = app
+        .task_panel
         .viewing_task_id
         .as_ref()
         .and_then(|id| task_ids.iter().position(|t| t == id))

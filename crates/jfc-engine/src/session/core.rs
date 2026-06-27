@@ -1002,6 +1002,7 @@ mod disk_io_tests {
             category: Some("code".into()),
             run_in_background: true,
             model: Some("anthropic/claude-sonnet-4-7".into()),
+            launcher: Some("variant-agent".into()),
             effort: None,
             name: Some("alice".into()),
             team_name: Some("core".into()),
@@ -1020,11 +1021,13 @@ mod disk_io_tests {
             SerializedToolInput::Task {
                 ref name,
                 ref team_name,
+                ref launcher,
                 ref mode,
                 ref isolation,
                 ..
             } if name.as_deref() == Some("alice")
                 && team_name.as_deref() == Some("core")
+                && launcher.as_deref() == Some("variant-agent")
                 && mode.as_deref() == Some("plan")
                 && isolation.as_deref() == Some("worktree")
         ));

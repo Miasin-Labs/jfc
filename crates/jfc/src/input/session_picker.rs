@@ -13,12 +13,10 @@ use crate::runtime::ControlEvent;
 use crate::runtime::{EngineEvent, send_critical};
 
 pub(super) fn open_session_picker(app: &mut App) {
-    app.show_session_picker = true;
-    app.session_picker_filter.clear();
-    app.session_picker_state.select(Some(0));
+    app.session_picker.open();
     // Session metadata refresh is handled by the existing Ctrl+B sidebar
     // path (`jfc_session::list_sessions_with_metadata()` is async); the
-    // picker reuses the already-cached `app.session_meta`. If the user
+    // picker reuses the already-cached `app.session_sidebar.meta`. If the user
     // wants a freshly-rescanned list they hit Ctrl+B once first.
 }
 
@@ -27,11 +25,11 @@ pub(super) fn handle_session_picker_key(
     key: crossterm::event::KeyEvent,
     tx: &mpsc::Sender<EngineEvent>,
 ) -> bool {
-    if !app.show_session_picker {
+    if !app.session_picker.visible {
         return false;
     }
     let total = filtered_sessions(app).len();
-    let current = app.session_picker_state.selected().unwrap_or(0);
+    let current = app.session_picker.table.selected().unwrap_or(0);
     match key.code {
         KeyCode::Esc => {
             close_session_picker(app);
@@ -50,37 +48,39 @@ pub(super) fn handle_session_picker_key(
             }
         }
         KeyCode::Up if current > 0 => {
-            app.session_picker_state.select(Some(current - 1));
+            app.session_picker.table.select(Some(current - 1));
         }
         KeyCode::Down => {
             let max = total.saturating_sub(1);
             if current < max {
-                app.session_picker_state.select(Some(current + 1));
+                app.session_picker.table.select(Some(current + 1));
             }
         }
         KeyCode::Home => {
-            app.session_picker_state.select(Some(0));
+            app.session_picker.table.select(Some(0));
         }
         KeyCode::End => {
             let max = total.saturating_sub(1);
-            app.session_picker_state.select(Some(max));
+            app.session_picker.table.select(Some(max));
         }
         KeyCode::PageUp => {
-            app.session_picker_state
+            app.session_picker
+                .table
                 .select(Some(current.saturating_sub(10)));
         }
         KeyCode::PageDown => {
             let max = total.saturating_sub(1);
-            app.session_picker_state
+            app.session_picker
+                .table
                 .select(Some((current + 10).min(max)));
         }
         KeyCode::Char(c) => {
-            app.session_picker_filter.push(c);
-            app.session_picker_state.select(Some(0));
+            app.session_picker.filter.push(c);
+            app.session_picker.table.select(Some(0));
         }
         KeyCode::Backspace => {
-            app.session_picker_filter.pop();
-            app.session_picker_state.select(Some(0));
+            app.session_picker.filter.pop();
+            app.session_picker.table.select(Some(0));
         }
         _ => {}
     }
@@ -88,7 +88,5 @@ pub(super) fn handle_session_picker_key(
 }
 
 fn close_session_picker(app: &mut App) {
-    app.show_session_picker = false;
-    app.session_picker_filter.clear();
-    app.session_picker_state.select(Some(0));
+    app.session_picker.close();
 }

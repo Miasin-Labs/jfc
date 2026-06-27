@@ -2,33 +2,21 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc, time::Instant};
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::widgets::TableState;
 use ratatui_textarea::TextArea;
 
-use crate::query::QueryCache;
 use crate::render_cache::RenderCache;
 use crate::theme::Theme;
-use jfc_provider::{ModelId, ModelInfo, Provider};
+use jfc_provider::{ModelId, Provider};
 
-use super::EngineState;
+use super::{
+    BashPickerState, CommandPaletteState, EngineState, InfoSidebarState, ModelPickerState,
+    SessionPickerState, SessionSidebarState, TaskPanelUiState, ThemePickerState,
+};
 
 /// Max number of recent RMS audio levels retained for the recording-cursor
 /// animation (the CLI's `LWA` ring length).
 pub const VOICE_AUDIO_LEVELS_CAP: usize = 16;
 pub const VOICE_TTS_TIMINGS_CAP: usize = 256;
-
-/// The expanded panel state cycled by Ctrl+T — mirrors Claude Code's
-/// `expandedView: "none" | "tasks" | "teammates"` state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExpandedView {
-    /// No expanded panel — just the normal pinned task row.
-    #[default]
-    None,
-    /// Full task list panel is showing.
-    Tasks,
-    /// Teammates/agents expanded view showing transcript previews.
-    Teammates,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptSearch {
@@ -163,6 +151,7 @@ pub struct App {
     pub theme: Theme,
     pub active_theme_name: String,
     pub plugins_disabled_by_managed_policy: bool,
+    pub(crate) plugins: super::plugin_status::PluginUiState,
     /// Text saved by Esc-clear so Up-arrow can recall it. Single slot —
     /// each Esc-clear overwrites. None when no text has been cleared.
     pub esc_saved_text: Option<String>,
@@ -189,17 +178,8 @@ pub struct App {
     /// plain insert editing); `Some` = on, toggled by `/vim`. Routes the
     /// default text-input path through `input::vim` and makes Esc mode-aware.
     pub vim: Option<crate::input::vim::VimState>,
-    pub show_palette: bool,
-    pub palette_input: String,
-    pub palette_selected: usize,
-    pub show_theme_picker: bool,
-    pub theme_picker_input: String,
-    pub theme_picker_selected: usize,
-    /// The theme active when the picker opened. While the picker is up, the
-    /// highlighted theme is applied live (preview); this restores it if the
-    /// user cancels with Esc. `None` when the picker isn't open.
-    pub theme_preview_original: Option<Theme>,
-    pub theme_preview_original_name: Option<String>,
+    pub palette: CommandPaletteState,
+    pub theme_picker: ThemePickerState,
     pub spinner_frame: usize,
     /// Hysteresis state machine for the status label — advanced once per tick
     /// so the phase ("Thinking"/"Responding"/…) can't flip per-frame. See
@@ -322,53 +302,11 @@ pub struct App {
     /// Set each frame by the renderer. Used for page-scroll math.
     pub viewport_height: usize,
     pub input_wrap_width: usize,
-    pub show_model_picker: bool,
-    pub model_picker_filter: String,
-    pub model_picker_selected: usize,
-    pub model_picker_models: Vec<ModelInfo>,
-    /// Session-picker popup state — same `Clear`+centered-table treatment as
-    /// the model picker. Toggled with Ctrl+P. Replaces the "Ctrl+B opens the
-    /// session list as a left sidebar" hack for one-shot session selection.
-    /// `session_picker_filter` filters by `display_title()` substring.
-    pub show_session_picker: bool,
-    pub session_picker_filter: String,
-    pub session_picker_state: TableState,
-    /// Background-shell picker popup: lists running + settled background shells
-    /// (`/bashes` as a modal), navigable with ↑/↓, `x`/`d` cancels the selected
-    /// running shell. Opened via the Ctrl+X leader chord then `b`. Snapshot is
-    /// captured when the modal opens (the source is async; the modal is sync).
-    pub show_bash_picker: bool,
-    pub bash_picker_state: TableState,
-    pub bash_picker_tasks: Vec<jfc_engine::tools::BashTaskSnapshot>,
-    /// Drives selection + scroll for the picker's `Table`. Kept in sync with
-    /// `model_picker_selected` so existing handlers keep working, but ratatui's
-    /// stateful render uses the `TableState` for autoscroll when the cursor moves
-    /// past the visible area.
-    pub model_picker_state: TableState,
-    pub model_picker_query_cache: QueryCache<Vec<ModelInfo>>,
-    /// Whether the sessions sidebar is visible. Default off so the chat takes
-    /// the full width — toggle with Ctrl+B.
-    pub show_sidebar: bool,
-    /// Cached list of session metadata (newest first), refreshed when the
-    /// sidebar opens. Storing here keeps render() pure of disk I/O. Replaced
-    /// the raw-id `session_ids` cache so the sidebar can show titles, cwd
-    /// badges, and relative timestamps instead of `ses_2026...` ids.
-    pub session_meta: Vec<jfc_session::SessionMetadata>,
-    /// Currently-selected sidebar row.
-    pub session_selected: usize,
-    /// State for the sidebar `List` widget — drives auto-scroll when the
-    /// selection moves past the visible area.
-    pub session_list_state: ratatui::widgets::ListState,
-    /// Whether the full-screen task panel overlay is visible (Ctrl+T).
-    pub show_task_panel: bool,
-    /// The expanded view state — cycles none → tasks → teammates → none on Ctrl+T.
-    pub expanded_view: ExpandedView,
-    /// Currently-selected row in the task panel.
-    pub task_panel_selected: usize,
-    /// Drives selection + scroll for the task panel's `Table`.
-    pub task_panel_state: TableState,
-    /// Whether the detail pane is shown for the currently-selected task.
-    pub task_panel_detail: bool,
+    pub model_picker: ModelPickerState,
+    pub session_picker: SessionPickerState,
+    pub bash_picker: BashPickerState,
+    pub session_sidebar: SessionSidebarState,
+    pub task_panel: TaskPanelUiState,
     /// `@filename` autocomplete state. `active=false` when not popping;
     /// while active, the input handler routes typed chars into
     /// `query` and `mentions::filter_candidates` re-ranks `candidates`.
@@ -409,31 +347,9 @@ pub struct App {
     /// `/verbose` toggle: when true, tool blocks render expanded by
     /// default. When false (default), they preview to N lines.
     pub verbose_mode: bool,
-    pub show_info_sidebar: bool,
-    /// Vertical scroll offset (rows from top) of the right-side info sidebar's
-    /// Tasks section. A long todo list (the user hit 27 in one session) now
-    /// renders compactly and scrolls instead of overflowing the panel.
-    /// Adjusted via Alt+Up / Alt+Down while the sidebar is visible.
-    pub info_sidebar_scroll: u16,
+    pub info_sidebar: InfoSidebarState,
     pub leader_key_active: bool,
     pub leader_key_timeout: Option<std::time::Instant>,
-    pub viewing_task_id: Option<String>,
-    /// Set of `BackgroundTask.messages` indices the user expanded with `o`
-    /// while drilled into the subagent task view. Long entries (>80 lines or
-    /// >5 KB) collapse to a 5-line preview by default; presence in this set
-    /// > flips them to fully expanded. Cleared whenever `viewing_task_id`
-    /// > changes so expansion state is per-drill-in, not sticky across tasks.
-    ///
-    /// TODO Phase B: once `BackgroundTask.messages` migrates to
-    /// `Vec<ChatMessage>` and the subagent view renders through the same
-    /// `MessageView` pipeline as the main chat, this field collapses into
-    /// per-`ToolCall.display` state and can be removed.
-    /// Per-task expansion state. Keyed by `task_id` so navigating
-    /// between tasks (or out and back in) preserves what the user has
-    /// expanded. Previously a session-wide `HashSet<usize>` that got
-    /// `.clear()`ed on every switch — entering a task with 121 hidden
-    /// lines required pressing `o` again every time.
-    pub viewing_task_expanded: std::collections::HashMap<String, std::collections::HashSet<usize>>,
     /// Per-prompt image staging. Each Ctrl+V / bracketed paste of an image
     /// lands here with a unique `id`; the submit path matches `[Image #N]`
     /// markers in the textarea and moves referenced entries onto the
@@ -571,13 +487,18 @@ impl App {
         // every render was noise. Just a soft prompt.
         textarea.set_placeholder_text("");
 
+        let engine = EngineState::new(provider, model);
+        let mut plugin_state =
+            super::plugin_status::initial_ui_state(std::path::Path::new(&engine.cwd));
+        plugin_state.last_refresh_at = Some(Instant::now());
         let mut app = Self {
-            engine: EngineState::new(provider, model),
+            engine,
             stream_pacer: crate::render::codex_stream::stream_pacer::StreamPacer::default(),
             paced_stream_key: None,
             theme: Theme::claude(),
             active_theme_name: "claude".to_owned(),
             plugins_disabled_by_managed_policy: false,
+            plugins: plugin_state,
             esc_saved_text: None,
             history_cursor: None,
             scroll_offset: 0,
@@ -585,14 +506,8 @@ impl App {
             total_lines_key: (0, 0, 0),
             textarea,
             vim: None,
-            show_palette: false,
-            palette_input: String::new(),
-            palette_selected: 0,
-            show_theme_picker: false,
-            theme_picker_input: String::new(),
-            theme_picker_selected: 0,
-            theme_preview_original: None,
-            theme_preview_original_name: None,
+            palette: CommandPaletteState::default(),
+            theme_picker: ThemePickerState::default(),
             spinner_frame: 0,
             spinner_state: crate::spinner::SpinnerState::new(std::time::Instant::now()),
             reasoning_expanded: HashMap::new(),
@@ -622,27 +537,11 @@ impl App {
             follow_bottom: true,
             viewport_height: 0,
             input_wrap_width: 1,
-            show_model_picker: false,
-            model_picker_filter: String::new(),
-            show_session_picker: false,
-            session_picker_filter: String::new(),
-            session_picker_state: TableState::default().with_selected(Some(0)),
-            show_bash_picker: false,
-            bash_picker_state: TableState::default().with_selected(Some(0)),
-            bash_picker_tasks: Vec::new(),
-            model_picker_selected: 0,
-            model_picker_models: Vec::new(),
-            model_picker_state: TableState::default().with_selected(Some(0)),
-            model_picker_query_cache: QueryCache::default(),
-            show_sidebar: false,
-            session_meta: Vec::new(),
-            session_selected: 0,
-            session_list_state: ratatui::widgets::ListState::default(),
-            show_task_panel: false,
-            expanded_view: ExpandedView::None,
-            task_panel_selected: 0,
-            task_panel_state: TableState::default().with_selected(Some(0)),
-            task_panel_detail: false,
+            model_picker: ModelPickerState::default(),
+            session_picker: SessionPickerState::default(),
+            bash_picker: BashPickerState::default(),
+            session_sidebar: SessionSidebarState::default(),
+            task_panel: TaskPanelUiState::default(),
             mention: crate::mentions::MentionState::default(),
             mention_all_files: Vec::new(),
             show_diagnostic_panel: false,
@@ -651,12 +550,9 @@ impl App {
             delivered_diagnostics: std::collections::HashSet::new(),
             last_keybindings_watcher_seen: 0,
             verbose_mode: false,
-            show_info_sidebar: true,
-            info_sidebar_scroll: 0,
+            info_sidebar: InfoSidebarState::default(),
             leader_key_active: false,
             leader_key_timeout: None,
-            viewing_task_id: None,
-            viewing_task_expanded: std::collections::HashMap::new(),
             pasted_images: Vec::new(),
             pasted_texts: Vec::new(),
             paste_counter: 0,
@@ -698,5 +594,39 @@ impl App {
             "App::new"
         );
         app
+    }
+
+    pub(crate) fn reload_plugin_status_fresh(&mut self) -> bool {
+        self.plugins.reload_report = None;
+        self.refresh_plugin_status()
+    }
+
+    pub(crate) fn refresh_plugin_status(&mut self) -> bool {
+        let project_root = std::path::Path::new(&self.engine.cwd);
+        let Some(mut next) = super::plugin_status::refresh_ui_state(
+            project_root,
+            self.plugins.reload_report.as_ref(),
+        ) else {
+            return false;
+        };
+        next.preserve_ui_widget_snapshots_from(&self.plugins);
+        let refreshed_at = Some(Instant::now());
+        let changed = self.plugins.health != next.health
+            || self.plugins.ui_slots != next.ui_slots
+            || self.plugins.ui_panel_descriptors != next.ui_panel_descriptors
+            || self.plugins.ui_panel_snapshots != next.ui_panel_snapshots
+            || self.plugins.ui_panel_refresh_status != next.ui_panel_refresh_status
+            || self.plugins.ui_widget_descriptors != next.ui_widget_descriptors
+            || self.plugins.ui_widget_snapshots != next.ui_widget_snapshots
+            || self.plugins.ui_widget_refresh_status != next.ui_widget_refresh_status
+            || self.plugins.metric_descriptors != next.metric_descriptors
+            || self.plugins.runtime_action_descriptors != next.runtime_action_descriptors
+            || self.plugins.runtime_extension_descriptors != next.runtime_extension_descriptors
+            || self.plugins.reload_report != next.reload_report;
+        if changed {
+            self.plugins = next;
+        }
+        self.plugins.last_refresh_at = refreshed_at;
+        changed
     }
 }

@@ -24,8 +24,8 @@ pub(super) fn bash_picker(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Clear, picker_area);
 
-    let total = app.bash_picker_tasks.len();
-    let running = app.bash_picker_tasks.iter().filter(|s| s.running).count();
+    let total = app.bash_picker.tasks.len();
+    let running = app.bash_picker.tasks.iter().filter(|s| s.running).count();
     let title = format!(" Background shells · {running} running / {total} total ");
 
     let block = Block::default()
@@ -63,7 +63,7 @@ pub(super) fn bash_picker(f: &mut Frame, app: &mut App) {
     }
 
     let table = shells_table(app);
-    f.render_stateful_widget(table, inner, &mut app.bash_picker_state);
+    f.render_stateful_widget(table, inner, &mut app.bash_picker.table);
 }
 
 /// Build the shells table (header + one row per tracked background shell).
@@ -80,7 +80,7 @@ fn shells_table(app: &App) -> Table<'static> {
     ])
     .height(1);
 
-    let rows: Vec<Row> = app.bash_picker_tasks.iter().map(shell_row).collect();
+    let rows: Vec<Row> = app.bash_picker.tasks.iter().map(shell_row).collect();
 
     let widths = [
         ratatui::layout::Constraint::Length(2),

@@ -2910,6 +2910,8 @@ dependencies = [
  "jfc-markdown",
  "jfc-mcp",
  "jfc-memory",
+ "jfc-plugin-host",
+ "jfc-plugin-sdk",
  "jfc-provider",
  "jfc-providers",
  "jfc-remote",
@@ -2970,6 +2972,8 @@ dependencies = [
  "jfc-config",
  "jfc-core",
  "jfc-knowledge",
+ "jfc-plugin-host",
+ "jfc-plugin-sdk",
  "serde",
  "serde_json",
  "serde_norway",
@@ -3203,6 +3207,8 @@ dependencies = [
  "jfc-learn",
  "jfc-mcp",
  "jfc-memory",
+ "jfc-plugin-host",
+ "jfc-plugin-sdk",
  "jfc-provider",
  "jfc-providers",
  "jfc-remote",
@@ -3324,6 +3330,30 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "jfc-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "jfc-core",
+ "jfc-plugin-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "jfc-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "jfc-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
