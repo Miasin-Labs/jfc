@@ -1147,6 +1147,11 @@ async fn handle_enter_submit(
                 let queue_mode = jfc_engine::config::load_arc().message_queue_mode;
                 let can_interrupt =
                     can_interrupt_on_submit(app, compacting, explicit_interrupt, queue_mode);
+                tracing::debug!(
+                    target: "jfc::input",
+                    "handle_enter_submit: is_streaming={} pipeline_busy={pipeline_busy} compacting={compacting} explicit={explicit_interrupt} queue_mode={queue_mode} can_interrupt={can_interrupt}",
+                    app.engine.is_streaming
+                );
                 if can_interrupt {
                     tracing::info!(
                         target: "jfc::input::interrupt",

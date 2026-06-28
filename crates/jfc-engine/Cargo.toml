@@ -50,6 +50,8 @@ jfc-auth = { path = "../jfc-auth" }
 jfc-agents = { path = "../jfc-agents" }
 jfc-agent = { path = "../jfc-agent" }
 jfc-core = { path = "../jfc-core" }
+jfc-context = { path = "../context" }
+linkscope = { workspace = true }
 jfc-compress = { path = "../jfc-compress" }
 jfc-changeset = { path = "../jfc-changeset" }
 jfc-provider = { path = "../jfc-provider" }

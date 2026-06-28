@@ -10,6 +10,7 @@ fn tool_definition_tokens(tool: &ToolDef) -> u64 {
     )
 }
 
+#[linkscope::instrument]
 pub(crate) fn stream_context_budget(
     system_prompt: &str,
     tools: &[ToolDef],

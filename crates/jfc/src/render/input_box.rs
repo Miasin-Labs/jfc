@@ -238,11 +238,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 pub(super) fn input_visual_line_count(app: &App, content_width: usize) -> usize {
-    input_soft_wrapped_lines(app, content_width)
-        .0
-        .len()
-        .max(1)
-        .saturating_add(2)
+    input_soft_wrapped_lines(app, content_width).0.len().max(1)
 }
 
 pub(super) fn input_soft_wrapped_lines(

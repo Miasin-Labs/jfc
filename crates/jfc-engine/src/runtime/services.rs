@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::app::{PermissionDecision, PermissionMode};
 use crate::context::ReadDedupCache;
 use crate::runtime::ExecutionResult;
 use crate::session::SessionStore;
@@ -80,7 +81,20 @@ pub trait ToolRuntime: RuntimeService {
     }
 }
 
-pub trait RuntimePolicy: RuntimeService {}
+pub trait RuntimePolicy: RuntimeService {
+    /// Mode-level auto-approval decision for a tool call, evaluated *before*
+    /// session/always allowlists are consulted. Fronts
+    /// [`PermissionMode::decide_parts`] so the runtime reads tool gating
+    /// through the policy service boundary instead of calling the mode enum
+    /// directly. Mirrors how [`RuntimeDiagnostics::diagnostic_entries`] fronts
+    /// the global diagnostics store.
+    fn tool_decision(
+        &self,
+        mode: PermissionMode,
+        kind: &ToolKind,
+        input: &ToolInput,
+    ) -> PermissionDecision;
+}
 
 pub trait PluginRuntime: RuntimeService {}
 
@@ -275,6 +289,32 @@ impl AgentRuntime {
         self.services.diagnostics.diagnostic_entries()
     }
 }
+
+/// Process-default no-op [`PluginRuntime`]. `PluginRuntime` is still a marker
+/// trait (cutover #3 gives the service traits real methods incrementally); this
+/// stub lets the live engine hold a complete [`RuntimeServices`] today without
+/// rerouting any plugin behavior through it yet.
+pub struct DefaultPluginRuntime;
+
+impl RuntimeService for DefaultPluginRuntime {
+    fn service_name(&self) -> &'static str {
+        "default-plugin-runtime"
+    }
+}
+
+impl PluginRuntime for DefaultPluginRuntime {}
+
+/// Process-default no-op [`ContextAssembler`] (marker trait today). Same purpose
+/// as [`DefaultPluginRuntime`]: a placeholder so the service bundle is complete.
+pub struct DefaultContextAssembler;
+
+impl RuntimeService for DefaultContextAssembler {
+    fn service_name(&self) -> &'static str {
+        "default-context-assembler"
+    }
+}
+
+impl ContextAssembler for DefaultContextAssembler {}
 
 #[cfg(test)]
 mod tests;

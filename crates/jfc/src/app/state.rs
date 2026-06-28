@@ -148,6 +148,16 @@ pub struct App {
     /// execute a turn with no UI present. Moves to the jfc-engine
     /// crate in a later stage of the extraction.
     pub engine: EngineState,
+    /// Token-audit dashboard handle. `Some` when the opt-in dashboard server is
+    /// running (via `[dashboard]` config); the event loop publishes a fresh
+    /// snapshot to it each drained burst. `None` on a default launch.
+    pub dashboard: Option<jfc_dashboard::DashboardHandle>,
+    /// Per-request token/cost timeline (bounded ring), appended once per
+    /// finalized provider request. Serialized into the dashboard snapshot so the
+    /// audit panel can chart where input/output tokens go over the session.
+    pub timeline: std::collections::VecDeque<jfc_dashboard::TimelineSample>,
+    /// Cumulative-usage baseline for computing per-request deltas. Not serialized.
+    pub timeline_baseline: crate::runtime::timeline::TimelineBaseline,
     pub theme: Theme,
     pub active_theme_name: String,
     pub plugins_disabled_by_managed_policy: bool,
@@ -493,6 +503,9 @@ impl App {
         plugin_state.last_refresh_at = Some(Instant::now());
         let mut app = Self {
             engine,
+            dashboard: None,
+            timeline: std::collections::VecDeque::new(),
+            timeline_baseline: crate::runtime::timeline::TimelineBaseline::default(),
             stream_pacer: crate::render::codex_stream::stream_pacer::StreamPacer::default(),
             paced_stream_key: None,
             theme: Theme::claude(),

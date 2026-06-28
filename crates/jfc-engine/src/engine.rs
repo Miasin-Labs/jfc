@@ -33,13 +33,49 @@ use std::sync::Arc;
 
 use crate::app::{EngineEffect, EngineState};
 use crate::runtime::{
-    self, APP_EVENT_BUFFER, AgentRuntime, EngineEvent, EventReceiver, EventSender,
-    FrontendDirective, RuntimeServices, RuntimeServicesBuilder, RuntimeServicesError,
+    self, APP_EVENT_BUFFER, AgentRuntime, DefaultContextAssembler, DefaultPluginRuntime,
+    EngineEvent, EventReceiver, EventSender, FrontendDirective, RuntimeServices,
+    RuntimeServicesBuilder, RuntimeServicesError,
 };
 
 /// Create the engine event channel with the standard buffer size.
 pub fn channel() -> (EventSender, EventReceiver) {
     tokio::sync::mpsc::channel(APP_EVENT_BUFFER)
+}
+
+/// Build the process-default [`RuntimeServices`] for the live engine from the
+/// real builtin service impls (provider registry, tool runtime, permission
+/// policy, diagnostics, session store) plus no-op plugin/context stubs.
+///
+/// Returns `None` (logged) if the builder is ever incomplete, so a missing
+/// service can never panic engine construction. Cutover #1 keystone: this makes
+/// a real services bundle exist on the live engine; live dispatch/session/cwd
+/// paths do NOT yet read it (that is a later, test-backed step).
+fn build_default_runtime_services(
+    provider: Arc<dyn jfc_provider::Provider>,
+) -> Option<RuntimeServices> {
+    match RuntimeServices::builder()
+        .session_store(Arc::new(crate::session::DefaultSessionStore))
+        .provider_registry(Arc::new(
+            crate::runtime::bootstrap::BuiltInProviderRegistry::new(vec![provider]),
+        ))
+        .tool_runtime(crate::tools::builtin_tool_runtime())
+        .policy(Arc::new(crate::app::BuiltinRuntimePolicy))
+        .plugin_runtime(Arc::new(DefaultPluginRuntime))
+        .context_assembler(Arc::new(DefaultContextAssembler))
+        .diagnostics(Arc::new(crate::diagnostics::GlobalDiagnosticsService))
+        .build()
+    {
+        Ok(services) => Some(services),
+        Err(error) => {
+            tracing::warn!(
+                target: "jfc::runtime",
+                %error,
+                "default runtime services unavailable; agent_runtime stays None"
+            );
+            None
+        }
+    }
 }
 
 /// An owned engine instance: the state plus the sending half of its event
@@ -122,10 +158,12 @@ impl Engine {
                 }
             }
         });
+        let agent_runtime =
+            build_default_runtime_services(Arc::clone(&provider)).map(AgentRuntime::new);
         Self {
             state: EngineState::new(provider, model),
             tx,
-            agent_runtime: None,
+            agent_runtime,
         }
     }
 
@@ -363,7 +401,27 @@ mod tests {
         }
     }
     fake_runtime_service!(FakeToolRuntime, ToolRuntime, "fake-tool-runtime");
-    fake_runtime_service!(FakePolicy, RuntimePolicy, "fake-policy");
+
+    // RuntimePolicy now carries `tool_decision`, which the no-method
+    // `fake_runtime_service!` macro can't generate — spell the fake out and
+    // delegate to the same pure mode logic the real `BuiltinRuntimePolicy` uses.
+    struct FakePolicy;
+    impl RuntimeService for FakePolicy {
+        fn service_name(&self) -> &'static str {
+            "fake-policy"
+        }
+    }
+    impl RuntimePolicy for FakePolicy {
+        fn tool_decision(
+            &self,
+            mode: crate::app::PermissionMode,
+            kind: &crate::types::ToolKind,
+            input: &crate::types::ToolInput,
+        ) -> crate::app::PermissionDecision {
+            mode.decide_parts(kind, input)
+        }
+    }
+
     fake_runtime_service!(FakePluginRuntime, PluginRuntime, "fake-plugin-runtime");
     fake_runtime_service!(
         FakeContextAssembler,

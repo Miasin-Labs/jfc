@@ -431,6 +431,7 @@ pub async fn compact(
     max_output_tokens: Option<usize>,
     on_progress: Option<CompactProgressCb>,
 ) -> CompactResult {
+    let _ls = linkscope::phase("turn.compact");
     // Recovery: reset the rapid-refill counter when enough turns have
     // elapsed since the last compact. v126's `cli.2.1.126.deob.js:397270`
     // re-evaluates this each turn — `consecutiveRapidRefills` resets to 0

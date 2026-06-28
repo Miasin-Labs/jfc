@@ -228,6 +228,49 @@ pub(crate) async fn run(
         }
     }
 
+    // Token-audit dashboard: opt-in via `[dashboard]` config. Serves a local
+    // web page that polls a JSON snapshot of context composition + per-model
+    // usage/cost. A default launch starts nothing.
+    if startup_config
+        .dashboard
+        .as_ref()
+        .is_some_and(|dashboard| dashboard.enabled)
+    {
+        // Turn on in-process pipeline profiling (near-zero cost otherwise) so the
+        // audit panel can show phase timings (turn.submit / turn.compact / …).
+        linkscope::enable();
+        let port = startup_config
+            .dashboard
+            .as_ref()
+            .map(|dashboard| dashboard.port)
+            .unwrap_or(jfc_config::DEFAULT_DASHBOARD_PORT);
+        let handle = jfc_dashboard::new_handle();
+        match jfc_dashboard::spawn(handle.clone(), &format!("127.0.0.1:{port}")) {
+            Ok(server) => {
+                tracing::info!(
+                    target: "jfc::dashboard",
+                    addr = %server.local_addr,
+                    "token dashboard auto-started at launch"
+                );
+                jfc_engine::toast::push_with_cap(
+                    &mut app.engine.toasts,
+                    jfc_engine::toast::Toast::new(
+                        jfc_engine::toast::ToastKind::Info,
+                        format!("token dashboard → http://{}", server.local_addr),
+                    ),
+                );
+                app.dashboard = Some(handle);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "jfc::dashboard",
+                    %error,
+                    "failed to start token dashboard"
+                );
+            }
+        }
+    }
+
     jfc_engine::claude_status::spawn_status_poll(tx.clone());
     // v141 parity: when the caller passed `--permission-mode`, apply
     // it before any user prompt so the first turn already runs under
@@ -1080,6 +1123,10 @@ pub(crate) async fn run(
         // (scroll pinning, render-cache invalidation).
         apply_engine_effects(&mut app, Some(&tx));
 
+        // Publish one coherent token-audit snapshot per drained burst (no-op
+        // unless the opt-in dashboard server is running).
+        crate::runtime::dashboard::publish(&app);
+
         // After processing all events in this burst, mirror derived state
         // to remote-control clients.
         if let Some(ref rc) = app.remote_host {
@@ -1267,6 +1314,9 @@ pub(crate) fn apply_engine_effects(app: &mut App, tx: Option<&EventSender>) {
                 }
             }
             crate::app::EngineEffect::StreamingFinalized => {
+                // One token-timeline sample per finalized request (edge-triggered:
+                // this effect is drained once per round-trip).
+                app.record_timeline_sample();
                 app.render_cache.borrow_mut().clear_streaming();
                 // End the incremental read-aloud turn (flush the trailing partial
                 // sentence + drain playback). No-op if read-aloud is off or the
@@ -1287,6 +1337,9 @@ pub(crate) fn apply_engine_effects(app: &mut App, tx: Option<&EventSender>) {
                 app.task_panel.reset_selection();
                 app.task_panel.reset_drilldown();
                 app.recompute_token_estimate();
+                // New session / cleared transcript: drop the timeline + baseline so
+                // the next request doesn't emit a spurious giant first delta.
+                app.reset_timeline();
             }
             crate::app::EngineEffect::ModelsRefreshed => {
                 app.model_picker.query_cache.clear();

@@ -658,6 +658,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
                     env: effective_env,
                     headers: cfg.headers.clone(),
                     url: cfg.url.clone(),
+                    cwd: None,
                 },
             };
         }
@@ -688,6 +689,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
                         env: effective_env,
                         headers: cfg.headers.clone(),
                         url: cfg.url.clone(),
+                        cwd: None,
                     },
                 };
             }
@@ -703,6 +705,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
         env: effective_env,
         headers,
         url: cfg.url.clone(),
+        cwd: None,
     };
 
     let Some(transport) = Transport::spawn(spawn_cfg.clone()).await else {
@@ -1022,6 +1025,7 @@ mod tests {
                 env: HashMap::new(),
                 headers: HashMap::new(),
                 url: None,
+                cwd: None,
             },
         }
     }

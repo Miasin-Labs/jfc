@@ -1,5 +1,7 @@
+pub(crate) mod dashboard;
 pub(crate) mod event_loop;
 mod terminal;
+pub(crate) mod timeline;
 mod yank;
 
 // Engine-side runtime surface re-exported so historical `crate::runtime::X`

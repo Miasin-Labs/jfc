@@ -351,6 +351,10 @@ pub struct SpawnConfig {
     pub env: HashMap<String, String>,
     pub headers: HashMap<String, String>,
     pub url: Option<String>,
+    /// Working directory for a stdio child (cutover #5 per-cwd seam). `None`
+    /// inherits jfc's OS-level cwd exactly as before; this is dormant scaffolding
+    /// populated only by a later, test-backed respawn-on-cd step.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 /// A live connection to one MCP server. Cloneable handles share the same
@@ -402,6 +406,11 @@ impl Transport {
         command.args(&cfg.args);
         for (k, v) in &cfg.env {
             command.env(k, v);
+        }
+        // Per-cwd scoping (cutover #5): when a cwd is set, run the child there;
+        // `None` keeps the inherited OS cwd, so default behavior is unchanged.
+        if let Some(cwd) = &cfg.cwd {
+            command.current_dir(cwd);
         }
 
         // Pipe stderr so we can surface it via `/mcp logs`; rmcp's builder

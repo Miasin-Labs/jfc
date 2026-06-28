@@ -56,7 +56,8 @@ pub use runtime_action::{
     resolve_runtime_action,
 };
 pub use services::{
-    AgentRuntime, ContextAssembler, PluginRuntime, ProviderModelResolution, ProviderRegistry,
+    AgentRuntime, ContextAssembler, DefaultContextAssembler, DefaultPluginRuntime, PluginRuntime,
+    ProviderModelResolution, ProviderRegistry,
     ProviderRegistryError, RuntimeDiagnostics, RuntimeDiagnosticsSnapshot,
     RuntimeDiagnosticsStatus, RuntimePolicy, RuntimeService, RuntimeServiceKind, RuntimeServices,
     RuntimeServicesBuilder, RuntimeServicesError, ToolRuntime, ToolRuntimeCatalogEntry,

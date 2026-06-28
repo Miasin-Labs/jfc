@@ -115,6 +115,8 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_control: Option<RemoteControlConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<DashboardConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exploration: Option<ExplorationConfig>,
@@ -492,6 +494,28 @@ impl Default for RemoteControlConfig {
     }
 }
 
+/// `[dashboard]` section in config.toml — opt-in local token-audit dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DashboardConfig {
+    /// Start the token-audit web dashboard when jfc launches.
+    pub enabled: bool,
+    /// TCP port for the dashboard HTTP server (default 4327).
+    pub port: u16,
+}
+
+/// Default token-audit dashboard HTTP port.
+pub const DEFAULT_DASHBOARD_PORT: u16 = 4327;
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: DEFAULT_DASHBOARD_PORT,
+        }
+    }
+}
+
 fn default_memory_recall_enabled() -> bool {
     true
 }
@@ -857,6 +881,7 @@ impl Default for Config {
             compact_instructions: None,
             hooks: None,
             remote_control: None,
+            dashboard: None,
             continuation: None,
             exploration: None,
             managed_settings: None,
@@ -985,6 +1010,7 @@ impl Config {
             compact_instructions: local_or_base!(compact_instructions),
             hooks: local_or_base!(hooks),
             remote_control: local_or_base!(remote_control),
+            dashboard: local_or_base!(dashboard),
             continuation: local_or_base!(continuation),
             exploration: local_or_base!(exploration),
             managed_settings: local_or_base!(managed_settings),

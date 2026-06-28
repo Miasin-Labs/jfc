@@ -9,7 +9,7 @@ pub mod memory;
 pub mod reduce;
 pub mod search;
 
-pub use contributors::{ContextContributor, ContributorId};
+pub use contributors::{ContextAccount, ContextContributor, ContributorId};
 pub use doctor::{ContextDoctorReport, ContextHealthDoctorEvent, ContextHealthDoctorSummary};
 pub use error::ContextSkeletonError;
 pub use health::{

@@ -45,7 +45,7 @@ use super::notebook::{execute_notebook_edit, execute_notebook_read};
 use super::notifications::{execute_push_notification, execute_remote_trigger};
 use super::research::execute_research;
 use super::scratchpad::{execute_scratchpad_read, execute_scratchpad_write};
-use super::search::{execute_glob, execute_grep};
+use super::search::execute_grep;
 use super::swarm::{
     execute_send_message, execute_team_create, execute_team_delete, execute_team_member_mode,
 };
@@ -96,7 +96,7 @@ impl ToolRuntime for BuiltinToolRuntime {
     }
 }
 
-fn builtin_tool_runtime() -> Arc<dyn ToolRuntime> {
+pub fn builtin_tool_runtime() -> Arc<dyn ToolRuntime> {
     Arc::new(BuiltinToolRuntime)
 }
 
@@ -472,9 +472,10 @@ async fn execute_tool_inner(
             }
             result
         }
-        (ToolKind::Glob, ToolInput::Glob { pattern, path }) => {
-            execute_glob(&pattern, path.as_deref(), &cwd).await
-        }
+        // Glob is owned end-to-end by the descriptor router (GLOB_HANDLER →
+        // execute_glob, dispatched at the `execute_descriptor_tool_with_context`
+        // step above), so the closed-match arm was dead. Removed as cutover #4 —
+        // Glob now flows only through the descriptor path.
         (
             ToolKind::Grep,
             ToolInput::Grep {

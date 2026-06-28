@@ -65,6 +65,8 @@ ansi-to-tui = "8"
 itertools = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 jfc-engine = { path = "../jfc-engine" }
+jfc-dashboard = { path = "../jfc-dashboard" }
+linkscope = { workspace = true }
 jfc-plugin-host = { path = "../jfc-plugin-host" }
 jfc-plugin-sdk = { path = "../jfc-plugin-sdk" }
 jfc-voice = { path = "../jfc-voice" }

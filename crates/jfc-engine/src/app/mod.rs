@@ -63,7 +63,7 @@ pub use engine_state::{
 };
 pub use events::EngineEvent;
 pub use permissions::{
-    ApprovalChoice, PendingApproval, PendingQuestion, PermissionDecision, PermissionMode,
-    QuestionItem, QuestionOption,
+    ApprovalChoice, BuiltinRuntimePolicy, PendingApproval, PendingQuestion, PermissionDecision,
+    PermissionMode, QuestionItem, QuestionOption,
 };
 pub use recent_models::{load_recent_models, push_recent_model};

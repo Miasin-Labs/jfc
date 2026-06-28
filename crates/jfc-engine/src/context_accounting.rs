@@ -1,6 +1,8 @@
 use crate::app::EngineState;
 use crate::types::ChatMessage;
 
+mod account;
+mod compartments;
 mod detected_limit;
 mod message_pressure;
 mod provider_archive;
@@ -9,6 +11,11 @@ mod provider_payload;
 mod request_pressure;
 mod transcript_boundary;
 
+pub use account::{
+    CONTRIB_COMPARTMENTS, CONTRIB_CONVERSATION, CONTRIB_DOCS, CONTRIB_MEMORIES, CONTRIB_SYSTEM,
+    CONTRIB_TOOL_CALLS, CONTRIB_TOOL_DEFS, build_context_account,
+};
+pub use compartments::{build_compartment_sequence, compartment_total_tokens};
 pub(crate) use detected_limit::{
     DetectedContextLimit, load_session_detected_context_limit, parse_detected_context_limit,
     persist_session_detected_context_limit,

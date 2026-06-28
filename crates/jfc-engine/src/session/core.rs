@@ -209,6 +209,16 @@ pub async fn save_session(
             "session DB write task failed"
         );
     }
+
+    // Cutover #2 (additive, fire-and-forget): mirror the transcript into a typed
+    // SessionEntry JSONL sidecar. The DB save above and the DB-only load path are
+    // untouched and nothing reads this sidecar yet — a detached task, so it can
+    // never block or fail the real save.
+    tokio::spawn(super::entry_log::write_sidecar(
+        session_id_str.to_owned(),
+        messages.to_vec(),
+    ));
+
     info!(
         target: "jfc::session",
         session_id = session_id_str,

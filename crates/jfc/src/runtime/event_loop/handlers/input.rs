@@ -628,6 +628,46 @@ mod tests {
         assert_eq!(app.scroll_velocity, 0.0);
     }
 
+    // Regression: clicking a toast's top border row maps to `local == 0`. The
+    // old click handler computed `local - 1` on an unsigned row, so a click on
+    // that border underflowed and panicked ("attempt to subtract with
+    // overflow"). The guarded handler must treat border rows as no-ops (toast
+    // stays) and only dismiss when a body row is clicked.
+    #[tokio::test]
+    async fn toast_border_click_does_not_underflow_regression() {
+        let mut app = App::new(Arc::new(StubProvider), "test-model");
+        let mut toast =
+            jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Error, "boom");
+        toast.created_at -= std::time::Duration::from_secs(1);
+        jfc_engine::toast::push_with_cap(&mut app.engine.toasts, toast);
+        // Bordered strip at (40,10) sized 30x4: row 10 = top border (local 0),
+        // rows 11-12 = body, row 13 = bottom border.
+        *app.toasts_rect.borrow_mut() = Some(ratatui::layout::Rect::new(40, 10, 30, 4));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
+        let click = |row: u16| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 45,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+
+        // Top border: previously panicked; now a no-op that keeps the toast.
+        handle_mouse(&mut app, click(10), &tx).await;
+        assert_eq!(
+            app.engine.toasts.len(),
+            1,
+            "clicking the toast border must not dismiss or panic"
+        );
+
+        // Body row dismisses the toast.
+        handle_mouse(&mut app, click(11), &tx).await;
+        assert!(
+            app.engine.toasts.is_empty(),
+            "clicking a toast body row should dismiss it"
+        );
+    }
+
     // Drag-edge autoscroll overrun: rows inside the transcript yield None; rows
     // above the top edge yield a negative overrun (scroll up); rows at/below
     // the bottom edge yield a positive overrun (scroll down). This is the core

@@ -52,10 +52,13 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     let total_w_pre = f.area().width as usize;
     let input_content_w = total_w_pre.saturating_sub(4);
     let input_lines = input_visual_line_count(app, input_content_w);
+    // +2 reserves the composer's top/bottom padding rows (borderless,
+    // opencode-style). `input_visual_line_count` returns the pure wrapped-line
+    // count; the chrome is added here where the layout height is decided.
     let input_height = if in_task_view {
         0
     } else {
-        input_lines.min(8) as u16
+        (input_lines + 2).min(8) as u16
     };
     // One quiet task-view tab strip. Navigation hints fit on the same row when
     // there is room; the transcript gets the rest.

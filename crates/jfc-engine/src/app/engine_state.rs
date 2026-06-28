@@ -19,8 +19,9 @@ use tokio::sync::Mutex;
 use crate::auto_mode::AutoModeConfig;
 use crate::context::{ReadDedupCache, ToolContext};
 use crate::runtime::{
-    DEFERRED_TOOL_USES_CAP, DeferredToolUse, EngineEvent, MessageQueue, StreamLifecycleStatus,
-    StreamRequestMetadata, TOOL_USE_SUMMARIES_CAP, ToolUseSummary, push_bounded_drop_oldest,
+    DEFERRED_TOOL_USES_CAP, DeferredToolUse, EngineEvent, MessageQueue, RuntimePolicy,
+    StreamLifecycleStatus, StreamRequestMetadata, TOOL_USE_SUMMARIES_CAP, ToolUseSummary,
+    push_bounded_drop_oldest,
 };
 use crate::slate::SlateRouter;
 use crate::types::*;
@@ -1985,6 +1986,20 @@ impl EngineState {
     }
 
     pub fn tool_needs_approval(&self, tool: &ToolCall) -> bool {
+        self.tool_needs_approval_with_policy(&super::permissions::BuiltinRuntimePolicy, tool)
+    }
+
+    /// [`Self::tool_needs_approval`] parameterized over the [`RuntimePolicy`]
+    /// service that decides mode-level auto-approval. The public entry point
+    /// passes the process-default `BuiltinRuntimePolicy`; the runtime service
+    /// boundary (and tests) can inject an alternate policy. Mirrors the
+    /// `build_prompt_seed` / `build_prompt_seed_with_diagnostics` split that
+    /// routes diagnostics through the `RuntimeDiagnostics` service.
+    pub(crate) fn tool_needs_approval_with_policy(
+        &self,
+        policy: &dyn RuntimePolicy,
+        tool: &ToolCall,
+    ) -> bool {
         // Fast path: when running inside a landlock sandbox, permission
         // prompts add friction without security value — auto-approve
         // unless the user has explicitly opted out via config.
@@ -2006,8 +2021,10 @@ impl EngineState {
             }
         }
 
-        // Permission mode takes priority
-        match self.permission_mode.auto_approves(tool) {
+        // Permission mode takes priority — read the decision through the
+        // RuntimePolicy service boundary rather than calling PermissionMode
+        // directly, so the gate has a single injectable owner.
+        match policy.tool_decision(self.permission_mode, &tool.kind, &tool.input) {
             PermissionDecision::Approved => return false,
             // Denied tools don't need a *prompt* — but they must not be
             // dispatched either. The StreamTool handler checks

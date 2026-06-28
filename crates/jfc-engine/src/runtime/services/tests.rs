@@ -121,7 +121,16 @@ impl RuntimeService for FakePolicy {
     }
 }
 
-impl RuntimePolicy for FakePolicy {}
+impl RuntimePolicy for FakePolicy {
+    fn tool_decision(
+        &self,
+        mode: crate::app::PermissionMode,
+        kind: &crate::types::ToolKind,
+        input: &crate::types::ToolInput,
+    ) -> crate::app::PermissionDecision {
+        mode.decide_parts(kind, input)
+    }
+}
 
 struct FakePluginRuntime;
 

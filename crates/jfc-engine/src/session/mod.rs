@@ -11,6 +11,7 @@
 mod compaction;
 mod core;
 mod deserialize;
+mod entry_log;
 pub(crate) mod serialization;
 mod serialize;
 mod store;

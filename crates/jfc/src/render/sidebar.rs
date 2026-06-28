@@ -328,114 +328,45 @@ struct ContextBreakdownRow {
     color: ratatui::style::Color,
 }
 
-struct TranscriptBreakdown {
-    conversation_tokens: u64,
-    tool_call_tokens: u64,
-    compartment_tokens: u64,
-}
-
 fn context_breakdown_rows(app: &App, theme: Theme) -> Vec<ContextBreakdownRow> {
-    let transcript = transcript_breakdown(&app.engine.messages);
+    use jfc_engine::context_accounting as account;
+
     let budget = app
         .engine
         .current_stream_request
         .as_ref()
         .and_then(|metadata| metadata.context_budget)
         .or(app.engine.last_context_budget);
-    let transcript_total = transcript
-        .conversation_tokens
-        .saturating_add(transcript.tool_call_tokens)
-        .saturating_add(transcript.compartment_tokens);
-    let conversation_tokens = budget
-        .map(|budget| budget.user_message_tokens.saturating_sub(transcript_total))
-        .unwrap_or(0)
-        .saturating_add(transcript.conversation_tokens);
+    let system_fallback = app.engine.last_system_prompt_len.unwrap_or(0) as u64;
 
-    let system_tokens = budget
-        .map(|budget| budget.system_prompt_tokens)
-        .unwrap_or_else(|| app.engine.last_system_prompt_len.unwrap_or(0) as u64);
-    let docs_tokens = budget
-        .map(|budget| budget.project_instructions_tokens)
-        .unwrap_or(0);
-    let memory_tokens = budget.map(|budget| budget.memory_tokens).unwrap_or(0);
-    let tool_def_tokens = budget
-        .map(|budget| budget.tool_definition_tokens)
-        .unwrap_or(0);
+    // Owned composition account (jfc-context). The derivation lives in the
+    // engine, not the render layer; the renderer only maps contributor ids to
+    // display colors and paints the rows.
+    let context_account =
+        account::build_context_account(budget, &app.engine.messages, system_fallback);
 
-    vec![
-        ContextBreakdownRow {
-            label: "System",
-            tokens: system_tokens,
-            color: theme.accent,
-        },
-        ContextBreakdownRow {
-            label: "Docs",
-            tokens: docs_tokens,
-            color: theme.accent_secondary,
-        },
-        ContextBreakdownRow {
-            label: "Compartments",
-            tokens: transcript.compartment_tokens,
-            color: theme.text_secondary,
-        },
-        ContextBreakdownRow {
-            label: "Memories",
-            tokens: memory_tokens,
-            color: theme.success,
-        },
-        ContextBreakdownRow {
-            label: "Conversation",
-            tokens: conversation_tokens,
-            color: theme.error,
-        },
-        ContextBreakdownRow {
-            label: "Tool Calls",
-            tokens: transcript.tool_call_tokens,
-            color: theme.warning,
-        },
-        ContextBreakdownRow {
-            label: "Tool Defs",
-            tokens: tool_def_tokens,
-            color: theme.reasoning_fg,
-        },
-    ]
-}
-
-fn transcript_breakdown(messages: &[jfc_core::ChatMessage]) -> TranscriptBreakdown {
-    let mut out = TranscriptBreakdown {
-        conversation_tokens: 0,
-        tool_call_tokens: 0,
-        compartment_tokens: 0,
-    };
-    for message in messages {
-        let compartment_message = message
-            .parts
-            .iter()
-            .any(|part| matches!(part, jfc_core::MessagePart::CompactBoundary { .. }));
-        for part in &message.parts {
-            match part {
-                jfc_core::MessagePart::Tool(tool) => {
-                    out.tool_call_tokens = out
-                        .tool_call_tokens
-                        .saturating_add(tokens_from_chars(tool.input.summary().len()))
-                        .saturating_add(tokens_from_chars(tool.output.approx_text_len()));
-                }
-                jfc_core::MessagePart::CompactBoundary { .. }
-                | jfc_core::MessagePart::ReasoningSignature(_) => {}
-                _ if compartment_message => {
-                    out.compartment_tokens = out
-                        .compartment_tokens
-                        .saturating_add(tokens_from_chars(part.approx_text_len()));
-                }
-                _ => {
-                    out.conversation_tokens = out
-                        .conversation_tokens
-                        .saturating_add(tokens_from_chars(part.approx_text_len()));
-                }
-            }
-        }
-    }
-    out
+    context_account
+        .contributors()
+        .iter()
+        .filter_map(|contributor| {
+            let (label, color): (&'static str, ratatui::style::Color) =
+                match contributor.id().as_str() {
+                    account::CONTRIB_SYSTEM => ("System", theme.accent),
+                    account::CONTRIB_DOCS => ("Docs", theme.accent_secondary),
+                    account::CONTRIB_COMPARTMENTS => ("Compartments", theme.text_secondary),
+                    account::CONTRIB_MEMORIES => ("Memories", theme.success),
+                    account::CONTRIB_CONVERSATION => ("Conversation", theme.error),
+                    account::CONTRIB_TOOL_CALLS => ("Tool Calls", theme.warning),
+                    account::CONTRIB_TOOL_DEFS => ("Tool Defs", theme.reasoning_fg),
+                    _ => return None,
+                };
+            Some(ContextBreakdownRow {
+                label,
+                tokens: contributor.tokens(),
+                color,
+            })
+        })
+        .collect()
 }
 
 fn context_breakdown_bar<'a>(
@@ -479,10 +410,6 @@ fn context_breakdown_bar<'a>(
         ));
     }
     Line::from(spans)
-}
-
-fn tokens_from_chars(chars: usize) -> u64 {
-    u64::try_from(chars.saturating_add(3) / 4).unwrap_or(u64::MAX)
 }
 
 fn align_right(value: &str, width: usize) -> String {

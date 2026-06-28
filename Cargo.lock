@@ -2902,6 +2902,7 @@ dependencies = [
  "jfc-config",
  "jfc-core",
  "jfc-daemon",
+ "jfc-dashboard",
  "jfc-design",
  "jfc-economy",
  "jfc-engine",
@@ -2919,6 +2920,7 @@ dependencies = [
  "jfc-tools",
  "jfc-voice",
  "jfc-web",
+ "linkscope",
  "notify",
  "parking_lot",
  "pprof",
@@ -3146,6 +3148,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jfc-dashboard"
+version = "0.1.0"
+dependencies = [
+ "jfc-context",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "jfc-design"
 version = "0.1.0"
 dependencies = [
@@ -3206,6 +3218,7 @@ dependencies = [
  "jfc-changeset",
  "jfc-compress",
  "jfc-config",
+ "jfc-context",
  "jfc-core",
  "jfc-daemon",
  "jfc-design",
@@ -3224,6 +3237,7 @@ dependencies = [
  "jfc-web",
  "jsonschema",
  "libc",
+ "linkscope",
  "notify",
  "notify-rust",
  "num_cpus",
@@ -3713,6 +3727,23 @@ name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
+
+[[package]]
+name = "linkscope"
+version = "0.1.0"
+dependencies = [
+ "linkscope-macros",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "linkscope-macros"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 2.0.118",
+]
 
 [[package]]
 name = "linux-raw-sys"

@@ -261,6 +261,31 @@ pub enum PermissionDecision {
     NeedsClassifier,
 }
 
+/// Process-default [`crate::runtime::RuntimePolicy`] backed by
+/// [`PermissionMode`] gating. Stateless service struct in the same shape as
+/// [`crate::diagnostics::GlobalDiagnosticsService`] and
+/// `BuiltinToolRuntime`: it fronts the existing pure decision logic so the
+/// runtime can read tool gating through the policy service boundary instead of
+/// reaching into the mode enum directly.
+pub struct BuiltinRuntimePolicy;
+
+impl crate::runtime::RuntimeService for BuiltinRuntimePolicy {
+    fn service_name(&self) -> &'static str {
+        "builtin-runtime-policy"
+    }
+}
+
+impl crate::runtime::RuntimePolicy for BuiltinRuntimePolicy {
+    fn tool_decision(
+        &self,
+        mode: PermissionMode,
+        kind: &ToolKind,
+        input: &ToolInput,
+    ) -> PermissionDecision {
+        mode.decide_parts(kind, input)
+    }
+}
+
 fn is_plan_safe_mcp_tool(name: &str) -> bool {
     let Some((server, tool)) = crate::mcp::protocol::split_advertised(name) else {
         return false;

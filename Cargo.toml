@@ -24,6 +24,7 @@ boa_engine = "0.20"
 criterion = { version = "4.7.0", features = ["html_reports"], package = "codspeed-criterion-compat" }
 fs2 = "0.4"
 futures-util = "0.3"
+linkscope = { path = "../linkscope", features = ["json"] }
 num_cpus = "1.16"
 parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde"] }

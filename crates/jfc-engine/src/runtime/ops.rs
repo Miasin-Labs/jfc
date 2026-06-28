@@ -533,6 +533,13 @@ pub async fn submit_prompt(
     attachments: Vec<crate::attachments::Attachment>,
     edit_at: Option<usize>,
 ) -> anyhow::Result<SubmitOutcome> {
+    let _ls = linkscope::phase("turn.submit");
+    tracing::debug!(
+        target: "jfc::submit",
+        "submit_prompt TOP: msgs={} budget_reached={}",
+        state.messages.len(),
+        refuse_budget_cap_if_reached(state)
+    );
     if refuse_budget_cap_if_reached(state) {
         return Ok(SubmitOutcome::BudgetExceeded);
     }
@@ -736,6 +743,11 @@ pub async fn submit_prompt(
         level,
         crate::compact::CompactLevel::Compact | crate::compact::CompactLevel::Blocked
     ) || state.force_compact_pending;
+    tracing::debug!(
+        target: "jfc::submit",
+        "submit_prompt: est={est} max_ctx={} max_out={:?} level={level:?} want_compact={want_compact} compact_suppressed={} msgs={}",
+        state.max_context_tokens, state.max_output_tokens, state.compact_suppressed, state.messages.len()
+    );
     // Respect the suppression flag set by the post-response compact
     // path. Once compaction has permanently failed (provider doesn't
     // support it, breaker latched, retries exhausted), retrying on
