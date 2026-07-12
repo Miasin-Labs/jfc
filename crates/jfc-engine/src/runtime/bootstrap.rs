@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::providers::{
-    AnthropicOAuthProvider, AnthropicProvider, AntigravityOAuthProvider, CodexOAuthProvider,
-    GeminiApiProvider, LiteLLMProvider, OpenAIProvider, OpenRouterProvider, OpenWebUIProvider,
-    VertexProvider,
+    AnthropicOAuthProvider, AnthropicProvider, AntigravityOAuthProvider,
+    CloudflarePlaygroundProvider, CodexOAuthProvider, GeminiApiProvider, LiteLLMProvider,
+    NvidiaProvider, OpenAIProvider, OpenRouterProvider, OpenWebUIProvider, VertexProvider,
 };
 use crate::runtime::{
     ProviderModelResolution, ProviderRegistry, ProviderRegistryError, RuntimeService,
@@ -106,6 +106,7 @@ pub fn build_providers() -> ProvidersInit {
         .ok()
         .or_else(|| std::env::var("OPENWEBUI_MODEL").ok())
         .or_else(|| std::env::var("OPENROUTER_MODEL").ok())
+        .or_else(|| std::env::var("NVIDIA_MODEL").ok())
         .or_else(|| std::env::var("JFC_LITELLM_MODEL").ok())
         .filter(|s| !s.is_empty());
     let cfg_model = crate::config::load_arc()
@@ -136,7 +137,15 @@ pub fn build_providers() -> ProvidersInit {
         model_id = %spec.model(),
         "resolved startup model spec"
     );
-    let model = spec.model().clone();
+    let model = if spec
+        .provider()
+        .is_some_and(|provider| provider.as_str() == "nvidia")
+        && nvidia_static_catalog_contains(&resolved_raw)
+    {
+        ModelId::new(resolved_raw.clone())
+    } else {
+        spec.model().clone()
+    };
 
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
     let mut prefer: Option<&'static str> = None;
@@ -176,9 +185,27 @@ pub fn build_providers() -> ProvidersInit {
         prefer.get_or_insert("openrouter");
     }
 
+    if let Some(nvidia) = NvidiaProvider::from_env() {
+        providers.push(Arc::new(nvidia));
+        prefer.get_or_insert("nvidia");
+    }
+
     if let Some(litellm) = LiteLLMProvider::from_env() {
         providers.push(Arc::new(litellm));
         prefer.get_or_insert("litellm");
+    }
+
+    // Cloudflare Workers AI playground — always registered (public, no auth).
+    // Set as default when JFC_CLOUDFLARE_PLAYGROUND=1.
+    {
+        let cf = CloudflarePlaygroundProvider::new();
+        providers.push(Arc::new(cf));
+        if std::env::var("JFC_CLOUDFLARE_PLAYGROUND")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+        {
+            prefer.get_or_insert("cloudflare-playground");
+        }
     }
 
     let codex = CodexOAuthProvider::new();
@@ -408,10 +435,11 @@ fn resolve_provider_model_from_slice(
             })
             .cloned()
             .map(|provider| {
+                let model = explicit_provider_model(&provider, model_id, &spec);
                 provider_resolution(
                     provider,
                     spec.clone(),
-                    spec.model().clone(),
+                    model,
                     ModelResolutionReason::ExplicitProvider,
                 )
             })
@@ -594,6 +622,30 @@ fn provider_resolution(
     }
 }
 
+fn explicit_provider_model(
+    provider: &Arc<dyn Provider>,
+    requested_model_id: &str,
+    spec: &ModelSpec,
+) -> ModelId {
+    if provider.name() == "nvidia" && provider_catalog_contains(&**provider, requested_model_id) {
+        return ModelId::new(requested_model_id);
+    }
+    spec.model().clone()
+}
+
+fn provider_catalog_contains(provider: &dyn Provider, model_id: &str) -> bool {
+    provider
+        .available_models()
+        .iter()
+        .any(|model| model.id.as_str() == model_id)
+}
+
+fn nvidia_static_catalog_contains(model_id: &str) -> bool {
+    NvidiaProvider::fallback_models()
+        .iter()
+        .any(|model| model.id.as_str() == model_id)
+}
+
 pub fn provider_for_model(
     providers: &[Arc<dyn Provider>],
     model_id: &str,
@@ -774,6 +826,21 @@ mod tests {
     }
 
     #[test]
+    fn built_in_provider_registry_keeps_nvidia_namespace_model_id_normal() {
+        let registry = BuiltInProviderRegistry::new(vec![Arc::new(CatalogProvider {
+            name: "nvidia",
+            model: "nvidia/nemotron-nano-12b-v2-vl",
+        })]);
+
+        let resolved = registry
+            .resolve_provider_model("nvidia/nemotron-nano-12b-v2-vl")
+            .expect("nvidia namespace model should resolve through nvidia provider");
+
+        assert_eq!(resolved.provider.name(), "nvidia");
+        assert_eq!(resolved.model.as_str(), "nvidia/nemotron-nano-12b-v2-vl");
+    }
+
+    #[test]
     fn built_in_provider_registry_does_not_cross_route_missing_openai_family_prefix_robust() {
         let registry = BuiltInProviderRegistry::new(vec![Arc::new(CatalogProvider {
             name: "openai",
@@ -833,7 +900,8 @@ mod tests {
 
         assert!(runtime.providers().contains_key("openrouter"));
         assert!(runtime.providers().contains_key("litellm"));
-        assert_eq!(diagnostics.counts.providers, 4);
+        assert!(runtime.providers().contains_key("nvidia"));
+        assert_eq!(diagnostics.counts.providers, 5);
         assert!(
             diagnostics
                 .active_plugins

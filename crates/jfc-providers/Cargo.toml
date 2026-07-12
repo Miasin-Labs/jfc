@@ -36,6 +36,8 @@ tracing = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+async-stream = { workspace = true }
+curl_idk = { path = "/home/cole/RustProjects/active/curl_idk" }
 
 [dev-dependencies]
 serial_test = { workspace = true }

@@ -826,7 +826,7 @@ pub fn build_rsi_funnel() -> RsiFunnelData {
             .filter(|(_, (c, a))| *c > 0 || *a > 0)
             .map(|(k, (c, a))| (k, c, a))
             .collect();
-        funnel.by_kind.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+        funnel.by_kind.sort_by_key(|a| std::cmp::Reverse(a.1 + a.2));
         // `verified`: inspect candidate metadata against the promotion gate.
         // Cap the scan so a huge candidate pool can't stall the snapshot.
         for kind in counts

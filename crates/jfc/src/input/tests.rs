@@ -2500,26 +2500,39 @@ async fn enter_queues_by_default_when_streaming_after_output_regression() {
 }
 
 #[tokio::test]
-async fn alt_enter_interrupts_and_submits_when_streaming_without_blockers() {
+async fn alt_enter_obeys_queue_mode_when_streaming_without_blockers() {
     let mut app = test_app_with_input("ask", 80);
     app.engine.is_streaming = true;
     app.engine.streaming_started_at = Some(std::time::Instant::now());
     app.engine.streaming_response_bytes = 128;
     let (tx, _rx) = channel();
+    let queue_mode = jfc_engine::config::load_arc().message_queue_mode;
 
-    handle_key(&mut app, key_mod(KeyCode::Enter, KeyModifiers::ALT), &tx)
-        .await
-        .unwrap();
+    super::key_dispatch::handle_enter_submit(
+        &mut app,
+        key_mod(KeyCode::Enter, KeyModifiers::ALT),
+        &tx,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
-    assert!(app.engine.queued_prompts.is_empty());
-    assert_eq!(app.engine.messages.len(), 2);
-    assert_eq!(app.engine.messages[0].role, Role::User);
-    assert!(matches!(
-        app.engine.messages[0].parts.first(),
-        Some(MessagePart::Text(text)) if text == "ask"
-    ));
-    assert_eq!(app.engine.messages[1].role, Role::Assistant);
-    assert!(app.engine.is_streaming);
+    if queue_mode {
+        assert_eq!(app.engine.queued_prompts.len(), 1);
+        assert_eq!(app.engine.queued_prompts[0].text, "ask");
+        assert!(app.engine.messages.is_empty());
+        assert!(app.engine.is_streaming);
+    } else {
+        assert!(app.engine.queued_prompts.is_empty());
+        assert_eq!(app.engine.messages.len(), 2);
+        assert_eq!(app.engine.messages[0].role, Role::User);
+        assert!(matches!(
+            app.engine.messages[0].parts.first(),
+            Some(MessagePart::Text(text)) if text == "ask"
+        ));
+        assert_eq!(app.engine.messages[1].role, Role::Assistant);
+        assert!(app.engine.is_streaming);
+    }
 }
 
 // REGRESSION (queueing-during-connect): submitting a second message while the

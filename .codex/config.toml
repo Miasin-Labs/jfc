@@ -11,9 +11,12 @@ model = "gpt-5.5"
 model_context_window = 400000
 model_reasoning_effort = "high"
 plan_mode_reasoning_effort = "xhigh"
+# GitHub's official remote MCP endpoint (the npm @modelcontextprotocol/server-github
+# stdio server is deprecated). Kept transport-consistent with the global github
+# server so Codex's per-key config merge doesn't mix `command` (stdio) with `url`.
 [mcp_servers.github]
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github@2025.4.8"]
+url = "https://api.githubcopilot.com/mcp/"
+bearer_token_env_var = "GITHUB_PERSONAL_ACCESS_TOKEN"
 
 [mcp_servers.context7]
 command = "npx"
@@ -38,7 +41,7 @@ args = ["-y", "@modelcontextprotocol/server-sequential-thinking@2025.12.18"]
 multi_agent = true
 
 [agents]
-max_threads = 6
+max_threads = 1000
 max_depth = 1
 
 [agents.explorer]
@@ -57,4 +60,5 @@ config_file = "agents/docs-researcher.toml"
 # because enabling it fails every turn with HTTP 400 (openai/codex#26753).
 # Opt out: LAZYCODEX_CONFIG_MIGRATION_DISABLED=1 (or OMO_CODEX_CONFIG_MIGRATION_DISABLED=1).
 [features.multi_agent_v2]
+max_concurrent_threads_per_session = 1000
 enabled = false

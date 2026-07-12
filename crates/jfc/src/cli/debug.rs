@@ -322,6 +322,7 @@ impl Stats {
             | StreamEvent::ToolDelta { .. }
             | StreamEvent::ToolDone { .. }
             | StreamEvent::ServerToolResult { .. }
+            | StreamEvent::CompactionDelta { .. }
             | StreamEvent::ResponseMetadata { .. }
             | StreamEvent::Error { .. }
             | StreamEvent::Keepalive
@@ -436,6 +437,7 @@ impl Printer {
             | StreamEvent::ToolDelta { .. }
             | StreamEvent::Usage { .. }
             | StreamEvent::ResponseMetadata { .. }
+            | StreamEvent::CompactionDelta { .. }
             | StreamEvent::Keepalive => {}
         }
         Ok(())
@@ -554,6 +556,9 @@ fn event_to_json(event: &StreamEvent) -> String {
             "input_tokens": input_tokens,
         }),
         StreamEvent::Error { message } => json!({"kind": "error", "message": message}),
+        StreamEvent::CompactionDelta { index, delta } => {
+            json!({"kind": "compaction_delta", "index": index, "delta_len": delta.len()})
+        }
         StreamEvent::Keepalive => json!({"kind": "keepalive"}),
         StreamEvent::FallbackTriggered(info) => {
             json!({"kind": "fallback_triggered", "info": format!("{info:?}")})

@@ -23,6 +23,7 @@ pub(crate) fn log_parsed_event(event: &SseEvent) {
                 ContentBlock::ToolUse { .. } => "tool_use",
                 ContentBlock::ServerToolUse { .. } => "server_tool_use",
                 ContentBlock::ServerToolResult { tool_kind, .. } => tool_kind.wire_type(),
+                ContentBlock::Compaction => "compaction",
                 ContentBlock::Unknown { kind, .. } => kind.as_str(),
             };
             match content_block {
@@ -82,7 +83,7 @@ pub(crate) fn log_parsed_event(event: &SseEvent) {
                 Delta::ConnectorTextDelta { connector_text } => {
                     ("connector_text", connector_text.len())
                 }
-                Delta::CompactionContentBlockDelta { content } => ("compaction", content.len()),
+                Delta::CompactionDelta { content } => ("compaction", content.len()),
                 Delta::Unknown { kind, raw } => (kind.as_str(), raw.to_string().len()),
             };
             tracing::trace!(

@@ -32,12 +32,19 @@ pub fn content_hash_bytes(bytes: &[u8]) -> SemanticHash {
     hash
 }
 
-pub fn hamming_distance(left: SemanticHash, right: SemanticHash) -> u64 {
+/// Arithmetic magnitude distance `|left - right|` between two hashes.
+///
+/// NOTE: despite living in a "semantic hashing" module, this is deliberately
+/// the *numeric* distance used by the deterministic LSH model mirrored from
+/// `SemanticHashing.v` — it is NOT bit-level Hamming distance. For true
+/// bit-Hamming (`(a ^ b).count_ones()`) see
+/// `jfc_compress::transforms::adaptive_sizer::hamming_distance`.
+pub fn magnitude_distance(left: SemanticHash, right: SemanticHash) -> u64 {
     left.max(right) - left.min(right)
 }
 
 pub fn semantically_similar(left: SemanticHash, right: SemanticHash) -> bool {
-    hamming_distance(left, right) <= LSH_THRESHOLD
+    magnitude_distance(left, right) <= LSH_THRESHOLD
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

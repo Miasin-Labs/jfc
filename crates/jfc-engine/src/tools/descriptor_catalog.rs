@@ -58,7 +58,7 @@ pub fn reload_discovered_plugin_tool_descriptors(
         before_count: before.len(),
         after_count: next_descriptors.len(),
         before_digest,
-        after_digest: after_digest.clone(),
+        after_digest,
         changed: before != next_descriptors,
         host_descriptor_digest: reload.report.diagnostics.descriptor_digest.clone(),
     };

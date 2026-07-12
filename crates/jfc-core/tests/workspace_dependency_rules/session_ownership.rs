@@ -20,8 +20,10 @@ const SYNTHETIC_ALLOWED_MALFORMED_ENGINE_SESSION_PATHS: &[&str] = &[
 ];
 const ENGINE_SESSION_COMPATIBILITY_SHIM_ALLOWLIST: &[&str] = &[
     "crates/jfc-engine/src/session/compaction.rs",
+    "crates/jfc-engine/src/session/context_reduction_state.rs",
     "crates/jfc-engine/src/session/core.rs",
     "crates/jfc-engine/src/session/deserialize.rs",
+    "crates/jfc-engine/src/session/entry_log.rs",
     "crates/jfc-engine/src/session/mod.rs",
     "crates/jfc-engine/src/session/serialization.rs",
     "crates/jfc-engine/src/session/serialization_tests.rs",

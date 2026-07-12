@@ -65,11 +65,33 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duratio
     }
     if let Some(v) = headers.get("retry-after")
         && let Ok(s) = v.to_str()
-        && let Ok(secs) = s.trim().parse::<u64>()
     {
-        return Some(Duration::from_secs(secs));
+        let s = s.trim();
+        // `Retry-After` is either a non-negative integer count of seconds or an
+        // HTTP-date (RFC 7231). Integer form is the common case; fall back to
+        // the date form so we also honour servers that send an absolute time.
+        if let Ok(secs) = s.parse::<u64>() {
+            return Some(Duration::from_secs(secs));
+        }
+        if let Some(delay) = http_date_to_delay(s, chrono::Utc::now()) {
+            return Some(delay);
+        }
     }
     None
+}
+
+/// Convert an HTTP-date `Retry-After` (IMF-fixdate, e.g.
+/// `Wed, 21 Oct 2015 07:28:00 GMT`) into a delay relative to `now`. A date in
+/// the past clamps to `Duration::ZERO`; an unparseable value returns `None`.
+fn http_date_to_delay(s: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let parsed =
+        chrono::NaiveDateTime::parse_from_str(s.trim(), "%a, %d %b %Y %H:%M:%S GMT").ok()?;
+    let secs = (parsed.and_utc() - now).num_seconds();
+    Some(if secs <= 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(secs as u64)
+    })
 }
 
 /// Should the given status code be retried?
@@ -127,5 +149,42 @@ mod tests {
     fn parse_retry_after_missing_is_none_robust() {
         let h = reqwest::header::HeaderMap::new();
         assert!(parse_retry_after(&h).is_none());
+    }
+
+    #[test]
+    fn http_date_retry_after_future_is_positive_delay() {
+        let now = chrono::DateTime::parse_from_rfc3339("2015-10-21T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d = http_date_to_delay("Wed, 21 Oct 2015 07:28:00 GMT", now).unwrap();
+        assert_eq!(d, Duration::from_secs(28 * 60));
+    }
+
+    #[test]
+    fn http_date_retry_after_past_clamps_to_zero() {
+        let now = chrono::DateTime::parse_from_rfc3339("2015-10-21T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d = http_date_to_delay("Wed, 21 Oct 2015 07:28:00 GMT", now).unwrap();
+        assert_eq!(d, Duration::ZERO);
+    }
+
+    #[test]
+    fn http_date_retry_after_garbage_is_none() {
+        assert!(http_date_to_delay("not a date", chrono::Utc::now()).is_none());
+    }
+
+    #[test]
+    fn parse_retry_after_accepts_http_date() {
+        let mut h = reqwest::header::HeaderMap::new();
+        // Canonical IMF-fixdate (a real Wednesday); chrono validates the
+        // weekday, so the date and day-name must agree.
+        h.insert(
+            "retry-after",
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        // A parseable HTTP-date yields Some (a past date clamps to ZERO, but is
+        // still recognized rather than falling through to computed backoff).
+        assert!(parse_retry_after(&h).is_some());
     }
 }

@@ -21,7 +21,7 @@ pub enum Delta {
     ConnectorTextDelta {
         connector_text: String,
     },
-    CompactionContentBlockDelta {
+    CompactionDelta {
         content: String,
     },
     Unknown {
@@ -71,7 +71,7 @@ impl<'de> Deserialize<'de> for Delta {
             "connector_text_delta" => Self::ConnectorTextDelta {
                 connector_text: field("connector_text"),
             },
-            "compaction_content_block_delta" => Self::CompactionContentBlockDelta {
+            "compaction_delta" | "compaction_content_block_delta" => Self::CompactionDelta {
                 content: field("content"),
             },
             _ => Self::Unknown { kind, raw: value },

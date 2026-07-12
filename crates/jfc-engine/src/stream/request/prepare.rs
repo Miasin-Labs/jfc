@@ -172,11 +172,6 @@ pub async fn prepare_stream_request(
     // compaction won't emit the hint.
     base.context_hint_tokens_saved = overrides.context_hint_tokens_saved;
 
-    // Server-side compaction (the non-blocking primary path): let Anthropic
-    // reduce old turns API-side before they reach the model, so the user's
-    // input never stalls behind a local summarization round-trip. Defaults on
-    // in StreamOptions::new; cleared only when the user disables auto-compaction
-    // or opts out of the server path specifically.
     {
         let cfg = crate::config::load_arc();
         base.server_side_compaction =

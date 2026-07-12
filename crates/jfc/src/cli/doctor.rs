@@ -19,6 +19,6 @@ pub(super) async fn run_doctor_subcommand(sub: DoctorSubcommand) -> anyhow::Resu
 }
 
 fn paths_diagnostic() -> anyhow::Result<()> {
-    print!("{}", XdgPathDiagnosticService::default().report());
+    print!("{}", XdgPathDiagnosticService.report());
     Ok(())
 }

@@ -36,6 +36,7 @@ pub(crate) use super::descriptor_search_defs::{
 #[cfg(test)]
 pub(crate) use super::descriptor_shell_defs::{
     BASH_HANDLER as BASH_TOOL_HANDLER, BASH_OUTPUT_HANDLER as BASH_OUTPUT_TOOL_HANDLER,
+    INTERACTIVE_BASH_HANDLER as INTERACTIVE_BASH_TOOL_HANDLER,
 };
 
 static BUILTIN_TOOL_DESCRIPTORS: OnceLock<Vec<ToolDescriptor>> = OnceLock::new();
@@ -193,7 +194,7 @@ fn load_builtin_tool_descriptors() -> Vec<ToolDescriptor> {
         Ok(host) => match runtime_tool_descriptors(&host) {
             Ok(runtime_descriptors) => {
                 let legacy_plugin_id = PluginId::new(BUILTIN_TOOLS_PLUGIN_ID);
-                let mut descriptors = shell_descriptors(legacy_plugin_id.clone());
+                let mut descriptors = shell_descriptors(legacy_plugin_id);
                 descriptors.extend(runtime_descriptors);
                 descriptors
             }

@@ -4,7 +4,9 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::{EngineEvent, StreamEvent as RuntimeStreamEvent};
+use crate::runtime::{
+    EngineEvent, StreamEvent as RuntimeStreamEvent, StreamLifecyclePhase, StreamLifecycleStatus,
+};
 use crate::types::{ToolCall, ToolInput, ToolKind, ToolOutput};
 use jfc_provider::{EventStream, StopReason, StreamEvent};
 
@@ -614,6 +616,29 @@ pub async fn drain_stream_events(
                     }))
                     .await;
             }
+            StreamEvent::CompactionDelta { delta, .. } => {
+                pending_visible.flush(tx).await;
+                tracing::debug!(
+                    target: "jfc::stream::lifecycle",
+                    delta_chars = delta.len(),
+                    "server-side compaction stream activity"
+                );
+                let _ = tx.try_send(EngineEvent::Stream(RuntimeStreamEvent::Lifecycle(
+                    StreamLifecycleStatus::new(
+                        StreamLifecyclePhase::ServerCompacting,
+                        Some(format!("{} chars", delta.len())),
+                    ),
+                )));
+                if tx
+                    .try_send(EngineEvent::Stream(RuntimeStreamEvent::Keepalive))
+                    .is_err()
+                {
+                    tracing::trace!(
+                        target: "jfc::stream",
+                        "compaction Keepalive dropped (buffer full)"
+                    );
+                }
+            }
             StreamEvent::Keepalive => {
                 // Wire-liveness only: forward a content-free Keepalive so the
                 // engine's idle watchdog (`check_stream_watchdog`) resets its
@@ -875,6 +900,36 @@ mod tests {
             ),
             "expected a forwarded runtime Keepalive event"
         );
+    }
+
+    #[tokio::test]
+    async fn compaction_delta_forwards_lifecycle_and_liveness_event_normal() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let outcome = drain_stream_events(
+            event_stream(vec![
+                Ok(StreamEvent::CompactionDelta {
+                    index: 0,
+                    delta: "summary chunk".into(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ]),
+            &tx,
+            Arc::new(AtomicBool::new(false)),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, DrainOutcome::Done(StopReason::EndTurn)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::Stream(RuntimeStreamEvent::Lifecycle(status)))
+                if status.phase == StreamLifecyclePhase::ServerCompacting
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::Stream(RuntimeStreamEvent::Keepalive))
+        ));
     }
 
     // Every ToolInputDelta must be forwarded even when the receiver lags behind

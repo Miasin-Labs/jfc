@@ -23,6 +23,32 @@ fn connector_text_delta_parses_and_ignored() {
 }
 
 #[test]
+fn compaction_delta_emits_activity_event() {
+    let json = r###"{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":"## Session Context"}}"###;
+    let event: SseEvent = serde_json::from_str(json).expect("compaction_delta must parse");
+    let (mut blocks, mut sr) = empty_state();
+    blocks.push(Some(BlockState::Compaction));
+
+    assert!(matches!(
+        translate(event, &mut blocks, &mut sr),
+        Some(StreamEvent::CompactionDelta { index: 0, delta }) if delta == "## Session Context"
+    ));
+}
+
+#[test]
+fn compaction_content_block_delta_emits_activity_event() {
+    let json = r#"{"type":"content_block_delta","index":0,"delta":{"type":"compaction_content_block_delta","content":"summary"}}"#;
+    let event = serde_json::from_str(json).expect("compaction_content_block_delta must parse");
+    let (mut blocks, mut sr) = empty_state();
+    blocks.push(Some(BlockState::Compaction));
+
+    assert!(matches!(
+        translate(event, &mut blocks, &mut sr),
+        Some(StreamEvent::CompactionDelta { index: 0, delta }) if delta == "summary"
+    ));
+}
+
+#[test]
 fn unknown_delta_type_parses_and_ignored() {
     let json = r#"{"type":"content_block_delta","index":0,"delta":{"type":"totally_new_delta","data":"x"}}"#;
     let event: SseEvent = serde_json::from_str(json).expect("unknown delta should parse");

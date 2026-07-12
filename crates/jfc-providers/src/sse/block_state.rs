@@ -41,6 +41,7 @@ pub enum BlockState {
         tool_kind: ServerToolResultKind,
         content: Value,
     },
+    Compaction,
     Ignored {
         kind: String,
     },

@@ -39,6 +39,10 @@ mod tests {
             ToolKind::from_name("toolsuggest"),
             ToolKind::ToolSuggest
         ));
+        assert!(matches!(
+            ToolKind::from_name("interactivebash"),
+            ToolKind::InteractiveBash
+        ));
     }
 
     #[test]
@@ -211,6 +215,7 @@ mod tests {
         assert_eq!(ToolKind::Edit.label(), "Edit");
         assert_eq!(ToolKind::Write.label(), "Write");
         assert_eq!(ToolKind::Bash.label(), "Bash");
+        assert_eq!(ToolKind::InteractiveBash.label(), "InteractiveBash");
         assert_eq!(ToolKind::ApplyPatch.label(), "Patch");
         assert_eq!(ToolKind::Generic("Foo".into()).label(), "Foo");
     }
@@ -221,6 +226,7 @@ mod tests {
         // their display label is PascalCase. Mirrors v126's tool table.
         assert_eq!(ToolKind::Search.api_name(), "codebase_search");
         assert_eq!(ToolKind::ApplyPatch.api_name(), "apply_patch");
+        assert_eq!(ToolKind::InteractiveBash.api_name(), "InteractiveBash");
         assert_eq!(ToolKind::Edit.api_name(), "Edit");
     }
 

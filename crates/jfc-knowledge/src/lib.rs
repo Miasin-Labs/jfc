@@ -819,6 +819,40 @@ impl KnowledgeStore {
         Ok(())
     }
 
+    /// Atomically acquire a lease-style artifact. Inserts `value_json` iff no
+    /// row exists, or the existing row's JSON `expiry_ms` field is `<= now_ms`
+    /// (the prior lease has expired). Returns `true` when the caller now holds
+    /// the lease.
+    ///
+    /// Race-free: the conditional insert/update is a single SQLite statement
+    /// executed under the write lock, so two concurrent acquirers can never
+    /// both win. A read-then-write `get`/`upsert` pair would be a TOCTOU race.
+    pub async fn try_acquire_lease_artifact(
+        &self,
+        session_id: &str,
+        kind: &str,
+        key: &str,
+        value_json: &str,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "INSERT INTO session_artifacts \
+             (session_id, kind, key, value_json, created_at_ms, updated_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?5) \
+             ON CONFLICT(session_id, kind, key) DO UPDATE SET \
+                value_json=excluded.value_json, updated_at_ms=excluded.updated_at_ms \
+             WHERE CAST(json_extract(session_artifacts.value_json, '$.expiry_ms') AS INTEGER) <= ?5",
+        )
+        .bind(session_id)
+        .bind(kind)
+        .bind(key)
+        .bind(value_json)
+        .bind(now_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() >= 1)
+    }
+
     pub async fn get_session_artifact(
         &self,
         session_id: &str,
@@ -2289,6 +2323,49 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    #[tokio::test]
+    async fn try_acquire_lease_artifact_is_atomic_and_respects_expiry() {
+        let store = KnowledgeStore::open_in_memory().await.unwrap();
+        let now: i64 = 1_000_000;
+        let lease = |holder: &str, expiry: i64| {
+            format!("{{\"holder_id\":\"{holder}\",\"expiry_ms\":{expiry}}}")
+        };
+
+        // Empty slot: first acquisition wins.
+        assert!(
+            store
+                .try_acquire_lease_artifact("s", "lease", "k", &lease("a", now + 5000), now)
+                .await
+                .unwrap(),
+            "first acquire should win"
+        );
+
+        // Still-valid lease: a competing acquisition loses.
+        assert!(
+            !store
+                .try_acquire_lease_artifact("s", "lease", "k", &lease("b", now + 5000), now)
+                .await
+                .unwrap(),
+            "acquire must fail while a valid lease is held"
+        );
+
+        // After expiry, a new holder takes over.
+        let later = now + 6000;
+        assert!(
+            store
+                .try_acquire_lease_artifact("s", "lease", "k", &lease("c", later + 5000), later)
+                .await
+                .unwrap(),
+            "acquire should succeed once the prior lease expired"
+        );
+
+        let row = store
+            .get_session_artifact("s", "lease", "k")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.value_json.contains("\"holder_id\":\"c\""));
+    }
     fn rec(scope: Scope, project: Option<&str>, title: &str, body: &str) -> KnowledgeRecord {
         KnowledgeRecord::new(Kind::Fact, scope, project.map(str::to_owned), title, body)
     }

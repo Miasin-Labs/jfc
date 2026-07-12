@@ -145,6 +145,9 @@ pub fn serialize_tool_input(input: &ToolInput) -> SerializedToolInput {
             timeout: *timeout,
             wait_up_to: *wait_up_to,
         },
+        ToolInput::InteractiveBash { tmux_command } => SerializedToolInput::Generic {
+            summary: format!("tmux {tmux_command}"),
+        },
         ToolInput::Glob { pattern, path } => SerializedToolInput::Glob {
             pattern: pattern.clone(),
             path: path.clone(),

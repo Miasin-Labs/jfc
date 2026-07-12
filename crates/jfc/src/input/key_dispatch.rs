@@ -1049,7 +1049,7 @@ pub(crate) fn can_interrupt_on_submit(
 /// textarea is empty (so the caller falls through to mention / textarea
 /// handling). Extracted from `handle_key` for cohesion — the behavior is
 /// identical to the prior inline block.
-async fn handle_enter_submit(
+pub(super) async fn handle_enter_submit(
     app: &mut App,
     key: event::KeyEvent,
     tx: &mpsc::Sender<crate::runtime::EngineEvent>,
@@ -1061,6 +1061,7 @@ async fn handle_enter_submit(
     let enter_sends = jfc_engine::config::load_arc().enter_sends_message;
     let ctrl_held = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift_held = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt_held = key.modifiers.contains(KeyModifiers::ALT);
 
     // Ctrl+Enter always inserts a literal newline (regardless of enter_sends_message).
     if ctrl_held && !shift_held {
@@ -1068,11 +1069,10 @@ async fn handle_enter_submit(
         return Some(Ok(false));
     }
 
-    // When enter_sends_message = false: bare Enter → newline, only Ctrl+Enter
-    // submits. The Ctrl+Enter branch above already handled submit when the flag
-    // is false — here we just let bare Enter fall through to newline insertion.
+    // When enter_sends_message = false: bare Enter → newline. Alt+Enter remains
+    // the explicit submit/interrupt chord, so do not treat it as bare Enter.
     // (The textarea widget handles Enter naturally when we return None.)
-    if !enter_sends && !shift_held && !ctrl_held {
+    if !enter_sends && !shift_held && !ctrl_held && !alt_held {
         app.textarea.insert_newline();
         return Some(Ok(false));
     }

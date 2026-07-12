@@ -117,8 +117,8 @@ pub struct TimelineSample {
     /// Context window occupancy *after* this request (gauge numerator).
     pub context_used_tokens: u64,
     pub context_window_tokens: u64,
-    /// Per-request cache-hit fraction (cache_read / input). NOT the cumulative
-    /// session figure.
+    /// Per-request cache-hit fraction: cached input divided by cached + fresh
+    /// input. NOT the cumulative session figure.
     pub cache_hit_pct: f64,
     /// Anomaly tags flagged for review (e.g. `input_spike`, `cache_hit_drop`,
     /// `cost_spike`, `context_near_window`). Empty when nothing stood out.

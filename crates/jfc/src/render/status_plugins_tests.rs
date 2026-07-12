@@ -227,7 +227,7 @@ fn cache_hit_badge_is_metric_descriptor_gated_normal() {
 
     assert_eq!(
         cache_hit_badge(&metrics, &usage_by_model),
-        Some("cache 40%".to_owned())
+        Some("cache 29%".to_owned())
     );
     assert_eq!(cache_hit_badge(&[], &usage_by_model), None);
 }

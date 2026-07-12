@@ -4,7 +4,8 @@ use crate::types::{ToolInput, ToolKind};
 
 use super::defs::{all_tool_defs, model_tool_defs};
 use super::descriptor_router::{
-    BASH_OUTPUT_TOOL_HANDLER, BASH_TOOL_HANDLER, descriptor_for_handler, execute_descriptor_tool,
+    BASH_OUTPUT_TOOL_HANDLER, BASH_TOOL_HANDLER, INTERACTIVE_BASH_TOOL_HANDLER,
+    descriptor_for_handler, execute_descriptor_tool,
 };
 
 #[test]
@@ -19,12 +20,22 @@ fn builtin_shell_descriptors_have_expected_visibility_and_policy_normal() {
     assert_eq!(bash_output.name, BASH_OUTPUT_TOOL_HANDLER);
     assert_eq!(bash_output.approval_policy, ToolApprovalPolicy::ReadOnly);
     assert_eq!(bash_output.visibility, DescriptorVisibility::HostVisible);
+
+    let interactive =
+        descriptor_for_handler(INTERACTIVE_BASH_TOOL_HANDLER).expect("interactive bash descriptor");
+    assert_eq!(interactive.name, INTERACTIVE_BASH_TOOL_HANDLER);
+    assert_eq!(interactive.approval_policy, ToolApprovalPolicy::Mutating);
+    assert_eq!(interactive.visibility, DescriptorVisibility::ModelVisible);
 }
 
 #[test]
 fn advertised_shell_definitions_are_derived_from_descriptors_normal() {
     let tools = all_tool_defs();
-    for handler in [BASH_TOOL_HANDLER, BASH_OUTPUT_TOOL_HANDLER] {
+    for handler in [
+        BASH_TOOL_HANDLER,
+        BASH_OUTPUT_TOOL_HANDLER,
+        INTERACTIVE_BASH_TOOL_HANDLER,
+    ] {
         let descriptor = descriptor_for_handler(handler).expect("shell descriptor");
         let tool = tools
             .iter()
@@ -34,6 +45,20 @@ fn advertised_shell_definitions_are_derived_from_descriptors_normal() {
         assert_eq!(tool.description, descriptor.description);
         assert_eq!(tool.input_schema, descriptor.input_schema);
     }
+}
+
+#[test]
+fn interactive_bash_is_model_visible_normal() {
+    let model_defs = model_tool_defs();
+    let tool = model_defs
+        .iter()
+        .find(|tool| tool.name == INTERACTIVE_BASH_TOOL_HANDLER)
+        .expect("InteractiveBash should be model-visible");
+    assert!(
+        tool.description.contains("tmux subcommand"),
+        "InteractiveBash should explain tmux-only usage: {}",
+        tool.description
+    );
 }
 
 #[test]
@@ -86,5 +111,23 @@ async fn descriptor_router_dispatches_shell_tools_normal() {
         bash_output.output.contains("BashOutput polling is ignored"),
         "{}",
         bash_output.output
+    );
+
+    let blocked = execute_descriptor_tool(
+        &ToolKind::InteractiveBash,
+        &ToolInput::InteractiveBash {
+            tmux_command: "capture-pane -p -t jfc-dev".to_owned(),
+        },
+        dir.path(),
+    )
+    .await
+    .expect("interactive bash descriptor route");
+    assert!(blocked.is_error());
+    assert!(
+        blocked
+            .output
+            .contains("Use Bash for read-only tmux capture"),
+        "{}",
+        blocked.output
     );
 }

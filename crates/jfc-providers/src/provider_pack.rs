@@ -6,10 +6,24 @@ pub const BUILTIN_PROVIDER_PACK_ID: &str = "builtin.providers";
 pub fn first_party_provider_descriptors() -> Vec<ProviderDescriptor> {
     vec![
         anthropic_provider_descriptor(),
+        nvidia_provider_descriptor(),
         openai_provider_descriptor(),
         openrouter_provider_descriptor(),
         litellm_provider_descriptor(),
+        cloudflare_playground_provider_descriptor(),
     ]
+}
+
+fn cloudflare_playground_provider_descriptor() -> ProviderDescriptor {
+    let mut descriptor = ProviderDescriptor::new(
+        PluginId::new(BUILTIN_PROVIDER_PACK_ID),
+        "cloudflare-playground",
+    )
+    .with_executor(ProviderExecutorKind::BuiltIn, "cloudflare-playground");
+    descriptor.models = model_descriptors(
+        super::cloudflare_playground::CloudflarePlaygroundProvider::fallback_models(),
+    );
+    descriptor
 }
 
 fn anthropic_provider_descriptor() -> ProviderDescriptor {
@@ -26,6 +40,13 @@ fn openai_provider_descriptor() -> ProviderDescriptor {
     let mut descriptor = ProviderDescriptor::new(PluginId::new(BUILTIN_PROVIDER_PACK_ID), "openai")
         .with_executor(ProviderExecutorKind::BuiltIn, "openai");
     descriptor.models = model_descriptors(super::openai::OpenAIProvider::fallback_models());
+    descriptor
+}
+
+fn nvidia_provider_descriptor() -> ProviderDescriptor {
+    let mut descriptor = ProviderDescriptor::new(PluginId::new(BUILTIN_PROVIDER_PACK_ID), "nvidia")
+        .with_executor(ProviderExecutorKind::BuiltIn, "nvidia");
+    descriptor.models = model_descriptors(super::nvidia::NvidiaProvider::fallback_models());
     descriptor
 }
 
@@ -81,6 +102,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(providers.contains(&"openai"));
+        assert!(providers.contains(&"nvidia"));
         assert!(providers.contains(&"openrouter"));
         assert!(providers.contains(&"litellm"));
 
@@ -89,5 +111,16 @@ mod tests {
             .find(|descriptor| descriptor.provider == "openai")
             .expect("openai descriptor");
         assert!(openai.models.iter().any(|model| model.id == "gpt-5.1"));
+
+        let nvidia = descriptors
+            .iter()
+            .find(|descriptor| descriptor.provider == "nvidia")
+            .expect("nvidia descriptor");
+        assert!(
+            nvidia
+                .models
+                .iter()
+                .any(|model| model.id == "nvidia/nemotron-nano-12b-v2-vl")
+        );
     }
 }

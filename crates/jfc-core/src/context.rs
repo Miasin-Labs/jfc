@@ -292,7 +292,7 @@ impl ClaudeMdHierarchy {
 
     /// Load the project hierarchy plus CLAUDE.md layers from extra roots.
     pub fn load_with_extra_roots(project_root: &Path, extra_roots: &[PathBuf]) -> Self {
-        tracing::info!(target: "jfc::context", project_root = %project_root.display(), "loading CLAUDE.md hierarchy");
+        tracing::debug!(target: "jfc::context", project_root = %project_root.display(), "loading CLAUDE.md hierarchy");
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let cfg = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
         let result = Self {

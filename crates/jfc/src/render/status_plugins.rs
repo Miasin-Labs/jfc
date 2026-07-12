@@ -306,11 +306,12 @@ pub(super) fn cache_metric_rows(
     {
         let total_cache_read = total_cache_read_tokens(usage_by_model);
         let total_input = total_input_tokens(usage_by_model);
+        let total = total_input.saturating_add(total_cache_read);
         rows.push(format!(
-            "cache hit {:.0}% ({} read / {} input)",
+            "cache hit {:.0}% ({} cached / {} total)",
             hit_pct.round(),
             super::fmt_number(total_cache_read),
-            super::fmt_number(total_input)
+            super::fmt_number(total)
         ));
     }
     if has_metric_surface(
@@ -405,8 +406,8 @@ fn metric_unit_label(unit: MetricUnit) -> &'static str {
 fn cache_hit_pct(usage_by_model: &HashMap<String, jfc_core::ModelUsage>) -> Option<f64> {
     let total_cache_read = total_cache_read_tokens(usage_by_model);
     let total_input = total_input_tokens(usage_by_model);
-    (total_cache_read > 0 && total_input > 0)
-        .then(|| (total_cache_read as f64 / total_input as f64 * 100.0).min(100.0))
+    let total = total_input.saturating_add(total_cache_read);
+    (total > 0).then(|| total_cache_read as f64 / total as f64 * 100.0)
 }
 
 fn total_cache_read_tokens(usage_by_model: &HashMap<String, jfc_core::ModelUsage>) -> u64 {

@@ -158,6 +158,11 @@ const TEMPORARY_PACKAGE_ROOT_ALLOWLIST: &[TemporaryPackageRoot] = &[
         target_path: "crates/daemon",
     },
     TemporaryPackageRoot {
+        package: "jfc-dashboard",
+        path: "crates/jfc-dashboard",
+        target_path: "crates/ui-model",
+    },
+    TemporaryPackageRoot {
         package: "jfc-design",
         path: "crates/jfc-design",
         target_path: "crates/plugin",
@@ -257,6 +262,7 @@ const TEMPORARY_ENGINE_WORKSPACE_DEP_ALLOWLIST: &[&str] = &[
     "jfc-changeset",
     "jfc-compress",
     "jfc-config",
+    "jfc-context",
     "jfc-core",
     "jfc-daemon",
     "jfc-design",

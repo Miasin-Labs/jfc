@@ -296,6 +296,7 @@ fn all_tool_defs_includes_every_canonical_tool_normal() {
     for required in [
         "Bash",
         "BashOutput",
+        "InteractiveBash",
         "Read",
         "Write",
         "Edit",

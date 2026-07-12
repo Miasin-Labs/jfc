@@ -25,7 +25,7 @@ const DEF_KIND_SKILL: &str = "skill";
 pub fn load_skills(project_root: &Path) -> Vec<Skill> {
     let _linkscope_load = linkscope::phase("agents.skills.load");
     trace_path_event("agents.skills.load.start", project_root);
-    tracing::info!(target: "jfc::agents", project_root = %project_root.display(), "loading skills");
+    tracing::debug!(target: "jfc::agents", project_root = %project_root.display(), "loading skills");
     let mut out: Vec<Skill> = built_in_skills();
     linkscope::record_items("agents.skills.builtin", usize_to_u64_saturating(out.len()));
     if let Some(store) = open_definition_store(project_root) {
@@ -563,7 +563,7 @@ fn agent_roots(project_root: &Path) -> Vec<AgentRoot> {
 pub fn load_agents(project_root: &Path) -> Vec<AgentDef> {
     let _linkscope_load = linkscope::phase("agents.load");
     trace_path_event("agents.load.start", project_root);
-    tracing::info!(target: "jfc::agents", project_root = %project_root.display(), "loading agents");
+    tracing::debug!(target: "jfc::agents", project_root = %project_root.display(), "loading agents");
     let mut out: Vec<AgentDef> = Vec::new();
     if let Some(store) = open_definition_store(project_root) {
         linkscope::record_items("agents.definition_store.opened", 1);

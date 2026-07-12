@@ -313,6 +313,7 @@ macro_rules! for_each_regular_tool_input {
             HcomRelay => { args: str_vec @ "args" }
             HcomRun => { script: opt_str @ "script", args: str_vec @ "args" }
             BashOutput => { task_id: req_str @ "task_id", offset: opt_u64 @ "offset", limit: opt_u64 @ "limit", block: raw_bool_opt @ "block", timeout: opt_u64_loose @ "timeout", wait_up_to: opt_u64_loose @ "wait_up_to" }
+            InteractiveBash => { tmux_command: req_str @ "tmux_command" }
             PlanCreate => { title: req_str @ "title", body: opt_str @ "body" }
             PlanList => { status: opt_str @ "status" }
             PlanShow => { slug: req_str @ "slug" }
@@ -518,6 +519,9 @@ pub enum ToolInput {
         block: Option<bool>,
         timeout: Option<u64>,
         wait_up_to: Option<u64>,
+    },
+    InteractiveBash {
+        tmux_command: String,
     },
     Glob {
         pattern: String,
@@ -1060,6 +1064,7 @@ impl ToolInput {
                 None => command.clone(),
             },
             Self::BashOutput { task_id, .. } => format!("output for {task_id}"),
+            Self::InteractiveBash { tmux_command } => format!("tmux {tmux_command}"),
             Self::Glob { pattern, path } => match path {
                 Some(path) => format!("{pattern} in {path}"),
                 None => pattern.clone(),

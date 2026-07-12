@@ -690,9 +690,10 @@ impl Dreamer {
 /// Acquire a lease. Returns the lease on success.
 pub async fn acquire_lease(lease_path: &Path) -> Result<DreamerLease, LearnError> {
     let _linkscope_lease = linkscope::phase("learn.dreamer.acquire_lease");
+    let now = now_ms();
     let lease = DreamerLease {
         holder_id: uuid::Uuid::new_v4().to_string(),
-        expiry_ms: now_ms() + DEFAULT_LEASE_DURATION_MS,
+        expiry_ms: now + DEFAULT_LEASE_DURATION_MS,
     };
 
     let store = jfc_knowledge::KnowledgeStore::open_default()
@@ -701,31 +702,46 @@ pub async fn acquire_lease(lease_path: &Path) -> Result<DreamerLease, LearnError
             source: std::io::Error::other(e),
         })?;
     let key = dreamer_lease_key(lease_path);
-    if let Some(row) = store
+    let json = serde_json::to_string(&lease)?;
+
+    // Atomic compare-and-set: exactly one caller can win even under concurrent
+    // acquisition, because the conditional upsert runs as a single SQLite
+    // statement under the write lock. A `get` + `upsert` pair would be a TOCTOU
+    // race where two dreamers both observe "no valid lease" and both write,
+    // each believing it holds the exclusive lease.
+    let acquired = store
+        .try_acquire_lease_artifact(
+            DREAMER_LEASE_SESSION_ID,
+            DREAMER_LEASE_KIND,
+            &key,
+            &json,
+            i64::try_from(now).unwrap_or(i64::MAX),
+        )
+        .await
+        .map_err(|e| LearnError::Io {
+            source: std::io::Error::other(e),
+        })?;
+    if acquired {
+        return Ok(lease);
+    }
+
+    // Lost the race to a still-valid lease — read it back purely to build a
+    // helpful diagnostic (this read is not part of the acquisition decision).
+    let message = match store
         .get_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key)
         .await
         .map_err(|e| LearnError::Io {
             source: std::io::Error::other(e),
         })?
-        && let Ok(existing) = serde_json::from_str::<DreamerLease>(&row.value_json)
-        && existing.expiry_ms > now_ms()
+        .and_then(|row| serde_json::from_str::<DreamerLease>(&row.value_json).ok())
     {
-        return Err(LearnError::LeaseConflict {
-            message: format!(
-                "Lease held by {} until {}",
-                existing.holder_id, existing.expiry_ms
-            ),
-        });
-    }
-
-    let json = serde_json::to_string(&lease)?;
-    store
-        .upsert_session_artifact(DREAMER_LEASE_SESSION_ID, DREAMER_LEASE_KIND, &key, &json)
-        .await
-        .map_err(|e| LearnError::Io {
-            source: std::io::Error::other(e),
-        })?;
-    Ok(lease)
+        Some(existing) => format!(
+            "Lease held by {} until {}",
+            existing.holder_id, existing.expiry_ms
+        ),
+        None => "Lease held by another holder".to_string(),
+    };
+    Err(LearnError::LeaseConflict { message })
 }
 
 /// Release a lease (only the holder can release).

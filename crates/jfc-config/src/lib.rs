@@ -108,13 +108,10 @@ pub struct Config {
     pub session_cost_budget_usd: Option<f64>,
     #[serde(default = "default_auto_compact_enabled")]
     pub auto_compact_enabled: bool,
-    /// Ask Anthropic to compact old turns SERVER-side (the `compact_20260112`
-    /// context-management edit) before content reaches the model. This is the
-    /// non-blocking primary compaction path: it runs API-side with no
-    /// client-side concurrency and never stalls the user's input. Defaults on;
-    /// only affects the Anthropic provider when `auto_compact_enabled` is also
-    /// true. Set false to fall back to client-side compaction only.
-    #[serde(default = "default_true")]
+    /// Ask Anthropic to compact old turns SERVER-side (`compact_20260112`).
+    /// Defaults off; client-side compaction remains the predictable primary
+    /// path unless this beta is explicitly enabled.
+    #[serde(default)]
     pub server_side_compaction_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_window: Option<u32>,
@@ -180,6 +177,15 @@ pub struct Config {
         alias = "refusalRewriteRetryMax"
     )]
     pub refusal_rewrite_retry_max: Option<u32>,
+    /// Max same-model resends for a content-bearing refusal before surfacing the
+    /// stall. `None` uses the runtime default; `JFC_REFUSAL_RESEND_CAP` still
+    /// overrides this for one-off debugging.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "refusalResendMax"
+    )]
+    pub refusal_resend_max: Option<u32>,
     /// When the model refuses (or a turn is reclassified as a refusal), write the
     /// model's chain-of-thought / thinking to ephemeral tracing debug logs so the
     /// refusal and the rewrite "chain of adaptation" can be inspected locally.
@@ -887,7 +893,7 @@ impl Default for Config {
             cross_project_recall_enabled: default_cross_project_recall_enabled(),
             session_cost_budget_usd: None,
             auto_compact_enabled: default_auto_compact_enabled(),
-            server_side_compaction_enabled: default_true(),
+            server_side_compaction_enabled: false,
             auto_compact_window: None,
             compact_instructions: None,
             hooks: None,
@@ -908,6 +914,7 @@ impl Default for Config {
             refusal_fallback_model: None,
             refusal_rewrite_retry_enabled: true,
             refusal_rewrite_retry_max: None,
+            refusal_resend_max: None,
             refusal_log_reasoning: false,
             message_queue_mode: false,
             subagent_context_inheritance: true,
@@ -1033,6 +1040,7 @@ impl Config {
             voice: local_or_base!(voice),
             refusal_fallback_model: local_or_base!(refusal_fallback_model),
             refusal_rewrite_retry_max: local_or_base!(refusal_rewrite_retry_max),
+            refusal_resend_max: local_or_base!(refusal_resend_max),
             bash_shell: local_or_base!(bash_shell),
             redacted_thinking_enabled: local_or_base!(redacted_thinking_enabled),
             // `extends` from the local file is already resolved; don't
@@ -2539,9 +2547,23 @@ model = "x"
         assert!(cfg.prompt_rewrite.is_none());
         assert!(PromptRewriteConfig::default().enabled);
         assert!(Config::default().refusal_rewrite_retry_enabled);
+        assert!(Config::default().refusal_resend_max.is_none());
         assert!(Config::default().subagent_context_inheritance);
         // Privacy default: refusal CoT logging is OFF unless explicitly enabled.
         assert!(!Config::default().refusal_log_reasoning);
+    }
+
+    #[test]
+    fn refusal_resend_max_parses_from_toml_normal() {
+        let cfg = parse(
+            r#"
+refusal_resend_max = 6
+
+[default]
+model = "x"
+"#,
+        );
+        assert_eq!(cfg.refusal_resend_max, Some(6));
     }
 
     #[test]
@@ -2932,6 +2954,21 @@ theme = "local-theme"
 
         let parsed: Config = toml::from_str("").expect("parse minimal config");
         assert!(!parsed.cross_project_recall_enabled);
+    }
+
+    #[test]
+    fn server_side_compaction_defaults_off_regression() {
+        let cfg = Config::default();
+        assert!(!cfg.server_side_compaction_enabled);
+
+        let parsed: Config = toml::from_str("").expect("parse minimal config");
+        assert!(!parsed.server_side_compaction_enabled);
+    }
+
+    #[test]
+    fn server_side_compaction_opt_in_parses_from_toml_normal() {
+        let cfg: Config = toml::from_str("server_side_compaction_enabled = true").expect("parse");
+        assert!(cfg.server_side_compaction_enabled);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use super::descriptor_filesystem_defs::{
     WRITE_HANDLER,
 };
 use super::descriptor_search_defs::{GLOB_HANDLER, GREP_HANDLER};
-use super::descriptor_shell_defs::{BASH_HANDLER, BASH_OUTPUT_HANDLER};
+use super::descriptor_shell_defs::{BASH_HANDLER, BASH_OUTPUT_HANDLER, INTERACTIVE_BASH_HANDLER};
 
 pub(crate) enum BuiltinToolRoute<'a> {
     Bash {
@@ -22,6 +22,9 @@ pub(crate) enum BuiltinToolRoute<'a> {
         block: Option<bool>,
         timeout: Option<u64>,
         wait_up_to: Option<u64>,
+    },
+    InteractiveBash {
+        tmux_command: &'a str,
     },
     Edit {
         file_path: &'a str,
@@ -100,6 +103,9 @@ impl<'a> BuiltinToolRoute<'a> {
                 timeout: *timeout,
                 wait_up_to: *wait_up_to,
             }),
+            (ToolKind::InteractiveBash, ToolInput::InteractiveBash { tmux_command }) => {
+                Some(Self::InteractiveBash { tmux_command })
+            }
             (
                 ToolKind::Edit,
                 ToolInput::Edit {
@@ -175,6 +181,7 @@ impl<'a> BuiltinToolRoute<'a> {
         match self {
             Self::Bash { .. } => BASH_HANDLER,
             Self::BashOutput { .. } => BASH_OUTPUT_HANDLER,
+            Self::InteractiveBash { .. } => INTERACTIVE_BASH_HANDLER,
             Self::Edit { .. } => EDIT_HANDLER,
             Self::Glob { .. } => GLOB_HANDLER,
             Self::Grep { .. } => GREP_HANDLER,

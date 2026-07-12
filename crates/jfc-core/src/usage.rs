@@ -49,10 +49,11 @@ impl ModelUsage {
     }
 
     pub fn cache_hit_pct(&self) -> f64 {
-        if self.input_tokens == 0 {
+        let total_input_tokens = self.input_tokens.saturating_add(self.cache_read_tokens);
+        if total_input_tokens == 0 {
             return 0.0;
         }
-        (self.cache_read_tokens as f64 / self.input_tokens as f64 * 100.0).min(100.0)
+        self.cache_read_tokens as f64 / total_input_tokens as f64 * 100.0
     }
 }
 
@@ -78,9 +79,18 @@ mod tests {
     }
 
     #[test]
-    fn cache_hit_pct_caps_at_100_robust() {
+    fn cache_hit_pct_uses_cached_plus_fresh_denominator_regression() {
         let usage = ModelUsage {
             input_tokens: 10,
+            cache_read_tokens: 10,
+            ..Default::default()
+        };
+        assert_eq!(usage.cache_hit_pct(), 50.0);
+    }
+
+    #[test]
+    fn cache_hit_pct_handles_cached_only_input_normal() {
+        let usage = ModelUsage {
             cache_read_tokens: 20,
             ..Default::default()
         };

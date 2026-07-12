@@ -31,6 +31,8 @@ const ENGINE_ROOT_FILE_ALLOWLIST: &[&str] = &[
     "crates/jfc-engine/src/config.rs",
     "crates/jfc-engine/src/context.rs",
     "crates/jfc-engine/src/context_accounting.rs",
+    "crates/jfc-engine/src/context_reduction.rs",
+    "crates/jfc-engine/src/context_reduction_pressure.rs",
     "crates/jfc-engine/src/cost.rs",
     "crates/jfc-engine/src/council.rs",
     "crates/jfc-engine/src/council_directives.rs",

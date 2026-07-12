@@ -363,6 +363,14 @@ mod tests {
     }
 
     #[test]
+    fn tool_input_summary_interactive_bash_prefixes_tmux_normal() {
+        let input = ToolInput::InteractiveBash {
+            tmux_command: "send-keys -t jfc-dev Enter".into(),
+        };
+        assert_eq!(input.summary(), "tmux send-keys -t jfc-dev Enter");
+    }
+
+    #[test]
     fn tool_input_summary_glob_grep_search_format_normal() {
         let g = ToolInput::Glob {
             pattern: "**/*.rs".into(),
@@ -545,6 +553,21 @@ mod tests {
                 assert_eq!(limit, Some(50));
             }
             _ => panic!("expected Read"),
+        }
+    }
+
+    #[test]
+    fn tool_input_from_value_interactive_bash_normal() {
+        let input = ToolInput::from_value(
+            "interactive_bash",
+            serde_json::json!({"tmux_command": "new-session -d -s jfc-dev"}),
+        )
+        .expect("valid InteractiveBash input");
+        match input {
+            ToolInput::InteractiveBash { tmux_command } => {
+                assert_eq!(tmux_command, "new-session -d -s jfc-dev");
+            }
+            other => panic!("expected InteractiveBash, got {other:?}"),
         }
     }
 

@@ -917,6 +917,16 @@ struct SessionAccounts {
     /// and they must be stripped before sending (else a deterministic
     /// "thinking blocks cannot be modified" 400 + strip-induced refusal).
     served: std::collections::HashSet<String>,
+    /// Once Anthropic has rejected this session's history because a thinking
+    /// block was immutable, future sends should strip historical thinking
+    /// blocks proactively instead of paying the same deterministic 400 first.
+    sanitize_thinking_before_send: bool,
+}
+
+impl SessionAccounts {
+    fn should_strip_thinking_before_send(&self, account: &str) -> bool {
+        self.sanitize_thinking_before_send || self.served.iter().any(|served| served != account)
+    }
 }
 
 /// Cap on tracked sessions so a long-lived process can't grow the affinity map
@@ -1006,6 +1016,24 @@ impl AnthropicOAuthProvider {
         let entry = map.entry(sid.to_owned()).or_default();
         entry.last = Some(account.to_owned());
         entry.served.insert(account.to_owned());
+    }
+
+    /// Remember that this session's history hit Anthropic's immutable-thinking
+    /// guard. The next turn can then sanitize up-front instead of repeating the
+    /// same 400+retry cycle for every continuation/substream.
+    fn mark_session_thinking_sanitization_required(&self, session_id: Option<&str>) {
+        let Some(sid) = session_id else {
+            return;
+        };
+        let Ok(mut map) = self.session_accounts.lock() else {
+            return;
+        };
+        if map.len() > SESSION_AFFINITY_CAP && !map.contains_key(sid) {
+            map.clear();
+        }
+        map.entry(sid.to_owned())
+            .or_default()
+            .sanitize_thinking_before_send = true;
     }
 
     /// Lazily initialize and return a reference to the account manager.
@@ -2126,16 +2154,16 @@ impl Provider for AnthropicOAuthProvider {
         // strip foreign thinking blocks once the session has crossed accounts.
         let session_id = options.session_id.clone();
         let body_has_thinking = crate::anthropic_recovery::body_has_thinking_blocks(&body_value);
-        let (preferred_account, prior_served_accounts) = match session_id.as_deref() {
+        let session_accounts = match session_id.as_deref() {
             Some(sid) => self
                 .session_accounts
                 .lock()
                 .ok()
                 .and_then(|m| m.get(sid).cloned())
-                .map(|s| (s.last, s.served))
                 .unwrap_or_default(),
-            None => (None, std::collections::HashSet::new()),
+            None => SessionAccounts::default(),
         };
+        let preferred_account = session_accounts.last.clone();
 
         'outer: loop {
             let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2163,19 +2191,17 @@ impl Provider for AnthropicOAuthProvider {
                 };
                 tried.insert(account.name.clone());
 
-                // Proactive cross-account thinking strip. If a *different*
+                // Proactive historical-thinking strip. If a *different*
                 // account has already served this session, the history carries
-                // account-foreign `thinking`/`redacted_thinking` blocks that
-                // this account rejects with a deterministic "blocks cannot be
-                // modified" 400 — after which the reactive strip frequently
-                // induces a blank refusal. Strip them up-front (once per turn),
+                // account-foreign `thinking`/`redacted_thinking` blocks. If the
+                // same session already hit Anthropic's immutable-thinking 400,
+                // the reconstructed history is also known-bad for future sends.
+                // Strip those historical blocks up-front (once per turn),
                 // skipping the wasted billed 400 round-trip. The reactive
                 // recovery stays as the safety net.
                 if body_has_thinking
                     && !recovery_latches.thinking_signature_stripped
-                    && prior_served_accounts
-                        .iter()
-                        .any(|served| served != &account.name)
+                    && session_accounts.should_strip_thinking_before_send(&account.name)
                 {
                     let mut patched: Value = serde_json::from_str(&body_str)?;
                     if crate::anthropic_recovery::strip_thinking_blocks(&mut patched) {
@@ -2194,9 +2220,10 @@ impl Provider for AnthropicOAuthProvider {
                         tracing::warn!(
                             target: "jfc::provider::anthropic_oauth::rotation",
                             account = %account.name,
-                            prior_accounts = ?prior_served_accounts,
-                            "cross-account continuation — proactively stripped account-foreign \
-                             thinking blocks before send (avoids the thinking-immutable 400)"
+                            prior_accounts = ?session_accounts.served,
+                            sticky_sanitization = session_accounts.sanitize_thinking_before_send,
+                            "proactively stripped historical thinking blocks before send \
+                             (avoids the thinking-immutable 400)"
                         );
                     }
                 }
@@ -2550,6 +2577,13 @@ impl Provider for AnthropicOAuthProvider {
                                         offending_blocks = %blocks,
                                         error_body = %body,
                                         "thinking-immutable 400 — outbound block structure (diagnostic)"
+                                    );
+                                }
+                                if kind
+                                    == crate::anthropic_recovery::RetryKind::ThinkingSignatureStrip
+                                {
+                                    self.mark_session_thinking_sanitization_required(
+                                        session_id.as_deref(),
                                     );
                                 }
                                 let patched_str = serde_json::to_string(&patched)?;
@@ -3160,6 +3194,58 @@ mod tests {
     const TEST_BH: &str =
         "x-anthropic-billing-header: cc_version=2.0.0.abc; cc_entrypoint=cli; cch=00000;";
 
+    // Normal: a single-account session keeps thinking blocks when no recovery
+    // has proven the history invalid.
+    #[test]
+    fn session_accounts_same_account_keeps_thinking_normal() {
+        let mut accounts = SessionAccounts::default();
+        accounts.last = Some("primary".to_owned());
+        accounts.served.insert("primary".to_owned());
+
+        assert!(!accounts.should_strip_thinking_before_send("primary"));
+    }
+
+    // Robust: once immutable-thinking recovery fires, the same account must
+    // sanitize future sends too, avoiding the repeated first-attempt 400 loop.
+    #[test]
+    fn session_accounts_sticky_sanitization_strips_same_account_regression() {
+        let provider = AnthropicOAuthProvider::new();
+        provider.record_session_account(Some("session-a"), "primary");
+
+        let before = provider
+            .session_accounts
+            .lock()
+            .unwrap()
+            .get("session-a")
+            .cloned()
+            .unwrap();
+        assert!(!before.should_strip_thinking_before_send("primary"));
+
+        provider.mark_session_thinking_sanitization_required(Some("session-a"));
+
+        let after = provider
+            .session_accounts
+            .lock()
+            .unwrap()
+            .get("session-a")
+            .cloned()
+            .unwrap();
+        assert!(after.sanitize_thinking_before_send);
+        assert!(after.should_strip_thinking_before_send("primary"));
+    }
+
+    // Robust: cross-account histories still sanitize proactively even before an
+    // immutable-thinking recovery has latched the session.
+    #[test]
+    fn session_accounts_cross_account_strips_thinking_regression() {
+        let mut accounts = SessionAccounts::default();
+        accounts.last = Some("secondary".to_owned());
+        accounts.served.insert("primary".to_owned());
+        accounts.served.insert("secondary".to_owned());
+
+        assert!(accounts.should_strip_thinking_before_send("secondary"));
+    }
+
     #[test]
     fn system_blocks_no_caller_system_has_two_blocks() {
         let v = build_system_blocks(TEST_BH, None);
@@ -3312,12 +3398,11 @@ mod tests {
         assert!(body.get("thinking").is_none());
     }
 
-    // Normal: with server-side compaction on (the default) and no thinking, the
-    // body carries exactly the compact_20260112 context-management edit — the
-    // non-blocking server compaction path.
     #[test]
-    fn build_body_server_side_compaction_edit_present_normal() {
-        let body = build_body(vec![make_user_msg("hi")], &opts("claude-opus-4-7"), TEST_BH);
+    fn build_body_server_side_compaction_edit_present_when_enabled_normal() {
+        let mut opts = opts("claude-opus-4-7");
+        opts.server_side_compaction = true;
+        let body = build_body(vec![make_user_msg("hi")], &opts, TEST_BH);
         let edits = body["context_management"]["edits"]
             .as_array()
             .expect("edits array");
@@ -3329,11 +3414,9 @@ mod tests {
 
     #[test]
     fn build_body_omits_context_management_for_haiku_compaction_regression() {
-        let body = build_body(
-            vec![make_user_msg("hi")],
-            &opts("claude-haiku-4-5-20251001"),
-            TEST_BH,
-        );
+        let mut opts = opts("claude-haiku-4-5-20251001");
+        opts.server_side_compaction = true;
+        let body = build_body(vec![make_user_msg("hi")], &opts, TEST_BH);
         assert!(
             body.get("context_management").is_none(),
             "haiku must not receive compact_20260112 edits, got {:?}",

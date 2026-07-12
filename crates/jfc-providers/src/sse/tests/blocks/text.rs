@@ -61,6 +61,22 @@ fn translate_block_stop_missing_index() {
 }
 
 #[test]
+fn translate_compaction_block_lifecycle() {
+    let (mut blocks, mut sr) = empty_state();
+    let out = translate(
+        SseEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Compaction,
+        },
+        &mut blocks,
+        &mut sr,
+    );
+
+    assert!(out.is_none());
+    assert!(matches!(blocks[0], Some(BlockState::Compaction)));
+}
+
+#[test]
 fn translate_multi_block_indices_independent() {
     let (mut blocks, mut sr) = empty_state();
     translate(

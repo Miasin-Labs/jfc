@@ -281,6 +281,7 @@ pub enum StreamLifecyclePhase {
     PreparingContext,
     WaitingForFirstByte,
     StreamOpened,
+    ServerCompacting,
     RetryingWithoutThinking,
     NonStreamingFallback,
 }
@@ -291,6 +292,7 @@ impl StreamLifecyclePhase {
             Self::PreparingContext => "preparing context",
             Self::WaitingForFirstByte => "waiting first byte",
             Self::StreamOpened => "stream opened",
+            Self::ServerCompacting => "server compaction",
             Self::RetryingWithoutThinking => "retrying without thinking",
             Self::NonStreamingFallback => "non-stream fallback",
         }

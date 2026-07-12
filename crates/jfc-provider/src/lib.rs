@@ -629,6 +629,13 @@ pub enum StreamEvent {
         tool_kind: ServerToolResultKind,
         content: serde_json::Value,
     },
+    /// Provider-side context compaction progress. This is real stream
+    /// activity, but it is not assistant-visible output and must not be
+    /// persisted into the assistant message.
+    CompactionDelta {
+        index: usize,
+        delta: String,
+    },
     Done {
         stop_reason: StopReason,
     },
@@ -717,7 +724,9 @@ impl StreamEvent {
             | StreamEvent::ThinkingTokens { .. } => FrameCategory::Usage,
             StreamEvent::FallbackTriggered(_) => FrameCategory::ModelResolution,
             StreamEvent::Done { .. } => FrameCategory::Finish,
-            StreamEvent::Keepalive | StreamEvent::Error { .. } => FrameCategory::Control,
+            StreamEvent::Keepalive
+            | StreamEvent::CompactionDelta { .. }
+            | StreamEvent::Error { .. } => FrameCategory::Control,
         }
     }
 
@@ -960,11 +969,9 @@ pub struct StreamOptions {
     /// server can return narration summaries for connector/user-message
     /// flows. Mirrors Claude Code 2.1.159's `narration_summaries` rollout.
     pub narration_summaries: bool,
-    /// When true, request Anthropic SERVER-side compaction (`compact_20260112`
-    /// context-management edit) so old turns are reduced API-side before they
-    /// reach the model — the non-blocking primary compaction path (no
-    /// client-side concurrency, never stalls the input stream). Defaults on;
-    /// the engine clears it from config (`server_side_compaction_enabled`).
+    /// When true, request Anthropic SERVER-side compaction (`compact_20260112`).
+    /// Defaults off because client-side compaction has clearer progress and
+    /// recovery semantics; config may opt into the beta.
     pub server_side_compaction: bool,
 }
 
@@ -996,7 +1003,7 @@ impl StreamOptions {
             session_id: None,
             advisor_model: None,
             narration_summaries: false,
-            server_side_compaction: true,
+            server_side_compaction: false,
         }
     }
 
@@ -2317,6 +2324,13 @@ mod tests {
             ),
             (StreamEvent::Keepalive, Control),
             (
+                StreamEvent::CompactionDelta {
+                    index: 0,
+                    delta: "compacting".into(),
+                },
+                Control,
+            ),
+            (
                 StreamEvent::Error {
                     message: "e".into(),
                 },
@@ -2374,6 +2388,13 @@ mod tests {
             .commits_output()
         );
         assert!(!StreamEvent::Keepalive.commits_output());
+        assert!(
+            !StreamEvent::CompactionDelta {
+                index: 0,
+                delta: "compacting".into(),
+            }
+            .commits_output()
+        );
         assert!(
             !StreamEvent::Done {
                 stop_reason: StopReason::EndTurn

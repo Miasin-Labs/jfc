@@ -8,7 +8,9 @@ use super::descriptor_filesystem_routes::{
     execute_edit_route, execute_multi_edit_route, execute_notebook_edit_route,
     execute_notebook_read_route, execute_read_route, execute_write_route,
 };
-use super::descriptor_shell_routes::{execute_bash_output_route, execute_bash_route};
+use super::descriptor_shell_routes::{
+    execute_bash_output_route, execute_bash_route, execute_interactive_bash_route,
+};
 use super::search::{execute_glob, execute_grep};
 use crate::context::ReadDedupCache;
 use crate::runtime::ExecutionResult;
@@ -63,6 +65,9 @@ impl<'a> BuiltinToolRoute<'a> {
                 wait_up_to,
             } => {
                 execute_bash_output_route(task_id, offset, limit, block, timeout, wait_up_to).await
+            }
+            Self::InteractiveBash { tmux_command } => {
+                execute_interactive_bash_route(tmux_command).await
             }
             Self::Edit {
                 file_path,

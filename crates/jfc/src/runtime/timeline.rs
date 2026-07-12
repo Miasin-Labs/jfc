@@ -79,11 +79,7 @@ impl App {
         let cache_read_delta = now.cache_read.saturating_sub(base.cache_read);
         let cache_write_delta = now.cache_write.saturating_sub(base.cache_write);
         let thinking_delta = now.thinking.saturating_sub(base.thinking);
-        let cache_hit_pct = if input_delta > 0 {
-            (cache_read_delta as f64 / input_delta as f64 * 100.0).min(100.0)
-        } else {
-            0.0
-        };
+        let cache_hit_pct = cache_hit_pct(input_delta, cache_read_delta);
 
         let mut sample = jfc_dashboard::TimelineSample {
             ts_unix: now_unix(),
@@ -165,6 +161,14 @@ fn truncate(text: &str, max_chars: usize) -> String {
     }
     let head: String = text.chars().take(max_chars).collect();
     format!("{head}…")
+}
+
+fn cache_hit_pct(input_delta: u64, cache_read_delta: u64) -> f64 {
+    let total_input_delta = input_delta.saturating_add(cache_read_delta);
+    if total_input_delta == 0 {
+        return 0.0;
+    }
+    cache_read_delta as f64 / total_input_delta as f64 * 100.0
 }
 
 /// Median of a set of values (0.0 when empty).
@@ -313,5 +317,15 @@ mod tests {
         let recent = steady(0.01, 2, 1_000);
         let flags = anomaly_flags(&sample(0.05, 2, 1_000, 0), &recent);
         assert!(!flags.contains(&"cost_spike".to_owned()));
+    }
+
+    #[test]
+    fn timeline_cache_hit_uses_cached_plus_fresh_denominator_regression() {
+        assert_eq!(cache_hit_pct(50, 50), 50.0);
+    }
+
+    #[test]
+    fn timeline_cache_hit_handles_cached_only_input_normal() {
+        assert_eq!(cache_hit_pct(0, 50), 100.0);
     }
 }

@@ -74,7 +74,10 @@ impl CronField {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, String> {
+    /// Parse a single field, validating that literal values fall within
+    /// `min..=max` for that field so an out-of-range value (e.g. minute `99`
+    /// or day `32`) is rejected at parse time instead of silently never firing.
+    fn parse(s: &str, min: u32, max: u32) -> Result<Self, String> {
         if s == "*" {
             return Ok(Self::Any);
         }
@@ -86,7 +89,21 @@ impl CronField {
             return Ok(Self::Step(n));
         }
         let n: u32 = s.parse().map_err(|_| format!("bad cron field `{s}`"))?;
+        if n < min || n > max {
+            return Err(format!("cron field `{s}` out of range {min}..={max}"));
+        }
         Ok(Self::Exact(n))
+    }
+
+    /// Parse the day-of-week field. POSIX/Vixie cron accepts `0..=7` where both
+    /// `0` and `7` mean Sunday; `7` is normalized to `0` so it matches chrono's
+    /// `num_days_from_sunday()` (which only yields `0..=6`). Without this,
+    /// `* * * * 7` parses fine but never fires.
+    fn parse_weekday(s: &str) -> Result<Self, String> {
+        match Self::parse(s, 0, 7)? {
+            Self::Exact(7) => Ok(Self::Exact(0)),
+            other => Ok(other),
+        }
     }
 }
 
@@ -147,11 +164,11 @@ pub fn parse_schedule(expr: &str) -> Result<CronSchedule, String> {
         ));
     }
     Ok(CronSchedule::Crontab {
-        minute: CronField::parse(fields[0])?,
-        hour: CronField::parse(fields[1])?,
-        day: CronField::parse(fields[2])?,
-        month: CronField::parse(fields[3])?,
-        weekday: CronField::parse(fields[4])?,
+        minute: CronField::parse(fields[0], 0, 59)?,
+        hour: CronField::parse(fields[1], 0, 23)?,
+        day: CronField::parse(fields[2], 1, 31)?,
+        month: CronField::parse(fields[3], 1, 12)?,
+        weekday: CronField::parse_weekday(fields[4])?,
     })
 }
 
@@ -170,18 +187,18 @@ fn parse_duration_spec(s: &str) -> Result<Duration, String> {
         let n: u64 = num.parse().map_err(|_| format!("bad duration `{s}`"))?;
         let chunk = match ch {
             's' => Duration::from_secs(n),
-            'm' => Duration::from_secs(n * 60),
-            'h' => Duration::from_secs(n * 3600),
-            'd' => Duration::from_secs(n * 86_400),
+            'm' => Duration::from_secs(n.saturating_mul(60)),
+            'h' => Duration::from_secs(n.saturating_mul(3600)),
+            'd' => Duration::from_secs(n.saturating_mul(86_400)),
             _ => return Err(format!("unknown duration unit `{ch}`")),
         };
-        total += chunk;
+        total = total.saturating_add(chunk);
         num.clear();
     }
     if !num.is_empty() {
         // Bare number — assume seconds for compatibility with `@every 30`.
         let n: u64 = num.parse().map_err(|_| format!("bad duration `{s}`"))?;
-        total += Duration::from_secs(n);
+        total = total.saturating_add(Duration::from_secs(n));
     }
     Ok(total)
 }
@@ -195,9 +212,10 @@ fn parse_duration_spec(s: &str) -> Result<Duration, String> {
 /// `Every { period }` fires immediately if `last_run` is `None`, then
 /// re-fires once at least `period` has elapsed.
 ///
-/// `Crontab { … }` fires at most once per minute, when the minute /
-/// hour / day / month / weekday fields all match the local-time
-/// components of `now`. The "at most once" guard uses `last_run` so a
+/// `Crontab { … }` fires at most once per minute, when the minute, hour and
+/// month fields match the local-time components of `now` and the
+/// day-of-month / day-of-week pair matches per POSIX rules (see
+/// [`day_and_weekday_match`]). The "at most once" guard uses `last_run` so a
 /// 30-second poll loop can't fire the same minute twice.
 pub fn should_fire_cron(job: &CronJob, now: SystemTime) -> bool {
     match &job.schedule {
@@ -237,13 +255,10 @@ pub fn should_fire_cron(job: &CronJob, now: SystemTime) -> bool {
             if !hour.matches(parts.hour) {
                 return false;
             }
-            if !day.matches(parts.day) {
-                return false;
-            }
             if !month.matches(parts.month) {
                 return false;
             }
-            if !weekday.matches(parts.weekday) {
+            if !day_and_weekday_match(day, weekday, parts.day, parts.weekday) {
                 return false;
             }
             // Don't refire within the same minute.
@@ -258,6 +273,26 @@ pub fn should_fire_cron(job: &CronJob, now: SystemTime) -> bool {
             }
             true
         }
+    }
+}
+
+/// POSIX day-of-month / day-of-week combination rule. Vixie cron fires when
+/// EITHER field matches if BOTH are restricted (neither is `*`); if either
+/// field is `*` it drops out and the other is ANDed normally. This matches
+/// real crontab semantics (e.g. `0 0 13 * 5` = "the 13th OR any Friday").
+fn day_and_weekday_match(
+    day: &CronField,
+    weekday: &CronField,
+    day_value: u32,
+    weekday_value: u32,
+) -> bool {
+    let day_ok = day.matches(day_value);
+    let weekday_ok = weekday.matches(weekday_value);
+    let both_restricted = !matches!(day, CronField::Any) && !matches!(weekday, CronField::Any);
+    if both_restricted {
+        day_ok || weekday_ok
+    } else {
+        day_ok && weekday_ok
     }
 }
 
@@ -367,4 +402,84 @@ pub(crate) async fn run_cron_command(job: &CronJob) -> std::io::Result<()> {
         "cron command exited"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weekday_seven_is_normalized_to_sunday() {
+        // POSIX: 0 and 7 both mean Sunday. Before the fix `7` parsed to
+        // Exact(7) and never matched (chrono yields 0..=6), so `0 0 * * 7`
+        // silently never fired.
+        let s = parse_schedule("0 0 * * 7").unwrap();
+        match s {
+            CronSchedule::Crontab { weekday, .. } => {
+                assert_eq!(weekday, CronField::Exact(0));
+            }
+            _ => panic!("expected crontab"),
+        }
+    }
+
+    #[test]
+    fn weekday_zero_still_means_sunday() {
+        let s = parse_schedule("0 0 * * 0").unwrap();
+        match s {
+            CronSchedule::Crontab { weekday, .. } => {
+                assert_eq!(weekday, CronField::Exact(0));
+            }
+            _ => panic!("expected crontab"),
+        }
+    }
+
+    #[test]
+    fn out_of_range_fields_are_rejected() {
+        assert!(parse_schedule("99 * * * *").is_err()); // minute > 59
+        assert!(parse_schedule("* 24 * * *").is_err()); // hour > 23
+        assert!(parse_schedule("* * 32 * *").is_err()); // day > 31
+        assert!(parse_schedule("* * 0 * *").is_err()); // day < 1
+        assert!(parse_schedule("* * * 13 *").is_err()); // month > 12
+        assert!(parse_schedule("* * * * 8").is_err()); // weekday > 7
+        // Valid boundaries still parse.
+        assert!(parse_schedule("59 23 31 12 6").is_ok());
+    }
+
+    #[test]
+    fn absurd_every_duration_saturates_without_panic() {
+        // `n * 86_400` used to overflow u64 (panic in debug / wrap in release).
+        let s = parse_schedule("@every 100000000000000000d").unwrap();
+        match s {
+            CronSchedule::Every { period } => assert!(period.as_secs() > 0),
+            _ => panic!("expected @every"),
+        }
+    }
+
+    #[test]
+    fn day_and_weekday_both_restricted_is_or() {
+        let day = CronField::Exact(13);
+        let weekday = CronField::Exact(5); // Friday
+        assert!(day_and_weekday_match(&day, &weekday, 13, 0)); // 13th, not Friday
+        assert!(day_and_weekday_match(&day, &weekday, 1, 5)); // Friday, not 13th
+        assert!(!day_and_weekday_match(&day, &weekday, 1, 0)); // neither
+    }
+
+    #[test]
+    fn day_or_weekday_wildcard_is_and() {
+        let day = CronField::Exact(13);
+        let weekday = CronField::Any;
+        assert!(day_and_weekday_match(&day, &weekday, 13, 3));
+        assert!(!day_and_weekday_match(&day, &weekday, 12, 3));
+        let day2 = CronField::Any;
+        let weekday2 = CronField::Exact(5);
+        assert!(day_and_weekday_match(&day2, &weekday2, 20, 5));
+        assert!(!day_and_weekday_match(&day2, &weekday2, 20, 4));
+    }
+
+    #[test]
+    fn weekday_parse_rejects_over_seven() {
+        assert!(CronField::parse_weekday("8").is_err());
+        assert_eq!(CronField::parse_weekday("7").unwrap(), CronField::Exact(0));
+        assert_eq!(CronField::parse_weekday("3").unwrap(), CronField::Exact(3));
+    }
 }

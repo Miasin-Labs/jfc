@@ -1258,15 +1258,21 @@ fn empty_billed_resend_cap() -> u32 {
     stream::max_self_continuations().min(3)
 }
 
+/// Default same-model resends for a content-bearing refusal before giving up
+/// and surfacing the stall. Four is still bounded, but avoids the observed
+/// 2/2 dead-stop on transient Anthropic refusal degradation.
+const DEFAULT_REFUSAL_RESEND_CAP: u32 = 4;
+
 /// Max same-model resends for a content-bearing refusal before giving up and
-/// surfacing the stall. Kept small (2) — a refusal that survives two clean
-/// resends is probably a real refusal, not transient degradation. Overridable
-/// via `JFC_REFUSAL_RESEND_CAP`.
+/// surfacing the stall. Configurable through `refusal_resend_max`; overridable
+/// via `JFC_REFUSAL_RESEND_CAP` for one-off debugging.
 fn refusal_resend_cap() -> u32 {
     std::env::var("JFC_REFUSAL_RESEND_CAP")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(2)
+        .or_else(|| crate::config::load_arc().refusal_resend_max)
+        .unwrap_or(DEFAULT_REFUSAL_RESEND_CAP)
+        .clamp(1, 10)
 }
 
 /// Cap for the opt-in refusal→rewrite→resend loop. Configured value
@@ -1757,6 +1763,10 @@ mod stream_done_lifecycle_tests {
     fn refusal_resend_cap_is_bounded_normal() {
         let cap = refusal_resend_cap();
         assert!(cap >= 1, "must allow at least one recovery retry");
+        assert!(
+            cap > 2,
+            "same-model refusal recovery must not stop at the screenshot's 2/2 cap"
+        );
         assert!(cap <= 5, "must stay small so a real refusal isn't hammered");
     }
 
@@ -1783,7 +1793,11 @@ mod stream_done_lifecycle_tests {
         unsafe { std::env::set_var(KEY, "4") };
         assert_eq!(refusal_resend_cap(), 4);
         unsafe { std::env::set_var(KEY, "not-a-number") };
-        assert_eq!(refusal_resend_cap(), 2, "bad value falls back to default");
+        assert_eq!(
+            refusal_resend_cap(),
+            DEFAULT_REFUSAL_RESEND_CAP,
+            "bad value falls back to default"
+        );
         unsafe {
             match &prev {
                 Some(v) => std::env::set_var(KEY, v),

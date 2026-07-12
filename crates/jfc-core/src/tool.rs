@@ -321,10 +321,18 @@ mod tests {
     }
 
     #[test]
-    fn model_usage_cache_hit_pct_capped_at_100_robust() {
-        // If a buggy provider reports cache_read > input we still cap at 100%.
+    fn model_usage_cache_hit_pct_uses_cached_plus_fresh_denominator_regression() {
         let u = ModelUsage {
             input_tokens: 10,
+            cache_read_tokens: 10,
+            ..Default::default()
+        };
+        assert_eq!(u.cache_hit_pct(), 50.0);
+    }
+
+    #[test]
+    fn model_usage_cache_hit_pct_cached_only_input_normal() {
+        let u = ModelUsage {
             cache_read_tokens: 50,
             ..Default::default()
         };
@@ -338,7 +346,7 @@ mod tests {
             cache_read_tokens: 25,
             ..Default::default()
         };
-        assert_eq!(u.cache_hit_pct(), 25.0);
+        assert_eq!(u.cache_hit_pct(), 20.0);
     }
 
     #[test]

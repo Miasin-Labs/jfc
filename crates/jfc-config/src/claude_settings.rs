@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,7 @@ use crate::{
 
 const CLAUDE_IN_CHROME_MCP_SERVER: &str = "claude-in-chrome";
 const CLAUDE_IN_CHROME_MCP_ARG: &str = "--claude-in-chrome-mcp";
+static UNTRUSTED_PROJECT_HOOK_WARNINGS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -512,6 +514,31 @@ pub fn project_hooks_trusted() -> bool {
         .is_some_and(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
 }
 
+fn should_warn_untrusted_project_hooks(path: &Path) -> bool {
+    let warned = UNTRUSTED_PROJECT_HOOK_WARNINGS.get_or_init(Default::default);
+    let Ok(mut warned) = warned.lock() else {
+        return true;
+    };
+    warned.insert(path.to_path_buf())
+}
+
+fn warn_untrusted_project_hooks(path: &Path) {
+    if should_warn_untrusted_project_hooks(path) {
+        tracing::warn!(
+            target: "jfc::config::claude_settings",
+            path = %path.display(),
+            "ignoring repo-local .claude shell hooks for an untrusted project; \
+             set JFC_TRUST_PROJECT_HOOKS=1 to enable them"
+        );
+    } else {
+        tracing::debug!(
+            target: "jfc::config::claude_settings",
+            path = %path.display(),
+            "repo-local .claude shell hooks remain disabled for an untrusted project"
+        );
+    }
+}
+
 pub fn load_merged(project_root: &Path) -> ClaudeCompatibilityConfig {
     let trust_project_hooks = project_hooks_trusted();
     let mut merged = ClaudeCompatibilityConfig::default();
@@ -526,12 +553,7 @@ pub fn load_merged(project_root: &Path) -> ClaudeCompatibilityConfig {
                 // otherwise reach `sh -c` on setup/prompt events before the
                 // user has trusted the project.
                 if is_project && !trust_project_hooks && settings.hooks.is_some() {
-                    tracing::warn!(
-                        target: "jfc::config::claude_settings",
-                        path = %path.display(),
-                        "ignoring repo-local .claude shell hooks for an untrusted project; \
-                         set JFC_TRUST_PROJECT_HOOKS=1 to enable them"
-                    );
+                    warn_untrusted_project_hooks(&path);
                     settings.hooks = None;
                 }
                 merged.merge_from(settings);
@@ -1559,6 +1581,17 @@ mod tests {
         );
         // Non-hook project settings still apply.
         assert_eq!(merged.model.as_deref(), Some("project-model"));
+    }
+
+    #[test]
+    fn untrusted_project_hook_warning_is_once_per_path_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join(".claude").join("settings.json");
+        let local_path = dir.path().join(".claude").join("settings.local.json");
+
+        assert!(should_warn_untrusted_project_hooks(&settings_path));
+        assert!(!should_warn_untrusted_project_hooks(&settings_path));
+        assert!(should_warn_untrusted_project_hooks(&local_path));
     }
 
     #[test]

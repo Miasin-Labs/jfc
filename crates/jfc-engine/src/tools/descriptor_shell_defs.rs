@@ -5,11 +5,13 @@ use serde_json::json;
 
 pub(crate) const BASH_HANDLER: &str = "Bash";
 pub(crate) const BASH_OUTPUT_HANDLER: &str = "BashOutput";
+pub(crate) const INTERACTIVE_BASH_HANDLER: &str = "InteractiveBash";
 
 pub(crate) fn shell_descriptors(plugin_id: PluginId) -> Vec<ToolDescriptor> {
     vec![
         bash_descriptor(plugin_id.clone()),
-        bash_output_descriptor(plugin_id),
+        bash_output_descriptor(plugin_id.clone()),
+        interactive_bash_descriptor(plugin_id),
     ]
 }
 
@@ -93,4 +95,25 @@ fn bash_output_descriptor(plugin_id: PluginId) -> ToolDescriptor {
     .with_executor(ToolExecutorKind::BuiltIn, BASH_OUTPUT_HANDLER)
     .with_approval_policy(ToolApprovalPolicy::ReadOnly)
     .with_visibility(DescriptorVisibility::HostVisible)
+}
+
+fn interactive_bash_descriptor(plugin_id: PluginId) -> ToolDescriptor {
+    ToolDescriptor::new(
+        plugin_id,
+        "InteractiveBash",
+        "Run a tmux subcommand for interactive terminal/TUI driving. Pass the tmux command without the `tmux` prefix, for example `new-session -d -s jfc-dev` or `send-keys -t jfc-dev \"cargo run\" Enter`. This tool is for persistent interactive sessions; use Bash for one-shot shell commands and for read-only capture commands such as `tmux capture-pane -p -t <session>`.",
+        json!({
+            "type": "object",
+            "properties": {
+                "tmux_command": {
+                    "type": "string",
+                    "description": "The tmux subcommand and arguments to execute, without the leading `tmux` executable name."
+                }
+            },
+            "required": ["tmux_command"]
+        }),
+    )
+    .with_executor(ToolExecutorKind::BuiltIn, INTERACTIVE_BASH_HANDLER)
+    .with_approval_policy(ToolApprovalPolicy::Mutating)
+    .with_visibility(DescriptorVisibility::ModelVisible)
 }

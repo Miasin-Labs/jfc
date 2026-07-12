@@ -49,6 +49,7 @@ pub(crate) fn start_content_block(
             tool_kind,
             content,
         },
+        ContentBlock::Compaction => BlockState::Compaction,
         ContentBlock::Unknown { kind, raw } => {
             tracing::warn!(
                 target: "jfc::provider::anthropic_sse",
@@ -139,9 +140,11 @@ pub(crate) fn apply_content_delta(
             *estimated_tokens = signature_total;
             Some(StreamEvent::ThinkingTokens { index, delta })
         }
-        Delta::CitationsDelta {}
-        | Delta::ConnectorTextDelta { .. }
-        | Delta::CompactionContentBlockDelta { .. } => None,
+        Delta::CitationsDelta {} | Delta::ConnectorTextDelta { .. } => None,
+        Delta::CompactionDelta { content } => Some(StreamEvent::CompactionDelta {
+            index,
+            delta: content,
+        }),
         Delta::Unknown { kind, raw } => {
             tracing::warn!(
                 target: "jfc::provider::anthropic_sse",
@@ -228,6 +231,7 @@ pub(crate) fn stop_content_block(
                 content,
             })
         }
+        Some(BlockState::Compaction) => None,
         Some(BlockState::Ignored { kind }) => {
             tracing::debug!(
                 target: "jfc::provider::anthropic_sse",

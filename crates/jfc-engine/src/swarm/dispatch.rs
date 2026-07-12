@@ -138,7 +138,7 @@ pub fn try_spawn_teammate(
                 model: Some(teammate_model_name.clone()),
                 agent_type: task_input.subagent_type.clone(),
                 provider: teammate_provider.clone(),
-                model_id: teammate_model.clone(),
+                model_id: teammate_model,
                 system_prompt: None,
                 task_store: Some(jfc_session::TaskStore::open_team(&team_name)),
             };
@@ -153,7 +153,7 @@ pub fn try_spawn_teammate(
                 task_id: runner_task_id.clone(),
                 agent_id: agent_id.clone(),
                 cwd: project_root.clone(),
-                model_id: Some(teammate_model.clone()),
+                model_id: Some(teammate_model),
                 provider_name: Some(teammate_provider.name().to_owned()),
                 active_team_name: Some(team_name.clone()),
             };

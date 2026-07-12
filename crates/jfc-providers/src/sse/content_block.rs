@@ -15,7 +15,9 @@ pub enum ContentBlock {
     },
     /// Server-redacted thinking block — opaque base64 blob, no deltas.
     /// Must be round-tripped verbatim in subsequent requests.
-    RedactedThinking { data: String },
+    RedactedThinking {
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -39,10 +41,14 @@ pub enum ContentBlock {
         tool_kind: ServerToolResultKind,
         content: Value,
     },
+    Compaction,
     /// Forward-compatible catch-all for new content block types. Unknown
     /// blocks are ignored unless they carry `tool_use_id` + `content`, in
     /// which case they are promoted to `ServerToolResult` above.
-    Unknown { kind: String, raw: Value },
+    Unknown {
+        kind: String,
+        raw: Value,
+    },
 }
 
 impl<'de> Deserialize<'de> for ContentBlock {
@@ -142,6 +148,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     content: block.content,
                 })
             }
+            "compaction" => Ok(Self::Compaction),
             _ => {
                 if let Some(tool_use_id) = value.get("tool_use_id").and_then(Value::as_str) {
                     return Ok(Self::ServerToolResult {
