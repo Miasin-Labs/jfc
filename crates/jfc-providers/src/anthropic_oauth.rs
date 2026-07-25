@@ -75,8 +75,8 @@ pub(crate) fn mid_conversation_system_enabled(model: &str) -> bool {
     {
         return true;
     }
-    let id = model.to_ascii_lowercase();
-    id.contains("opus-4-8") || id.contains("mythos")
+    jfc_provider::anthropic_model_metadata(model)
+        .is_some_and(|metadata| metadata.has_capability("mid_conv_system"))
 }
 
 /// Append `ANTHROPIC_BETAS` env var values to `header`. CC 2.1.154's `G36`
@@ -1889,8 +1889,9 @@ fn build_body(
     let model_supports_context_management =
         super::anthropic_models::model_supports_context_management(opts.model.as_str());
 
+    let wire_model = jfc_provider::normalize_anthropic_model_id(&opts.model);
     let mut body = json!({
-        "model": opts.model,
+        "model": wire_model,
         "max_tokens": opts.max_tokens,
         "stream": true,
         "messages": sse::build_messages(&messages),
@@ -3351,6 +3352,16 @@ mod tests {
     }
 
     #[test]
+    fn build_body_strips_context_suffix_from_wire_model_regression() {
+        let body = build_body(
+            vec![make_user_msg("hello")],
+            &opts("claude-fable-5[1m]"),
+            TEST_BH,
+        );
+        assert_eq!(body["model"], "claude-fable-5");
+    }
+
+    #[test]
     fn build_body_tools_absent_when_empty() {
         let body = build_body(vec![make_user_msg("hi")], &opts("m"), TEST_BH);
         assert!(body.get("tools").is_none());
@@ -3848,7 +3859,7 @@ mod tests {
             false,
             false,
             &[],
-            "claude-opus-4-7",
+            "claude-opus-4-6[1m]",
         );
         assert!(header.contains("context-1m-2025-08-07"));
         assert!(header.contains("afk-mode-2026-01-31"));
@@ -4104,7 +4115,8 @@ mod tests {
     #[test]
     fn mid_conversation_system_enabled_for_opus_4_8_normal() {
         assert!(mid_conversation_system_enabled("claude-opus-4-8"));
-        assert!(mid_conversation_system_enabled("claude-mythos-preview"));
+        assert!(mid_conversation_system_enabled("claude-sonnet-5"));
+        assert!(mid_conversation_system_enabled("claude-fable-5"));
     }
 
     // Normal: every pre-4.8 model is excluded so we don't send the beta to

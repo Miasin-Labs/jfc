@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -151,6 +152,9 @@ impl McpAdvertisedToolMetadata {
 /// the [`crate::types::McpServerInfo`] sidebar block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpServerStatus {
+    /// Repository-provided config retained for inspection but not spawned
+    /// until the user explicitly approves it.
+    PendingApproval,
     /// Handshake completed, tool list cached, ready to dispatch.
     Connected,
     /// Spawn or handshake failed; entry kept so `/mcp list` shows the
@@ -165,6 +169,7 @@ pub enum McpServerStatus {
 impl McpServerStatus {
     pub fn label(self) -> &'static str {
         match self {
+            Self::PendingApproval => "pending approval",
             Self::Connected => "connected",
             Self::Failed => "failed",
             Self::Disabled => "disabled",
@@ -173,6 +178,7 @@ impl McpServerStatus {
 }
 
 /// One live or stub MCP server entry.
+#[derive(Clone)]
 pub struct McpServer {
     pub name: String,
     pub status: McpServerStatus,
@@ -190,6 +196,11 @@ pub struct McpServer {
     /// Original spawn config — kept so `/mcp restart` can re-spawn
     /// without needing the caller to re-thread the config.
     pub spawn_cfg: SpawnConfig,
+    /// Original config, retained so reconnect reruns dynamic headers and OAuth
+    /// token acquisition rather than recycling stale resolved headers.
+    pub config: McpServerConfig,
+    /// Optional server-specific request timeout.
+    pub request_timeout: Option<Duration>,
 }
 
 impl McpServer {
@@ -465,10 +476,43 @@ impl McpRegistry {
         let Some(transport) = server.transport.as_ref() else {
             return Err(DispatchError::ServerNotConnected(server_name.to_owned()));
         };
-        let result = transport
-            .call_tool(&tool_name, arguments, timeout)
-            .await
-            .map_err(DispatchError::Request)?;
+        let timeout = server.request_timeout.unwrap_or(timeout);
+        let retry_arguments = arguments.clone();
+        let result = match transport.call_tool(&tool_name, arguments, timeout).await {
+            Ok(result) => result,
+            Err(error)
+                if matches!(
+                    error,
+                    RequestError::AuthHeaderRejected | RequestError::Disconnected
+                ) =>
+            {
+                tracing::warn!(
+                    target: "jfc::mcp",
+                    server = server_name,
+                    error = %error,
+                    "MCP call lost authorization or connection; rebuilding transport once"
+                );
+                if restart_server(self, server_name).await != Some(true) {
+                    return Err(DispatchError::Request(error));
+                }
+                let refreshed = self
+                    .get(server_name)
+                    .await
+                    .ok_or_else(|| DispatchError::UnknownServer(server_name.to_owned()))?;
+                let transport = refreshed.transport.as_ref().ok_or_else(|| {
+                    DispatchError::ServerNotConnected(server_name.to_owned())
+                })?;
+                transport
+                    .call_tool(
+                        &tool_name,
+                        retry_arguments,
+                        refreshed.request_timeout.unwrap_or(timeout),
+                    )
+                    .await
+                    .map_err(DispatchError::Request)?
+            }
+            Err(error) => return Err(DispatchError::Request(error)),
+        };
         Ok(ToolCallOutcome::from(result))
     }
 
@@ -623,6 +667,19 @@ fn build_effective_env(name: &str, cfg: &McpServerConfig) -> HashMap<String, Str
     env
 }
 
+fn effective_roots(cfg: &McpServerConfig) -> Vec<std::path::PathBuf> {
+    if cfg.roots.is_empty() {
+        std::env::current_dir().into_iter().collect()
+    } else {
+        cfg.roots.clone()
+    }
+}
+
+fn configured_timeout(cfg: &McpServerConfig) -> Option<Duration> {
+    cfg.request_timeout_ms
+        .map(|millis| Duration::from_millis(millis.clamp(1_000, 600_000)))
+}
+
 /// Spawn a single server from a config block, run the handshake +
 /// `tools/list`, and return the resulting [`McpServer`] entry. On any
 /// failure returns a `Failed` entry (no transport) so `/mcp list` can
@@ -632,6 +689,38 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
     // (if set), then overlay the explicit `env` entries so that inline
     // vars always win over file-sourced ones.
     let effective_env = build_effective_env(name, cfg);
+    let roots = effective_roots(cfg);
+
+    if cfg.requires_approval {
+        let kind = cfg.resolve_transport().unwrap_or_else(|_| {
+            if cfg.url_present() {
+                TransportKind::Http
+            } else {
+                TransportKind::Stdio
+            }
+        });
+        return McpServer {
+            name: name.to_owned(),
+            status: McpServerStatus::PendingApproval,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            instructions: None,
+            transport: None,
+            spawn_cfg: SpawnConfig {
+                server_name: name.to_owned(),
+                kind,
+                command: cfg.command.clone().unwrap_or_default(),
+                args: cfg.args.clone(),
+                env: effective_env,
+                headers: cfg.headers.clone(),
+                url: cfg.url.clone(),
+                cwd: None,
+                roots,
+            },
+            config: cfg.clone(),
+            request_timeout: configured_timeout(cfg),
+        };
+    }
 
     // `type` is authoritative; resolution validates that the required
     // fields (`command` for stdio, `url` for http) are present.
@@ -660,7 +749,10 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
                     headers: cfg.headers.clone(),
                     url: cfg.url.clone(),
                     cwd: None,
+                    roots,
                 },
+                config: cfg.clone(),
+                request_timeout: configured_timeout(cfg),
             };
         }
     };
@@ -691,7 +783,10 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
                         headers: cfg.headers.clone(),
                         url: cfg.url.clone(),
                         cwd: None,
+                        roots,
                     },
+                    config: cfg.clone(),
+                    request_timeout: configured_timeout(cfg),
                 };
             }
         },
@@ -707,6 +802,7 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
         headers,
         url: cfg.url.clone(),
         cwd: None,
+        roots,
     };
 
     let Some(transport) = Transport::spawn(spawn_cfg.clone()).await else {
@@ -718,6 +814,8 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
             instructions: None,
             transport: None,
             spawn_cfg,
+            config: cfg.clone(),
+            request_timeout: configured_timeout(cfg),
         };
     };
 
@@ -741,6 +839,8 @@ pub async fn build_server(name: &str, cfg: &McpServerConfig) -> McpServer {
         instructions,
         transport: Some(transport),
         spawn_cfg,
+        config: cfg.clone(),
+        request_timeout: configured_timeout(cfg),
     }
 }
 
@@ -756,6 +856,14 @@ async fn effective_http_headers(
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
     let mut headers = cfg.headers.clone();
+    if let Some(helper) = cfg
+        .headers_helper
+        .as_deref()
+        .map(str::trim)
+        .filter(|helper| !helper.is_empty())
+    {
+        headers.extend(run_headers_helper(server_name, helper, env).await?);
+    }
     if has_authorization_header(&headers) {
         return Ok(headers);
     }
@@ -764,6 +872,51 @@ async fn effective_http_headers(
         return Ok(headers);
     };
     headers.insert("Authorization".to_owned(), format!("Bearer {token}"));
+    Ok(headers)
+}
+
+async fn run_headers_helper(
+    server_name: &str,
+    helper: &str,
+    env: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let argv = shlex::split(helper).ok_or_else(|| "headersHelper has invalid quoting".to_owned())?;
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| "headersHelper is empty".to_owned())?;
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).envs(env).kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "headersHelper timed out after 10 seconds".to_owned())?
+        .map_err(|error| format!("headersHelper failed to start: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "headersHelper exited with status {}",
+            output.status
+        ));
+    }
+    if output.stdout.len() > 64 * 1024 {
+        return Err("headersHelper output exceeds 64 KiB".to_owned());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("headersHelper output is not JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "headersHelper must print a JSON object".to_owned())?;
+    let mut headers = HashMap::with_capacity(object.len());
+    for (name, value) in object {
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("headersHelper value for `{name}` is not a string"))?;
+        headers.insert(name.clone(), value.to_owned());
+    }
+    tracing::debug!(
+        target: "jfc::mcp",
+        server = server_name,
+        header_count = headers.len(),
+        "loaded dynamic MCP HTTP headers"
+    );
     Ok(headers)
 }
 
@@ -975,25 +1128,50 @@ pub async fn restart_server(registry: &McpRegistry, name: &str) -> Option<bool> 
     if let Some(t) = old.transport.as_ref() {
         t.shutdown().await;
     }
-    // Reconstruct McpServerConfig from cached spawn cfg, preserving the
-    // resolved transport kind so a restart can't silently switch
-    // transports.
-    let cfg = McpServerConfig {
-        server_type: Some(old.spawn_cfg.kind.label().to_owned()),
-        command: Some(old.spawn_cfg.command.clone()),
-        args: old.spawn_cfg.args.clone(),
-        env: old.spawn_cfg.env.clone(),
-        // env_file is intentionally omitted on restart: the effective env
-        // was already resolved and baked into spawn_cfg.env at startup.
-        env_file: None,
-        headers: old.spawn_cfg.headers.clone(),
-        url: old.spawn_cfg.url.clone(),
-        oauth: Default::default(),
-    };
+    // Retain the original config so reconnect reruns env-file loading,
+    // headersHelper, and OAuth token acquisition instead of recycling the
+    // resolved Authorization header from the previous connection.
+    let cfg = old.config.clone();
     let new_server = build_server(name, &cfg).await;
     let connected = new_server.status == McpServerStatus::Connected;
     registry.insert(new_server).await;
     Some(connected)
+}
+
+/// Approve and connect a repository-provided server that was registered in
+/// `PendingApproval` state. Already-approved servers report their current
+/// connection state without rebuilding.
+pub async fn approve_server(registry: &McpRegistry, name: &str) -> Option<bool> {
+    let current = registry.get(name).await?;
+    if current.status != McpServerStatus::PendingApproval {
+        return Some(current.status == McpServerStatus::Connected);
+    }
+    let mut config = current.config.clone();
+    config.requires_approval = false;
+    let server = build_server(name, &config).await;
+    let connected = server.status == McpServerStatus::Connected;
+    registry.insert(server).await;
+    Some(connected)
+}
+
+/// Replace a server's workspace roots and emit
+/// `notifications/roots/list_changed` on a live connection.
+pub async fn set_server_roots(
+    registry: &McpRegistry,
+    name: &str,
+    roots: Vec<std::path::PathBuf>,
+) -> Option<Result<(), RequestError>> {
+    let current = registry.get(name).await?;
+    if let Some(transport) = current.transport.as_ref()
+        && let Err(error) = transport.update_roots(&roots).await
+    {
+        return Some(Err(error));
+    }
+    let mut updated = current.as_ref().clone();
+    updated.config.roots = roots.clone();
+    updated.spawn_cfg.roots = roots;
+    registry.insert(updated).await;
+    Some(Ok(()))
 }
 
 #[cfg(test)]
@@ -1027,7 +1205,10 @@ mod tests {
                 headers: HashMap::new(),
                 url: None,
                 cwd: None,
+                roots: Vec::new(),
             },
+            config: McpServerConfig::default(),
+            request_timeout: None,
         }
     }
 
@@ -1363,6 +1544,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_server_waits_for_approval_regression() {
+        let cfg = McpServerConfig {
+            server_type: Some("stdio".into()),
+            command: Some("/nonexistent/must-not-spawn-before-approval".into()),
+            requires_approval: true,
+            request_timeout_ms: Some(250),
+            ..Default::default()
+        };
+
+        let server = build_server("project", &cfg).await;
+
+        assert_eq!(server.status, McpServerStatus::PendingApproval);
+        assert!(server.transport.is_none());
+        assert_eq!(server.request_timeout, Some(Duration::from_secs(1)));
+        assert!(server.config.requires_approval);
+    }
+
+    #[tokio::test]
+    async fn headers_helper_supplies_refreshable_headers_regression() {
+        let cfg = McpServerConfig {
+            server_type: Some("http".into()),
+            url: Some("https://mcp.example.test/mcp".into()),
+            headers_helper: Some("/usr/bin/printf '{\"X-Dynamic\":\"fresh\"}'".into()),
+            ..Default::default()
+        };
+
+        let headers = effective_http_headers("server", &cfg, &HashMap::new())
+            .await
+            .expect("dynamic headers");
+
+        assert_eq!(headers.get("X-Dynamic").map(String::as_str), Some("fresh"));
+    }
+
+    #[tokio::test]
     async fn effective_http_headers_uses_oauth_access_token_env_regression() {
         let mut cfg = McpServerConfig {
             server_type: Some("http".into()),
@@ -1373,6 +1588,7 @@ mod tests {
             headers: HashMap::new(),
             url: Some("https://mcp.example.test/mcp".into()),
             oauth: Default::default(),
+            ..Default::default()
         };
         cfg.oauth.access_token_env = Some("MCP_TEST_TOKEN".into());
         let env = HashMap::from([("MCP_TEST_TOKEN".to_owned(), "tok_123".to_owned())]);
@@ -1400,6 +1616,7 @@ mod tests {
             headers,
             url: Some("https://mcp.example.test/mcp".into()),
             oauth: Default::default(),
+            ..Default::default()
         };
         cfg.oauth.access_token_env = Some("MISSING_TOKEN_SHOULD_NOT_BE_READ".into());
 
@@ -1425,6 +1642,7 @@ mod tests {
             headers: HashMap::new(),
             url: Some("https://mcp.example.test/mcp".into()),
             oauth: Default::default(),
+            ..Default::default()
         };
         cfg.oauth.scopes = vec!["tools.read".into(), "tools.write".into()];
         cfg.oauth.resource = Some("https://resource.example.test/root".into());
@@ -1457,6 +1675,7 @@ mod tests {
                 headers: HashMap::new(),
                 url: None,
                 oauth: Default::default(),
+                ..Default::default()
             },
         );
         register_servers_from_config(&reg, &configs).await;
@@ -1482,6 +1701,7 @@ mod tests {
                 headers: HashMap::new(),
                 url: None,
                 oauth: Default::default(),
+                ..Default::default()
             },
         );
         register_servers_from_config(&reg, &configs).await;

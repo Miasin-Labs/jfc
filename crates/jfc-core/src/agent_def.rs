@@ -29,6 +29,14 @@ pub struct AgentDef {
     pub forks_parent_context: Option<serde_json::Value>,
     #[serde(default)]
     pub background: Option<bool>,
+    /// Read-only agent type paired with this agent when experimental observer
+    /// support is enabled.
+    #[serde(default)]
+    pub observer: Option<String>,
+    /// Supplemental instruction appended after the harness-owned observer
+    /// safety postamble.
+    #[serde(default, rename = "observerMessage")]
+    pub observer_message: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]

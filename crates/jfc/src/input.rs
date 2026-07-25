@@ -18,6 +18,7 @@ mod navigation;
 mod palette;
 mod palette_actions;
 mod palette_slash_action;
+pub(crate) mod paste;
 mod prompt_rewrite;
 mod question;
 mod runtime_action_host;

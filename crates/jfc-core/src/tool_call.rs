@@ -212,6 +212,7 @@ mod tests {
     #[test]
     fn mcp_status_labels_normal() {
         assert_eq!(McpStatus::Connected.label(), "Connected");
+        assert_eq!(McpStatus::PendingApproval.label(), "Pending approval");
         assert_eq!(McpStatus::Disabled.label(), "Disabled");
         assert_eq!(McpStatus::Error.label(), "Error");
     }

@@ -3,7 +3,8 @@
 //! `reconcile_background_agents` is called from every CLI query path and
 //! from the daemon's main loop. It walks every `Running` agent and:
 //!
-//! 1. If the owning PID is gone, requests one respawn from the persisted
+//! 1. If the owning PID is gone, requests a bounded, backoff-controlled
+//!    respawn from the persisted
 //!    `BackgroundAgentLaunch` (capped by `JFC_DAEMON_WORKER_RESPAWN_LIMIT`)
 //!    unless the
 //!    agent was cancelled.
@@ -64,6 +65,16 @@ pub(crate) fn reconcile_background_agents(paths: &DaemonPaths) -> std::io::Resul
                         respawns.push((agent.id.clone(), launch_path, launch));
                         changed = true;
                     }
+                    continue;
+                }
+                if !agent.cancel_requested
+                    && agent.respawn_count < worker_respawn_limit()
+                    && !low_memory_respawn_blocked()
+                    && !respawn_ready(agent, now)
+                {
+                    // Keep the durable row running while the short restart
+                    // backoff elapses; marking it failed here would defeat the
+                    // next reconciliation attempt.
                     continue;
                 }
                 if !agent.cancel_requested
@@ -171,7 +182,15 @@ fn worker_respawn_limit() -> u32 {
     std::env::var("JFC_DAEMON_WORKER_RESPAWN_LIMIT")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(1)
+        .unwrap_or(3)
+}
+
+fn respawn_ready(agent: &BackgroundAgentInfo, now: SystemTime) -> bool {
+    let exponent = agent.respawn_count.min(5);
+    let delay = Duration::from_secs(1_u64 << exponent);
+    now.duration_since(agent.updated_at)
+        .map(|elapsed| elapsed >= delay)
+        .unwrap_or(true)
 }
 
 /// Maximum terminal background-agent rows to retain in the state file.

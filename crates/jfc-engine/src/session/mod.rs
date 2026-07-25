@@ -20,9 +20,11 @@ mod store;
 #[cfg(test)]
 mod serialization_tests;
 
+pub use compaction::extract_first_prompt;
 pub use context_reduction_state::{load_context_reduction_queue, save_context_reduction_queue};
 pub use core::{
-    load_session, load_session_with_model, save_session, set_post_save_hook, set_session_title,
+    load_session, load_session_title, load_session_with_model, save_session,
+    set_ai_session_title_if_empty, set_post_save_hook, set_session_title,
 };
 pub use store::{
     AutosaveOutcome, AutosaveRequest, DefaultSessionStore, ListSessionsRequest, LoadedTranscript,
@@ -30,6 +32,7 @@ pub use store::{
     StoredSessionMessage, default_session_store,
 };
 
+pub(crate) use compaction::first_meaningful_user_prompt;
 pub(crate) use deserialize::deserialize_message;
 pub(crate) use serialization::SerializedMessage;
 pub(crate) use serialize::serialize_message;

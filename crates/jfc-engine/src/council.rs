@@ -619,6 +619,8 @@ fn council_member_agent_def() -> crate::agents::AgentDef {
         permission_mode: None,
         forks_parent_context: None,
         background: Some(false),
+        observer: None,
+        observer_message: None,
         color: None,
         effort: None,
         max_turns: Some(8),

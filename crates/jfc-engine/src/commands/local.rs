@@ -1,8 +1,4 @@
 use crate::app::EngineState;
-use tokio::sync::mpsc;
-
-use crate::runtime::{ControlEvent, EngineEvent};
-use jfc_core::ChatMessage;
 
 /// `/dump-context` prints everything jfc would inject into the system prompt
 /// into the transcript.
@@ -326,57 +322,6 @@ fn save_output_style(name: &str) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
-/// `/plan`, `/roadmap`, `/parity`, `/philosophy`, and `/usage` start a normal
-/// model turn that asks JFC to create or update the matching project document.
-pub(super) async fn handle_doc_command(
-    state: &mut EngineState,
-    kind: crate::document_formats::DocKind,
-    tx: Option<&mpsc::Sender<EngineEvent>>,
-) {
-    let cwd = std::path::PathBuf::from(&state.cwd);
-    let target = crate::document_formats::doc_target(&cwd, kind);
-    let exists = target.is_file();
-    let echo = format!("/{}", kind.verb());
-    let body = kind.prompt_body(&target, exists);
-    let action = if exists { "Updating" } else { "Drafting" };
-
-    let idle = !state.is_streaming
-        && state.pending_approval.is_none()
-        && state.approval_queue.is_empty()
-        && state.pending_tool_calls.is_empty();
-
-    if let (true, Some(tx)) = (idle, tx) {
-        state.messages.push(ChatMessage::user(echo));
-        state.push_effect(crate::app::EngineEffect::ScrollToBottom);
-        let _ = tx
-            .send(EngineEvent::Control(ControlEvent::SubmitPrompt(body)))
-            .await;
-        tracing::info!(
-            target: "jfc::doc_command",
-            kind = kind.file_name(),
-            "doc command dispatched immediately (idle session)"
-        );
-    } else {
-        state.messages.push(ChatMessage::user(echo));
-        state.messages.push(ChatMessage::assistant(format!(
-            "{action} `{}` … (queued — will run when the current turn finishes)",
-            target.display()
-        )));
-        state.queued_prompts.push(crate::runtime::QueuedPrompt {
-            text: body,
-            is_meta: false,
-            priority: crate::runtime::QueuePriority::Later,
-            attachments: Vec::new(),
-        });
-        state.push_effect(crate::app::EngineEffect::ScrollToBottom);
-        tracing::info!(
-            target: "jfc::doc_command",
-            kind = kind.file_name(),
-            "doc command queued (session busy)"
-        );
-    }
-}
-
 /// `/init` bootstraps a CLAUDE.md in the current working directory.
 pub(super) async fn handle_init_command(state: &mut EngineState) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -562,39 +507,9 @@ pub(super) async fn handle_init_command(state: &mut EngineState) {
     state.messages.push(jfc_core::ChatMessage::assistant(body));
 }
 
-/// `/cost` reports running session cost.
-pub(super) fn handle_cost_command(state: &mut EngineState) {
-    let mut total = 0.0f64;
-    let mut lines: Vec<String> = vec!["Session cost so far:".into(), "".into()];
-    if state.usage_by_model.is_empty() {
-        lines.push("  (no model usage yet — try a prompt first)".into());
-    } else {
-        for (model, usage) in &state.usage_by_model {
-            let cost = crate::cost::cost_for(model.as_str(), usage);
-            total += cost;
-            lines.push(format!(
-                "  {} · {} in / {} out / {} cache-read / {} cache-write → {}",
-                model.as_str(),
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_read_tokens,
-                usage.cache_write_tokens,
-                crate::cost::fmt_cost(cost),
-            ));
-        }
-    }
-    lines.push("".into());
-    lines.push(format!("**Total: {}**", crate::cost::fmt_cost(total)));
-    state
-        .messages
-        .push(jfc_core::ChatMessage::user("/cost".into()));
-    state
-        .messages
-        .push(jfc_core::ChatMessage::assistant(lines.join("\n")));
-}
-
-/// `/usage-report` shows per-model token usage, cache hits, cost, and budget percent if configured.
-pub(super) fn handle_usage_report_command(state: &mut EngineState) {
+/// Text fallback for `/usage` (and its `/cost` and `/stats` aliases).
+/// Interactive frontends render the same state in a native view.
+pub(super) fn handle_usage_command(state: &mut EngineState, invocation: &str) {
     let mut total_cost = 0.0f64;
     let mut total_in = 0u64;
     let mut total_out = 0u64;
@@ -643,9 +558,40 @@ pub(super) fn handle_usage_report_command(state: &mut EngineState) {
             pct
         ));
     }
+
+    if !state.anthropic_account_snapshots.is_empty() {
+        lines.push(String::new());
+        lines.push("Anthropic accounts:".into());
+        let active = state
+            .anthropic_account_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.name.as_str());
+        for account in &state.anthropic_account_snapshots {
+            let marker = if active == Some(account.name.as_str()) {
+                "*"
+            } else {
+                "-"
+            };
+            let pct = |value: Option<f64>| {
+                value
+                    .map(|value| format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0))
+                    .unwrap_or_else(|| "--".to_owned())
+            };
+            lines.push(format!(
+                "{marker} {}: {} · 5h {} · 7d {} · {} requests · ${:.2} total",
+                account.name,
+                account.auth_status,
+                pct(account.utilization_5h),
+                pct(account.utilization_7d),
+                account.total_request_count,
+                account.total_cost_usd,
+            ));
+        }
+    }
+
     state
         .messages
-        .push(jfc_core::ChatMessage::user("/usage-report".into()));
+        .push(jfc_core::ChatMessage::user(invocation.to_owned()));
     state
         .messages
         .push(jfc_core::ChatMessage::assistant(lines.join("\n")));
@@ -682,8 +628,28 @@ pub(super) fn handle_status_command(state: &mut EngineState) {
     let effort_label = state.effort_state.status();
     let temperature_label = state.temperature_state.status();
     let exploration_label = state.exploration_state.status();
+    let session_name = state
+        .current_session_title
+        .clone()
+        .or_else(|| crate::session::extract_first_prompt(&state.messages))
+        .unwrap_or_else(|| "Untitled".to_owned());
+    let session_id = state
+        .current_session_id
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "none".to_owned());
+    let run_state = if state.is_streaming {
+        "working".to_owned()
+    } else if let Some(status) = state.stream_terminal_status.as_ref() {
+        status.clone()
+    } else {
+        "ready".to_owned()
+    };
 
     let lines = vec![
+        format!("**Session name:** {session_name}"),
+        format!("**Session ID:** {session_id}"),
+        format!("**State:** {run_state}"),
         format!("**Version:** jfc v{}", env!("CARGO_PKG_VERSION")),
         format!("**Model:** {model_str}"),
         format!("**Provider:** {provider_label}"),

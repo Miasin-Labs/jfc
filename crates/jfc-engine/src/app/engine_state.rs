@@ -347,6 +347,12 @@ pub enum EngineEffect {
     /// The engine switched sessions (load/clear/continue) — frontends reset
     /// per-session view state (task panel selection, drill-down, token gauge).
     SessionSwitched,
+    /// The resolved current-session title changed. Frontends update any open
+    /// picker/sidebar caches without waiting for a manual refresh.
+    SessionTitleChanged {
+        session_id: crate::ids::SessionId,
+        title: String,
+    },
     /// The local prompt-rewrite gate proposed a reworded prompt. Frontends show
     /// original→rewrite + rationale and let the user accept/reject/edit before
     /// re-submitting. Never applied silently.
@@ -764,6 +770,10 @@ pub struct EngineState {
     /// Compact/Blocked or an explicit manual compact. Resets on compaction
     /// completion or /clear.
     pub speculative_compact_fired: bool,
+    /// Exact transcript/model fingerprint last queued for speculative
+    /// compaction. A changed transcript may queue a fresh precompute while a
+    /// matching artifact survives process resume.
+    pub speculative_compact_fingerprint: Option<String>,
     /// Cumulative summary-text length collected during the in-flight
     /// compact (across all retry attempts). The spinner divides by 4 to
     /// get a chars-per-token estimate and renders `↓ Nk tokens` —
@@ -798,6 +808,14 @@ pub struct EngineState {
     pub account_email: Option<String>,
     /// Active session id (set when the user picks one or starts a new one).
     pub current_session_id: Option<crate::ids::SessionId>,
+    /// Resolved live session title. This is engine state, not a sidebar cache,
+    /// so every frontend surface sees rename/AI-title changes immediately.
+    pub current_session_title: Option<String>,
+    /// Prevent duplicate title requests while the first one is in flight.
+    pub session_title_generation_pending: bool,
+    /// Durable-in-the-live-session explanation for the most recent terminal
+    /// stream failure. Reset on the next submitted turn.
+    pub stream_terminal_status: Option<String>,
     /// v126 auto-mode classifier config — `enabled: true` routes every tool
     /// call through the LLM classifier instead of prompting the user.
     /// Loaded from `~/.config/jfc/settings.json` at startup.
@@ -924,6 +942,9 @@ pub struct EngineState {
     /// ribbon's "5h 47% / 7d 12% · opus weekly" display. `None` for non-
     /// OAuth providers.
     pub anthropic_account_snapshot: Option<crate::providers::anthropic_accounts::AccountSnapshot>,
+    /// Cached activity/health rows for every configured Anthropic account.
+    pub anthropic_account_snapshots:
+        Vec<crate::providers::anthropic_accounts::AccountSnapshot>,
     /// Last instant we re-queried the rotation manager. Throttle to once
     /// every ~10s so the ribbon stays current without burning a lock per
     /// frame at 30fps.
@@ -1252,6 +1273,7 @@ impl EngineState {
             compact_suppressed: false,
             compacting_started_at: None,
             speculative_compact_fired: false,
+            speculative_compact_fingerprint: None,
             compacting_output_chars: 0,
             compacting_attempt_baseline: 0,
             compacting_last_progress: 0,
@@ -1264,6 +1286,9 @@ impl EngineState {
             subscription_type: None,
             account_email: None,
             current_session_id: Some(jfc_session::generate_session_id()),
+            current_session_title: None,
+            session_title_generation_pending: false,
+            stream_terminal_status: None,
             auto_mode: crate::auto_mode::load_config(),
             permission_mode: PermissionMode::Default,
             interaction_mode: None,
@@ -1302,6 +1327,7 @@ impl EngineState {
             lsp_servers: Vec::new(),
             usage_by_model: HashMap::new(),
             anthropic_account_snapshot: None,
+            anthropic_account_snapshots: Vec::new(),
             anthropic_snapshot_refreshed_at: None,
             anthropic_sweep_at: None,
             last_detached_sync_at: None,
@@ -1854,6 +1880,9 @@ impl EngineState {
             );
         }
         self.current_session_id = Some(new_id.clone());
+        self.current_session_title = None;
+        self.session_title_generation_pending = false;
+        self.stream_terminal_status = None;
         self.context_reduction_queue = jfc_context::ContextReductionQueue::default();
         self.clear_active_stream_scope();
         // Mirror the constructor's store choice: inside a git repo the
@@ -1873,6 +1902,7 @@ impl EngineState {
         self.provider_history_archive_seen.clear();
         self.compact_suppressed = false;
         self.speculative_compact_fired = false;
+        self.speculative_compact_fingerprint = None;
         self.detected_context_limit_tokens = None;
         self.detected_context_limit_model = None;
         self.max_context_tokens = self.baseline_context_window_tokens();

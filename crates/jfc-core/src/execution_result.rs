@@ -7,6 +7,13 @@ use std::path::PathBuf;
 
 use crate::{Attachment, DiffView};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveredFile {
+    pub name: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub output: String,
@@ -15,6 +22,8 @@ pub struct ExecutionResult {
     pub provenance: Option<ToolProvenance>,
     pub diff: Option<DiffView>,
     pub attachments: Vec<Attachment>,
+    /// Generic user-facing files emitted by tools such as SendUserFile.
+    pub files: Vec<DeliveredFile>,
 }
 
 impl ExecutionResult {
@@ -26,6 +35,7 @@ impl ExecutionResult {
             provenance: None,
             diff: None,
             attachments: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -38,6 +48,7 @@ impl ExecutionResult {
             provenance: None,
             diff: None,
             attachments: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -58,6 +69,7 @@ impl ExecutionResult {
             provenance: None,
             diff: None,
             attachments: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -73,6 +85,11 @@ impl ExecutionResult {
 
     pub fn with_attachments(mut self, atts: Vec<Attachment>) -> Self {
         self.attachments = atts;
+        self
+    }
+
+    pub fn with_files(mut self, files: Vec<DeliveredFile>) -> Self {
+        self.files = files;
         self
     }
 

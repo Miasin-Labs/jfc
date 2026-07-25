@@ -351,6 +351,7 @@ pub mod permissions;
 pub mod plan;
 pub mod plan_dreamer;
 pub mod plan_recall;
+pub mod precomputed_compact;
 pub mod prompt_context_cache;
 pub mod prompt_executor;
 pub mod proof_oracles;

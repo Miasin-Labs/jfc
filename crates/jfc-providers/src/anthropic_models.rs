@@ -9,15 +9,11 @@
 //! Listing order is most-capable-first within each family (Opus → Sonnet → Haiku) and
 //! newest-first within a family, which is what the picker renders top-to-bottom.
 
-use jfc_provider::{AnthropicModelKind, ModelInfo, ModelRequestPolicy, ModelThinkingMode};
-
-fn limits_for_anthropic_model(id: &str) -> (usize, Option<usize>) {
-    let model = AnthropicModelKind::from_model_id(id);
-    (
-        model.context_window_tokens().unwrap_or(200_000),
-        model.max_output_tokens().map(|tokens| tokens as usize),
-    )
-}
+use jfc_provider::{
+    ANTHROPIC_ALIAS_FABLE, ANTHROPIC_ALIAS_HAIKU, ANTHROPIC_ALIAS_OPUS, ANTHROPIC_ALIAS_SONNET,
+    AnthropicModelKind, ModelInfo, ModelRequestPolicy, ModelThinkingMode, anthropic_model_catalog,
+    anthropic_model_metadata, context_suffix, normalize_anthropic_model_id,
+};
 
 /// Canonical "latest" alias targets — mirrors v126 cli.js alias resolution.
 ///
@@ -25,16 +21,16 @@ fn limits_for_anthropic_model(id: &str) -> (usize, Option<usize>) {
 /// resolve to these full ids before hitting `/v1/messages`. Pinning the latest
 /// firstParty id here gives users a stable "always pick the newest" option
 /// without having to read release dates.
-pub const ALIAS_SONNET: &str = "claude-sonnet-4-6";
-pub const ALIAS_HAIKU: &str = "claude-haiku-4-5-20251001";
+pub const ALIAS_SONNET: &str = ANTHROPIC_ALIAS_SONNET;
+pub const ALIAS_HAIKU: &str = ANTHROPIC_ALIAS_HAIKU;
 /// Tracks Claude Code 2.1.154's first-party default
 /// (`he()` returns `Yz().opus48` for firstParty backends).
-pub const ALIAS_OPUS: &str = "claude-opus-4-8";
+pub const ALIAS_OPUS: &str = ANTHROPIC_ALIAS_OPUS;
 /// Claude Code 2.1.170 shipped Fable 5 — `{fable, opus, sonnet, haiku}` default
 /// map adds a `fable` slot whose firstParty id is `claude-fable-5` ("our newest
 /// model for complex, long-running work", training cutoff January 2026). It is
 /// NOT the default flagship (Opus 4.8 still is) — it's a sibling row.
-pub const ALIAS_FABLE: &str = "claude-fable-5";
+pub const ALIAS_FABLE: &str = ANTHROPIC_ALIAS_FABLE;
 
 /// Build the canonical first-party Anthropic model list.
 ///
@@ -50,41 +46,27 @@ pub fn anthropic_first_party_models(provider_tag: &str) -> Vec<ModelInfo> {
         (ALIAS_OPUS, "↗ Opus (latest)"),
         (ALIAS_SONNET, "↗ Sonnet (latest)"),
         (ALIAS_HAIKU, "↗ Haiku (latest)"),
-        // Fable / Mythos — Claude Code 2.1.170's newest family (training cutoff
-        // January 2026; 1M context; adaptive thinking + effort-capable). Fable 5
-        // is the flagship-tier long-horizon model; Mythos 5 is its sibling.
-        ("claude-fable-5", "Claude Fable 5"),
-        ("claude-mythos-5", "Claude Mythos 5"),
-        // Preview / experimental
-        ("claude-mythos-preview", "Claude Mythos (preview)"),
-        // Opus — flagship, dated/specific
-        ("claude-opus-4-8", "Claude Opus 4.8"),
-        ("claude-opus-4-7", "Claude Opus 4.7"),
-        ("claude-opus-4-6", "Claude Opus 4.6"),
-        ("claude-opus-4-5-20251101", "Claude Opus 4.5"),
-        ("claude-opus-4-1-20250805", "Claude Opus 4.1"),
-        ("claude-opus-4-20250514", "Claude Opus 4"),
-        // Sonnet
-        ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-        (
-            "claude-sonnet-4-6-20251114",
-            "Claude Sonnet 4.6 (2025-11-14)",
-        ),
-        ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
-        ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
-        ("claude-3-7-sonnet-20250219", "Claude Sonnet 3.7"),
-        // Haiku — fast/cheap
-        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
-        ("claude-3-5-haiku-20241022", "Claude Haiku 3.5"),
     ]
     .into_iter()
     .map(|(id, display)| {
-        let (context, max_output) = limits_for_anthropic_model(id);
+        let metadata = anthropic_model_metadata(id).expect("generated alias target must exist");
         ModelInfo::new(id, display, provider_tag)
-            .with_context_window_tokens(context)
-            .with_max_output_tokens(max_output)
+            .with_context_window_tokens(metadata.context_window_tokens)
+            .with_max_output_tokens(metadata.max_output_tokens as usize)
+            .with_costs(Some(metadata.input_cost), Some(metadata.output_cost))
     })
     .collect();
+
+    out.extend(anthropic_model_catalog().iter().rev().map(|metadata| {
+        ModelInfo::new(
+            metadata.provider_ids.first_party,
+            format!("Claude {}", metadata.display_name),
+            provider_tag,
+        )
+        .with_context_window_tokens(metadata.context_window_tokens)
+        .with_max_output_tokens(metadata.max_output_tokens as usize)
+        .with_costs(Some(metadata.input_cost), Some(metadata.output_cost))
+    }));
 
     // ANTHROPIC_CUSTOM_MODEL_OPTION — v126 reads this env var and surfaces the value
     // as an extra picker row so power users can target preview/internal model ids.
@@ -145,7 +127,8 @@ pub fn apply_seat_tier_filter(models: Vec<ModelInfo>, seat_tier: Option<&str>) -
     // Specific-id tier: e.g. "claude-opus-4-6" or "claude-opus-4-6[1m]". Anything
     // else (subscription names like "max", "pro", or unknown values) → don't filter,
     // let the API's 404 path surface the truth at request time.
-    let pinned = tier.strip_suffix("[1m]").unwrap_or(tier);
+    let pinned = normalize_anthropic_model_id(tier);
+    let pinned = pinned.as_ref();
     if !pinned.starts_with("claude-opus-") {
         tracing::debug!(
             target: "jfc::provider::anthropic_models",
@@ -296,6 +279,7 @@ pub fn model_supports_temperature(model_id: &str) -> bool {
     match AnthropicModelKind::from_model_id(model_id) {
         AnthropicModelKind::Fable5
         | AnthropicModelKind::Mythos5
+        | AnthropicModelKind::Sonnet5
         | AnthropicModelKind::Opus48
         | AnthropicModelKind::Opus47
         | AnthropicModelKind::Unknown => false,
@@ -307,6 +291,7 @@ pub fn model_supports_temperature(model_id: &str) -> bool {
         | AnthropicModelKind::Sonnet45
         | AnthropicModelKind::Sonnet4
         | AnthropicModelKind::Sonnet37
+        | AnthropicModelKind::Sonnet35
         | AnthropicModelKind::Haiku45
         | AnthropicModelKind::Haiku35 => true,
     }
@@ -322,43 +307,16 @@ pub fn model_supports_temperature(model_id: &str) -> bool {
 /// requests. Deny unknown and legacy 3.x-family ids by default; missing
 /// server-side compaction is safer than a request-wide 400.
 pub fn model_supports_context_management(model_id: &str) -> bool {
-    match AnthropicModelKind::from_model_id(model_id) {
-        AnthropicModelKind::Fable5
-        | AnthropicModelKind::Mythos5
-        | AnthropicModelKind::Opus48
-        | AnthropicModelKind::Opus47
-        | AnthropicModelKind::Opus46
-        | AnthropicModelKind::Opus45
-        | AnthropicModelKind::Opus41
-        | AnthropicModelKind::Opus4
-        | AnthropicModelKind::Sonnet46
-        | AnthropicModelKind::Sonnet45
-        | AnthropicModelKind::Sonnet4 => true,
-        AnthropicModelKind::Sonnet37
-        | AnthropicModelKind::Haiku45
-        | AnthropicModelKind::Haiku35
-        | AnthropicModelKind::Unknown => false,
-    }
+    anthropic_model_metadata(model_id).is_some_and(|metadata| {
+        metadata.has_capability("context_management")
+            && metadata.kind != AnthropicModelKind::Haiku45
+    })
 }
 
 pub fn model_supports_long_context_beta(model_id: &str) -> bool {
-    match AnthropicModelKind::from_model_id(model_id) {
-        AnthropicModelKind::Fable5
-        | AnthropicModelKind::Mythos5
-        | AnthropicModelKind::Opus48
-        | AnthropicModelKind::Opus47
-        | AnthropicModelKind::Opus46
-        | AnthropicModelKind::Sonnet46 => true,
-        AnthropicModelKind::Opus45
-        | AnthropicModelKind::Opus41
-        | AnthropicModelKind::Opus4
-        | AnthropicModelKind::Sonnet45
-        | AnthropicModelKind::Sonnet4
-        | AnthropicModelKind::Sonnet37
-        | AnthropicModelKind::Haiku45
-        | AnthropicModelKind::Haiku35
-        | AnthropicModelKind::Unknown => false,
-    }
+    context_suffix(model_id).is_some()
+        && anthropic_model_metadata(model_id)
+            .is_some_and(|metadata| metadata.supports_1m_beta && !metadata.native_1m)
 }
 
 /// Resolve the effort value actually safe to send for `model_id`, given the
@@ -383,9 +341,9 @@ mod tests {
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
-            "claude-opus-4-5",
             "claude-sonnet-4-6",
-            "claude-mythos-preview",
+            "claude-sonnet-5",
+            "claude-fable-5",
         ] {
             assert!(model_supports_effort(ok), "{ok} should support effort");
         }
@@ -396,6 +354,8 @@ mod tests {
             "claude-sonnet-4-0",
             "claude-opus-4-1",
             "claude-opus-4-0",
+            "claude-opus-4-5",
+            "claude-mythos-5",
             "claude-3-7-sonnet-20250219",
             "some-unknown-model",
         ] {
@@ -470,7 +430,6 @@ mod tests {
     fn context_management_support_excludes_haiku_compaction_regression() {
         for allowed in [
             "claude-fable-5",
-            "claude-mythos-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -478,6 +437,7 @@ mod tests {
             "claude-opus-4-1-20250805",
             "claude-opus-4-20250514",
             "claude-sonnet-4-6",
+            "claude-sonnet-5",
             "claude-sonnet-4-5-20250929",
             "claude-sonnet-4-20250514",
         ] {
@@ -485,6 +445,7 @@ mod tests {
         }
 
         for denied in [
+            "claude-mythos-5",
             "claude-haiku-4-5",
             "claude-haiku-4-5-20251001",
             "claude-3-5-haiku-20241022",
@@ -500,18 +461,17 @@ mod tests {
 
     #[test]
     fn long_context_beta_support_excludes_haiku_regression() {
-        for allowed in [
+        for allowed in ["claude-opus-4-6[1m]", "claude-sonnet-4-6[1m]"] {
+            assert!(model_supports_long_context_beta(allowed), "{allowed}");
+        }
+
+        for denied in [
             "claude-fable-5",
             "claude-mythos-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-sonnet-4-6",
-        ] {
-            assert!(model_supports_long_context_beta(allowed), "{allowed}");
-        }
-
-        for denied in [
             "claude-haiku-4-5",
             "claude-haiku-4-5-20251001",
             "claude-opus-4-5-20251101",
@@ -557,6 +517,7 @@ mod tests {
         for required in [
             "claude-opus-4-8",
             "claude-opus-4-7",
+            "claude-sonnet-5",
             "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",
         ] {
@@ -695,7 +656,8 @@ mod tests {
         assert!(supports_adaptive_thinking("claude-opus-4-7"));
         assert!(supports_adaptive_thinking("claude-opus-4-8"));
         assert!(supports_adaptive_thinking("claude-sonnet-4-6"));
-        assert!(supports_adaptive_thinking("claude-mythos-preview"));
+        assert!(supports_adaptive_thinking("claude-sonnet-5"));
+        assert!(supports_adaptive_thinking("claude-fable-5"));
     }
 
     #[test]
@@ -707,15 +669,6 @@ mod tests {
         assert!(!supports_adaptive_thinking("claude-3-7-sonnet-20250219"));
         assert!(!supports_adaptive_thinking("claude-haiku-4-5-20251001"));
         assert!(!supports_adaptive_thinking("claude-3-5-haiku-20241022"));
-    }
-
-    #[test]
-    fn mythos_preview_in_catalog_normal() {
-        let models = anthropic_first_party_models("anthropic-oauth");
-        assert!(
-            models.iter().any(|m| m.id == "claude-mythos-preview"),
-            "claude-mythos-preview should be in the catalog"
-        );
     }
 
     // [MODEL LAUNCH] Claude Code 2.1.170: Fable 5 + Mythos 5 are in the catalog
@@ -737,26 +690,21 @@ mod tests {
         }
     }
 
-    // Robust: Fable 5 / Mythos 5 are effort + adaptive-thinking capable.
+    // Fable carries the active capability set; Mythos is catalogued without
+    // request capabilities in Claude Code 2.1.207.
     #[test]
-    fn fable_and_mythos_5_capabilities_robust() {
-        for id in ["claude-fable-5", "claude-mythos-5"] {
-            assert!(model_supports_effort(id), "{id} effort");
-            assert!(supports_adaptive_thinking(id), "{id} adaptive thinking");
-            assert!(model_supports_max_effort(id), "{id} supports max");
-            assert!(model_supports_xhigh_effort(id), "{id} supports xhigh");
-            assert_eq!(effort_for_model(id, "max"), Some("max"), "{id} keeps max");
-            assert_eq!(
-                effort_for_model(id, "xhigh"),
-                Some("xhigh"),
-                "{id} keeps xhigh"
-            );
-            assert_eq!(
-                effort_for_model(id, "high"),
-                Some("high"),
-                "{id} keeps high"
-            );
-        }
+    fn fable_and_mythos_5_capabilities_follow_catalog_robust() {
+        let id = "claude-fable-5";
+        assert!(model_supports_effort(id));
+        assert!(supports_adaptive_thinking(id));
+        assert!(model_supports_max_effort(id));
+        assert!(model_supports_xhigh_effort(id));
+        assert_eq!(effort_for_model(id, "xhigh"), Some("xhigh"));
+
+        let id = "claude-mythos-5";
+        assert!(!model_supports_effort(id));
+        assert!(!supports_adaptive_thinking(id));
+        assert_eq!(effort_for_model(id, "high"), None);
     }
 
     // ── merge_live_into_canonical (models.dev union) ────────────────────────

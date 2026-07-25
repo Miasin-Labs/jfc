@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use tokio::sync::{Mutex, mpsc};
@@ -50,6 +53,14 @@ fn apply_config_default_task_isolation_if_omitted(task_input: &mut crate::types:
     apply_default_task_isolation_if_omitted(task_input, default_isolation);
 }
 
+fn task_cwd_or_dispatch_cwd(task_input: &crate::types::TaskInput, dispatch_cwd: &Path) -> PathBuf {
+    match task_input.cwd.as_deref().map(Path::new) {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => dispatch_cwd.join(path),
+        None => dispatch_cwd.to_path_buf(),
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalAdvisorDispatchContext {
     pub targets: Vec<crate::advisor::LocalAdvisorProviderTarget>,
@@ -65,6 +76,7 @@ impl LocalAdvisorDispatchContext {
         let targets = match crate::advisor::resolve_local_advisor_provider_targets(
             &state.providers,
             Arc::clone(&state.provider),
+            &state.model,
             state.local_advisor_provider.as_ref(),
             &advisor_model,
         ) {
@@ -96,6 +108,7 @@ fn spawn_error_means_run_inproc(spawn_result: &std::io::Result<u32>) -> bool {
 pub struct ToolBatchDispatch {
     pub tx: mpsc::Sender<EngineEvent>,
     pub dedup: Arc<Mutex<ReadDedupCache>>,
+    pub cwd: PathBuf,
     pub task_store: Option<Arc<jfc_session::TaskStore>>,
     pub active_team_name: Option<String>,
     pub current_session_id: Option<String>,
@@ -116,6 +129,7 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
     let ToolBatchDispatch {
         tx,
         dedup,
+        cwd,
         task_store,
         active_team_name,
         current_session_id,
@@ -130,7 +144,6 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
         cancel,
     } = dispatch;
     let tx = &tx;
-    let cwd = std::env::current_dir().unwrap_or_default();
 
     let mut regular_calls: Vec<ToolCall> = Vec::new();
     let mut task_calls: Vec<ToolCall> = Vec::new();
@@ -429,6 +442,7 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
         let done = send_all_complete.clone();
         let task_store_task = task_store.clone();
         let active_team_name_task = active_team_name.clone();
+        let task_dispatch_cwd = cwd.clone();
 
         // Resolve `subagent_type` to a concrete `AgentDef`. When unset
         // or unknown, falls back to `None` and `execute_task` runs with
@@ -490,11 +504,8 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
         }
 
         if task_input.run_in_background {
-            let project_root = task_input
-                .cwd
-                .as_deref()
-                .map(std::path::Path::new)
-                .unwrap_or(cwd.as_path());
+            let task_cwd = task_cwd_or_dispatch_cwd(&task_input, &cwd);
+            let project_root = task_cwd.as_path();
             let background_launch_plan =
                 match crate::agents::select_background_task_agent_launch_plan(
                     &task_input,
@@ -567,13 +578,7 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
                 model: model_task.clone(),
                 provider_name: Some(provider_task.name().to_owned()),
                 agent_def: agent_def.clone(),
-                cwd: task_input
-                    .cwd
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    }),
+                cwd: task_cwd,
                 worker_exe: None,
                 worker_epoch: 0,
                 active_team_name: active_team_name_task.clone(),
@@ -676,17 +681,17 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
                         .take(8)
                         .collect::<String>()
                 );
-                let cwd = std::env::current_dir().unwrap_or_default();
-                let repo_root = match crate::worktrees::find_repo_root_async(&cwd).await {
+                let task_cwd = task_cwd_or_dispatch_cwd(&task_input, &task_dispatch_cwd);
+                let repo_root = match crate::worktrees::find_repo_root_async(&task_cwd).await {
                     Ok(root) => root,
                     Err(e) => {
                         tracing::warn!(
                             target: "jfc::stream",
-                            cwd = %cwd.display(),
+                            cwd = %task_cwd.display(),
                             error = %e,
                             "task tool: failed to resolve git root, falling back to cwd for worktree"
                         );
-                        cwd
+                        task_cwd
                     }
                 };
                 match crate::worktrees::create_worktree_async(&repo_root, &name).await {
@@ -808,7 +813,12 @@ pub fn dispatch_tools_batched(tool_calls: Vec<ToolCall>, dispatch: ToolBatchDisp
             let cwd_override = worktree_info
                 .as_ref()
                 .map(|(info, _, _)| std::path::PathBuf::from(&info.path))
-                .or_else(|| task_input.cwd.as_deref().map(std::path::PathBuf::from));
+                .or_else(|| {
+                    task_input
+                        .cwd
+                        .as_ref()
+                        .map(|_| task_cwd_or_dispatch_cwd(&task_input, &task_dispatch_cwd))
+                });
             // No daemon registration for in-process subagents — they're
             // tracked via `state.background_tasks` and the assistant
             // message's TaskStatus parts. Previously this call planted
@@ -1158,6 +1168,17 @@ where
                 parent_task_id: None,
             }))
             .await;
+        let _ = tx
+            .send(EngineEvent::WorkflowProgress(
+                crate::runtime::WorkflowProgressEvent::Registered {
+                    task_id: crate::ids::TaskId::from(bg_task_id.clone()),
+                    run_id: run_id.clone(),
+                    meta: meta.clone(),
+                    script_path: persisted_path.clone(),
+                },
+            ))
+            .await;
+        crate::workflows::register_active_workflow(&bg_task_id, cancel.clone());
 
         // ── return async_launched immediately ───────────────────────────
         let launch = serde_json::json!({
@@ -1202,6 +1223,7 @@ where
             token_budget: None,
         })
         .await;
+        crate::workflows::unregister_active_workflow(&bg_task_id);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         if meta.name == "code-review" {
             let source = if workflow_args
@@ -1228,6 +1250,16 @@ where
         // The notification body becomes the task summary so the standard
         // background-completion path surfaces it to the model and re-engages
         // the agentic loop (`maybe_resume_after_background`).
+        let _ = tx
+            .send(EngineEvent::WorkflowProgress(
+                crate::runtime::WorkflowProgressEvent::Finished {
+                    task_id: crate::ids::TaskId::from(bg_task_id.clone()),
+                    failed_agents: outcome.failed_agents,
+                    errored: outcome.error.is_some(),
+                    cancelled: outcome.cancelled,
+                },
+            ))
+            .await;
         let notification = build_task_notification(&bg_task_id, &meta.name, &outcome, elapsed_ms);
         if let Some(err) = &outcome.error {
             let _ = tx
@@ -1310,14 +1342,31 @@ fn build_task_notification(
     outcome: &crate::workflows::WorkflowOutcome,
     elapsed_ms: u64,
 ) -> String {
-    let status = if outcome.error.is_some() {
+    let status = if outcome.cancelled {
+        "cancelled"
+    } else if outcome.error.is_some() {
         "failed"
+    } else if outcome.failed_agents > 0 {
+        "partial"
     } else {
         "completed"
     };
+    let summary = if outcome.failed_agents > 0 && outcome.error.is_none() {
+        let noun = if outcome.failed_agents == 1 {
+            "agent failure"
+        } else {
+            "agent failures"
+        };
+        format!(
+            "Workflow \"{name}\" completed with {} {noun}",
+            outcome.failed_agents
+        )
+    } else {
+        format!("Workflow \"{name}\" {status}")
+    };
     let mut body = format!(
         "<task-notification>\n<task-id>{task_id}</task-id>\n<status>{status}</status>\n\
-         <summary>Workflow \"{name}\" {status}</summary>"
+         <summary>{summary}</summary>"
     );
     if let Some(err) = &outcome.error {
         body.push_str(&format!("\n<error>{err}</error>"));
@@ -1335,10 +1384,21 @@ fn build_task_notification(
             .join("\n");
         body.push_str(&format!("\n<logs>\n{log_text}\n</logs>"));
     }
+    if outcome.failed_agents > 0 && outcome.error.is_none() {
+        let run_id = task_id.strip_prefix("bgwf_").unwrap_or(task_id);
+        body.push_str(&format!(
+            "\n<recovery>Resume failed agents with /workflow resume {name} {run_id}</recovery>"
+        ));
+    }
     body.push_str(&format!(
         "\n<usage><agent_count>{}</agent_count><agents_dispatched>{}</agents_dispatched>\
-         <cache_hits>{}</cache_hits><duration_ms>{}</duration_ms></usage>\n</task-notification>",
-        outcome.agent_count, outcome.total_agents_dispatched, outcome.cache_hits, elapsed_ms
+         <agents_failed>{}</agents_failed><cache_hits>{}</cache_hits><duration_ms>{}</duration_ms>\
+         </usage>\n</task-notification>",
+        outcome.agent_count,
+        outcome.total_agents_dispatched,
+        outcome.failed_agents,
+        outcome.cache_hits,
+        elapsed_ms
     ));
     body
 }
@@ -1685,7 +1745,10 @@ fn resolve_configured_council_members(
 
 #[cfg(test)]
 mod isolation_inheritance_tests {
-    use super::{apply_default_task_isolation_if_omitted, inherit_agent_isolation_if_omitted};
+    use super::{
+        apply_default_task_isolation_if_omitted, inherit_agent_isolation_if_omitted,
+        task_cwd_or_dispatch_cwd,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -1723,6 +1786,8 @@ mod isolation_inheritance_tests {
             permission_mode: None,
             forks_parent_context: None,
             background: None,
+            observer: None,
+            observer_message: None,
             color: None,
             effort: None,
             max_turns: None,
@@ -1778,6 +1843,38 @@ mod isolation_inheritance_tests {
         apply_default_task_isolation_if_omitted(&mut task, Some("other"));
 
         assert_eq!(task.isolation.as_deref(), Some("worktree"));
+    }
+
+    #[test]
+    fn task_cwd_defaults_to_dispatch_cwd_regression() {
+        let dispatch_cwd = PathBuf::from("/repo/project");
+        let task = task_input(Some("worktree"));
+
+        assert_eq!(task_cwd_or_dispatch_cwd(&task, &dispatch_cwd), dispatch_cwd);
+    }
+
+    #[test]
+    fn relative_task_cwd_resolves_under_dispatch_cwd_normal() {
+        let dispatch_cwd = PathBuf::from("/repo/project");
+        let mut task = task_input(Some("worktree"));
+        task.cwd = Some("crates/jfc".to_owned());
+
+        assert_eq!(
+            task_cwd_or_dispatch_cwd(&task, &dispatch_cwd),
+            PathBuf::from("/repo/project/crates/jfc")
+        );
+    }
+
+    #[test]
+    fn absolute_task_cwd_wins_over_dispatch_cwd_normal() {
+        let dispatch_cwd = PathBuf::from("/repo/project");
+        let mut task = task_input(Some("worktree"));
+        task.cwd = Some("/tmp/other".to_owned());
+
+        assert_eq!(
+            task_cwd_or_dispatch_cwd(&task, &dispatch_cwd),
+            PathBuf::from("/tmp/other")
+        );
     }
 }
 

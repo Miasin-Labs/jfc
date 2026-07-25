@@ -10,6 +10,7 @@ use super::sse;
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA: &str = "interleaved-thinking-2025-05-14";
+const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 const PROMPT_CACHING_SCOPE_BETA: &str = "prompt-caching-scope-2026-01-05";
 const EXTENDED_CACHE_TTL_BETA: &str = "extended-cache-ttl-2025-04-11";
 const CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
@@ -98,7 +99,10 @@ fn should_auto_retry_status(status: u16, kind: Option<&str>) -> bool {
     ) || matches!(status, 408 | 409 | 429 | 500..=599)
 }
 
-fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_json::Value {
+pub(crate) fn build_body(
+    messages: Vec<ProviderMessage>,
+    opts: &StreamOptions,
+) -> serde_json::Value {
     let thinking_mode = if opts.adaptive_thinking {
         "adaptive"
     } else if opts.thinking_budget.is_some() {
@@ -117,8 +121,9 @@ fn build_body(messages: Vec<ProviderMessage>, opts: &StreamOptions) -> serde_jso
         "building request body"
     );
 
+    let wire_model = jfc_provider::normalize_anthropic_model_id(&opts.model);
     let mut body = json!({
-        "model": opts.model,
+        "model": wire_model,
         "max_tokens": opts.max_tokens,
         "stream": true,
         "messages": sse::build_messages(&messages),
@@ -445,7 +450,10 @@ fn build_beta_header(options: &StreamOptions) -> String {
     build_beta_header_with_cache_ttl(options, false)
 }
 
-fn build_beta_header_for_body(options: &StreamOptions, body: &serde_json::Value) -> String {
+pub(crate) fn build_beta_header_for_body(
+    options: &StreamOptions,
+    body: &serde_json::Value,
+) -> String {
     build_beta_header_with_cache_ttl(options, sse::has_cache_control_ttl(body))
 }
 
@@ -458,6 +466,10 @@ fn build_beta_header_with_cache_ttl(options: &StreamOptions, extended_cache_ttl:
     if extended_cache_ttl {
         betas.push(',');
         betas.push_str(EXTENDED_CACHE_TTL_BETA);
+    }
+    if super::anthropic_models::model_supports_long_context_beta(&options.model) {
+        betas.push(',');
+        betas.push_str(CONTEXT_1M_BETA);
     }
     if super::anthropic_oauth::mid_conversation_system_enabled(&options.model) {
         betas.push_str(",mid-conversation-system-2026-04-07");
@@ -710,6 +722,20 @@ mod tests {
         assert_eq!(body["max_tokens"], 8192);
         assert_eq!(body["stream"], true);
         assert!(body["messages"].is_array());
+    }
+
+    #[test]
+    fn build_body_strips_context_suffix_from_wire_model_regression() {
+        let options = opts("claude-fable-5[1m]");
+        let body = build_body(vec![make_user_msg("hello")], &options);
+        assert_eq!(body["model"], "claude-fable-5");
+    }
+
+    #[test]
+    fn build_beta_header_enables_context_for_explicit_suffix_normal() {
+        let header = build_beta_header(&opts("claude-opus-4-6[1m]"));
+        assert!(header.contains(CONTEXT_1M_BETA));
+        assert!(!build_beta_header(&opts("claude-opus-4-6")).contains(CONTEXT_1M_BETA));
     }
 
     // Normal: the optional `system` field is included when the caller provides

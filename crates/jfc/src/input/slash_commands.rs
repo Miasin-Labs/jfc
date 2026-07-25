@@ -52,6 +52,7 @@ macro_rules! slash_commands {
 }
 
 slash_commands! {
+        "/usage" ["/cost", "/stats"] "show session cost, plan usage, and account activity" => cmd_usage,
         "/remote-control" ["/rc"] "toggle remote-control server (WS on port 4242)" => cmd_remote_control,
         "/copy" [] "copy transcript text to the clipboard (last/all/N)" => cmd_copy,
         "/verbose" [] "toggle expanded-by-default tool blocks" => cmd_verbose,

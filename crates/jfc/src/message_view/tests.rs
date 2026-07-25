@@ -1874,8 +1874,8 @@ mod helper_tests {
     }
 
     #[test]
-    fn bash_is_hidden_from_normal_transcript_regression() {
-        assert!(is_invisible_in_transcript(&ToolKind::Bash));
+    fn bash_is_visible_in_normal_transcript_regression() {
+        assert!(!is_invisible_in_transcript(&ToolKind::Bash));
     }
 
     #[test]
@@ -1915,7 +1915,7 @@ mod helper_tests {
     }
 
     #[test]
-    fn render_items_drop_bash_tool_regression() {
+    fn render_items_include_bash_tool_regression() {
         let mut app = stub_app();
         let mut msg = ChatMessage::assistant(String::new());
         msg.parts.clear();
@@ -1936,10 +1936,10 @@ mod helper_tests {
         let items = build_render_items_ctx(&ctx, 80);
 
         assert!(
-            !items
+            items
                 .iter()
                 .any(|item| matches!(item, super::core::RenderItem::ToolBlock(_))),
-            "Bash calls should surface through footer/background state, not transcript tool widgets"
+            "Bash calls should remain visible in the transcript"
         );
     }
 
@@ -2029,7 +2029,7 @@ mod helper_tests {
     }
 
     #[test]
-    fn hidden_bash_tool_only_message_allocates_no_rows_regression() {
+    fn visible_bash_tool_only_message_allocates_rows_regression() {
         let mut app = stub_app();
         let mut msg = ChatMessage::assistant(String::new());
         msg.parts.clear();
@@ -2050,9 +2050,9 @@ mod helper_tests {
         let items = build_render_items_ctx(&ctx, 80);
         let rendered_height: usize = items.iter().map(|item| item.height(80)).sum();
 
-        assert!(items.is_empty(), "hidden-only Bash emitted transcript rows");
-        assert_eq!(rendered_height, 0);
-        assert_eq!(message_view_total_lines(&app, 80), 0);
+        assert!(!items.is_empty(), "visible Bash emitted no transcript rows");
+        assert!(rendered_height > 0);
+        assert!(message_view_total_lines(&app, 80) > 0);
     }
 
     #[test]

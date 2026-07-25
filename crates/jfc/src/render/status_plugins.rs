@@ -4,8 +4,8 @@ use jfc_plugin_host::{
     PluginHealthSummary, PluginReloadReport,
 };
 use jfc_plugin_sdk::{
-    ExtensionSlot, MetricDescriptor, MetricSurface, MetricUnit, RuntimeActionDescriptor,
-    RuntimeActionKind, UiSlotDescriptor,
+    ExtensionSlot, MetricDescriptor, MetricSurface, RuntimeActionDescriptor, RuntimeActionKind,
+    UiSlotDescriptor,
 };
 use std::collections::HashMap;
 
@@ -289,117 +289,6 @@ const fn target_kind_label(kind: PluginDescriptorTargetKind) -> &'static str {
         PluginDescriptorTargetKind::RuntimeAction => "runtime_action",
         PluginDescriptorTargetKind::UiPanel => "ui_panel",
         PluginDescriptorTargetKind::UiWidget => "ui_widget",
-    }
-}
-
-pub(super) fn cache_metric_rows(
-    metrics: &[MetricDescriptor],
-    usage_by_model: &HashMap<String, jfc_core::ModelUsage>,
-    reload_report: Option<&PluginReloadReport>,
-) -> Vec<String> {
-    let mut rows = Vec::new();
-    if has_metric_surface(
-        metrics,
-        jfc_plugin_host::BUILTIN_CACHE_HIT_METRIC_ID,
-        MetricSurface::Sidebar,
-    ) && let Some(hit_pct) = cache_hit_pct(usage_by_model)
-    {
-        let total_cache_read = total_cache_read_tokens(usage_by_model);
-        let total_input = total_input_tokens(usage_by_model);
-        let total = total_input.saturating_add(total_cache_read);
-        rows.push(format!(
-            "cache hit {:.0}% ({} cached / {} total)",
-            hit_pct.round(),
-            super::fmt_number(total_cache_read),
-            super::fmt_number(total)
-        ));
-    }
-    if has_metric_surface(
-        metrics,
-        jfc_plugin_host::BUILTIN_CACHE_DIGEST_METRIC_ID,
-        MetricSurface::Sidebar,
-    ) && let Some(report) = reload_report
-    {
-        rows.push(match report.changed {
-            Some(true) => "descriptors changed".to_owned(),
-            Some(false) => "descriptors unchanged".to_owned(),
-            None => "descriptors fresh".to_owned(),
-        });
-        rows.push(format!(
-            "descriptor digest {}",
-            report.diagnostics.descriptor_digest
-        ));
-    }
-    rows
-}
-
-pub(super) fn rsi_metric_rows(
-    metrics: &[MetricDescriptor],
-    metadata: Option<&jfc_engine::runtime::StreamRequestMetadata>,
-) -> Vec<String> {
-    let Some(metadata) = metadata else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    if has_metric_surface(
-        metrics,
-        jfc_plugin_host::BUILTIN_RSI_PROMPT_SECTIONS_METRIC_ID,
-        MetricSurface::Sidebar,
-    ) {
-        rows.push(format!(
-            "rsi prompt sections {}",
-            metadata.rsi_prompt_sections
-        ));
-    }
-    if has_metric_surface(
-        metrics,
-        jfc_plugin_host::BUILTIN_RSI_TOOL_VISIBILITY_METRIC_ID,
-        MetricSurface::Sidebar,
-    ) {
-        rows.push(format!(
-            "rsi tool visibility rules {}",
-            metadata.rsi_tool_visibility_rules
-        ));
-    }
-    rows
-}
-
-pub(super) fn metric_panel_descriptor_rows(metrics: &[MetricDescriptor]) -> Vec<String> {
-    let mut panel_metrics = metrics
-        .iter()
-        .filter(|metric| metric.surfaces.contains(&MetricSurface::Panel))
-        .collect::<Vec<_>>();
-    panel_metrics.sort_by(|left, right| {
-        right
-            .priority
-            .cmp(&left.priority)
-            .then_with(|| left.plugin_id.as_str().cmp(right.plugin_id.as_str()))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    panel_metrics
-        .into_iter()
-        .map(metric_descriptor_row)
-        .collect()
-}
-
-pub(super) fn metric_descriptor_row(metric: &MetricDescriptor) -> String {
-    format!(
-        "{} · {} · {}:{}",
-        metric.label,
-        metric_unit_label(metric.unit),
-        metric.plugin_id.as_str(),
-        metric.id
-    )
-}
-
-fn metric_unit_label(unit: MetricUnit) -> &'static str {
-    match unit {
-        MetricUnit::Count => "count",
-        MetricUnit::Percent => "percent",
-        MetricUnit::Tokens => "tokens",
-        MetricUnit::Usd => "usd",
-        MetricUnit::Digest => "digest",
-        MetricUnit::Text => "text",
     }
 }
 

@@ -33,6 +33,72 @@ pub enum SubmitOutcome {
     CompactingFirst,
 }
 
+/// Queue an idle provider-backed compaction and persist the result under the
+/// current session. The returned fingerprint lets the caller suppress repeat
+/// work until the transcript/model/window changes.
+pub fn start_speculative_compaction(state: &EngineState) -> Option<String> {
+    let session_id = state.current_session_id.as_ref()?.to_string();
+    let messages = state.messages.clone();
+    let provider = Arc::clone(&state.provider);
+    let model = state.model.clone();
+    let mut tool_ctx = state.tool_ctx.clone();
+    let window = state.max_context_tokens;
+    let max_output_tokens = state.max_output_tokens;
+    let fingerprint = crate::precomputed_compact::source_fingerprint(
+        &messages,
+        model.as_str(),
+        window,
+        max_output_tokens,
+    );
+    let queued_fingerprint = fingerprint.clone();
+    tokio::spawn(async move {
+        if crate::precomputed_compact::load_matching(&session_id, &fingerprint).is_some() {
+            tracing::debug!(
+                target: "jfc::compact",
+                session_id,
+                "matching durable precomputed compaction already exists"
+            );
+            return;
+        }
+        let options = jfc_provider::StreamOptions::new(model);
+        if let crate::compact::CompactResult::Success {
+            messages,
+            pre_tokens,
+            post_tokens,
+        } = crate::compact::compact(
+            &messages,
+            provider.as_ref(),
+            &options,
+            &mut tool_ctx,
+            window,
+            max_output_tokens,
+            None,
+        )
+        .await
+        {
+            crate::precomputed_compact::save(
+                &session_id,
+                &crate::precomputed_compact::PrecomputedCompact {
+                    source_fingerprint: fingerprint,
+                    messages,
+                    tool_ctx,
+                    pre_tokens,
+                    post_tokens,
+                    created_at_ms: crate::precomputed_compact::now_ms(),
+                },
+            );
+            tracing::info!(
+                target: "jfc::compact",
+                session_id,
+                pre_tokens,
+                post_tokens,
+                "persisted speculative compaction"
+            );
+        }
+    });
+    Some(queued_fingerprint)
+}
+
 async fn spawn_compaction_worker(
     state: &mut EngineState,
     tx: &EventSender,
@@ -46,6 +112,50 @@ async fn spawn_compaction_worker(
     let mut tool_ctx = state.tool_ctx.clone();
     let window = state.max_context_tokens;
     let max_output_tokens = state.max_output_tokens;
+    let fingerprint = crate::precomputed_compact::source_fingerprint(
+        &messages,
+        model.as_str(),
+        window,
+        max_output_tokens,
+    );
+    if let Some(precomputed) = crate::precomputed_compact::load_matching(&session_id, &fingerprint)
+    {
+        state.compacting_started_at = Some(std::time::Instant::now());
+        state.compacting_output_chars = 0;
+        let _ = tx
+            .send(crate::runtime::EngineEvent::Compaction(
+                crate::runtime::CompactionEvent::Started,
+            ))
+            .await;
+        crate::hooks::fire(
+            crate::hooks::HookPoint::BeforeCompact,
+            &crate::hooks::HookContext::for_session(&session_id),
+        );
+        crate::precomputed_compact::delete(&session_id);
+        let _ = tx
+            .send(crate::runtime::EngineEvent::Compaction(
+                crate::runtime::CompactionEvent::Done {
+                    messages: precomputed.messages,
+                    tool_ctx: precomputed.tool_ctx,
+                    pre_tokens: precomputed.pre_tokens,
+                    post_tokens: precomputed.post_tokens,
+                },
+            ))
+            .await;
+        if let Some(user_text) = pending_prompt {
+            let _ = tx
+                .send(crate::runtime::EngineEvent::Control(
+                    crate::runtime::ControlEvent::SubmitPrompt(user_text),
+                ))
+                .await;
+        }
+        tracing::info!(
+            target: "jfc::compact",
+            session_id,
+            "applied durable precomputed compaction"
+        );
+        return;
+    }
     let tx_pre = tx.clone();
     let is_blocked = matches!(level, crate::compact::CompactLevel::Blocked);
     state.compacting_started_at = Some(std::time::Instant::now());
@@ -432,7 +542,8 @@ pub async fn load_session(state: &mut EngineState, session_id: crate::ids::Sessi
         Some(messages) => {
             state.messages = messages;
             let id_for_toast = session_id.clone();
-            state.switch_session(Some(session_id));
+            state.switch_session(Some(session_id.clone()));
+            state.current_session_title = crate::session::load_session_title(&session_id).await;
             restore_session_context_state(state, id_for_toast.as_str()).await;
             state.streaming_text.clear();
             state.streaming_reasoning.clear();
@@ -1336,6 +1447,7 @@ pub async fn start_turn_from_transcript(
     state.refusal_resend_count = 0;
     state.refusal_rewrite_retry_count = 0;
     state.refusal_rewrite_attempts.clear();
+    state.stream_terminal_status = None;
     state.network_recovery_status = None;
     state.network_recovery_attempts = 0;
     state.streaming_assistant_idx = Some(assistant_idx);
@@ -1423,6 +1535,28 @@ pub async fn start_turn_from_transcript(
     state.current_session_id = Some(session_id.clone());
 
     let provider = state.provider.clone();
+    if state.current_session_title.is_none()
+        && !state.session_title_generation_pending
+        && let Some(first_prompt) =
+            crate::session::first_meaningful_user_prompt(&state.messages[..assistant_idx])
+    {
+        state.session_title_generation_pending = true;
+        let title_provider = provider.clone();
+        let title_model = model.clone();
+        let title_session_id = session_id.clone();
+        let title_tx = tx.clone();
+        tokio::spawn(async move {
+            let title =
+                crate::session_naming::generate_title(title_provider, title_model, first_prompt)
+                    .await;
+            let _ = title_tx
+                .send(crate::runtime::EngineEvent::SessionTitleGenerated {
+                    session_id: title_session_id,
+                    title,
+                })
+                .await;
+        });
+    }
     let messages = crate::stream::build_provider_messages(&state.messages[..assistant_idx]);
     let cfg = crate::config::load_arc();
     state.exploration_state.begin_turn(turn_text, &cfg);

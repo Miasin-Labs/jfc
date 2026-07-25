@@ -6,12 +6,53 @@ pub const BUILTIN_PROVIDER_PACK_ID: &str = "builtin.providers";
 pub fn first_party_provider_descriptors() -> Vec<ProviderDescriptor> {
     vec![
         anthropic_provider_descriptor(),
+        bedrock_provider_descriptor(),
+        vertex_provider_descriptor(),
+        anthropic_gateway_descriptor(
+            "foundry",
+            super::anthropic_gateway::AnthropicGatewayKind::Foundry,
+        ),
+        anthropic_gateway_descriptor(
+            "anthropic-aws",
+            super::anthropic_gateway::AnthropicGatewayKind::AnthropicAws,
+        ),
+        anthropic_gateway_descriptor(
+            "mantle",
+            super::anthropic_gateway::AnthropicGatewayKind::Mantle,
+        ),
         nvidia_provider_descriptor(),
         openai_provider_descriptor(),
         openrouter_provider_descriptor(),
         litellm_provider_descriptor(),
         cloudflare_playground_provider_descriptor(),
     ]
+}
+
+fn bedrock_provider_descriptor() -> ProviderDescriptor {
+    let mut descriptor =
+        ProviderDescriptor::new(PluginId::new(BUILTIN_PROVIDER_PACK_ID), "bedrock")
+            .with_executor(ProviderExecutorKind::BuiltIn, "bedrock");
+    descriptor.models = model_descriptors(super::bedrock::BedrockProvider::fallback_models());
+    descriptor
+}
+
+fn vertex_provider_descriptor() -> ProviderDescriptor {
+    let mut descriptor = ProviderDescriptor::new(PluginId::new(BUILTIN_PROVIDER_PACK_ID), "vertex")
+        .with_executor(ProviderExecutorKind::BuiltIn, "vertex");
+    descriptor.models = model_descriptors(super::vertex::VertexProvider::fallback_models());
+    descriptor
+}
+
+fn anthropic_gateway_descriptor(
+    provider: &str,
+    kind: super::anthropic_gateway::AnthropicGatewayKind,
+) -> ProviderDescriptor {
+    let mut descriptor = ProviderDescriptor::new(PluginId::new(BUILTIN_PROVIDER_PACK_ID), provider)
+        .with_executor(ProviderExecutorKind::BuiltIn, provider);
+    descriptor.models = model_descriptors(
+        super::anthropic_gateway::AnthropicGatewayProvider::fallback_models(kind),
+    );
+    descriptor
 }
 
 fn cloudflare_playground_provider_descriptor() -> ProviderDescriptor {

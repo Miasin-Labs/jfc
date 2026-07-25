@@ -12,12 +12,9 @@ use crate::render::session_picker::filtered_sessions;
 use crate::runtime::ControlEvent;
 use crate::runtime::{EngineEvent, send_critical};
 
-pub(super) fn open_session_picker(app: &mut App) {
+pub(super) async fn open_session_picker(app: &mut App) {
+    app.session_sidebar.meta = jfc_session::list_sessions_with_metadata().await;
     app.session_picker.open();
-    // Session metadata refresh is handled by the existing Ctrl+B sidebar
-    // path (`jfc_session::list_sessions_with_metadata()` is async); the
-    // picker reuses the already-cached `app.session_sidebar.meta`. If the user
-    // wants a freshly-rescanned list they hit Ctrl+B once first.
 }
 
 pub(super) fn handle_session_picker_key(

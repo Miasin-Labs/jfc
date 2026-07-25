@@ -297,6 +297,7 @@ pub fn compute_diff_stats(app: &App) -> DiffStats {
 
 pub fn mcp_status_color(status: McpStatus, theme: Theme) -> Color {
     match status {
+        McpStatus::PendingApproval => theme.warning,
         McpStatus::Connected => theme.success,
         McpStatus::Disabled => theme.text_muted,
         McpStatus::Error => theme.error,

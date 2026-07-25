@@ -639,6 +639,14 @@ async fn execute_tool_inner(
                         "No background shell with id '{task_id}' is tracked in this session."
                     )),
                 }
+            } else if task_id.starts_with("bgwf_") || task_id.starts_with("wf_") {
+                if crate::workflows::cancel_active_workflow(&task_id) {
+                    ExecutionResult::success(format!("Cancelled workflow {task_id}."))
+                } else {
+                    ExecutionResult::failure(format!(
+                        "No running workflow with id '{task_id}' is tracked in this process."
+                    ))
+                }
             } else {
                 execute_task_stop("", &task_id)
             }
@@ -1607,6 +1615,8 @@ async fn execute_tool_inner(
             } else {
                 // Resolve + validate each file exists + collect size info.
                 let mut delivered = Vec::with_capacity(paths.len());
+                let mut remote_files = Vec::new();
+                let mut remote_bytes = 0_u64;
                 let mut errors = Vec::new();
                 for p in &paths {
                     let path = std::path::Path::new(p);
@@ -1618,6 +1628,20 @@ async fn execute_tool_inner(
                     match std::fs::metadata(&abs) {
                         Ok(meta) if meta.is_file() => {
                             delivered.push(format!("{} ({} bytes)", abs.display(), meta.len()));
+                            if remote_bytes.saturating_add(meta.len()) <= 25 * 1024 * 1024
+                                && let Ok(bytes) = std::fs::read(&abs)
+                            {
+                                remote_bytes = remote_bytes.saturating_add(meta.len());
+                                remote_files.push(jfc_core::DeliveredFile {
+                                    name: abs
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or("file")
+                                        .to_owned(),
+                                    mime_type: user_file_mime_type(&abs).to_owned(),
+                                    bytes,
+                                });
+                            }
                         }
                         Ok(_) => errors.push(format!("{}: not a regular file", abs.display())),
                         Err(e) => errors.push(format!("{}: {e}", abs.display())),
@@ -1651,7 +1675,7 @@ async fn execute_tool_inner(
                 }
                 // Return success if at least one file was delivered, even if some failed
                 if !delivered.is_empty() {
-                    ExecutionResult::success(out)
+                    ExecutionResult::success(out).with_files(remote_files)
                 } else if errors.is_empty() {
                     // No files delivered and no errors = caller provided empty paths
                     ExecutionResult::success(out)
@@ -1964,6 +1988,28 @@ fn mcp_dispatch_error_metadata(error: &crate::mcp::DispatchError) -> (ToolErrorC
             crate::mcp::RequestError::BadArguments => (ToolErrorCategory::Validation, false),
             crate::mcp::RequestError::Service(_) => (ToolErrorCategory::Business, false),
         },
+    }
+}
+
+fn user_file_mime_type(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("json") => "application/json",
+        Some("html" | "htm") => "text/html",
+        Some("md" | "markdown") => "text/markdown",
+        Some("csv") => "text/csv",
+        Some("txt" | "log") => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 

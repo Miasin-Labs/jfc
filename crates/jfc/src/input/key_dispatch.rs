@@ -321,7 +321,7 @@ async fn handle_configured_keybinding(
 }
 
 /// Chip atomic delete: when Backspace is pressed with the cursor immediately
-/// after the `]` of an `[Image #N]` or `[Pasted #N · …]` token, delete the
+/// after the `]` of an image or pasted-text token, delete the
 /// whole chip as one unit instead of char-by-char. Returns `Some(Ok(false))`
 /// when a chip was deleted, `None` to let normal Backspace handling proceed.
 fn handle_chip_atomic_delete(app: &mut App, key: event::KeyEvent) -> Option<anyhow::Result<bool>> {
@@ -335,6 +335,7 @@ fn handle_chip_atomic_delete(app: &mut App, key: event::KeyEvent) -> Option<anyh
     let before_cursor = &line[..byte_col];
     let start = [
         before_cursor.rfind("[Image #"),
+        before_cursor.rfind("[Pasted text #"),
         before_cursor.rfind("[Pasted #"),
     ]
     .into_iter()
@@ -495,7 +496,7 @@ async fn handle_command_keys(
         // Ctrl+B.
         (KeyModifiers::ALT, KeyCode::Char('y')) => cmd_yank_current_input(app),
         (KeyModifiers::ALT, KeyCode::Char('s')) => {
-            open_session_picker(app);
+            open_session_picker(app).await;
             Some(Ok(false))
         }
         // Alt+Up / Alt+Down scroll the right-side info sidebar when it's
@@ -884,39 +885,8 @@ fn cmd_open_prompt_search(app: &mut App) -> Option<anyhow::Result<bool>> {
 
 /// Ctrl+V — attach a clipboard image, falling back to text paste.
 fn cmd_paste_clipboard_image(app: &mut App) -> Option<anyhow::Result<bool>> {
-    match crate::attachments::read_clipboard_image() {
-        Ok(Some((att, w, h))) => {
-            tracing::debug!(
-                target: "jfc::input::paste",
-                width = w,
-                height = h,
-                bytes = att.bytes.len(),
-                "attached clipboard image"
-            );
-            app.image_counter += 1;
-            let id = app.image_counter;
-            app.pasted_images.push(crate::attachments::PastedContent {
-                id,
-                attachment: att,
-                width: w,
-                height: h,
-            });
-            app.textarea.insert_str(format!("[Image #{id}]"));
-            Some(Ok(false))
-        }
-        Ok(None) => {
-            if let Ok(mut cb) = arboard::Clipboard::new()
-                && let Ok(text) = cb.get_text()
-            {
-                app.textarea.insert_str(&text);
-            }
-            Some(Ok(false))
-        }
-        Err(e) => {
-            tracing::debug!(target: "jfc::input", error = %e, "Ctrl+V image paste failed");
-            Some(Ok(false))
-        }
-    }
+    super::paste::paste_clipboard(app);
+    Some(Ok(false))
 }
 
 /// Esc (no input) — the dismiss/interrupt cascade: vim-mode exit, clear a
@@ -1196,7 +1166,7 @@ pub(super) async fn handle_enter_submit(
 /// (build_provider_messages* skips queued messages so they don't inflate
 /// the current turn).
 pub(super) fn queue_prompt_for_later(app: &mut App, text: String) {
-    // Expand any `[Pasted #N · …]` chips to their full text BEFORE queuing —
+    // Expand any staged paste placeholders to their full text BEFORE queuing —
     // the non-queued submit path does this in `handle_submit`, but a queued
     // prompt bypasses that, so without this the placeholder (and the eventually
     // drained turn) would carry the literal chip token instead of what the user

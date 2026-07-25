@@ -103,6 +103,7 @@ engine_commands! {
         "/rename" [] "set a custom title on the current session" => cmd_rename,
         "/clear" [] "clear the conversation and start fresh" => cmd_clear,
         "/recap" [] "generate a one-line session recap now" => cmd_recap,
+        "/refusals" ["/refusal-log"] "show complete refusal audit records (`/refusals [N|all]`)" => cmd_refusals,
         "/check" [] "re-run cargo-check diagnostics" => cmd_check,
         "/compact" [] "summarize earlier messages to free context" => cmd_compact,
         "/expand" [] "open raw messages saved before compaction (`/expand <archive-id>`)" => cmd_expand,
@@ -173,13 +174,8 @@ engine_commands! {
         "/teleport" [] "jump into a teammate's context" => cmd_teleport,
         "/fleet" ["/fleetview"] "show the teammate fleet view" => cmd_fleet,
         "/init" [] "scaffold a CLAUDE.md for this project" => cmd_init,
-        "/plan" [] "draft or update PLAN.md (Atlas-compatible)" => cmd_plan,
-        "/roadmap" [] "draft or update ROADMAP.md (stable decimal IDs)" => cmd_roadmap,
-        "/parity" [] "draft or update PARITY.md (evidence required)" => cmd_parity,
-        "/philosophy" [] "draft or update PHILOSOPHY.md" => cmd_philosophy,
-        "/usage" [] "draft or update USAGE.md (operator commands)" => cmd_usage,
-        "/usage-report" ["/usage_stats", "/usage-stats", "/usage_report"] "show session token usage by model with cost/budget" => cmd_usage_report,
-        "/cost" ["/stats"] "show session cost / token usage" => cmd_cost,
+        "/plan" [] "enter plan mode" => cmd_plan,
+        "/usage" ["/cost", "/stats"] "show session cost, plan usage, and account activity" => cmd_usage,
         "/audit" [] "show the runtime audit ledger (agent actions)" => cmd_audit,
         "/changes" [] "list/show/apply/revert agent change-sets" => cmd_changes,
         "/commands" [] "unified command/tool list across CLI, slash, and tools" => cmd_commands,
@@ -221,8 +217,86 @@ pub async fn run_command(
     if dispatch_engine(state, &parts, text, tx).await {
         return CommandOutcome::Handled;
     }
+    if run_stacked_inline_skills(state, text, tx) {
+        return CommandOutcome::Handled;
+    }
     skill_fallthrough(state, &parts, text, tx).await;
     CommandOutcome::Handled
+}
+
+/// Expand `/skill-a /skill-b shared args` into one synthetic turn. Only
+/// user-invocable inline skills participate; forked skills and unknown slash
+/// tokens remain ordinary arguments. The cap mirrors upstream's five-command
+/// guard against accidental slash-heavy prompts.
+fn run_stacked_inline_skills(
+    state: &mut EngineState,
+    text: &str,
+    tx: Option<&mpsc::Sender<EngineEvent>>,
+) -> bool {
+    const MAX_STACKED: usize = 5;
+
+    let cwd = PathBuf::from(&state.cwd);
+    let skills = crate::agents::load_skills(&cwd);
+    let mut selected = Vec::new();
+    let mut remaining = text.trim_start();
+    let mut capped = false;
+    while let Some(slash) = remaining.strip_prefix('/') {
+        let end = slash.find(char::is_whitespace).unwrap_or(slash.len());
+        let name = &slash[..end];
+        let Some(skill) = crate::agents::find_skill_by_name(&skills, name) else {
+            break;
+        };
+        if !skill.is_user_invocable() || skill.context.is_fork() {
+            break;
+        }
+        if selected.len() == MAX_STACKED {
+            capped = true;
+            break;
+        }
+        selected.push(skill.clone());
+        remaining = slash[end..].trim_start();
+    }
+    if selected.len() < 2 {
+        return false;
+    }
+    let Some(tx) = tx else {
+        state.messages.push(ChatMessage::assistant(
+            "Stacked skills require a live stream channel.".to_owned(),
+        ));
+        return true;
+    };
+
+    state.messages.push(ChatMessage::user(text.to_owned()));
+    let args = (!remaining.is_empty()).then_some(remaining);
+    let memory_root = jfc_memory::project_memory_dir(&cwd);
+    let render_context = crate::agents::SkillRenderContext::new(Some(&cwd), Some(&memory_root));
+    let mut bodies = Vec::with_capacity(selected.len());
+    for skill in &selected {
+        bodies.push(crate::agents::render_skill_invocation(
+            skill,
+            render_context,
+            args,
+        ));
+        let session_id = state
+            .current_session_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned())
+            .unwrap_or_default();
+        crate::hooks::fire_async(
+            crate::hooks::HookPoint::OnUserPromptExpansion,
+            &crate::hooks::HookContext::for_session(&session_id)
+                .with_extra("expansion_type", "stacked_skill")
+                .with_extra("command_name", skill.name.clone())
+                .with_extra("command_source", "skill_registry"),
+        );
+    }
+    if capped {
+        bodies.push(format!(
+            "<system-reminder>Stacked skill limit ({MAX_STACKED}) reached; remaining slash text was passed as shared arguments.</system-reminder>"
+        ));
+    }
+    start_synthetic_user_turn(state, bodies.join("\n\n"), tx);
+    true
 }
 
 /// Skill-name fallthrough for any `/<name>` not bound above: `/<skill>`

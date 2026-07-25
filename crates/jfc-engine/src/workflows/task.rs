@@ -4,9 +4,12 @@
 //! completed workflow.  It is stored on `BackgroundTask.workflow_progress` and
 //! updated by `EngineEvent::WorkflowProgress` handlers in the event loop.
 //!
-//! The types here are fully implemented but some are not yet wired into the
-//! event loop (pending t154/t156). Suppress dead_code until the wiring lands.
+//! Progress is wired through `EngineEvent::WorkflowProgress`; active workflow
+//! cancellation tokens live in the small registry below so TaskStop and the
+//! slash-command surface can stop a run by id.
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 
 use super::meta::WorkflowMeta;
@@ -17,6 +20,7 @@ pub enum WorkflowRunStatus {
     Running,
     Paused,
     Completed,
+    Partial,
     Failed,
     Killed,
 }
@@ -25,7 +29,10 @@ impl WorkflowRunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            WorkflowRunStatus::Completed | WorkflowRunStatus::Failed | WorkflowRunStatus::Killed
+            WorkflowRunStatus::Completed
+                | WorkflowRunStatus::Partial
+                | WorkflowRunStatus::Failed
+                | WorkflowRunStatus::Killed
         )
     }
 }
@@ -36,6 +43,7 @@ impl std::fmt::Display for WorkflowRunStatus {
             Self::Running => f.write_str("running"),
             Self::Paused => f.write_str("paused"),
             Self::Completed => f.write_str("completed"),
+            Self::Partial => f.write_str("partial"),
             Self::Failed => f.write_str("failed"),
             Self::Killed => f.write_str("killed"),
         }
@@ -159,8 +167,61 @@ impl WorkflowTaskState {
     }
 }
 
+fn active_workflows() -> &'static Mutex<HashMap<String, CancellationToken>> {
+    static ACTIVE: OnceLock<Mutex<HashMap<String, CancellationToken>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn register_active_workflow(task_id: &str, cancel: CancellationToken) {
+    let mut active = active_workflows()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    active.insert(task_id.to_owned(), cancel);
+}
+
+pub fn unregister_active_workflow(task_id: &str) {
+    let mut active = active_workflows()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    active.remove(task_id);
+}
+
+pub fn cancel_active_workflow(task_or_run_id: &str) -> bool {
+    let task_id = if task_or_run_id.starts_with("wf_") {
+        format!("bgwf_{task_or_run_id}")
+    } else {
+        task_or_run_id.to_owned()
+    };
+    let cancel = active_workflows()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&task_id)
+        .cloned();
+    if let Some(cancel) = cancel {
+        cancel.cancel();
+        true
+    } else {
+        false
+    }
+}
+
 /// Generate a workflow run ID: `wf_` + 8 random hex chars.
 pub fn generate_run_id() -> String {
     let id = uuid::Uuid::new_v4();
     format!("wf_{}", &id.simple().to_string()[..8])
+}
+
+#[cfg(test)]
+mod active_workflow_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_cancel_registry_accepts_task_and_run_ids_normal() {
+        let token = CancellationToken::new();
+        register_active_workflow("bgwf_wf_canceltest", token.clone());
+        assert!(cancel_active_workflow("wf_canceltest"));
+        assert!(token.is_cancelled());
+        unregister_active_workflow("bgwf_wf_canceltest");
+        assert!(!cancel_active_workflow("bgwf_wf_canceltest"));
+    }
 }

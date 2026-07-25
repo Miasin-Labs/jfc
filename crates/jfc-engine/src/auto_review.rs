@@ -1056,14 +1056,24 @@ fn build_auto_review_notification(
         .map_or(0, Vec::len);
     let result_json = serde_json::to_string(&outcome.result).unwrap_or_default();
     let truncated: String = result_json.chars().take(8000).collect();
+    let status = if outcome.failed_agents > 0 {
+        "partial"
+    } else {
+        "completed"
+    };
     format!(
-        "<task-notification>\n<task-id>{task_id}</task-id>\n<status>completed</status>\n\
-         <summary>Auto-review completed: {findings} finding(s), {dismissed} dismissed, \
-         {diagnostics} diagnostic(s).</summary>\n<result>{truncated}</result>\n\
+        "<task-notification>\n<task-id>{task_id}</task-id>\n<status>{status}</status>\n\
+         <summary>Auto-review {status}: {findings} finding(s), {dismissed} dismissed, \
+         {diagnostics} diagnostic(s), {} agent failure(s).</summary>\n<result>{truncated}</result>\n\
          <usage><agent_count>{}</agent_count><agents_dispatched>{}</agents_dispatched>\
-         <cache_hits>{}</cache_hits><duration_ms>{elapsed_ms}</duration_ms></usage>\n\
+         <agents_failed>{}</agents_failed><cache_hits>{}</cache_hits>\
+         <duration_ms>{elapsed_ms}</duration_ms></usage>\n\
          </task-notification>",
-        outcome.agent_count, outcome.total_agents_dispatched, outcome.cache_hits
+        outcome.failed_agents,
+        outcome.agent_count,
+        outcome.total_agents_dispatched,
+        outcome.failed_agents,
+        outcome.cache_hits
     )
 }
 

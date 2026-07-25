@@ -64,6 +64,58 @@ pub(super) async fn cmd_workflow(
                 "Dispatching workflow `{rest}` via the Workflow tool…"
             )));
         }
+        "resume" => {
+            let mut args = rest.split_whitespace();
+            let name = args.next().unwrap_or("");
+            let run_id = args.next().unwrap_or("");
+            if name.is_empty() || run_id.is_empty() {
+                state.messages.push(ChatMessage::assistant(
+                    "Usage: `/workflow resume <name> <run-id>`.".into(),
+                ));
+                return;
+            }
+            if crate::workflows::resolve(&cwd, name).is_none() {
+                state.messages.push(ChatMessage::assistant(format!(
+                    "Workflow `{name}` not found."
+                )));
+                return;
+            }
+            let Some(tx) = tx else {
+                state.messages.push(ChatMessage::assistant(
+                    "Workflow resume needs the event channel.".into(),
+                ));
+                return;
+            };
+            let prompt = format!(
+                "Resume the saved workflow named \"{name}\" by calling the Workflow tool with \
+                 {{ name: \"{name}\", resumeFromRunId: \"{run_id}\" }}. Do not describe it; \
+                 call the tool. Failed or interrupted agents must rerun while completed journal \
+                 entries are reused."
+            );
+            let _ = tx
+                .send(crate::runtime::EngineEvent::Control(
+                    crate::runtime::ControlEvent::SubmitPrompt(prompt),
+                ))
+                .await;
+            state.messages.push(ChatMessage::assistant(format!(
+                "Resuming workflow `{name}` from `{run_id}`…"
+            )));
+        }
+        "stop" => {
+            if rest.is_empty() {
+                state.messages.push(ChatMessage::assistant(
+                    "Usage: `/workflow stop <task-id|run-id>`.".into(),
+                ));
+            } else if crate::workflows::cancel_active_workflow(&rest) {
+                state.messages.push(ChatMessage::assistant(format!(
+                    "Cancellation sent to workflow `{rest}`."
+                )));
+            } else {
+                state.messages.push(ChatMessage::assistant(format!(
+                    "No running workflow `{rest}` is tracked in this process."
+                )));
+            }
+        }
         "save" => {
             // `/workflow save [user|project] <name>` — persist a named workflow
             // from the registry into the user or project workflows directory.
@@ -161,14 +213,18 @@ pub(super) async fn cmd_workflow(
             let mut output = String::from("**Workflow status**\n");
             for bt in tasks {
                 let elapsed = bt.started_at.elapsed().as_secs();
-                let status_label = match bt.status {
-                    TaskLifecycle::Running => "running",
-                    TaskLifecycle::Idle => "idle",
-                    TaskLifecycle::Completed => "completed",
-                    TaskLifecycle::Failed => "failed",
-                    TaskLifecycle::Cancelled => "cancelled",
-                    TaskLifecycle::Pending => "pending",
-                };
+                let status_label = bt
+                    .workflow_progress
+                    .as_ref()
+                    .map(|progress| progress.status.to_string())
+                    .unwrap_or_else(|| match bt.status {
+                        TaskLifecycle::Running => "running".to_owned(),
+                        TaskLifecycle::Idle => "idle".to_owned(),
+                        TaskLifecycle::Completed => "completed".to_owned(),
+                        TaskLifecycle::Failed => "failed".to_owned(),
+                        TaskLifecycle::Cancelled => "cancelled".to_owned(),
+                        TaskLifecycle::Pending => "pending".to_owned(),
+                    });
                 output.push('\n');
                 output.push_str(&format!(
                     "`{}` — {} · {} · {}s\n",
@@ -228,7 +284,8 @@ pub(super) async fn cmd_workflow(
         }
         other => {
             state.messages.push(ChatMessage::assistant(format!(
-                "Unknown subcommand `{other}`. Use `/workflow list`, `/workflow run <name>`, `/workflow save [user|project] <name>`, or `/workflow status [id]`."
+                "Unknown subcommand `{other}`. Use `/workflow list`, `run <name>`, \
+                 `resume <name> <run-id>`, `stop <id>`, `save`, or `status [id]`."
             )));
         }
     }

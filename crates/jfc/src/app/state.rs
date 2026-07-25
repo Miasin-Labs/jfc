@@ -10,7 +10,7 @@ use jfc_provider::{ModelId, Provider};
 
 use super::{
     BashPickerState, CommandPaletteState, EngineState, InfoSidebarState, ModelPickerState,
-    SessionPickerState, SessionSidebarState, TaskPanelUiState, ThemePickerState,
+    SessionPickerState, SessionSidebarState, TaskPanelUiState, ThemePickerState, UsageOverlayState,
 };
 
 /// Max number of recent RMS audio levels retained for the recording-cursor
@@ -238,6 +238,9 @@ pub struct App {
     /// (Ctrl+X chord, ESC×2 interrupt, `o` to expand, etc.) that
     /// otherwise live only in source comments.
     pub show_help: bool,
+    /// Native `/usage` dialog. `/stats` opens the same surface on its
+    /// session-activity tab; aliases never inject prompts into the transcript.
+    pub usage_overlay: UsageOverlayState,
     /// True between Ctrl+G and the follow-up letter that selects the
     /// jump target (e/t/m/a). Esc cancels. Drives a small hint row
     /// in the status area so the user knows the chord is armed.
@@ -253,6 +256,7 @@ pub struct App {
     /// hidden — in that case the click handler ignores sidebar
     /// coordinates.
     pub sidebar_rect: std::cell::RefCell<Option<ratatui::layout::Rect>>,
+    pub info_sidebar_rect: std::cell::RefCell<Option<ratatui::layout::Rect>>,
     /// Bounds of the messages area, used by the drag-scroll handler
     /// to convert pixel deltas to scroll offsets and to gate scroll
     /// events to the right region.
@@ -366,11 +370,11 @@ pub struct App {
     /// submitted ChatMessage's `attachments` field. Replaces the old
     /// `pending_attachments → push_pending_tool_attachment` global queue.
     pub pasted_images: Vec<crate::attachments::PastedContent>,
-    /// Large text pastes collapsed to `[Pasted #N · …]` chips: `(chip_token,
+    /// Large text pastes collapsed to visible placeholders: `(chip_token,
     /// full_text)`. The chip keeps the input box clean; on submit each chip
     /// in the prompt is expanded back to its full text. Cleared per submit.
     pub pasted_texts: Vec<(String, String)>,
-    /// Monotonic id for `[Pasted #N · …]` chips.
+    /// Monotonic id for pasted-text placeholders.
     pub paste_counter: u32,
     /// Monotonically incrementing counter for paste IDs within a session.
     pub image_counter: u32,
@@ -532,10 +536,12 @@ impl App {
             path_yank_cursor: 0,
             editing_message_idx: None,
             show_help: false,
+            usage_overlay: UsageOverlayState::default(),
             jump_armed: false,
             jump_armed_at: None,
             last_tool_click: None,
             sidebar_rect: std::cell::RefCell::new(None),
+            info_sidebar_rect: std::cell::RefCell::new(None),
             messages_rect: std::cell::RefCell::new(None),
             toasts_rect: std::cell::RefCell::new(None),
             input_rect: std::cell::RefCell::new(None),

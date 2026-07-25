@@ -19,6 +19,7 @@ fn modal_overlay_locks_scroll(app: &App) -> bool {
             crate::app::ExpandedView::Teammates
         )
         || app.show_help
+        || app.usage_overlay.visible
         || (app.show_diagnostic_panel && !app.engine.diagnostics.is_empty())
         || app.engine.pending_approval.is_some()
         || app.engine.pending_question.is_some()
@@ -225,21 +226,10 @@ fn empty_session_lines(app: &App, t: Theme, width: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
 
-    lines.extend([
-        Line::from(Span::styled(
-            "What can I help you with?",
-            Style::default().fg(t.text_muted),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  ?    keybindings",
-            Style::default().fg(t.text_muted),
-        )),
-        Line::from(Span::styled(
-            "  Ctrl+P    palette · Ctrl+M    model picker",
-            Style::default().fg(t.text_muted),
-        )),
-    ]);
+    lines.push(Line::from(Span::styled(
+        "What can I help you with?",
+        Style::default().fg(t.text_muted),
+    )));
     lines
 }
 

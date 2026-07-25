@@ -3,6 +3,16 @@
 
 pub use jfc_engine::attachments::*;
 
+/// Read text from the system clipboard. Kept separate from the image probe so
+/// an image backend or decoding failure cannot swallow an otherwise valid
+/// text paste.
+pub fn read_clipboard_text() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| format!("Clipboard: {error}"))?;
+    clipboard
+        .get_text()
+        .map_err(|error| format!("Clipboard: {error}"))
+}
+
 /// Read an image from the system clipboard and return it as a processed
 /// `Attachment` along with its dimensions (width, height). Returns
 /// `Ok(None)` if the clipboard contains no image (text, files, empty, …);

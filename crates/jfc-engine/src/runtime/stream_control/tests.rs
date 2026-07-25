@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 struct CapturingProvider {
     calls: Mutex<Vec<Vec<ProviderMessage>>>,
+    sessions: Mutex<Vec<Option<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -23,12 +24,16 @@ impl Provider for CapturingProvider {
     async fn stream(
         &self,
         messages: Vec<ProviderMessage>,
-        _options: &StreamOptions,
+        options: &StreamOptions,
     ) -> anyhow::Result<EventStream> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(messages);
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(options.session_id.clone());
         Ok(Box::pin(futures::stream::empty()))
     }
 }
@@ -43,6 +48,7 @@ fn huge_message(index: usize) -> crate::types::ChatMessage {
 async fn pre_stream_boundary_updates_assistant_index_regression() {
     let provider = Arc::new(CapturingProvider {
         calls: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
     });
     let mut state = EngineState::new(provider, "test-model");
     state.messages = (0..30).map(huge_message).collect();
@@ -70,6 +76,7 @@ async fn pre_stream_boundary_updates_assistant_index_regression() {
 async fn restart_stream_builds_provider_request_from_materialized_boundary_regression() {
     let provider = Arc::new(CapturingProvider {
         calls: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
     });
     let mut state = EngineState::new(provider.clone(), "test-model");
     state.task_store = jfc_session::TaskStore::in_memory();
@@ -123,10 +130,65 @@ async fn restart_stream_builds_provider_request_from_materialized_boundary_regre
     assert!(sent.len() < 30);
 }
 
+#[tokio::test]
+async fn stream_spawn_inherits_current_session_for_provider_correlation_regression() {
+    let provider = Arc::new(CapturingProvider {
+        calls: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
+    });
+    let mut state = EngineState::new(provider.clone(), "test-model");
+    state.current_session_id = Some(crate::ids::SessionId::new("ses_correlation"));
+    let messages = vec![ProviderMessage {
+        role: jfc_provider::ProviderRole::User,
+        content: vec![jfc_provider::ProviderContent::Text("hello".to_owned())],
+    }];
+    let interrupt = state.interrupt_flag.clone();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+    spawn_stream_response_scoped(
+        &mut state,
+        &tx,
+        provider.clone(),
+        messages,
+        jfc_provider::ModelId::new("test-model"),
+        interrupt,
+        cancel,
+        None,
+        StreamRequestOverrides::default(),
+    );
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while rx.recv().await.is_some() {
+            if provider
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .any(|session| session.as_deref() == Some("ses_correlation"))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        provider
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|session| session.as_deref() == Some("ses_correlation")),
+        "the main provider request should inherit the live session id"
+    );
+}
+
 #[test]
 fn terminal_boundary_materializes_before_plain_turn_save_regression() {
     let provider = Arc::new(CapturingProvider {
         calls: Mutex::new(Vec::new()),
+        sessions: Mutex::new(Vec::new()),
     });
     let mut state = EngineState::new(provider, "test-model");
     state.task_store = jfc_session::TaskStore::in_memory();

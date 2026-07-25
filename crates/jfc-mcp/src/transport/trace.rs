@@ -203,6 +203,7 @@ mod tests {
             headers: HashMap::new(),
             url: None,
             cwd: None,
+            roots: Vec::new(),
         };
 
         spawn_start(&cfg);

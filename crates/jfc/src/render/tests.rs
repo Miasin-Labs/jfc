@@ -1553,6 +1553,7 @@ mod render_snapshot_tests {
         app.engine.task_store = jfc_session::TaskStore::in_memory();
         app.engine.max_context_tokens = 1_000_000;
         app.info_sidebar.visible = true;
+        app.engine.current_session_title = Some("Frozen stream audit".to_owned());
         app.engine.current_stream_request = Some(jfc_engine::runtime::StreamRequestMetadata {
             advertised_tool_count: 2,
             action_expected: false,
@@ -1577,6 +1578,7 @@ mod render_snapshot_tests {
             provider_history_archive_recall_ids: Vec::new(),
             rsi_prompt_sections: 0,
             rsi_tool_visibility_rules: 0,
+            raw_request_json: None,
         });
 
         let backend = TestBackend::new(140, 20);
@@ -1586,8 +1588,15 @@ mod render_snapshot_tests {
 
         let text = buffer_text(&term);
         assert!(
-            text.contains("▼ Context"),
-            "wide frame should render the plugin-style context card:\n{text}"
+            text.contains("Context"),
+            "wide frame should render the context inspector:\n{text}"
+        );
+        assert!(
+            text.contains("Session")
+                && text.contains("Frozen stream audit")
+                && text.contains("ID")
+                && text.contains("○ Ready"),
+            "session identity and run state should be first-class sidebar rows:\n{text}"
         );
         assert!(
             text.contains("ctx_reduce") && text.contains("ch2") && text.contains("drop 8,193"),
@@ -1596,12 +1605,14 @@ mod render_snapshot_tests {
         assert!(
             text.contains("System")
                 && text.contains("Docs")
-                && text.contains("Compartments")
                 && text.contains("Memories")
                 && text.contains("Conversation")
-                && text.contains("Tool Calls")
                 && text.contains("Tool Defs"),
             "context sidebar should expose composition rows:\n{text}"
+        );
+        assert!(
+            !text.contains("Compartments") && !text.contains("Tool Calls"),
+            "zero-token contributors should not consume sidebar rows:\n{text}"
         );
         let system_line = text
             .lines()
@@ -1612,11 +1623,11 @@ mod render_snapshot_tests {
             .find(|line| line.contains("Docs"))
             .expect("docs row");
         let system_side = system_line
-            .rsplit_once('│')
+            .split_once('│')
             .map(|(_, side)| side)
             .unwrap_or(system_line);
         let docs_side = docs_line
-            .rsplit_once('│')
+            .split_once('│')
             .map(|(_, side)| side)
             .unwrap_or(docs_line);
         let system_col = system_side
@@ -1634,6 +1645,168 @@ mod render_snapshot_tests {
         assert_eq!(
             system_pct_col, docs_pct_col,
             "context percentages should share a fixed right-aligned percent column:\n{text}"
+        );
+    }
+
+    #[test]
+    fn workspace_header_keeps_session_and_stream_state_visible_without_sidebar_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.info_sidebar.visible = false;
+        app.engine.current_session_title = Some("Frozen stream audit".to_owned());
+        app.engine.messages.push(jfc_core::ChatMessage::user(
+            "inspect the stalled stream".into(),
+        ));
+        app.engine.is_streaming = true;
+        app.engine.stream_lifecycle = Some(jfc_engine::runtime::StreamLifecycleStatus::new(
+            jfc_engine::runtime::StreamLifecyclePhase::WaitingForFirstByte,
+            None,
+        ));
+
+        let backend = TestBackend::new(100, 20);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| super::super::frame::frame(f, &mut app))
+            .expect("draw");
+
+        let first_row = buffer_text(&term)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            first_row.contains("JFC") && first_row.contains("Frozen stream audit"),
+            "session identity must remain visible when the inspector is hidden:\n{first_row}"
+        );
+        assert!(
+            first_row.contains("Working") && first_row.contains("waiting first byte"),
+            "live stream phase must be visible in the session header:\n{first_row}"
+        );
+    }
+
+    #[test]
+    fn workspace_header_exposes_terminal_provider_failure_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        app.info_sidebar.visible = false;
+        app.engine.current_session_title = Some("External script search".to_owned());
+        app.engine
+            .messages
+            .push(jfc_core::ChatMessage::user("find the scripts".into()));
+        app.engine.is_streaming = false;
+        app.engine.stream_terminal_status = Some("Stopped · blank refusals".to_owned());
+
+        let backend = TestBackend::new(100, 20);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| super::super::frame::frame(f, &mut app))
+            .expect("draw");
+
+        let first_row = buffer_text(&term)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            first_row.contains("External script search")
+                && first_row.contains("Stopped · blank refusals"),
+            "terminal provider failures must not look like a frozen stream:\n{first_row}"
+        );
+    }
+
+    #[test]
+    fn info_sidebar_lists_every_account_without_lossy_aggregate_regression() {
+        let mut app = App::new(Arc::new(TestProvider), "test-model");
+        app.engine.task_store = jfc_session::TaskStore::in_memory();
+        let account =
+            |name: &str, status: &str| jfc_engine::providers::anthropic_accounts::AccountSnapshot {
+                name: name.to_owned(),
+                email: Some(name.to_owned()),
+                enabled: true,
+                auth_status: status.to_owned(),
+                ..Default::default()
+            };
+        app.engine.anthropic_account_snapshots = vec![
+            account("primary@example.com", "healthy"),
+            account(
+                "the-longest-account-name-for-regression@example.com",
+                "healthy",
+            ),
+            account("needs-login@example.com", "re-login"),
+        ];
+        app.engine.anthropic_account_snapshot =
+            app.engine.anthropic_account_snapshots.first().cloned();
+
+        let backend = TestBackend::new(40, 60);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::sidebar::info_sidebar(f, &mut app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        let compact = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != '│')
+            .collect::<String>();
+        for name in [
+            "primary@example.com",
+            "the-longest-account-name-for-regression@example.com",
+            "needs-login@example.com",
+        ] {
+            assert!(
+                compact.contains(name),
+                "every account identity must render in full:\n{text}"
+            );
+        }
+        assert!(text.contains("ready") && text.contains("re-login"));
+        assert!(
+            !text.contains("need attention"),
+            "aggregate health must not replace individual account rows:\n{text}"
+        );
+        assert!(
+            !text.contains("Metrics"),
+            "internal descriptor metrics do not belong in the inspector:\n{text}"
+        );
+    }
+
+    #[test]
+    fn info_sidebar_surfaces_live_dynamic_workflow_progress_regression() {
+        let mut app = app_with_task(TaskLifecycle::Running, "workflow task");
+        let mut progress = jfc_engine::workflows::WorkflowTaskProgress::new(
+            "run-1".to_owned(),
+            jfc_engine::workflows::WorkflowMeta {
+                name: "Survey codebase and synthesize fixes".to_owned(),
+                description: "Parallel repository survey".to_owned(),
+                when_to_use: None,
+                phases: Vec::new(),
+            },
+        );
+        progress.current_phase = Some("Synthesizing findings".to_owned());
+        app.engine
+            .background_tasks
+            .get_mut("tx")
+            .expect("background task")
+            .workflow_progress = Some(progress);
+
+        let backend = TestBackend::new(42, 36);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = f.area();
+            super::super::sidebar::info_sidebar(f, &mut app, area);
+        })
+        .expect("draw");
+
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("Active work"),
+            "workflow section missing:\n{text}"
+        );
+        assert!(
+            text.contains("Survey codebase and synthesize fixes")
+                && text.contains("running")
+                && text.contains("0/0 agents")
+                && text.contains("Synthesizing findings"),
+            "live workflow identity and progress must remain visible:\n{text}"
         );
     }
 
@@ -1880,7 +2053,7 @@ mod render_snapshot_tests {
     }
 
     #[test]
-    fn info_sidebar_renders_plugin_reload_digest_state_normal() {
+    fn info_sidebar_renders_actionable_plugin_health_without_descriptor_dump_normal() {
         let mut app = App::new(Arc::new(TestProvider), "test-model");
         app.engine.task_store = jfc_session::TaskStore::in_memory();
         app.plugins.reload_report = Some(jfc_plugin_host::PluginReloadReport {
@@ -1951,16 +2124,8 @@ mod render_snapshot_tests {
         let text = buffer_text(&term);
         assert!(text.contains("Plugins"), "plugin section missing:\n{text}");
         assert!(
-            text.contains("descriptors changed"),
-            "reload state missing:\n{text}"
-        );
-        assert!(
-            text.contains("digest bbbbbbbbbbbbbbbb"),
-            "descriptor digest missing:\n{text}"
-        );
-        assert!(
-            text.contains("actions 4"),
-            "runtime action count missing:\n{text}"
+            text.contains("1/1 active"),
+            "plugin health missing:\n{text}"
         );
         assert!(
             text.contains("descriptor issues 1"),
@@ -1970,10 +2135,8 @@ mod render_snapshot_tests {
             text.contains("error add_runtime_action"),
             "descriptor issue severity missing:\n{text}"
         );
-        assert!(
-            text.contains("diagnostics action Run Plugin Diagnostics"),
-            "plugin diagnostics action missing:\n{text}"
-        );
+        assert!(!text.contains("digest bbbbbbbbbbbbbbbb"), "{text}");
+        assert!(!text.contains("actions 4"), "{text}");
     }
 
     #[test]

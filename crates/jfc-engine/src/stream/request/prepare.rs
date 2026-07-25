@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::context_accounting::RequestContextPressure;
 use crate::runtime::{StreamRequestMetadata, StreamRequestOverrides};
 use crate::tools;
+use base64::Engine as _;
 use jfc_provider::{
     DEFAULT_MAX_OUTPUT_TOKENS, ModelId, ModelRequestPolicy, ModelRequestProfile,
     ModelResolutionReason, ModelSpec, Provider, ProviderId, ProviderMessage, ResolvedModel,
@@ -126,6 +127,7 @@ pub async fn prepare_stream_request(
         .system(system_prompt)
         .tools(advertised_tools)
         .max_tokens(max_out);
+    base.session_id = overrides.session_id.clone();
     if matches!(
         provider.stream_convention(),
         StreamConvention::AnthropicNative
@@ -245,6 +247,7 @@ pub async fn prepare_stream_request(
         // active; the API otherwise streams thinking_delta without estimates.
         opts = opts.thinking_token_count(true);
     }
+    let raw_request_json = stream_request_snapshot(provider.as_ref(), messages, &opts);
 
     PreparedStreamRequest {
         opts,
@@ -266,8 +269,139 @@ pub async fn prepare_stream_request(
                 .provider_history_archive_recall_ids,
             rsi_prompt_sections: rsi_runtime.prompt_sections,
             rsi_tool_visibility_rules: rsi_runtime.tool_visibility_rules,
+            raw_request_json: Some(raw_request_json),
         },
         recalled_memory_chars: project_context.fresh_recall_chars,
+    }
+}
+
+pub(crate) fn stream_request_snapshot(
+    provider: &dyn Provider,
+    messages: &[ProviderMessage],
+    opts: &StreamOptions,
+) -> Arc<str> {
+    let messages = messages
+        .iter()
+        .map(|message| {
+            serde_json::json!({
+                "role": match message.role {
+                    jfc_provider::ProviderRole::User => "user",
+                    jfc_provider::ProviderRole::Assistant => "assistant",
+                },
+                "content": message.content.iter().map(provider_content_snapshot).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let tools = opts
+        .tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "schema": "jfc.engine_stream_request.v1",
+        "provider": provider.name(),
+        "messages": messages,
+        "options": {
+            "model": opts.model.as_str(),
+            "system": opts.system,
+            "max_tokens": opts.max_tokens,
+            "tools": tools,
+            "thinking_budget": opts.thinking_budget,
+            "adaptive_thinking": opts.adaptive_thinking,
+            "thinking_display": opts.thinking_display,
+            "temperature": opts.temperature,
+            "top_p": opts.top_p,
+            "reasoning_effort": opts.reasoning_effort,
+            "provider_options": opts.provider_options,
+            "custom_betas": opts.custom_betas,
+            "fast_mode": opts.fast_mode,
+            "eager_input_streaming": opts.eager_input_streaming,
+            "strict_tool_schemas": opts.strict_tool_schemas,
+            "task_budget_tokens": opts.task_budget_tokens,
+            "previous_message_id": opts.previous_message_id,
+            "context_hint_tokens_saved": opts.context_hint_tokens_saved,
+            "thinking_token_count": opts.thinking_token_count,
+            "mid_conversation_system": opts.mid_conversation_system,
+            "cache_diagnosis": opts.cache_diagnosis,
+            "prompt_caching_scope": opts.prompt_caching_scope,
+            "session_id": opts.session_id,
+            "advisor_model": opts.advisor_model.as_ref().map(|model| model.as_str()),
+            "narration_summaries": opts.narration_summaries,
+            "server_side_compaction": opts.server_side_compaction,
+        },
+    });
+    Arc::from(serde_json::to_string(&value).unwrap_or_else(|error| {
+        serde_json::json!({
+            "schema": "jfc.engine_stream_request.v1",
+            "snapshot_error": error.to_string(),
+        })
+        .to_string()
+    }))
+}
+
+fn provider_content_snapshot(content: &jfc_provider::ProviderContent) -> serde_json::Value {
+    use jfc_provider::ProviderContent;
+
+    match content {
+        ProviderContent::Text(text) => serde_json::json!({"type": "text", "text": text}),
+        ProviderContent::Thinking { text, signature } => serde_json::json!({
+            "type": "thinking",
+            "text": text,
+            "signature": signature,
+        }),
+        ProviderContent::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content,
+            "is_error": is_error,
+        }),
+        ProviderContent::ToolUse {
+            id,
+            name,
+            input,
+            thought_signature,
+        } => serde_json::json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+            "thought_signature": thought_signature,
+        }),
+        ProviderContent::ServerToolUse { id, name, input } => serde_json::json!({
+            "type": "server_tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        }),
+        ProviderContent::ServerToolResult {
+            tool_use_id,
+            tool_kind,
+            content,
+        } => serde_json::json!({
+            "type": tool_kind.wire_type(),
+            "tool_use_id": tool_use_id,
+            "content": content,
+        }),
+        ProviderContent::Attachment(attachment) => serde_json::json!({
+            "type": "attachment",
+            "id": attachment.id,
+            "media_type": attachment.kind.mime_type(),
+            "data": base64::engine::general_purpose::STANDARD.encode(&attachment.bytes),
+        }),
+        ProviderContent::RedactedThinking { data } => serde_json::json!({
+            "type": "redacted_thinking",
+            "data": data,
+        }),
     }
 }
 

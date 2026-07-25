@@ -18,6 +18,7 @@ use super::status::status;
 use super::task_panel::task_panel;
 use super::teammates_panel::teammates_panel;
 use super::theme_picker::theme_picker;
+use super::usage_overlay::usage_overlay;
 use super::*;
 
 pub fn frame(f: &mut Frame, app: &mut App) {
@@ -31,6 +32,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     app.tool_hit_regions.borrow_mut().clear();
     app.tool_copy_regions.borrow_mut().clear();
     *app.input_rect.borrow_mut() = None;
+    *app.info_sidebar_rect.borrow_mut() = None;
 
     f.render_widget(Block::default().style(Style::default().bg(t.bg)), f.area());
 
@@ -48,6 +50,7 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     // transcript you can't act on the input, pinned tasks, or the agent fan.
     // Keep only a one-line task tab strip plus the compact status line.
     let in_task_view = app.task_panel.viewing_task_id.is_some();
+    let workspace_header_height = u16::from(!in_task_view && !app.engine.messages.is_empty());
 
     let total_w_pre = f.area().width as usize;
     let input_content_w = total_w_pre.saturating_sub(4);
@@ -186,14 +189,15 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(subagent_footer_height), // 0: task tab strip (top)
-            Constraint::Min(3),                         // 1: messages
-            Constraint::Length(diag_row_height),        // 2
-            Constraint::Length(spinner_row_height),     // 3
-            Constraint::Length(tasks_pinned_height),    // 4
-            Constraint::Length(input_height),           // 5
-            Constraint::Length(agent_fan_height),       // 6
-            Constraint::Length(1),                      // 7: compact status line
+            Constraint::Length(workspace_header_height), // 0: session identity + live state
+            Constraint::Length(subagent_footer_height),  // 1: task tab strip (top)
+            Constraint::Min(3),                          // 2: messages
+            Constraint::Length(diag_row_height),         // 3
+            Constraint::Length(spinner_row_height),      // 4
+            Constraint::Length(tasks_pinned_height),     // 5
+            Constraint::Length(input_height),            // 6
+            Constraint::Length(agent_fan_height),        // 7
+            Constraint::Length(1),                       // 8: compact status line
         ])
         .split(f.area());
 
@@ -209,26 +213,27 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     };
     let show_right = app.info_sidebar.visible && !in_task_view && total_w >= 120;
 
-    // Responsive sidebars: at narrow widths the sessions sidebar
-    // shrinks toward 20 cols and the info sidebar drops below 32, so
-    // the message column always retains a usable working area. v126
-    // does the same — sidebars scale with terminal width instead of
-    // pinning to fixed column counts.
+    // Keep the inspector wide enough for account identities and operational
+    // state. It still yields first to the transcript on smaller terminals.
     let left_w_full = (total_w / 5).clamp(20, 32) as u16;
     let left_w = (left_w_full as f32 * ease_out_cubic(sidebar_progress)) as u16;
     let show_left = left_w > 0;
     let right_w = if total_w < 140 {
-        32
+        38
     } else {
-        (total_w / 6).clamp(36, 48) as u16
+        (total_w / 5).clamp(40, 52) as u16
     };
 
-    // Tab strip at the top in task view (chunks[0]); collapsed otherwise.
-    if app.task_panel.viewing_task_id.is_some() {
-        subagent_footer(f, app, chunks[0]);
+    if workspace_header_height > 0 {
+        workspace_header(f, app, chunks[0]);
     }
 
-    let msg_area = chunks[1];
+    // Tab strip at the top in task view (chunks[1]); collapsed otherwise.
+    if app.task_panel.viewing_task_id.is_some() {
+        subagent_footer(f, app, chunks[1]);
+    }
+
+    let msg_area = chunks[2];
     match (show_left, show_right) {
         (true, true) => {
             let split = Layout::default()
@@ -264,18 +269,18 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         }
     }
     if unack_count > 0 {
-        diagnostic_row(f, app, chunks[2]);
+        diagnostic_row(f, app, chunks[3]);
     }
     if show_spinner {
-        spinner_row(f, app, chunks[3]);
+        spinner_row(f, app, chunks[4]);
     }
     if tasks_pinned_height > 0 {
-        tasks_pinned_row(f, app, chunks[4]);
+        tasks_pinned_row(f, app, chunks[5]);
     }
     if input_height > 0 {
-        input(f, app, chunks[5]);
+        input(f, app, chunks[6]);
     }
-    status(f, app, chunks[7]);
+    status(f, app, chunks[8]);
 
     // Resolve a pending word/line multi-click into a selection span (needs the
     // buffer), then paint the drag highlight / extract + copy on finalize.
@@ -331,6 +336,10 @@ pub fn frame(f: &mut Frame, app: &mut App) {
         help_overlay(f, app);
     }
 
+    if app.usage_overlay.visible {
+        usage_overlay(f, app);
+    }
+
     if app.transcript_search.is_some() {
         search_bar(f, app);
     }
@@ -367,6 +376,71 @@ pub fn frame(f: &mut Frame, app: &mut App) {
     if app.pending_rewrite_proposal.is_some() {
         super::prompt_rewrite::prompt_rewrite(f, app);
     }
+}
+
+fn workspace_header(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let t = app.theme;
+    let title = app
+        .engine
+        .current_session_title
+        .clone()
+        .or_else(|| jfc_engine::session::extract_first_prompt(&app.engine.messages))
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "Untitled".to_owned());
+    let (marker, run_label, run_color) = super::sidebar::session_run_status(app, t);
+    let used = app.engine.tool_ctx.approx_tokens as u64;
+    let max = app.engine.selected_context_window_tokens().max(1) as u64;
+    let context_pct = used.saturating_mul(100) / max;
+    let right = if area.width >= 100 {
+        format!(
+            "{marker} {run_label} · {} · ctx {context_pct}%",
+            app.engine.model.as_str()
+        )
+    } else {
+        format!("{marker} {run_label}")
+    };
+    let right_width = super::cell_width(&right)
+        .min(area.width.saturating_sub(12) as usize)
+        .min(64) as u16;
+    let columns = Layout::horizontal([
+        Constraint::Min(12),
+        Constraint::Length(right_width.saturating_add(1)),
+    ])
+    .split(area);
+    let title_width = columns[0].width.saturating_sub(7) as usize;
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " JFC ",
+                Style::default()
+                    .fg(t.bg)
+                    .bg(t.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default().bg(t.surface)),
+            Span::styled(
+                truncate_str(&title, title_width),
+                Style::default()
+                    .fg(t.text_primary)
+                    .bg(t.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .style(Style::default().bg(t.surface)),
+        columns[0],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate_str(&right, right_width as usize),
+            Style::default().fg(run_color).bg(t.surface),
+        )))
+        .alignment(ratatui::layout::Alignment::Right)
+        .style(Style::default().bg(t.surface)),
+        columns[1],
+    );
 }
 
 /// Column span `[c0, c1)` of the selection on content `line`, in terminal-

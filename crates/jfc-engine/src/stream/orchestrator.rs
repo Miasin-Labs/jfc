@@ -11,7 +11,10 @@ use crate::runtime::{
 };
 use jfc_provider::{ModelId, Provider, ProviderMessage, StopReason, StreamOptions};
 
-use super::{live_events, open_stream_with_bedrock_retries, prepare_stream_request};
+use super::{
+    live_events, open_stream_with_bedrock_retries, persist_ephemeral_request,
+    prepare_stream_request, stream_request_snapshot,
+};
 
 // `previous_response_id` chaining was removed from the OpenAI Responses
 // transmit path. It produced `previous_response_not_found` 400s because the
@@ -196,6 +199,8 @@ pub async fn stream_response(
         opts.cache_diagnosis = true;
         opts.previous_message_id = Some(id);
     }
+    prepared.metadata.raw_request_json =
+        Some(stream_request_snapshot(provider.as_ref(), &messages, &opts));
 
     // Audit: record the provider/model call to the runtime ledger so spend +
     // "which model did what" is queryable. Offloaded so the locked append
@@ -687,6 +692,8 @@ async fn try_nonstreaming_fallback(
             ),
         )))
         .await;
+    let _ =
+        persist_ephemeral_request(provider, messages.as_ref(), opts, "complete-fallback", 0).await;
     let response = match provider.complete((*messages).clone(), opts).await {
         Ok(response) => response,
         Err(fallback_error) => {

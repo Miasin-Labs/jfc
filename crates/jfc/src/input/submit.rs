@@ -8,43 +8,60 @@ pub async fn handle_submit_text(
     handle_submit(app, text, tx).await
 }
 
+/// Return the first-line fact for Claude's `#` memory shortcut.
+///
+/// A real multiline prompt may begin with a Markdown heading. It is only a
+/// shortcut when every non-empty continuation line is another `#` line. A
+/// shebang is always normal prompt content.
+fn memory_shortcut_fact(text: &str) -> Option<String> {
+    let mut lines = text.trim_start().lines();
+    let first_line = lines.next()?.trim();
+    if !first_line.starts_with('#') || first_line.starts_with("#!") {
+        return None;
+    }
+    if lines.any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with('#')
+    }) {
+        return None;
+    }
+
+    let fact = first_line.trim_start_matches('#').trim();
+    if fact.is_empty() || fact.chars().any(char::is_control) {
+        return None;
+    }
+    Some(fact.to_owned())
+}
+
 pub(super) async fn handle_submit(
     app: &mut App,
     text: String,
     tx: &mpsc::Sender<crate::runtime::EngineEvent>,
 ) -> anyhow::Result<()> {
-    // `# <fact>` quick-add: a prompt whose first non-space character is `#`
-    // is a memory note, not a turn. Append it to project memory (so the
-    // recall engine can surface it later) and stop — no stream, no model.
-    // Mirrors Claude Code's `#` shortcut. `#` alone (empty body) falls
-    // through and is sent normally.
-    {
-        let trimmed = text.trim_start();
-        let fact = trimmed.trim_start_matches('#').trim();
-        if trimmed.starts_with('#') && !fact.is_empty() {
-            let root = app
-                .engine
-                .git_root
-                .clone()
-                .flatten()
-                .unwrap_or_else(|| std::path::PathBuf::from(&app.engine.cwd));
-            let toast_msg =
-                match jfc_engine::memory::create_project_context_memory(fact, &root).await {
-                    Ok(id) => format!("remembered -> {id}"),
-                    Err(e) => format!("memory save failed: {e}"),
-                };
-            jfc_engine::toast::push_with_cap(
-                &mut app.engine.toasts,
-                jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Info, toast_msg),
-            );
-            // Clear the prompt; this was a note, not a turn.
-            app.textarea.select_all();
-            app.textarea.cut();
-            return Ok(());
-        }
+    // `# <fact>` quick-add is intentionally narrower than Markdown syntax.
+    // A document beginning with `# Heading` must still reach the model.
+    if let Some(fact) = memory_shortcut_fact(&text) {
+        let root = app
+            .engine
+            .git_root
+            .clone()
+            .flatten()
+            .unwrap_or_else(|| std::path::PathBuf::from(&app.engine.cwd));
+        let toast_msg = match jfc_engine::memory::create_project_context_memory(&fact, &root).await
+        {
+            Ok(id) => format!("remembered -> {id}"),
+            Err(e) => format!("memory save failed: {e}"),
+        };
+        jfc_engine::toast::push_with_cap(
+            &mut app.engine.toasts,
+            jfc_engine::toast::Toast::new(jfc_engine::toast::ToastKind::Info, toast_msg),
+        );
+        app.textarea.select_all();
+        app.textarea.cut();
+        return Ok(());
     }
 
-    // Expand any `[Pasted #N · …]` chips back to their full text so the model
+    // Expand staged paste placeholders back to their full text so the model
     // receives what the user actually pasted, then drop the stash for the next
     // turn. A chip the user deleted simply won't match — harmless.
     let text = if app.pasted_texts.is_empty() {
@@ -139,4 +156,30 @@ pub(super) async fn handle_submit(
         crate::runtime::ops::submit_prompt(&mut app.engine, tx, text, submit_attachments, edit_at)
             .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory_shortcut_fact;
+
+    #[test]
+    fn memory_shortcut_accepts_a_single_fact_normal() {
+        assert_eq!(
+            memory_shortcut_fact("  ## remember this seam"),
+            Some("remember this seam".to_owned())
+        );
+    }
+
+    #[test]
+    fn memory_shortcut_rejects_markdown_documents_regression() {
+        assert_eq!(
+            memory_shortcut_fact("# Endpoint map\n\nThis body must reach the model.\n- one\n- two"),
+            None
+        );
+    }
+
+    #[test]
+    fn memory_shortcut_rejects_shebangs_robust() {
+        assert_eq!(memory_shortcut_fact("#!/usr/bin/env bash\necho hi"), None);
+    }
 }

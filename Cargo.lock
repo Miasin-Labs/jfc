@@ -3397,18 +3397,24 @@ dependencies = [
 name = "jfc-mcp"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dotenvy",
  "jfc-core",
  "jfc-provider",
+ "libc",
  "linkscope",
  "reqwest",
  "rmcp",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "shlex 1.3.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]

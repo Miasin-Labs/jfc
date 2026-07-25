@@ -1,3 +1,4 @@
+mod artifact;
 mod behavior_prompt;
 mod budget;
 mod intent;
@@ -21,7 +22,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use artifact::persist_ephemeral_request;
 pub use prepare::prepare_stream_request;
+pub(crate) use prepare::stream_request_snapshot;
 pub(crate) use types::PreparedStreamRequest;
 
 #[cfg(test)]

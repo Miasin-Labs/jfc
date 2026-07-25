@@ -9,6 +9,7 @@
 
 pub mod anthropic;
 pub mod anthropic_accounts;
+pub mod anthropic_gateway;
 pub mod anthropic_models;
 pub mod anthropic_oauth;
 pub mod anthropic_oauth_login;
@@ -35,6 +36,7 @@ pub mod vertex;
 pub mod vertex_wizard;
 
 pub use anthropic::AnthropicProvider;
+pub use anthropic_gateway::{AnthropicGatewayKind, AnthropicGatewayProvider};
 pub use anthropic_oauth::{AnthropicOAuthProvider, current_access_token};
 pub use antigravity_oauth::AntigravityOAuthProvider;
 pub use bedrock::BedrockProvider;

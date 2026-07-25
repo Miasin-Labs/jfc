@@ -1,5 +1,6 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum McpStatus {
+    PendingApproval,
     Connected,
     Disabled,
     Error,
@@ -8,6 +9,7 @@ pub enum McpStatus {
 impl McpStatus {
     pub fn label(self) -> &'static str {
         match self {
+            Self::PendingApproval => "Pending approval",
             Self::Connected => "Connected",
             Self::Disabled => "Disabled",
             Self::Error => "Error",

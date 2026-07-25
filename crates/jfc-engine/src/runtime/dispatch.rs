@@ -430,6 +430,32 @@ pub async fn handle_engine_event(
         EngineEvent::WorkflowProgress(ev) => {
             crate::runtime::event_loop::handlers::workflow::handle_workflow_progress(state, ev);
         }
+        EngineEvent::SessionTitleGenerated { session_id, title } => {
+            if state.current_session_id.as_ref() == Some(&session_id) {
+                state.session_title_generation_pending = false;
+                if state.current_session_title.is_none()
+                    && let Some(title) = title
+                {
+                    let resolved = crate::session::set_ai_session_title_if_empty(
+                        &session_id,
+                        &title,
+                    )
+                    .await
+                    .unwrap_or(title);
+                    state.current_session_title = Some(resolved.clone());
+                    state.push_effect(crate::app::EngineEffect::SessionTitleChanged {
+                        session_id: session_id.clone(),
+                        title: resolved.clone(),
+                    });
+                    tracing::info!(
+                        target: "jfc::session_naming",
+                        %session_id,
+                        title = %resolved,
+                        "session title resolved"
+                    );
+                }
+            }
+        }
         EngineEvent::Control(ControlEvent::RunCommand(text)) => {
             return Ok(Some(FrontendDirective::RunCommand(text)));
         }

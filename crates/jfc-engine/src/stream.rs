@@ -22,6 +22,7 @@ pub use continuation::{
 pub use messages::build_provider_messages;
 pub use orchestrator::stream_response;
 use request::prepare_stream_request;
+pub(crate) use request::{persist_ephemeral_request, stream_request_snapshot};
 pub use retry::open_stream_with_bedrock_retries;
 pub use tool_dispatch::{LocalAdvisorDispatchContext, ToolBatchDispatch, dispatch_tools_batched};
 pub use tool_results::{cap_tool_result, cleanup_tool_result_spills};

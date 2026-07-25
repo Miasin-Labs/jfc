@@ -58,61 +58,16 @@ pub(super) async fn cmd_plan(
     _text: &str,
     tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    handle_doc_command(state, crate::document_formats::DocKind::Plan, tx).await;
-}
-
-pub(super) async fn cmd_roadmap(
-    state: &mut EngineState,
-    _parts: &[&str],
-    _text: &str,
-    tx: Option<&mpsc::Sender<EngineEvent>>,
-) {
-    handle_doc_command(state, crate::document_formats::DocKind::Roadmap, tx).await;
-}
-
-pub(super) async fn cmd_parity(
-    state: &mut EngineState,
-    _parts: &[&str],
-    _text: &str,
-    tx: Option<&mpsc::Sender<EngineEvent>>,
-) {
-    handle_doc_command(state, crate::document_formats::DocKind::Parity, tx).await;
-}
-
-pub(super) async fn cmd_philosophy(
-    state: &mut EngineState,
-    _parts: &[&str],
-    _text: &str,
-    tx: Option<&mpsc::Sender<EngineEvent>>,
-) {
-    handle_doc_command(state, crate::document_formats::DocKind::Philosophy, tx).await;
+    super::context::cmd_mode(state, &["/mode", "plan"], "/mode plan", tx).await;
 }
 
 pub(super) async fn cmd_usage(
     state: &mut EngineState,
     _parts: &[&str],
-    _text: &str,
-    tx: Option<&mpsc::Sender<EngineEvent>>,
-) {
-    handle_doc_command(state, crate::document_formats::DocKind::Usage, tx).await;
-}
-
-pub(super) async fn cmd_cost(
-    state: &mut EngineState,
-    _parts: &[&str],
-    _text: &str,
+    text: &str,
     _tx: Option<&mpsc::Sender<EngineEvent>>,
 ) {
-    handle_cost_command(state);
-}
-
-pub(super) async fn cmd_usage_report(
-    state: &mut EngineState,
-    _parts: &[&str],
-    _text: &str,
-    _tx: Option<&mpsc::Sender<EngineEvent>>,
-) {
-    super::local::handle_usage_report_command(state);
+    super::local::handle_usage_command(state, text);
 }
 
 pub(super) async fn cmd_status(

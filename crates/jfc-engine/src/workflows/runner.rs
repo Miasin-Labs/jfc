@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use sha2::{Digest, Sha256};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -67,6 +68,9 @@ pub struct WorkflowOutcome {
     pub result: serde_json::Value,
     pub agent_count: u32,
     pub total_agents_dispatched: u32,
+    /// Agent dispatches that failed even if the JS script caught the error and
+    /// returned a usable partial result.
+    pub failed_agents: u32,
     pub cache_hits: u32,
     pub logs: Vec<String>,
     pub error: Option<String>,
@@ -82,6 +86,7 @@ pub struct WorkflowOutcome {
 struct Orchestrator {
     semaphore: Arc<Semaphore>,
     dispatched: Arc<AtomicU32>,
+    failed_agents: Arc<AtomicU32>,
     cache_hits: Arc<AtomicU32>,
     running_hash: Arc<parking_lot::Mutex<String>>,
     journal_writer: Arc<JournalWriter>,
@@ -178,6 +183,13 @@ impl Orchestrator {
         if let Some(budget) = self.token_budget {
             let spent = self.tokens_spent.load(Ordering::Relaxed);
             if spent >= budget {
+                self.failed_agents.fetch_add(1, Ordering::Relaxed);
+                emit_agent_failed(
+                    &self.tx,
+                    &self.workflow_task_id,
+                    req.index,
+                    "workflow token budget exhausted".to_owned(),
+                );
                 let _ = req
                     .reply
                     .send(Err("workflow token budget exhausted".to_owned()));
@@ -192,6 +204,13 @@ impl Orchestrator {
                 concurrency: max_concurrency(),
             };
             if let FanoutDecision::Defer { reason } = self.fanout_predictor.gate(&plan) {
+                self.failed_agents.fetch_add(1, Ordering::Relaxed);
+                emit_agent_failed(
+                    &self.tx,
+                    &self.workflow_task_id,
+                    req.index,
+                    format!("workflow fan-out gated by budget: {reason}"),
+                );
                 let _ = req
                     .reply
                     .send(Err(format!("workflow fan-out gated by budget: {reason}")));
@@ -200,6 +219,13 @@ impl Orchestrator {
         }
 
         if self.dispatched.load(Ordering::Relaxed) >= MAX_AGENTS {
+            self.failed_agents.fetch_add(1, Ordering::Relaxed);
+            emit_agent_failed(
+                &self.tx,
+                &self.workflow_task_id,
+                req.index,
+                format!("workflow agent cap reached ({MAX_AGENTS})"),
+            );
             let _ = req
                 .reply
                 .send(Err(format!("workflow agent cap reached ({MAX_AGENTS})")));
@@ -252,6 +278,7 @@ impl Orchestrator {
         let workflow_task_id = self.workflow_task_id.clone();
         let cancel = self.cancel.clone();
         let tokens_spent = self.tokens_spent.clone();
+        let failed_agents = self.failed_agents.clone();
         self.agent_tasks.spawn(async move {
             // Race the permit acquire against cancellation. A bare
             // `acquire().await` would wedge a queued agent until a permit frees
@@ -282,6 +309,7 @@ impl Orchestrator {
                 workflow_task_id,
                 cancel,
                 tokens_spent,
+                failed_agents,
             )
             .await;
         });
@@ -380,6 +408,7 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
     let mut orch = Orchestrator {
         semaphore: Arc::new(Semaphore::new(max_concurrency())),
         dispatched: Arc::new(AtomicU32::new(0)),
+        failed_agents: Arc::new(AtomicU32::new(0)),
         cache_hits: Arc::new(AtomicU32::new(0)),
         running_hash: Arc::new(parking_lot::Mutex::new(String::new())),
         journal_writer: Arc::new(journal_writer),
@@ -513,7 +542,19 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
     }
 
     let dispatched = orch.dispatched.clone();
+    let failed_agents = orch.failed_agents.clone();
     let cache_hits = orch.cache_hits.clone();
+    let failed_count = failed_agents.load(Ordering::Relaxed);
+    if failed_count > 0 {
+        let noun = if failed_count == 1 {
+            "agent failed"
+        } else {
+            "agents failed"
+        };
+        orch.logs.push(format!(
+            "partial workflow result: {failed_count} {noun}; inspect the failed agent rows or resume the run"
+        ));
+    }
     let logs = std::mem::take(&mut orch.logs);
     drop(orch);
 
@@ -535,6 +576,7 @@ pub async fn run_workflow(config: WorkflowRunConfig) -> WorkflowOutcome {
         result: engine_outcome.result,
         agent_count: engine_outcome.agent_count,
         total_agents_dispatched: dispatched.load(Ordering::Relaxed),
+        failed_agents: failed_count,
         cache_hits: cache_hits.load(Ordering::Relaxed),
         logs,
         error: engine_outcome.error,
@@ -596,6 +638,7 @@ async fn run_one_agent(
     workflow_task_id: String,
     cancel: CancellationToken,
     tokens_spent: Arc<AtomicU64>,
+    failed_agents: Arc<AtomicU32>,
 ) {
     let agent_id = format!("{workflow_task_id}:agent_{}", req.index);
 
@@ -620,8 +663,16 @@ async fn run_one_agent(
     let worktree_info = match prepare_workflow_agent_worktree(&task_input, &agent_id).await {
         Ok(info) => info,
         Err(error) => {
+            failed_agents.fetch_add(1, Ordering::Relaxed);
             finalize_agent_row(&agent_id, AgentRowOutcome::Failed(&error));
             emit_agent_failed(&tx, &workflow_task_id, req.index, error.clone());
+            let _ = journal_writer
+                .append(&JournalEntry::Failed {
+                    key,
+                    agent_id,
+                    error: error.clone(),
+                })
+                .await;
             let _ = req.reply.send(Err(error));
             return;
         }
@@ -658,7 +709,19 @@ async fn run_one_agent(
             &agent_id,
             agent_error_outcome(cancel.is_cancelled(), &result.output),
         );
-        emit_agent_failed(&tx, &workflow_task_id, req.index, result.output.clone());
+        if cancel.is_cancelled() {
+            emit_agent_failed(&tx, &workflow_task_id, req.index, result.output.clone());
+        } else {
+            failed_agents.fetch_add(1, Ordering::Relaxed);
+            emit_agent_failed(&tx, &workflow_task_id, req.index, result.output.clone());
+        }
+        let _ = journal_writer
+            .append(&JournalEntry::Failed {
+                key,
+                agent_id,
+                error: result.output.clone(),
+            })
+            .await;
         let _ = req.reply.send(Err(result.output.clone()));
         return;
     }
@@ -675,16 +738,17 @@ async fn run_one_agent(
             // Schema contract violation: surface as an agent failure rather
             // than silently stringifying (which used to hide schema breaches
             // and surprise scripts expecting object fields).
+            failed_agents.fetch_add(1, Ordering::Relaxed);
             emit_agent_failed(&tx, &workflow_task_id, req.index, error.clone());
             finalize_agent_row(
                 &agent_id,
                 agent_error_outcome(cancel.is_cancelled(), &error),
             );
             let _ = journal_writer
-                .append(&JournalEntry::Result {
+                .append(&JournalEntry::Failed {
                     key,
                     agent_id,
-                    result: serde_json::Value::String(text.clone()),
+                    error: error.clone(),
                 })
                 .await;
             let _ = req.reply.send(Err(error));
@@ -724,7 +788,7 @@ async fn run_one_agent(
 /// Build the `TaskInput` for a workflow sub-agent dispatch from its request.
 fn build_agent_task_input(
     req: &AgentRequest,
-    agent_def: Option<&crate::agents::AgentDef>,
+    _agent_def: Option<&crate::agents::AgentDef>,
 ) -> crate::types::TaskInput {
     let mut task_input = crate::types::TaskInput {
         description: req.label.clone(),
@@ -745,9 +809,12 @@ fn build_agent_task_input(
         disallowed_tools: Vec::new(),
         cwd: None,
     };
+    #[cfg(test)]
+    apply_workflow_agent_isolation_defaults(&mut task_input, None, Some("none"));
+    #[cfg(not(test))]
     apply_workflow_agent_isolation_defaults(
         &mut task_input,
-        agent_def,
+        _agent_def,
         crate::config::load_arc()
             .isolation
             .as_ref()
@@ -797,19 +864,7 @@ async fn prepare_workflow_agent_worktree(
         return Ok(None);
     }
 
-    let suffix: String = agent_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(12)
-        .collect();
-    let name = format!(
-        "agent-{}",
-        if suffix.is_empty() {
-            "workflow"
-        } else {
-            suffix.as_str()
-        }
-    );
+    let name = workflow_agent_worktree_name(agent_id);
     let cwd = task_input
         .cwd
         .as_deref()
@@ -875,6 +930,21 @@ async fn prepare_workflow_agent_worktree(
             }
         },
     }
+}
+
+fn workflow_agent_worktree_name(agent_id: &str) -> String {
+    let readable: String = agent_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let readable = if readable.is_empty() {
+        "workflow"
+    } else {
+        readable.as_str()
+    };
+    let digest = Sha256::digest(agent_id.as_bytes());
+    format!("agent-{readable}-{}", hex::encode(&digest[..4]))
 }
 
 async fn finish_workflow_agent_worktree(
@@ -1066,6 +1136,14 @@ mod tests {
         assert!(mc <= 16);
     }
 
+    #[test]
+    fn workflow_worktree_names_keep_agent_identity_regression() {
+        let first = workflow_agent_worktree_name("bgwf_wf_12345678:agent_1");
+        let second = workflow_agent_worktree_name("bgwf_wf_12345678:agent_2");
+        assert_ne!(first, second);
+        assert!(first.starts_with("agent-bgwfwf12-"), "{first}");
+    }
+
     /// A provider that returns a fixed text for every stream call. Each agent
     /// dispatch ends after one `Done(EndTurn)`, so the subagent loop returns
     /// the emitted text as the agent's result.
@@ -1213,6 +1291,8 @@ mod tests {
             permission_mode: None,
             forks_parent_context: None,
             background: None,
+            observer: None,
+            observer_message: None,
             color: None,
             effort: None,
             max_turns: None,
@@ -1349,6 +1429,52 @@ mod tests {
             out.error
                 .unwrap()
                 .contains("without calling StructuredOutput")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_partial_failure_is_in_final_recap_regression() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = r#"
+            let failed = null;
+            try {
+                failed = await agent('return structured data', {
+                    schema: {
+                        type: 'object',
+                        properties: { summary: { type: 'string' } },
+                        required: ['summary'],
+                        additionalProperties: false
+                    },
+                    isolation: 'none'
+                });
+            } catch (_) {}
+            const recovered = await agent('recover without a schema', { isolation: 'none' });
+            return { failed, recovered };
+        "#;
+        let mut config = cfg_with_provider(
+            script,
+            tmp.path(),
+            Arc::new(EchoProvider {
+                text: "plain text".into(),
+                calls: AtomicUsize::new(0),
+            }),
+        );
+        let run_id = crate::workflows::generate_run_id();
+        config.run_id = run_id.clone();
+        config.workflow_task_id = format!("bgwf_{run_id}");
+        let out = run_workflow(config).await;
+
+        assert!(
+            out.error.is_none(),
+            "script handled the agent failure: {:?}",
+            out.error
+        );
+        assert_eq!(out.total_agents_dispatched, 2);
+        assert_eq!(out.failed_agents, 1);
+        assert!(
+            out.logs.iter().any(|line| line.contains("1 agent failed")),
+            "partial agent failures must survive into the final recap: {:?}",
+            out.logs
         );
     }
 

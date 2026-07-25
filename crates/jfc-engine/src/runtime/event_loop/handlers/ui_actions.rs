@@ -295,6 +295,7 @@ mod tests {
             provider_history_archive_recall_ids: vec!["provider-history-1".to_owned()],
             rsi_prompt_sections: 0,
             rsi_tool_visibility_rules: 0,
+            raw_request_json: None,
         };
 
         handle_request_metadata(&mut state, meta.clone());

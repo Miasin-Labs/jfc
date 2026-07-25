@@ -1556,6 +1556,46 @@ async fn bracketed_text_paste_is_editable_without_toast_normal() {
     assert!(app.engine.toasts.is_empty());
 }
 
+#[test]
+fn shared_large_paste_shows_claude_style_placeholder_normal() {
+    let mut app = test_app();
+    super::paste::insert_pasted_text_with_mode(&mut app, "one\ntwo\nthree\nfour", true);
+
+    assert_eq!(app.textarea.lines().join("\n"), "[Pasted text #1 +3 lines]");
+    assert_eq!(
+        app.pasted_texts,
+        vec![(
+            "[Pasted text #1 +3 lines]".to_owned(),
+            "one\ntwo\nthree\nfour".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn ctrl_v_falls_back_to_text_when_image_probe_errors_regression() {
+    let mut app = test_app();
+    super::paste::paste_clipboard_with(
+        &mut app,
+        || Err("image backend unavailable".to_owned()),
+        || Ok("clipboard text".to_owned()),
+    );
+
+    assert_eq!(app.textarea.lines().join("\n"), "clipboard text");
+}
+
+#[tokio::test]
+async fn backspace_deletes_new_paste_placeholder_atomically_normal() {
+    let mut app = test_app_with_input("before [Pasted text #1 +3 lines]", 80);
+    app.textarea.move_cursor(CursorMove::End);
+    let (tx, _rx) = channel();
+
+    handle_key(&mut app, key(KeyCode::Backspace), &tx)
+        .await
+        .unwrap();
+
+    assert_eq!(app.textarea.lines().join("\n"), "before ");
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Ctrl+C
 // ─────────────────────────────────────────────────────────────────────
@@ -2443,6 +2483,40 @@ async fn direct_submit_queues_during_compaction_regression() {
 }
 
 #[tokio::test]
+async fn markdown_heading_prompt_is_ingested_instead_of_saved_as_memory_regression() {
+    let mut app = test_app();
+    app.engine.compacting_started_at = Some(std::time::Instant::now());
+    let (tx, _rx) = channel();
+    let prompt = "# GMGN endpoint map\n\nDescribe the endpoint and preserve this body.";
+
+    submit::handle_submit(&mut app, prompt.to_owned(), &tx)
+        .await
+        .unwrap();
+
+    assert_eq!(app.engine.queued_prompts.len(), 1);
+    assert_eq!(app.engine.queued_prompts[0].text, prompt);
+    assert!(app.engine.toasts.is_empty());
+}
+
+#[tokio::test]
+async fn staged_paste_expands_before_prompt_queueing_regression() {
+    let mut app = test_app();
+    app.engine.compacting_started_at = Some(std::time::Instant::now());
+    let (tx, _rx) = channel();
+    let content = "one\ntwo\nthree\nfour";
+    super::paste::insert_pasted_text_with_mode(&mut app, content, true);
+    let placeholder = app.textarea.lines().join("\n");
+
+    submit::handle_submit(&mut app, placeholder, &tx)
+        .await
+        .unwrap();
+
+    assert_eq!(app.engine.queued_prompts.len(), 1);
+    assert_eq!(app.engine.queued_prompts[0].text, content);
+    assert!(app.pasted_texts.is_empty());
+}
+
+#[tokio::test]
 #[serial]
 async fn hash_prefixed_submit_saves_project_context_memory_normal() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2583,6 +2657,30 @@ async fn slash_help_sets_show_help_normal() {
     let mut app = test_app();
     run_slash_command(&mut app, "/help").await;
     assert!(app.show_help);
+}
+
+#[tokio::test]
+async fn slash_usage_opens_native_view_without_queuing_prompt_regression() {
+    let mut app = test_app();
+
+    run_slash_command(&mut app, "/usage").await;
+
+    assert!(app.usage_overlay.visible);
+    assert_eq!(app.usage_overlay.tab, crate::app::UsageTab::Usage);
+    assert!(app.engine.queued_prompts.is_empty());
+    assert!(app.engine.messages.is_empty());
+}
+
+#[tokio::test]
+async fn slash_stats_opens_stats_tab_and_escape_closes_normal() {
+    let mut app = test_app();
+    let (tx, _rx) = channel();
+
+    run_slash_command(&mut app, "/stats").await;
+    assert_eq!(app.usage_overlay.tab, crate::app::UsageTab::Stats);
+
+    handle_key(&mut app, key(KeyCode::Esc), &tx).await.unwrap();
+    assert!(!app.usage_overlay.visible);
 }
 
 #[tokio::test]

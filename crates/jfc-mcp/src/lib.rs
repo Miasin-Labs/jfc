@@ -10,6 +10,7 @@
 
 pub mod protocol;
 pub mod registry;
+pub mod staging;
 pub mod tool_dispatch;
 pub mod tool_permissions;
 pub mod transport;
@@ -20,7 +21,11 @@ use std::collections::HashMap;
 pub use protocol::ToolCallOutcome;
 pub use registry::{
     DispatchError, McpAdvertisedToolMetadata, McpRegistry, McpResource, McpServer, McpServerStatus,
-    build_server, register_servers_from_config, restart_server,
+    approve_server, build_server, register_servers_from_config, restart_server, set_server_roots,
+};
+pub use staging::{
+    StagedInputFile, StagedInputUsed, StagedMcpCall, StagedMcpCallResult, StagedOutputFile,
+    StagedOutputWritten, StagingErrorCode, StagingOutcome, dispatch_staged_mcp_tool,
 };
 pub use tool_dispatch::{
     DEFAULT_DISPATCH_TIMEOUT, dispatch_mcp_tool, dispatch_mcp_tool_with_timeout, is_mcp_tool_name,
@@ -49,8 +54,23 @@ pub struct McpServerConfig {
     pub env_file: Option<std::path::PathBuf>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Optional executable command that prints a JSON object of dynamic HTTP
+    /// headers. Parsed as argv (never passed through a shell) and rerun on
+    /// reconnect so short-lived credentials can rotate.
+    #[serde(default, rename = "headersHelper", alias = "headers_helper")]
+    pub headers_helper: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// Per-server tool-call timeout. Call-site defaults are used when absent.
+    #[serde(default, rename = "requestTimeoutMs", alias = "request_timeout_ms")]
+    pub request_timeout_ms: Option<u64>,
+    /// Filesystem roots exposed through MCP `roots/list`.
+    #[serde(default)]
+    pub roots: Vec<std::path::PathBuf>,
+    /// Set internally for repository-provided servers until the user approves
+    /// them. This cannot be enabled by serialized project configuration.
+    #[serde(skip)]
+    pub requires_approval: bool,
     /// Optional OAuth/client metadata for HTTP MCP servers. The current rmcp
     /// transport still expects callers to supply Authorization headers, but
     /// preserving these aliases keeps config compatible with MCP protected-
@@ -251,6 +271,7 @@ mod tests {
             headers: HashMap::new(),
             url: url.map(str::to_owned),
             oauth: McpOAuthMetadata::default(),
+            ..McpServerConfig::default()
         }
     }
 

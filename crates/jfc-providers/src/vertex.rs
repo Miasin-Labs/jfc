@@ -182,47 +182,23 @@ impl VertexProvider {
     }
 
     pub fn fallback_models() -> Vec<ModelInfo> {
-        // Vertex model ids strip the AWS-style version suffix and use the
-        // bare anthropic name (e.g. `claude-opus-4-5@20251101`).
-        [
-            (
-                "claude-opus-4-5@20251101",
-                "Claude Opus 4.5 (Vertex)",
-                Some(1_000_000),
-                Some(64_000),
-            ),
-            (
-                "claude-opus-4-1@20250805",
-                "Claude Opus 4.1 (Vertex)",
-                Some(200_000),
-                Some(32_000),
-            ),
-            (
-                "claude-sonnet-4-5@20250929",
-                "Claude Sonnet 4.5 (Vertex)",
-                Some(200_000),
-                Some(64_000),
-            ),
-            (
-                "claude-3-7-sonnet@20250219",
-                "Claude Sonnet 3.7 (Vertex)",
-                Some(200_000),
-                Some(64_000),
-            ),
-            (
-                "claude-haiku-4-5@20251001",
-                "Claude Haiku 4.5 (Vertex)",
-                Some(200_000),
-                Some(32_000),
-            ),
-        ]
-        .into_iter()
-        .map(|(id, display, ctx, max_out)| {
-            ModelInfo::new(ModelId::new(id), display, ProviderId::new(PROVIDER_ID))
-                .with_context_window_tokens(ctx)
-                .with_max_output_tokens(max_out)
-        })
-        .collect()
+        jfc_provider::anthropic_model_catalog()
+            .iter()
+            .rev()
+            .filter_map(|metadata| {
+                let id = metadata.provider_ids.vertex?;
+                Some(
+                    ModelInfo::new(
+                        ModelId::new(id),
+                        format!("Claude {} (Vertex)", metadata.display_name),
+                        ProviderId::new(PROVIDER_ID),
+                    )
+                    .with_context_window_tokens(metadata.context_window_tokens)
+                    .with_max_output_tokens(metadata.max_output_tokens as usize)
+                    .with_costs(Some(metadata.input_cost), Some(metadata.output_cost)),
+                )
+            })
+            .collect()
     }
 
     fn endpoint_url(&self, model: &str) -> anyhow::Result<String> {
@@ -299,7 +275,13 @@ impl Provider for VertexProvider {
             );
         }
         let token = self.access_token().await?;
-        let url = self.endpoint_url(options.model.as_str())?;
+        let wire_model = jfc_provider::anthropic_model_metadata(&options.model)
+            .and_then(|metadata| metadata.provider_ids.vertex)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                jfc_provider::normalize_anthropic_model_id(&options.model).into_owned()
+            });
+        let url = self.endpoint_url(&wire_model)?;
 
         // Vertex requires `anthropic_version: vertex-2023-10-16` and forbids
         // the regular `model` field in the body (the model is in the URL).

@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 
-use crate::StreamOptions;
+use crate::{
+    AnthropicModelKind, StreamOptions, anthropic_model_catalog, anthropic_model_metadata,
+    context_suffix,
+};
 
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 pub const LEGACY_ANTHROPIC_THINKING_BUDGET_TOKENS: u32 = 16_384;
@@ -19,7 +22,8 @@ impl ProviderFamily {
     pub fn from_provider_name(provider: &str) -> Self {
         match provider.trim().to_ascii_lowercase().as_str() {
             "anthropic" | "anthropic-oauth" => Self::AnthropicNative,
-            "bedrock" | "vertex" => Self::AnthropicProxy,
+            "bedrock" | "vertex" | "foundry" | "anthropic-aws" | "anthropic_aws" | "mantle"
+            | "gateway" => Self::AnthropicProxy,
             "openai" | "codex" => Self::OpenAiNative,
             "openwebui" | "litellm" | "openrouter" => Self::OpenAiCompatible,
             "gemini" | "antigravity" => Self::Gemini,
@@ -28,7 +32,7 @@ impl ProviderFamily {
     }
 
     pub fn can_send_anthropic_thinking(self) -> bool {
-        matches!(self, Self::AnthropicNative)
+        matches!(self, Self::AnthropicNative | Self::AnthropicProxy)
     }
 
     pub fn can_send_openai_reasoning(self) -> bool {
@@ -68,94 +72,41 @@ pub trait ModelRequestPolicy {
     fn normalized_reasoning_effort<'a>(&self, requested: &'a str) -> Option<Cow<'a, str>>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnthropicModelKind {
-    Fable5,
-    Mythos5,
-    Opus48,
-    Opus47,
-    Opus46,
-    Opus45,
-    Opus41,
-    Opus4,
-    Sonnet46,
-    Sonnet45,
-    Sonnet4,
-    Sonnet37,
-    Haiku45,
-    Haiku35,
-    Unknown,
-}
-
 impl AnthropicModelKind {
     pub fn from_model_id(model: &str) -> Self {
-        let id = bare_model_id(model).to_ascii_lowercase();
-        if id.contains("fable") {
-            Self::Fable5
-        } else if id.contains("mythos") {
-            Self::Mythos5
-        } else if id.contains("opus-4-8") {
-            Self::Opus48
-        } else if id.contains("opus-4-7") {
-            Self::Opus47
-        } else if id.contains("opus-4-6") {
-            Self::Opus46
-        } else if id.contains("opus-4-5") {
-            Self::Opus45
-        } else if id.contains("opus-4-1") {
-            Self::Opus41
-        } else if id.contains("opus-4") {
-            Self::Opus4
-        } else if id.contains("sonnet-4-6") {
-            Self::Sonnet46
-        } else if id.contains("sonnet-4-5") {
-            Self::Sonnet45
-        } else if id.contains("sonnet-4") {
-            Self::Sonnet4
-        } else if id.contains("3-7-sonnet") {
-            Self::Sonnet37
-        } else if id.contains("haiku-4-5") {
-            Self::Haiku45
-        } else if id.contains("3-5-haiku") {
-            Self::Haiku35
-        } else {
-            Self::Unknown
-        }
+        anthropic_model_metadata(model)
+            .map(|metadata| metadata.kind)
+            .or_else(|| {
+                bare_model_id(model)
+                    .to_ascii_lowercase()
+                    .contains("mythos")
+                    .then_some(Self::Mythos5)
+            })
+            .unwrap_or(Self::Unknown)
+    }
+
+    fn metadata(self) -> Option<&'static crate::AnthropicModelMetadata> {
+        anthropic_model_catalog()
+            .iter()
+            .find(|metadata| metadata.kind == self)
     }
 
     pub fn supports_effort(self) -> bool {
-        matches!(
-            self,
-            Self::Fable5
-                | Self::Mythos5
-                | Self::Opus48
-                | Self::Opus47
-                | Self::Opus46
-                | Self::Opus45
-                | Self::Sonnet46
-        )
+        self.metadata()
+            .is_some_and(|metadata| metadata.has_capability("effort"))
     }
 
     /// Whether this model supports effort="max" (Opus 4.6+, Sonnet 4.6, Fable5, Mythos5).
     /// Other effort-capable models clamp max→high.
     pub fn supports_max_effort(self) -> bool {
-        matches!(
-            self,
-            Self::Fable5
-                | Self::Mythos5
-                | Self::Opus48
-                | Self::Opus47
-                | Self::Opus46
-                | Self::Sonnet46
-        )
+        self.metadata()
+            .is_some_and(|metadata| metadata.has_capability("max_effort"))
     }
 
     /// Whether this model supports effort="xhigh" (Opus 4.7+, Fable5, Mythos5).
     pub fn supports_xhigh_effort(self) -> bool {
-        matches!(
-            self,
-            Self::Fable5 | Self::Mythos5 | Self::Opus48 | Self::Opus47
-        )
+        self.metadata()
+            .is_some_and(|metadata| metadata.has_capability("xhigh_effort"))
     }
 
     pub fn normalized_effort(self, requested: &str) -> Option<&str> {
@@ -191,51 +142,23 @@ impl AnthropicModelKind {
 
 impl ModelRequestPolicy for AnthropicModelKind {
     fn context_window_tokens(&self) -> Option<usize> {
-        Some(match self {
-            // 1M context: Fable5, Mythos5, Opus 4.6+, Sonnet 4.6
-            Self::Fable5
-            | Self::Mythos5
-            | Self::Opus48
-            | Self::Opus47
-            | Self::Opus46
-            | Self::Sonnet46 => 1_000_000,
-            // 200K context: everything else
-            Self::Opus45
-            | Self::Opus41
-            | Self::Opus4
-            | Self::Sonnet45
-            | Self::Sonnet4
-            | Self::Sonnet37
-            | Self::Haiku45
-            | Self::Haiku35
-            | Self::Unknown => 200_000,
-        })
+        self.metadata()
+            .map(|metadata| metadata.context_window_tokens)
     }
 
     fn max_output_tokens(&self) -> Option<u32> {
-        Some(match self {
-            Self::Fable5
-            | Self::Mythos5
-            | Self::Opus48
-            | Self::Opus47
-            | Self::Opus46
-            | Self::Sonnet46 => 128_000,
-            Self::Opus45 | Self::Sonnet45 | Self::Sonnet4 | Self::Sonnet37 => 64_000,
-            Self::Opus41 | Self::Opus4 | Self::Haiku45 => 32_000,
-            Self::Haiku35 => 8_192,
-            Self::Unknown => return None,
-        })
+        self.metadata().map(|metadata| metadata.max_output_tokens)
     }
 
     fn thinking_mode(&self) -> ModelThinkingMode {
         match self {
             Self::Fable5
-            | Self::Mythos5
             | Self::Opus48
             | Self::Opus47
             | Self::Opus46
+            | Self::Sonnet5
             | Self::Sonnet46 => ModelThinkingMode::AnthropicAdaptive,
-            Self::Sonnet45 | Self::Sonnet4 | Self::Sonnet37 => {
+            Self::Sonnet45 | Self::Sonnet4 | Self::Sonnet37 | Self::Sonnet35 => {
                 ModelThinkingMode::AnthropicLegacyBudget {
                     budget_tokens: LEGACY_ANTHROPIC_THINKING_BUDGET_TOKENS,
                 }
@@ -243,6 +166,7 @@ impl ModelRequestPolicy for AnthropicModelKind {
             Self::Opus45
             | Self::Opus41
             | Self::Opus4
+            | Self::Mythos5
             | Self::Haiku45
             | Self::Haiku35
             | Self::Unknown => ModelThinkingMode::Off,
@@ -361,6 +285,7 @@ pub struct ModelRequestProfile {
     pub model: KnownModel,
     catalog_context_window_tokens: Option<usize>,
     catalog_max_output_tokens: Option<u32>,
+    explicit_context_window_tokens: Option<usize>,
 }
 
 impl ModelRequestProfile {
@@ -377,6 +302,7 @@ impl ModelRequestProfile {
             catalog_context_window_tokens,
             catalog_max_output_tokens: catalog_max_output_tokens
                 .and_then(|v| u32::try_from(v).ok()),
+            explicit_context_window_tokens: context_suffix(model),
         }
     }
 
@@ -395,7 +321,8 @@ impl ModelRequestProfile {
 
 impl ModelRequestPolicy for ModelRequestProfile {
     fn context_window_tokens(&self) -> Option<usize> {
-        self.catalog_context_window_tokens
+        self.explicit_context_window_tokens
+            .or(self.catalog_context_window_tokens)
             .or_else(|| match self.model {
                 KnownModel::Anthropic(model) => model.context_window_tokens(),
                 KnownModel::OpenAi(model) => model.context_window_tokens(),
@@ -423,9 +350,7 @@ impl ModelRequestPolicy for ModelRequestProfile {
 
     fn normalized_reasoning_effort<'a>(&self, requested: &'a str) -> Option<Cow<'a, str>> {
         match self.model {
-            KnownModel::Anthropic(model)
-                if matches!(self.provider, ProviderFamily::AnthropicNative) =>
-            {
+            KnownModel::Anthropic(model) if self.provider.can_send_anthropic_thinking() => {
                 model.normalized_reasoning_effort(requested)
             }
             KnownModel::OpenAi(model) if self.provider.can_send_openai_reasoning() => {

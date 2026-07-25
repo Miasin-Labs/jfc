@@ -16,6 +16,14 @@ pub fn handle_workflow_progress(state: &mut EngineState, ev: WorkflowProgressEve
         bt.last_activity_at = std::time::Instant::now();
     }
     match ev {
+        WorkflowProgressEvent::Registered {
+            task_id,
+            run_id,
+            meta,
+            script_path,
+        } => {
+            apply_registered(state, task_id.as_str(), run_id, meta, script_path);
+        }
         WorkflowProgressEvent::Phase { task_id, title } => {
             apply_phase(state, task_id.as_str(), title);
         }
@@ -45,10 +53,39 @@ pub fn handle_workflow_progress(state: &mut EngineState, ev: WorkflowProgressEve
         } => {
             apply_agent_failed(state, task_id.as_str(), index, error);
         }
+        WorkflowProgressEvent::Finished {
+            task_id,
+            failed_agents,
+            errored,
+            cancelled,
+        } => {
+            apply_finished(
+                state,
+                task_id.as_str(),
+                failed_agents,
+                errored,
+                cancelled,
+            );
+        }
         WorkflowProgressEvent::Log { task_id, message } => {
             apply_log(state, task_id.as_str(), message);
         }
     }
+}
+
+fn apply_registered(
+    state: &mut EngineState,
+    task_id: &str,
+    run_id: String,
+    meta: WorkflowMeta,
+    script_path: Option<std::path::PathBuf>,
+) {
+    let Some(task) = state.background_tasks.get_mut(task_id) else {
+        return;
+    };
+    let mut progress = WorkflowTaskProgress::new(run_id, meta);
+    progress.script_path = script_path;
+    task.workflow_progress = Some(progress);
 }
 
 fn apply_phase(state: &mut EngineState, task_id: &str, title: String) {
@@ -132,6 +169,29 @@ fn apply_log(state: &mut EngineState, task_id: &str, message: String) {
     };
     let wfp = ensure_progress(bt, task_id);
     wfp.logs.push(message);
+}
+
+fn apply_finished(
+    state: &mut EngineState,
+    task_id: &str,
+    failed_agents: u32,
+    errored: bool,
+    cancelled: bool,
+) {
+    let Some(task) = state.background_tasks.get_mut(task_id) else {
+        return;
+    };
+    let progress = ensure_progress(task, task_id);
+    progress.status = if cancelled {
+        crate::workflows::WorkflowRunStatus::Killed
+    } else if errored {
+        crate::workflows::WorkflowRunStatus::Failed
+    } else if failed_agents > 0 {
+        crate::workflows::WorkflowRunStatus::Partial
+    } else {
+        crate::workflows::WorkflowRunStatus::Completed
+    };
+    progress.ended_at = Some(std::time::Instant::now());
 }
 
 /// Return `bt.workflow_progress`, initialising it from the task's description

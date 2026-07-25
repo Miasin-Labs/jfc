@@ -158,6 +158,8 @@ fn skills_are_progressively_disclosed() -> EvalCaseReport {
         permission_mode: None,
         forks_parent_context: None,
         background: None,
+        observer: None,
+        observer_message: None,
         color: None,
         effort: None,
         max_turns: None,

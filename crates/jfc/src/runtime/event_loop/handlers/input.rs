@@ -48,16 +48,8 @@ pub(crate) async fn handle_term_event(
             // succeeds we attach it; otherwise fall through to
             // the text path. Mirrors v126's clipboard-image flow.
             let attached_image = match attachments::read_clipboard_image() {
-                Ok(Some((att, w, h))) => {
-                    app.image_counter += 1;
-                    let id = app.image_counter;
-                    app.pasted_images.push(crate::attachments::PastedContent {
-                        id,
-                        attachment: att,
-                        width: w,
-                        height: h,
-                    });
-                    app.textarea.insert_str(format!("[Image #{id}]"));
+                Ok(Some(image)) => {
+                    input::paste::attach_image(app, image);
                     true
                 }
                 Ok(None) => false,
@@ -104,32 +96,12 @@ pub(crate) async fn handle_term_event(
                     );
                 }
             }
-            // Always insert the text — it may be a path or
-            // contextual prose alongside the image. Large pastes should
-            // remain editable in the textarea instead of collapsing to an
-            // opaque chip. Preserve the old chip behavior behind a config
-            // gate for users who prefer it.
+            // Always insert text when present: it may be a path or contextual
+            // prose alongside an image. The shared paste path normalizes
+            // terminal escapes/newlines and stages large content behind a
+            // visible, editable placeholder.
             if !attached_image || !text.is_empty() {
-                const PASTE_LINE_THRESHOLD: usize = 8;
-                const PASTE_CHAR_THRESHOLD: usize = 400;
-                let n_lines = text.lines().count();
-                let n_chars = text.chars().count();
-                let collapse = jfc_engine::config::load_arc().collapse_large_pastes;
-                if collapse && (n_lines > PASTE_LINE_THRESHOLD || n_chars > PASTE_CHAR_THRESHOLD) {
-                    app.paste_counter += 1;
-                    let id = app.paste_counter;
-                    let label = if n_lines > 1 {
-                        format!("{n_lines} lines")
-                    } else {
-                        format!("{n_chars} chars")
-                    };
-                    let chip = format!("[Pasted #{id} · {label}]");
-                    app.pasted_texts.push((chip.clone(), text.clone()));
-                    app.textarea.insert_str(&chip);
-                } else {
-                    // Insert full pasted text so it stays editable.
-                    app.textarea.insert_str(&text);
-                }
+                input::paste::insert_pasted_text(app, &text);
             }
         }
         Event::Mouse(mouse) => {
@@ -171,12 +143,20 @@ async fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, _tx: &
     use crossterm::event::{MouseButton, MouseEventKind};
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_velocity = 0.0;
-            app.scroll_up(3);
+            if info_sidebar_contains(app, mouse.column, mouse.row) {
+                app.info_sidebar.scroll = app.info_sidebar.scroll.saturating_sub(3);
+            } else {
+                app.scroll_velocity = 0.0;
+                app.scroll_up(3);
+            }
         }
         MouseEventKind::ScrollDown => {
-            app.scroll_velocity = 0.0;
-            app.scroll_down(3);
+            if info_sidebar_contains(app, mouse.column, mouse.row) {
+                app.info_sidebar.scroll = app.info_sidebar.scroll.saturating_add(3);
+            } else {
+                app.scroll_velocity = 0.0;
+                app.scroll_down(3);
+            }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             // Drag inside the transcript extends a text selection (copy-on-
@@ -307,6 +287,12 @@ async fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, _tx: &
     }
 }
 
+fn info_sidebar_contains(app: &App, column: u16, row: u16) -> bool {
+    app.info_sidebar_rect.borrow().as_ref().is_some_and(|area| {
+        column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+    })
+}
+
 /// Handle left-click: tool toggle, toast dismiss, sidebar session load.
 async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
     // First, see if the click landed on a tool block —
@@ -422,7 +408,9 @@ async fn handle_left_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
                     && let Some(messages) = jfc_engine::session::load_session(&id).await
                 {
                     app.engine.messages = messages;
-                    app.switch_session(Some(id));
+                    app.switch_session(Some(id.clone()));
+                    app.engine.current_session_title =
+                        jfc_engine::session::load_session_title(&id).await;
                     app.engine.streaming_text = String::new();
                     app.engine.streaming_reasoning = String::new();
                     app.engine.streaming_response_bytes = 0;
@@ -626,6 +614,47 @@ mod tests {
         .await;
         assert_eq!(app.scroll_offset, 8);
         assert_eq!(app.scroll_velocity, 0.0);
+    }
+
+    #[tokio::test]
+    async fn mouse_wheel_over_info_sidebar_scrolls_inspector_only_regression() {
+        let mut app = App::new(Arc::new(StubProvider), "test-model");
+        app.total_lines = 100;
+        app.viewport_height = 20;
+        app.scroll_offset = 8;
+        app.info_sidebar.scroll = 5;
+        *app.info_sidebar_rect.borrow_mut() = Some(ratatui::layout::Rect::new(70, 0, 30, 20));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
+        handle_mouse(
+            &mut app,
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::ScrollUp,
+                column: 80,
+                row: 10,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            },
+            &tx,
+        )
+        .await;
+
+        assert_eq!(app.info_sidebar.scroll, 2);
+        assert_eq!(app.scroll_offset, 8);
+
+        handle_mouse(
+            &mut app,
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::ScrollDown,
+                column: 80,
+                row: 10,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            },
+            &tx,
+        )
+        .await;
+
+        assert_eq!(app.info_sidebar.scroll, 5);
+        assert_eq!(app.scroll_offset, 8);
     }
 
     // Regression: clicking a toast's top border row maps to `local == 0`. The

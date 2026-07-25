@@ -206,12 +206,13 @@ pub fn resolve_local_advisor_provider(
 pub fn resolve_local_advisor_provider_targets(
     providers: &[Arc<dyn Provider>],
     active_provider: Arc<dyn Provider>,
+    active_model: &ModelId,
     configured_provider: Option<&ProviderId>,
     advisor_model: &ModelId,
 ) -> Result<Vec<LocalAdvisorProviderTarget>, String> {
     let primary = resolve_local_advisor_provider(
         providers,
-        active_provider,
+        Arc::clone(&active_provider),
         configured_provider,
         advisor_model,
     )?;
@@ -234,6 +235,23 @@ pub fn resolve_local_advisor_provider_targets(
         targets.push(LocalAdvisorProviderTarget::new(
             resolved.provider,
             resolved.model,
+        ));
+    }
+
+    // Last resort: the provider/model the user is actively talking to. The
+    // advisor model is inherited from the *startup* model and never re-synced on
+    // a mid-session model switch, so it can point at a provider the session no
+    // longer authenticates against — e.g. a bare startup id that heuristically
+    // routed to the OpenWebUI catch-all proxy. The active target is by
+    // definition reachable, so it keeps the advisor alive instead of hard-failing.
+    if !active_model.as_str().is_empty()
+        && !targets
+            .iter()
+            .any(|target| target.same_provider_model(active_provider.as_ref(), active_model))
+    {
+        targets.push(LocalAdvisorProviderTarget::new(
+            active_provider,
+            active_model.clone(),
         ));
     }
 
@@ -836,7 +854,12 @@ fn advisor_error_allows_model_fallback(error: &anyhow::Error) -> bool {
         if let Some(provider_error) = cause.downcast_ref::<ProviderError>() {
             return matches!(
                 provider_error.kind,
-                ProviderErrorKind::Permission
+                // Authentication belongs here: the advisor is a best-effort side
+                // call, so a provider we can't authenticate against (stale proxy
+                // token, expired key) must degrade to the next target rather than
+                // failing the whole advisor tool.
+                ProviderErrorKind::Authentication
+                    | ProviderErrorKind::Permission
                     | ProviderErrorKind::RateLimit
                     | ProviderErrorKind::Overloaded
                     | ProviderErrorKind::NotFound
@@ -855,6 +878,9 @@ fn advisor_error_allows_model_fallback(error: &anyhow::Error) -> bool {
         || message.contains("model access denied")
         || message.contains("not enabled on your anthropic account")
         || message.contains("model not found")
+        || message.contains("unauthorized")
+        || message.contains("authentication_error")
+        || message.contains("invalid api key")
 }
 
 #[cfg(test)]
@@ -1080,6 +1106,7 @@ mod tests {
         let targets = resolve_local_advisor_provider_targets(
             &providers,
             anthropic,
+            &ModelId::new("claude-opus-4-8"),
             None,
             &ModelId::new("claude-opus-4-8"),
         )
@@ -1090,6 +1117,56 @@ mod tests {
         assert_eq!(targets[0].model.as_str(), "claude-opus-4-8");
         assert_eq!(targets[1].provider.name(), "openai");
         assert_eq!(targets[1].model.as_str(), "gpt-5.5");
+    }
+
+    /// Regression: on a non-Anthropic session the advisor model is still the one
+    /// inherited at startup, which can route to a proxy provider the session has
+    /// no credentials for. The active provider/model must be appended as a
+    /// last-resort target so the advisor has somewhere reachable to land.
+    #[test]
+    fn resolve_local_advisor_provider_targets_appends_active_model_robust() {
+        let proxy: Arc<dyn Provider> = Arc::new(FakeProvider::catalog("openwebui", &["opus[1m]"]));
+        let gemini: Arc<dyn Provider> = Arc::new(FakeProvider::catalog("gemini", &["gemini-3-pro"]));
+        let providers = vec![proxy, gemini.clone()];
+
+        let targets = resolve_local_advisor_provider_targets(
+            &providers,
+            gemini,
+            &ModelId::new("gemini-3-pro"),
+            None,
+            &ModelId::new("opus[1m]"),
+        )
+        .expect("targets should resolve");
+
+        // The static gpt-5.5 fallback still lands on the same unauthenticated
+        // proxy (it is the catch-all for unknown ids), so the active provider is
+        // the only reachable target — and it must be present.
+        let last = targets.last().expect("at least one target");
+        assert_eq!(last.provider.name(), "gemini");
+        assert_eq!(last.model.as_str(), "gemini-3-pro");
+        assert_eq!(targets[0].provider.name(), "openwebui");
+        assert_eq!(targets[0].model.as_str(), "opus[1m]");
+    }
+
+    /// Regression: the active target is not duplicated when it already appears
+    /// as the primary or a static fallback.
+    #[test]
+    fn resolve_local_advisor_provider_targets_dedups_active_model_robust() {
+        let openai: Arc<dyn Provider> = Arc::new(FakeProvider::catalog("openai", &["gpt-5.5"]));
+        let providers = vec![openai.clone()];
+
+        let targets = resolve_local_advisor_provider_targets(
+            &providers,
+            openai,
+            &ModelId::new("gpt-5.5"),
+            None,
+            &ModelId::new("gpt-5.5"),
+        )
+        .expect("targets should resolve");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].provider.name(), "openai");
+        assert_eq!(targets[0].model.as_str(), "gpt-5.5");
     }
 
     /// Normal: render_snapshot produces role-prefixed lines for text parts.
@@ -1263,6 +1340,56 @@ mod tests {
         );
         assert_eq!(session.model.as_str(), "gpt-5.5");
         assert_eq!(session.tokens_used, 25);
+    }
+
+    /// Regression: a 401 from the advisor's primary provider must fall through to
+    /// the next target instead of hard-failing the Advisor tool. Reproduces the
+    /// observed `Local advisor error: openwebui API error 401: 401 Unauthorized`
+    /// on a session whose active model is non-Anthropic while the advisor is
+    /// still pinned to the startup model's proxy provider.
+    #[tokio::test]
+    async fn ask_advisor_falls_back_on_unauthorized_primary_robust() {
+        let primary: Arc<dyn Provider> = Arc::new(FakeProvider::with_result(
+            "openwebui",
+            &["opus[1m]"],
+            Err(anyhow::Error::new(ProviderError::api_status(
+                "openwebui",
+                401,
+                r#"{"detail":"401 Unauthorized"}"#,
+            ))),
+        ));
+        let fallback: Arc<dyn Provider> = Arc::new(FakeProvider::with_result(
+            "openai",
+            &["gpt-5.5"],
+            Ok(CompletionResponse {
+                content: "fallback advice".to_owned(),
+                usage: jfc_provider::TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 5,
+                    thinking_tokens: None,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                },
+                context_signals: None,
+                reasoning: None,
+            }),
+        ));
+        let targets = vec![
+            LocalAdvisorProviderTarget::new(primary, ModelId::new("opus[1m]")),
+            LocalAdvisorProviderTarget::new(fallback, ModelId::new("gpt-5.5")),
+        ];
+        let mut session = AdvisorSession::new("opus[1m]").with_budget(1_000);
+
+        let reply = ask_advisor_with_fallback(&targets, &mut session, "review".into(), &[])
+            .await
+            .expect("401 on the primary advisor target must fall back, not fail");
+
+        assert_eq!(reply.content, "fallback advice");
+        assert_eq!(reply.model.as_str(), "gpt-5.5");
+        assert_eq!(
+            reply.fallback_from.as_ref().map(|m| m.as_str()),
+            Some("opus[1m]")
+        );
     }
 
     /// Robust: ordinary provider failures still surface instead of falling back,

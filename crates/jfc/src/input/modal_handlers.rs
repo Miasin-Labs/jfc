@@ -12,6 +12,9 @@ pub(super) async fn handle_modal_key(
     key: event::KeyEvent,
     tx: &tokio::sync::mpsc::Sender<EngineEvent>,
 ) -> bool {
+    if handle_usage_overlay_key(app, key) {
+        return true;
+    }
     if handle_task_panel_key(app, key) {
         return true;
     }
@@ -28,6 +31,42 @@ pub(super) async fn handle_modal_key(
         return true;
     }
     false
+}
+
+fn handle_usage_overlay_key(app: &mut App, key: event::KeyEvent) -> bool {
+    if !app.usage_overlay.visible {
+        return false;
+    }
+    use crate::app::UsageTab;
+    match key.code {
+        KeyCode::Esc => app.usage_overlay.close(),
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+            let tab = match app.usage_overlay.tab {
+                UsageTab::Usage => UsageTab::Stats,
+                UsageTab::Stats => UsageTab::Usage,
+            };
+            app.usage_overlay.select(tab);
+        }
+        KeyCode::Char('u') => app.usage_overlay.select(UsageTab::Usage),
+        KeyCode::Char('s') => app.usage_overlay.select(UsageTab::Stats),
+        KeyCode::Char('r') => app.engine.anthropic_snapshot_refreshed_at = None,
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.usage_overlay.scroll = app.usage_overlay.scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.usage_overlay.scroll = app.usage_overlay.scroll.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            app.usage_overlay.scroll = app.usage_overlay.scroll.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            app.usage_overlay.scroll = app.usage_overlay.scroll.saturating_add(10);
+        }
+        KeyCode::Home | KeyCode::Char('g') => app.usage_overlay.scroll = 0,
+        KeyCode::End | KeyCode::Char('G') => app.usage_overlay.scroll = u16::MAX,
+        _ => {}
+    }
+    true
 }
 
 fn handle_task_panel_key(app: &mut App, key: event::KeyEvent) -> bool {
@@ -193,7 +232,9 @@ async fn handle_sidebar_key(app: &mut App, key: event::KeyEvent) -> bool {
                 && let Some(messages) = jfc_engine::session::load_session(&id).await
             {
                 app.engine.messages = messages;
-                app.switch_session(Some(id));
+                app.switch_session(Some(id.clone()));
+                app.engine.current_session_title =
+                    jfc_engine::session::load_session_title(&id).await;
                 app.engine.streaming_text.clear();
                 app.engine.streaming_reasoning.clear();
                 app.engine.streaming_response_bytes = 0;

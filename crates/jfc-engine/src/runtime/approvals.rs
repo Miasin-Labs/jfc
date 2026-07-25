@@ -68,6 +68,7 @@ pub fn dispatch_approved_tools(
         stream::ToolBatchDispatch {
             tx: tx.clone(),
             dedup: Arc::clone(&state.dedup_cache),
+            cwd: std::path::PathBuf::from(&state.cwd),
             task_store: Some(Arc::clone(&state.task_store)),
             active_team_name: state.team_context.team_name.clone(),
             current_session_id: state

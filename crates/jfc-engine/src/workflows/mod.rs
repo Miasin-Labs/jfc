@@ -29,5 +29,6 @@ pub use registry::{
 pub use runner::{WorkflowOutcome, WorkflowRunConfig, run_workflow};
 pub use task::{
     AgentProgress, AgentStatus, WorkflowRunStatus, WorkflowTaskProgress, WorkflowTaskState,
-    generate_run_id,
+    cancel_active_workflow, generate_run_id, register_active_workflow,
+    unregister_active_workflow,
 };

@@ -26,6 +26,7 @@ pub enum TransportError {
 }
 
 /// Send half of a transport.
+#[derive(Clone)]
 pub struct TransportSender {
     tx: mpsc::Sender<RemoteFrame>,
 }

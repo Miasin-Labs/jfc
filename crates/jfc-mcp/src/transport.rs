@@ -41,7 +41,7 @@ mod trace;
 pub use config::{SpawnConfig, TransportKind};
 pub use error::RequestError;
 use error::map_service_error;
-use handler::JfcClientHandler;
+use handler::{JfcClientHandler, RootStore};
 
 type StderrRing = Arc<Mutex<std::collections::VecDeque<String>>>;
 
@@ -57,6 +57,7 @@ struct TransportInner {
     client: RunningService<RoleClient, JfcClientHandler>,
     has_auth_header: bool,
     stderr_ring: StderrRing,
+    roots: RootStore,
 }
 
 impl Transport {
@@ -160,6 +161,25 @@ impl Transport {
     pub async fn recent_stderr(&self) -> Vec<String> {
         let guard = self.inner.stderr_ring.lock().await;
         guard.iter().cloned().collect()
+    }
+
+    /// Replace the roots returned by `roots/list` and notify the server when
+    /// the effective set changed.
+    pub async fn update_roots(&self, paths: &[std::path::PathBuf]) -> Result<(), RequestError> {
+        let next = handler::roots(paths);
+        {
+            let mut roots = self.inner.roots.write().await;
+            if *roots == next {
+                return Ok(());
+            }
+            *roots = next;
+        }
+        self.inner
+            .client
+            .peer()
+            .notify_roots_list_changed()
+            .await
+            .map_err(|error| map_service_error(error, self.inner.has_auth_header))
     }
 
     /// Raw JSON-RPC escape hatch. The `rmcp` SDK does not expose a generic

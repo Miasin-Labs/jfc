@@ -500,6 +500,62 @@ pub async fn set_session_title(session_id: &SessionId, title: &str) {
     info!(target: "jfc::session", session_id = session_id_str, "session title updated in DB");
 }
 
+/// Load the persisted resolved title for the active-session UI surfaces.
+pub async fn load_session_title(session_id: &SessionId) -> Option<String> {
+    load_session_header_from_db(session_id.as_str())
+        .await
+        .and_then(|row| row.title)
+        .filter(|title| !title.trim().is_empty())
+}
+
+/// Persist an AI title only while the catalog title is empty. Returning the
+/// existing value makes `/rename` win even if it races an in-flight title call.
+pub async fn set_ai_session_title_if_empty(
+    session_id: &SessionId,
+    generated_title: &str,
+) -> Option<String> {
+    let session_id_str = session_id.as_str().to_owned();
+    let generated_title = generated_title.to_owned();
+    for attempt in 0..3 {
+        let id = session_id_str.clone();
+        let candidate = generated_title.clone();
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        let result = jfc_knowledge::block_on_knowledge(async move {
+            let store = jfc_knowledge::KnowledgeStore::open_default().await?;
+            let Some(mut row) = store.get_session(&id).await? else {
+                return Ok::<Option<String>, jfc_knowledge::KnowledgeError>(None);
+            };
+            if row
+                .title
+                .as_deref()
+                .is_none_or(|title| title.trim().is_empty())
+            {
+                row.title = Some(candidate);
+                row.updated_at = Some(updated_at);
+                store.upsert_session(&row).await?;
+            }
+            Ok(row.title)
+        });
+        match result {
+            Ok(Some(title)) => return Some(title),
+            Ok(None) if attempt < 2 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Ok(None) => return None,
+            Err(error) => {
+                warn!(
+                    target: "jfc::session",
+                    session_id = %session_id_str,
+                    error = %error,
+                    "AI session title DB update failed"
+                );
+                return None;
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod disk_io_tests {
     use super::super::deserialize::{
@@ -834,6 +890,32 @@ mod disk_io_tests {
         let meta = load_session_metadata(&id).await.expect("loaded");
         assert_eq!(meta.title.as_deref(), Some("My custom title"));
         assert_eq!(meta.display_title(), "My custom title");
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn ai_session_title_only_fills_an_empty_title_regression() {
+        let _g = TempConfigHome::new();
+        let messages = vec![ChatMessage::user("Diagnose the stream".into())];
+
+        let unnamed = SessionId::new("ses_20260506_ai_empty");
+        save_session(&unnamed, &messages, Some("/tmp"), None).await;
+        assert_eq!(
+            set_ai_session_title_if_empty(&unnamed, "Diagnose Frozen Stream").await,
+            Some("Diagnose Frozen Stream".to_owned())
+        );
+
+        let renamed = SessionId::new("ses_20260506_ai_renamed");
+        save_session(&renamed, &messages, Some("/tmp"), None).await;
+        set_session_title(&renamed, "My Manual Name").await;
+        assert_eq!(
+            set_ai_session_title_if_empty(&renamed, "Late AI Name").await,
+            Some("My Manual Name".to_owned())
+        );
+        assert_eq!(
+            load_session_title(&renamed).await.as_deref(),
+            Some("My Manual Name")
+        );
     }
 
     // Robust: set_session_title on a non-existent id is a no-op (does not

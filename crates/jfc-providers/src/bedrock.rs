@@ -25,11 +25,13 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use async_trait::async_trait;
+use futures::stream;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use jfc_provider::{
-    EventStream, ModelId, ModelInfo, Provider, ProviderId, ProviderMessage, StreamConvention,
-    StreamEvent, StreamOptions,
+    EventStream, ModelId, ModelInfo, Provider, ProviderId, ProviderMessage, StopReason,
+    StreamConvention, StreamEvent, StreamOptions,
 };
 
 const PROVIDER_ID: &str = "bedrock";
@@ -147,49 +149,182 @@ impl BedrockProvider {
     /// v2.1.132 wizard's default set. Real users may have custom inference
     /// profiles — those flow through `inference_profile` in the TOML config.
     pub fn fallback_models() -> Vec<ModelInfo> {
-        // Bedrock model ids use AWS's `anthropic.claude-…-v1:0` convention.
-        // The display name mirrors the picker entry from
-        // `crate::anthropic_models`.
-        [
-            (
-                "anthropic.claude-opus-4-5-20251101-v1:0",
-                "Claude Opus 4.5 (Bedrock)",
-                Some(1_000_000),
-                Some(64_000),
-            ),
-            (
-                "anthropic.claude-opus-4-1-20250805-v1:0",
-                "Claude Opus 4.1 (Bedrock)",
-                Some(200_000),
-                Some(32_000),
-            ),
-            (
-                "anthropic.claude-sonnet-4-5-20250929-v1:0",
-                "Claude Sonnet 4.5 (Bedrock)",
-                Some(200_000),
-                Some(64_000),
-            ),
-            (
-                "anthropic.claude-3-7-sonnet-20250219-v1:0",
-                "Claude Sonnet 3.7 (Bedrock)",
-                Some(200_000),
-                Some(64_000),
-            ),
-            (
-                "anthropic.claude-haiku-4-5-20251001-v1:0",
-                "Claude Haiku 4.5 (Bedrock)",
-                Some(200_000),
-                Some(32_000),
-            ),
-        ]
-        .into_iter()
-        .map(|(id, display, ctx, max_out)| {
-            ModelInfo::new(ModelId::new(id), display, ProviderId::new(PROVIDER_ID))
-                .with_context_window_tokens(ctx)
-                .with_max_output_tokens(max_out)
-        })
-        .collect()
+        jfc_provider::anthropic_model_catalog()
+            .iter()
+            .rev()
+            .filter_map(|metadata| {
+                let id = metadata.provider_ids.bedrock?;
+                Some(
+                    ModelInfo::new(
+                        ModelId::new(id),
+                        format!("Claude {} (Bedrock)", metadata.display_name),
+                        ProviderId::new(PROVIDER_ID),
+                    )
+                    .with_context_window_tokens(metadata.context_window_tokens)
+                    .with_max_output_tokens(metadata.max_output_tokens as usize)
+                    .with_costs(Some(metadata.input_cost), Some(metadata.output_cost)),
+                )
+            })
+            .collect()
     }
+}
+
+struct BedrockTempFiles {
+    request: PathBuf,
+    response: PathBuf,
+}
+
+impl BedrockTempFiles {
+    fn new() -> Self {
+        let id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir();
+        Self {
+            request: dir.join(format!("jfc-bedrock-{id}.request.json")),
+            response: dir.join(format!("jfc-bedrock-{id}.response.json")),
+        }
+    }
+}
+
+impl Drop for BedrockTempFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.request);
+        let _ = std::fs::remove_file(&self.response);
+    }
+}
+
+fn build_body(messages: &[ProviderMessage], options: &StreamOptions) -> Value {
+    let mut body = json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": options.max_tokens,
+        "messages": crate::sse::build_messages(messages),
+    });
+    if let Some(system) = &options.system {
+        body["system"] = json!(system);
+    }
+    if !options.tools.is_empty() {
+        body["tools"] = crate::sse::build_tools(&options.tools);
+    }
+    if options.adaptive_thinking {
+        body["thinking"] = json!({ "type": "adaptive" });
+    } else if let Some(budget) = options.thinking_budget {
+        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+    } else {
+        if let Some(temperature) = options.temperature {
+            body["temperature"] = json!(temperature);
+        }
+        if let Some(top_p) = options.top_p {
+            body["top_p"] = json!(top_p);
+        }
+    }
+    body
+}
+
+fn parse_stop_reason(value: Option<&str>) -> StopReason {
+    match value {
+        Some("end_turn") => StopReason::EndTurn,
+        Some("tool_use") => StopReason::ToolUse,
+        Some("max_tokens") => StopReason::MaxTokens,
+        Some("stop_sequence") => StopReason::StopSequence,
+        Some("pause_turn") => StopReason::PauseTurn,
+        Some("refusal") => StopReason::Refusal,
+        Some(other) => StopReason::Other(other.to_owned()),
+        None => StopReason::EndTurn,
+    }
+}
+
+fn response_events(response: &Value) -> anyhow::Result<Vec<StreamEvent>> {
+    let mut events = Vec::new();
+    if let Some(id) = response.get("id").and_then(Value::as_str) {
+        events.push(StreamEvent::ResponseMetadata {
+            response_id: id.to_owned(),
+            input_tokens: response
+                .pointer("/usage/input_tokens")
+                .and_then(Value::as_u64),
+        });
+    }
+    for (index, block) in response
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => events.push(StreamEvent::TextDone {
+                index,
+                text: block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }),
+            Some("thinking") => events.push(StreamEvent::ThinkingDone {
+                index,
+                text: block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                signature: block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            }),
+            Some("redacted_thinking") => events.push(StreamEvent::RedactedThinkingDone {
+                index,
+                data: block
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }),
+            Some("tool_use") => events.push(StreamEvent::ToolDone {
+                index,
+                tool_name: block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                tool_use_id: block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                input_json: serde_json::to_string(block.get("input").unwrap_or(&Value::Null))?,
+                thought_signature: None,
+            }),
+            _ => {}
+        }
+    }
+    if let Some(usage) = response.get("usage") {
+        events.push(StreamEvent::Usage {
+            input_tokens: usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_default(),
+            output_tokens: usage
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_default(),
+            thinking_tokens: None,
+            cache_read_tokens: usage
+                .get("cache_read_input_tokens")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_default(),
+            cache_write_tokens: usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_default(),
+        });
+    }
+    events.push(StreamEvent::Done {
+        stop_reason: parse_stop_reason(response.get("stop_reason").and_then(Value::as_str)),
+    });
+    Ok(events)
 }
 
 impl Default for BedrockProvider {
@@ -220,20 +355,62 @@ impl Provider for BedrockProvider {
 
     async fn stream(
         &self,
-        _messages: Vec<ProviderMessage>,
-        _options: &StreamOptions,
+        messages: Vec<ProviderMessage>,
+        options: &StreamOptions,
     ) -> anyhow::Result<EventStream> {
-        // The streaming path is intentionally stubbed: the AWS event-stream
-        // protocol (vnd.amazon.eventstream) needs custom framing that's not
-        // worth the maintenance burden for this iteration. The picker will
-        // surface the models, the router will pick this provider, and the
-        // user gets a clean error pointing them at the wizard or the OpenWebUI
-        // proxy path which already understands Bedrock.
-        anyhow::bail!(
-            "Bedrock streaming is not yet implemented. Use OpenWebUI/LiteLLM as a Bedrock proxy, \
-             or set ANTHROPIC_API_KEY to use the direct Anthropic API in the meantime. \
-             Run `/login bedrock` to (re)configure."
+        let config = self.config.clone().unwrap_or_default();
+        let model = config
+            .inference_profile
+            .clone()
+            .or_else(|| {
+                jfc_provider::anthropic_model_metadata(&options.model)
+                    .and_then(|metadata| metadata.provider_ids.bedrock)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                jfc_provider::normalize_anthropic_model_id(&options.model).into_owned()
+            });
+        let files = BedrockTempFiles::new();
+        tokio::fs::write(
+            &files.request,
+            serde_json::to_vec(&build_body(&messages, options))?,
         )
+        .await?;
+
+        let mut command = tokio::process::Command::new("aws");
+        command
+            .args([
+                "bedrock-runtime",
+                "invoke-model",
+                "--no-cli-pager",
+                "--cli-binary-format",
+                "raw-in-base64-out",
+                "--content-type",
+                "application/json",
+                "--accept",
+                "application/json",
+                "--model-id",
+                &model,
+                "--region",
+                config.region_or_default(),
+                "--body",
+            ])
+            .arg(format!("fileb://{}", files.request.display()));
+        if let Some(profile) = config.profile.as_deref() {
+            command.args(["--profile", profile]);
+        }
+        command.arg(&files.response);
+        let output = command.output().await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Bedrock invoke-model failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        let response: Value = serde_json::from_slice(&tokio::fs::read(&files.response).await?)?;
+        let events = response_events(&response)?;
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 }
 
@@ -296,13 +473,6 @@ pub fn run_sso_login(cfg: &BedrockConfig) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
-// Suppress unused-import warning for StreamEvent — it's reachable from the
-// trait surface above and will be hot when streaming lands.
-#[allow(dead_code)]
-const _: fn() = || {
-    let _ = std::mem::size_of::<StreamEvent>();
-};
 
 /// DO-178B §6.4.2 conformance: every behavior is exercised by at least one
 /// `_normal` and one `_robust` test. Tests cover config TOML round-trip,
@@ -394,33 +564,53 @@ mod tests {
             assert!(m.context_window_tokens.is_some());
             // Ids follow the AWS convention.
             assert!(
-                m.id.as_str().starts_with("anthropic."),
+                m.id.as_str().contains("anthropic."),
                 "unexpected id: {}",
                 m.id
             );
         }
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id.contains("claude-opus-4-8"))
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id.contains("claude-sonnet-5"))
+        );
     }
 
-    // Robust: the streaming path bails with a clear message rather than panicking.
-    // Until full SigV4 + event-stream support lands, the message must point the
-    // user at a working alternative so they aren't stranded.
-    //
-    // We can't use `.expect_err` because `EventStream` is a `Pin<Box<dyn Stream>>`
-    // which doesn't impl `Debug`. Match on the result directly instead.
-    #[tokio::test]
-    async fn stream_returns_stub_error_robust() {
-        let p = BedrockProvider::new();
-        let opts = StreamOptions::new("anthropic.claude-opus-4-5-20251101-v1:0");
-        let result = p.stream(vec![], &opts).await;
-        let err = match result {
-            Ok(_) => panic!("stream is supposed to be stubbed"),
-            Err(e) => e,
-        };
-        let msg = err.to_string();
+    #[test]
+    fn invoke_model_response_maps_to_provider_events_normal() {
+        let response = json!({
+            "id": "msg_1",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "tool_use", "id": "tool_1", "name": "Read", "input": {"path": "x"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 7}
+        });
+        let events = response_events(&response).unwrap();
+        assert!(matches!(events[0], StreamEvent::ResponseMetadata { .. }));
+        assert!(matches!(events[1], StreamEvent::TextDone { ref text, .. } if text == "hello"));
         assert!(
-            msg.contains("Bedrock") && msg.contains("not yet implemented"),
-            "unexpected stub message: {msg}"
+            matches!(events[2], StreamEvent::ToolDone { ref tool_name, .. } if tool_name == "Read")
         );
+        assert!(matches!(
+            events[3],
+            StreamEvent::Usage {
+                output_tokens: 7,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[4],
+            StreamEvent::Done {
+                stop_reason: StopReason::ToolUse
+            }
+        ));
     }
 
     // Normal: region_or_default falls back when the field is absent.

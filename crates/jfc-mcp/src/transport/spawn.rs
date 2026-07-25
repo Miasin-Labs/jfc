@@ -7,7 +7,7 @@ use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use tokio::process::Command;
 
 use super::error::service_error_suggests_auth_rejection;
-use super::handler::JfcClientHandler;
+use super::handler::{JfcClientHandler, root_store};
 use super::http::header_map_from_config;
 use super::stderr::{empty_ring, new_ring, spawn_stderr_drain};
 use super::trace;
@@ -59,7 +59,8 @@ impl Transport {
             spawn_stderr_drain(cfg.server_name.clone(), stderr, Arc::clone(&stderr_ring));
         }
 
-        let client = match JfcClientHandler::new(cfg.server_name.clone())
+        let roots = root_store(&cfg.roots);
+        let client = match JfcClientHandler::new(cfg.server_name.clone(), Arc::clone(&roots))
             .serve(proc)
             .await
         {
@@ -91,6 +92,7 @@ impl Transport {
                 client,
                 has_auth_header: false,
                 stderr_ring,
+                roots,
             }),
         })
     }
@@ -121,7 +123,8 @@ impl Transport {
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers),
         );
-        let client = match JfcClientHandler::new(cfg.server_name.clone())
+        let roots = root_store(&cfg.roots);
+        let client = match JfcClientHandler::new(cfg.server_name.clone(), Arc::clone(&roots))
             .serve(transport)
             .await
         {
@@ -166,6 +169,7 @@ impl Transport {
                 client,
                 has_auth_header,
                 stderr_ring: empty_ring(),
+                roots,
             }),
         })
     }

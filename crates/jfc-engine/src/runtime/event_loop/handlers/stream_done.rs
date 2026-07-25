@@ -431,7 +431,8 @@ pub async fn handle_stream_done(
                     visible_response_text: &assistant_response_text,
                     reasoning_text: &reasoning_text,
                 },
-            );
+            )
+            .await;
         }
         match empty_billed_action {
             EmptyBilledAction::DiscardAndResend => {
@@ -471,6 +472,17 @@ pub async fn handle_stream_done(
             }
             EmptyBilledAction::CapReached => {
                 empty_billed_refusal_cap_reached = stop_reason_is_refusal(&stop_reason);
+                if empty_billed_refusal_cap_reached
+                    && let Some(message) = state.messages.get_mut(idx)
+                {
+                    state.stream_terminal_status = Some("Stopped · blank refusals".to_owned());
+                    set_message_text_parts(
+                        message,
+                        "Provider returned blank refusal responses repeatedly. The turn stopped; \
+                         the full request and refusal diagnostic are available with `/refusals`."
+                            .to_owned(),
+                    );
+                }
                 tracing::warn!(
                     target: "jfc::stream::lifecycle",
                     assistant_idx = idx,
@@ -590,50 +602,6 @@ pub async fn handle_stream_done(
         // the post-turn footer / auto-name while the user is still answering.
         && state.pending_question.is_none();
     if turn_done {
-        // v132 session auto-naming — fire on the first
-        // assistant-turn completion if no title is set
-        // yet. We dispatch a non-blocking tokio task so
-        // the UI doesn't stall waiting on the naming
-        // call. Best-effort: failures are logged but
-        // don't surface to the user (the fallback title
-        // is still readable).
-        let user_turn_count = state
-            .messages
-            .iter()
-            .filter(|m| matches!(m.role, types::Role::User))
-            .count();
-        if user_turn_count == 1 {
-            let first_user = state
-                .messages
-                .iter()
-                .find(|m| matches!(m.role, types::Role::User))
-                .and_then(|m| {
-                    m.parts.iter().find_map(|p| match p {
-                        types::MessagePart::Text(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                });
-            let first_assistant = state
-                .messages
-                .iter()
-                .find(|m| matches!(m.role, types::Role::Assistant))
-                .and_then(|m| {
-                    m.parts.iter().find_map(|p| match p {
-                        types::MessagePart::Text(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                });
-            if let (Some(sid), Some(u), Some(a)) = (
-                state.current_session_id.clone(),
-                first_user,
-                first_assistant,
-            ) && let Some((p, m)) = crate::tools::snapshot_active_provider()
-            {
-                tokio::spawn(async move {
-                    let _ = crate::session_naming::generate_and_save(sid, p, m, u, a).await;
-                });
-            }
-        }
         if let (Some(start), Some(idx)) = (state.turn_started_at, state.streaming_assistant_idx) {
             let elapsed = std::time::Instant::now().duration_since(start);
             // Honest, minimal footer: just how long the turn took (no
@@ -1369,6 +1337,10 @@ struct RefusalInputDiagnostic {
     action_expected: Option<bool>,
     tool_choice: Option<String>,
     request_resolved_model: Option<String>,
+    /// Complete provider-neutral request sent by the engine. This deliberately
+    /// includes unredacted user/system/tool content; refusal artifacts are the
+    /// explicit local forensic channel surfaced by `/refusals`.
+    raw_request: Option<serde_json::Value>,
 }
 
 /// Whether refusal chain-of-thought debug logging is opted in via config.
@@ -1399,12 +1371,12 @@ fn emit_refusal_reasoning_debug(input: &RefusalDiagnosticInput<'_>) {
     );
 }
 
-fn record_refusal_diagnostic(state: &EngineState, input: RefusalDiagnosticInput<'_>) {
+async fn record_refusal_diagnostic(state: &EngineState, input: RefusalDiagnosticInput<'_>) {
     // Opt-in, local-debug only: surface the refusing turn's chain-of-thought (and
     // full visible response) to an EPHEMERAL debug log so a user can see *why* the
     // turn refused and how the rewrite chain adapts. This never touches the durable
-    // record built below, which stays counts-only — preserving the privacy
-    // guarantee for everyone who hasn't opted in.
+    // record built below, which retains the complete outbound request but only
+    // response-side counts and visible text — never private response reasoning.
     if refusal_reasoning_logging_enabled() {
         emit_refusal_reasoning_debug(&input);
     }
@@ -1427,6 +1399,7 @@ fn record_refusal_diagnostic(state: &EngineState, input: RefusalDiagnosticInput<
         action_expected = ?diagnostic.input.action_expected,
         tool_choice = ?diagnostic.input.tool_choice.as_deref(),
         request_resolved_model = ?diagnostic.input.request_resolved_model.as_deref(),
+        raw_request_captured = diagnostic.input.raw_request.is_some(),
         input_conversation_messages = diagnostic.input.conversation_messages,
         visible_response_preview = ?diagnostic.visible_response_preview.as_deref(),
         stop_reason_refusal = diagnostic.stop_reason_refusal,
@@ -1456,28 +1429,26 @@ fn record_refusal_diagnostic(state: &EngineState, input: RefusalDiagnosticInput<
         );
         return;
     };
-    tokio::spawn(async move {
-        let result: jfc_knowledge::Result<()> = async {
-            let store = jfc_knowledge::KnowledgeStore::open_default().await?;
-            store
-                .append_session_artifact_event(
-                    &session_id,
-                    REFUSAL_DIAGNOSTIC_KIND,
-                    REFUSAL_DIAGNOSTIC_KEY,
-                    &value_json,
-                )
-                .await?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = result {
-            tracing::warn!(
-                target: "jfc::stream::refusal_diagnostic",
-                error = %error,
-                "failed to persist refusal diagnostic"
-            );
-        }
-    });
+    let result: jfc_knowledge::Result<()> = async {
+        let store = jfc_knowledge::KnowledgeStore::open_default().await?;
+        store
+            .append_session_artifact_event(
+                &session_id,
+                REFUSAL_DIAGNOSTIC_KIND,
+                REFUSAL_DIAGNOSTIC_KEY,
+                &value_json,
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(
+            target: "jfc::stream::refusal_diagnostic",
+            error = %error,
+            "failed to persist refusal diagnostic"
+        );
+    }
 }
 
 fn build_refusal_diagnostic(
@@ -1485,7 +1456,7 @@ fn build_refusal_diagnostic(
     input: RefusalDiagnosticInput<'_>,
 ) -> RefusalDiagnosticRecord {
     RefusalDiagnosticRecord {
-        schema_version: 1,
+        schema_version: 2,
         stop_reason: format!("{:?}", input.stop_reason),
         stop_reason_refusal: input.stop_reason_refusal,
         model_refusal: input.model_refusal,
@@ -1515,7 +1486,7 @@ fn build_refusal_diagnostic(
         approval_queue_depth: state.approval_queue.len(),
         input: build_refusal_input_diagnostic(state, input.assistant_idx),
         visible_response_preview: visible_refusal_preview(input.visible_response_text),
-        privacy_note: "private reasoning is intentionally not persisted; only counts and visible text preview are stored",
+        privacy_note: "private response reasoning is not persisted; the complete outbound request is retained for refusal forensics",
     }
 }
 
@@ -1558,6 +1529,12 @@ fn build_refusal_input_diagnostic(
         request_resolved_model: request
             .and_then(|meta| meta.resolved_model.as_ref())
             .map(|resolved| resolved.effective.to_string()),
+        raw_request: request
+            .and_then(|meta| meta.raw_request_json.as_deref())
+            .map(|raw| {
+                serde_json::from_str(raw)
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()))
+            }),
     }
 }
 
@@ -2184,6 +2161,20 @@ mod stream_done_lifecycle_tests {
             provider_history_archive_recall_ids: Vec::new(),
             rsi_prompt_sections: 0,
             rsi_tool_visibility_rules: 0,
+            raw_request_json: Some(std::sync::Arc::from(
+                serde_json::json!({
+                    "schema": "jfc.engine_stream_request.v1",
+                    "provider": "test",
+                    "messages": [{
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "please explain why this fails token=sk-proj-0123456789abcdef"
+                        }]
+                    }]
+                })
+                .to_string(),
+            )),
         });
         let hidden_reasoning = "private diagnostic chain";
         let (visible, reasoning_chars) = {
@@ -2238,11 +2229,22 @@ mod stream_done_lifecycle_tests {
             json.contains("please explain why this fails token=[REDACTED]"),
             "diagnostic should persist a redacted last-user preview: {json}"
         );
+        let preview = diagnostic.input.user_preview.as_deref().unwrap_or_default();
         assert!(
-            !json.contains("sk-proj-0123456789abcdef")
-                && !json.contains("internal-only hint")
-                && !json.contains("<system-reminder>"),
-            "input preview must redact secrets and strip system reminders: {json}"
+            !preview.contains("sk-proj-0123456789abcdef")
+                && !preview.contains("internal-only hint")
+                && !preview.contains("<system-reminder>"),
+            "the compact preview must remain redacted: {preview}"
+        );
+        assert_eq!(
+            diagnostic
+                .input
+                .raw_request
+                .as_ref()
+                .and_then(|request| request.pointer("/messages/0/content/0/text"))
+                .and_then(serde_json::Value::as_str),
+            Some("please explain why this fails token=sk-proj-0123456789abcdef"),
+            "the forensic record must retain the complete outbound request"
         );
         assert!(
             json.contains("\"advertised_tool_count\":7")
@@ -2250,14 +2252,13 @@ mod stream_done_lifecycle_tests {
             "diagnostic should include request-shape metadata: {json}"
         );
         assert!(
-            json.contains("private reasoning is intentionally not persisted"),
+            json.contains("private response reasoning is not persisted"),
             "diagnostic should document the privacy boundary: {json}"
         );
     }
 
-    // The durable record stays counts-only regardless of the opt-in flag; the CoT
-    // only ever travels the ephemeral debug-log path. This pins the two channels
-    // apart: `build_refusal_diagnostic` never reads `reasoning_text`.
+    // The durable record includes the outbound request but never the refusing
+    // model's private reasoning. That CoT only travels the opt-in debug path.
     #[test]
     fn refusal_diagnostic_record_ignores_reasoning_text_field() {
         let state = app_with_content_turn();
@@ -2494,6 +2495,13 @@ mod stream_done_lifecycle_tests {
             state.turn_started_at.is_none(),
             "blank refusal cap is terminal; the TUI must not keep showing \
              `Working between model/tool steps`"
+        );
+        assert!(
+            state.messages.iter().any(|message| {
+                message_text_parts(message)
+                    .contains("Provider returned blank refusal responses repeatedly")
+            }),
+            "the terminal refusal must survive toast expiry in the transcript"
         );
         unsafe { std::env::remove_var("JFC_AUTO_CONTINUE") };
     }

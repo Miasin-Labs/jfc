@@ -22,6 +22,7 @@ mod state;
 // `crate::app::X` paths keep working until the stage-6 shim removal.
 pub use input_state::{
     BashPickerState, CommandPaletteState, ModelPickerState, SessionPickerState, ThemePickerState,
+    UsageOverlayState, UsageTab,
 };
 pub use jfc_engine::app::{
     ApprovalChoice, BACKGROUND_REMINDERS_CAP, BackgroundTask, DEFAULT_CONTEXT_WINDOW_TOKENS,

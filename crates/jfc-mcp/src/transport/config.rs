@@ -25,6 +25,7 @@ pub struct SpawnConfig {
     pub headers: HashMap<String, String>,
     pub url: Option<String>,
     pub cwd: Option<std::path::PathBuf>,
+    pub roots: Vec<std::path::PathBuf>,
 }
 
 #[cfg(test)]

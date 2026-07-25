@@ -6,22 +6,36 @@ use rmcp::ClientHandler;
 use rmcp::model::{
     ClientCapabilities, ClientInfo, CreateElicitationRequestParams, CreateElicitationResult,
     ElicitationAction, ElicitationCapability, ElicitationResponseNotificationParam,
-    FormElicitationCapability, Implementation, UrlElicitationCapability,
+    FormElicitationCapability, Implementation, ListRootsResult, Root, RootsCapabilities,
+    UrlElicitationCapability,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleClient};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub(super) type RootStore = Arc<RwLock<Vec<Root>>>;
 
 #[derive(Clone)]
 pub(super) struct JfcClientHandler {
     server_name: String,
+    roots: RootStore,
 }
 
 impl JfcClientHandler {
-    pub(super) fn new(server_name: String) -> Self {
-        Self { server_name }
+    pub(super) fn new(server_name: String, roots: RootStore) -> Self {
+        Self { server_name, roots }
     }
 }
 
 impl ClientHandler for JfcClientHandler {
+    async fn list_roots(
+        &self,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<ListRootsResult, rmcp::ErrorData> {
+        Ok(ListRootsResult::new(self.roots.read().await.clone()))
+    }
+
     async fn on_tool_list_changed(&self, _ctx: NotificationContext<RoleClient>) {
         crate::registry::request_refresh();
         linkscope::record_items("mcp.notifications.tools_list_changed", 1);
@@ -124,6 +138,9 @@ impl ClientHandler for JfcClientHandler {
 
     fn get_info(&self) -> ClientInfo {
         let mut caps = ClientCapabilities::default();
+        caps.roots = Some(RootsCapabilities {
+            list_changed: Some(true),
+        });
         caps.elicitation = Some(ElicitationCapability {
             form: Some(FormElicitationCapability {
                 schema_validation: Some(true),
@@ -132,6 +149,31 @@ impl ClientHandler for JfcClientHandler {
         });
         ClientInfo::new(caps, Implementation::new("jfc", env!("CARGO_PKG_VERSION")))
     }
+}
+
+pub(super) fn root_store(paths: &[PathBuf]) -> RootStore {
+    Arc::new(RwLock::new(paths.iter().filter_map(|path| root(path)).collect()))
+}
+
+pub(super) fn roots(paths: &[PathBuf]) -> Vec<Root> {
+    paths.iter().filter_map(|path| root(path)).collect()
+}
+
+fn root(path: &Path) -> Option<Root> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let uri = url::Url::from_directory_path(&absolute).ok()?.to_string();
+    let name = absolute
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty());
+    Some(match name {
+        Some(name) => Root::new(uri).with_name(name),
+        None => Root::new(uri),
+    })
 }
 
 fn elicitation_kind(request: &CreateElicitationRequestParams) -> ElicitationKind {
@@ -158,5 +200,18 @@ fn elicitation_kind(request: &CreateElicitationRequestParams) -> ElicitationKind
             url: url.clone(),
             elicitation_id: elicitation_id.clone(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roots_are_file_uris_with_names_regression() {
+        let roots = roots(&[PathBuf::from("/tmp/jfc workspace")]);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].uri, "file:///tmp/jfc%20workspace/");
+        assert_eq!(roots[0].name.as_deref(), Some("jfc workspace"));
     }
 }

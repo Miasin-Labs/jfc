@@ -17,7 +17,8 @@ pub(super) async fn cmd_rename(
     state
         .messages
         .push(ChatMessage::user(format!("/rename {new_title}")));
-    match (&state.current_session_id, new_title.is_empty()) {
+    let current_session_id = state.current_session_id.clone();
+    match (current_session_id, new_title.is_empty()) {
         (None, _) => {
             state.messages.push(ChatMessage::assistant(
                 "No active session to rename. Send a message first.".into(),
@@ -29,7 +30,12 @@ pub(super) async fn cmd_rename(
                     ));
         }
         (Some(id), false) => {
-            crate::session::set_session_title(id, &new_title).await;
+            crate::session::set_session_title(&id, &new_title).await;
+            state.current_session_title = Some(new_title.clone());
+            state.push_effect(crate::app::EngineEffect::SessionTitleChanged {
+                session_id: id.clone(),
+                title: new_title.clone(),
+            });
             state.messages.push(ChatMessage::assistant(format!(
                 "Session `{id}` renamed to **{new_title}**.",
             )));
@@ -86,6 +92,7 @@ pub(super) async fn cmd_continue(
             state.messages = messages;
             let session_id_for_msg = session_id.clone();
             state.switch_session(Some(session_id.clone()));
+            state.current_session_title = crate::session::load_session_title(&session_id).await;
             crate::runtime::ops::restore_session_context_state(state, session_id.as_str()).await;
             state.streaming_text.clear();
             state.streaming_reasoning.clear();
@@ -189,6 +196,8 @@ pub(super) async fn cmd_resume(
             }
             state.messages = messages;
             state.switch_session(Some(typed_session_id.clone()));
+            state.current_session_title =
+                crate::session::load_session_title(&typed_session_id).await;
             crate::runtime::ops::restore_session_context_state(state, typed_session_id.as_str())
                 .await;
             state.streaming_text.clear();
@@ -610,6 +619,55 @@ pub(super) async fn cmd_recap(
     // Generate the recap from collected messages.
     match crate::session_recap::generate_recap(&recap_messages) {
         Some(recap) => {
+            let mut recap = recap.replacen("While you were away", "Session recap", 1);
+            let open_tasks = state
+                .task_store
+                .list(jfc_session::DeletedFilter::Exclude)
+                .into_iter()
+                .filter(|task| !task.status.is_terminal())
+                .count();
+            let running_workflows = state
+                .background_tasks
+                .values()
+                .filter_map(|task| task.workflow_progress.as_ref())
+                .filter(|progress| {
+                    matches!(
+                        progress.status,
+                        crate::workflows::WorkflowRunStatus::Running
+                    )
+                })
+                .count();
+            let partial_workflows = state
+                .background_tasks
+                .values()
+                .filter_map(|task| task.workflow_progress.as_ref())
+                .filter(|progress| {
+                    matches!(
+                        progress.status,
+                        crate::workflows::WorkflowRunStatus::Partial
+                    )
+                })
+                .count();
+            let status = if state.is_streaming {
+                "working"
+            } else if state.stream_terminal_status.is_some() {
+                "stopped"
+            } else {
+                "ready"
+            };
+            recap.push_str(&format!(
+                "\nState: {status} · {open_tasks} open task(s) · {running_workflows} workflow(s) running"
+            ));
+            if partial_workflows > 0 {
+                recap.push_str(&format!(
+                    "\nAttention: {partial_workflows} workflow(s) completed with agent failures; use `/workflow status`."
+                ));
+            }
+            if let Some(reason) = state.stream_terminal_status.as_deref() {
+                recap.push_str(&format!(
+                    "\nAttention: {reason}; use `/refusals` or `/stuck`."
+                ));
+            }
             state.messages.push(ChatMessage::assistant(recap));
         }
         None => {
@@ -619,6 +677,80 @@ pub(super) async fn cmd_recap(
             ));
         }
     }
+}
+
+pub(super) async fn cmd_refusals(
+    state: &mut EngineState,
+    parts: &[&str],
+    text: &str,
+    _tx: Option<&mpsc::Sender<EngineEvent>>,
+) {
+    state.messages.push(ChatMessage::user(text.to_owned()));
+    let Some(session_id) = state.current_session_id.as_ref() else {
+        state
+            .messages
+            .push(ChatMessage::assistant("No active session.".into()));
+        return;
+    };
+    let arg = parts.get(1).copied().unwrap_or("").trim();
+    let limit = match arg {
+        "" => 1,
+        "all" => 20,
+        raw => match raw.parse::<usize>() {
+            Ok(value) if value > 0 => value.min(20),
+            _ => {
+                state.messages.push(ChatMessage::assistant(
+                    "Usage: `/refusals [N|all]` (maximum 20 records).".into(),
+                ));
+                return;
+            }
+        },
+    };
+
+    let events = match jfc_knowledge::KnowledgeStore::open_default().await {
+        Ok(store) => {
+            store
+                .list_recent_session_artifact_events(
+                    session_id.as_str(),
+                    "refusal_diagnostic",
+                    Some("stream_done"),
+                    limit,
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    let events = match events {
+        Ok(events) => events,
+        Err(error) => {
+            state.messages.push(ChatMessage::assistant(format!(
+                "Failed to read refusal audit records: {error}"
+            )));
+            return;
+        }
+    };
+    if events.is_empty() {
+        state.messages.push(ChatMessage::assistant(
+            "No refusal audit records exist for this session.".into(),
+        ));
+        return;
+    }
+
+    let mut body = format!(
+        "**Refusal audit** — {} record{} (complete outbound requests; may contain secrets)\n",
+        events.len(),
+        if events.len() == 1 { "" } else { "s" }
+    );
+    for event in events {
+        let formatted = serde_json::from_str::<serde_json::Value>(&event.value_json)
+            .and_then(|value| serde_json::to_string_pretty(&value))
+            .unwrap_or(event.value_json);
+        body.push_str(&format!(
+            "\nEvent `{}` · {}\n``````json\n{}\n``````\n",
+            event.id, event.created_at_ms, formatted
+        ));
+    }
+    state.messages.push(ChatMessage::assistant(body));
 }
 
 pub(super) async fn cmd_export(

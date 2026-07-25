@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use crate::providers::{
-    AnthropicOAuthProvider, AnthropicProvider, AntigravityOAuthProvider,
-    CloudflarePlaygroundProvider, CodexOAuthProvider, GeminiApiProvider, LiteLLMProvider,
-    NvidiaProvider, OpenAIProvider, OpenRouterProvider, OpenWebUIProvider, VertexProvider,
+    AnthropicGatewayKind, AnthropicGatewayProvider, AnthropicOAuthProvider, AnthropicProvider,
+    AntigravityOAuthProvider, BedrockProvider, CloudflarePlaygroundProvider, CodexOAuthProvider,
+    GeminiApiProvider, LiteLLMProvider, NvidiaProvider, OpenAIProvider, OpenRouterProvider,
+    OpenWebUIProvider, VertexProvider,
 };
 use crate::runtime::{
     ProviderModelResolution, ProviderRegistry, ProviderRegistryError, RuntimeService,
@@ -237,6 +238,33 @@ pub fn build_providers() -> ProvidersInit {
         providers.push(Arc::new(vertex));
     }
 
+    let bedrock = BedrockProvider::new();
+    if bedrock.has_usable_config() {
+        tracing::info!(target: "jfc::startup", "registering Bedrock provider");
+        providers.push(Arc::new(bedrock));
+        if env_flag("CLAUDE_CODE_USE_BEDROCK") {
+            prefer.get_or_insert("bedrock");
+        }
+    }
+
+    for (kind, opt_in) in [
+        (AnthropicGatewayKind::Foundry, "CLAUDE_CODE_USE_FOUNDRY"),
+        (
+            AnthropicGatewayKind::AnthropicAws,
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        ),
+        (AnthropicGatewayKind::Mantle, "CLAUDE_CODE_USE_MANTLE"),
+    ] {
+        if let Some(provider) = AnthropicGatewayProvider::from_env(kind) {
+            let name = kind.provider_id();
+            tracing::info!(target: "jfc::startup", provider = name, "registering Anthropic gateway provider");
+            if env_flag(opt_in) {
+                prefer.get_or_insert(name);
+            }
+            providers.push(Arc::new(provider));
+        }
+    }
+
     // Antigravity OAuth: Google AI Pro / Gemini 3 + Claude via Code Assist API.
     let antigravity = AntigravityOAuthProvider::new();
     if antigravity.has_usable_config() {
@@ -392,6 +420,12 @@ pub fn build_providers() -> ProvidersInit {
         provider_plugin_runtime,
         provider_plugin_diagnostics,
     }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
 }
 
 /// Route a model id to the provider that owns it.

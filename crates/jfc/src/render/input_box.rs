@@ -67,7 +67,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .border_style(Style::default().fg(border_color))
         .padding(Padding::horizontal(1))
-        .style(Style::default().bg(t.bg));
+        .style(Style::default().bg(t.surface));
     if let Some(title_line) = title_line {
         block = block.title(title_line);
     }
@@ -109,7 +109,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default()
                     .fg(prompt_color)
-                    .bg(t.bg)
+                    .bg(t.surface)
                     .add_modifier(Modifier::BOLD)
             };
             cell.set_style(style);
@@ -119,7 +119,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
         if space_x < buf.area().right() {
             let cell = &mut buf[(space_x, content_inner.y)];
             cell.set_symbol(" ");
-            cell.set_style(Style::default().bg(t.bg));
+            cell.set_style(Style::default().bg(t.surface));
         }
     }
 
@@ -159,7 +159,7 @@ pub(super) fn input(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(
         Paragraph::new(visible)
             .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(Style::default().bg(t.bg)),
+            .style(Style::default().bg(t.surface)),
         inner,
     );
 

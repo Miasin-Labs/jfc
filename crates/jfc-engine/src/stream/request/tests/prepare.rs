@@ -47,6 +47,48 @@ impl Drop for ExplorationGlobalGuard {
 }
 
 #[tokio::test]
+async fn prepare_captures_complete_request_for_refusal_forensics_regression() {
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider {
+        name: "openai-test",
+        convention: StreamConvention::OpenAiNative,
+    });
+    let request = prepare_stream_request(
+        provider,
+        &[user_text("raw request token=secret-value")],
+        &ModelId::new("test-model"),
+        crate::runtime::StreamRequestOverrides {
+            session_id: Some("ses_forensics".to_owned()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let raw = request
+        .metadata
+        .raw_request_json
+        .as_deref()
+        .expect("request snapshot");
+    let snapshot: serde_json::Value = serde_json::from_str(raw).expect("valid request JSON");
+
+    assert_eq!(snapshot["provider"], "openai-test");
+    assert_eq!(request.opts.session_id.as_deref(), Some("ses_forensics"));
+    assert_eq!(snapshot["options"]["session_id"], "ses_forensics");
+    assert_eq!(
+        snapshot.pointer("/messages/0/content/0/text"),
+        Some(&serde_json::json!("raw request token=secret-value"))
+    );
+    assert!(
+        snapshot.pointer("/options/system").is_some(),
+        "full system prompt is required for refusal reproduction"
+    );
+    assert!(
+        snapshot["options"]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "advertised tool definitions are part of the raw request"
+    );
+}
+
+#[tokio::test]
 async fn prepare_preserves_discovery_tools_for_plain_question_regression() {
     let provider: Arc<dyn Provider> = Arc::new(TestProvider {
         name: "openai-test",

@@ -96,6 +96,14 @@ pub async fn open_stream_with_bedrock_retries(
     let mut advisor_strip_used = false;
     let mut attempt = 0;
     loop {
+        let _ = super::persist_ephemeral_request(
+            provider,
+            current_messages.as_ref(),
+            opts,
+            "stream",
+            attempt,
+        )
+        .await;
         // Arc::clone is O(1) -- no heap allocation for the messages vec itself.
         // The provider impl receives Vec<ProviderMessage> by value as before.
         match provider.stream((*current_messages).clone(), opts).await {

@@ -28,6 +28,45 @@ fn envelope_roundtrip_user_prompt() {
 }
 
 #[test]
+fn reconnect_snapshot_and_attachment_prompt_roundtrip() {
+    let snapshot = RemoteEnvelope::SessionSnapshot {
+        snapshot: RemoteSessionSnapshot {
+            session_id: Some("ses_1".into()),
+            model: "claude-sonnet-5".into(),
+            permission_mode: "default".into(),
+            active_goal: Some("finish the migration".into()),
+            agents: vec![RemoteAgentSnapshot {
+                id: "agent-1".into(),
+                description: "verify".into(),
+                status: "running".into(),
+                model: None,
+                last_tool: Some("Bash".into()),
+                elapsed_ms: 50,
+                input_tokens: 10,
+                output_tokens: 2,
+            }],
+            workflows: Vec::new(),
+            models: Vec::new(),
+        },
+    };
+    let prompt = RemoteEnvelope::UserPromptWithAttachments {
+        text: "inspect this".into(),
+        attachments: vec![RemoteAttachment {
+            id: 7,
+            name: Some("screen.png".into()),
+            mime_type: "image/png".into(),
+            data_base64: "iVBORw==".into(),
+        }],
+    };
+
+    for envelope in [snapshot, prompt] {
+        let json = serde_json::to_string(&envelope).unwrap();
+        let decoded: RemoteEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, envelope);
+    }
+}
+
+#[test]
 fn envelope_roundtrip_permission_request() {
     let env = RemoteEnvelope::PermissionRequest {
         tool_use_id: "t1".into(),

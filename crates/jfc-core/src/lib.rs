@@ -58,7 +58,7 @@ pub use diff::{
 };
 pub use execution::{ExecutionStatus, TaskLifecycle, ToolStatus};
 pub use execution_result::{
-    DiagnosticLevel, ExecutionResult, ToolDiagnostic, ToolErrorCategory, ToolOutcome,
+    DeliveredFile, DiagnosticLevel, ExecutionResult, ToolDiagnostic, ToolErrorCategory, ToolOutcome,
     ToolProvenance, ToolSource,
 };
 pub use fanout::{FanoutDecision, FanoutPlan, FanoutPredictor, PlannedAgent};

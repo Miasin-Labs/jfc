@@ -61,8 +61,14 @@ pub fn spawn_stream_response_scoped(
     interrupt: Arc<std::sync::atomic::AtomicBool>,
     cancel: tokio_util::sync::CancellationToken,
     previous_message_id: Option<String>,
-    overrides: StreamRequestOverrides,
+    mut overrides: StreamRequestOverrides,
 ) {
+    if overrides.session_id.is_none() {
+        overrides.session_id = state
+            .current_session_id
+            .as_ref()
+            .map(|session_id| session_id.as_str().to_owned());
+    }
     let previous_message_id = previous_message_id
         .or_else(|| crate::cache_lineage::previous_response_id_for(state, provider.name(), &model));
     let stream_id = state.begin_stream_scope();

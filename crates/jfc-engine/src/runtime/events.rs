@@ -85,6 +85,12 @@ pub enum EngineEvent {
     Voice(VoiceEvent),
     /// Live progress update from a running workflow background task.
     WorkflowProgress(WorkflowProgressEvent),
+    /// Best-effort result of the first-prompt title generator. The event loop
+    /// owns persistence so a concurrent `/rename` always wins.
+    SessionTitleGenerated {
+        session_id: crate::ids::SessionId,
+        title: Option<String>,
+    },
     /// Inbound command for the engine — from detached producers (remote
     /// control, schedulers, background tasks) or frontend code paths that
     /// only hold an event sender.
@@ -274,6 +280,10 @@ pub struct StreamRequestMetadata {
     pub provider_history_archive_recall_ids: Vec<String>,
     pub rsi_prompt_sections: usize,
     pub rsi_tool_visibility_rules: usize,
+    /// Complete provider-neutral engine request used for refusal forensics.
+    /// Stored once behind an Arc because request metadata is cloned across the
+    /// stream event boundary and the snapshot may contain a large transcript.
+    pub raw_request_json: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -590,6 +600,7 @@ pub enum ProviderEvent {
     /// utilization (5h / 7d) plus the active claim type.
     AnthropicSnapshotUpdated {
         snapshot: Option<crate::providers::anthropic_accounts::AccountSnapshot>,
+        accounts: Vec<crate::providers::anthropic_accounts::AccountSnapshot>,
     },
     /// Best-effort heartbeat from status.claude.com. Kept separate from
     /// provider stream errors so the UI can show both the immediate HTTP
@@ -697,6 +708,13 @@ pub enum VoiceEvent {
 /// orchestrator loop so the UI can show live phase/agent/log state without
 /// waiting for the workflow to complete.
 pub enum WorkflowProgressEvent {
+    /// Register exact workflow metadata before the first phase/agent event.
+    Registered {
+        task_id: crate::ids::TaskId,
+        run_id: String,
+        meta: crate::workflows::WorkflowMeta,
+        script_path: Option<std::path::PathBuf>,
+    },
     /// The script called `phase(title)` — advance `current_phase`.
     Phase {
         task_id: crate::ids::TaskId,
@@ -727,6 +745,14 @@ pub enum WorkflowProgressEvent {
         index: u32,
         error: String,
     },
+    /// The orchestrator settled. `failed_agents > 0` is a partial result even
+    /// when the JS script caught those errors and returned successfully.
+    Finished {
+        task_id: crate::ids::TaskId,
+        failed_agents: u32,
+        errored: bool,
+        cancelled: bool,
+    },
     /// The script emitted a `log(message)` call.
     Log {
         task_id: crate::ids::TaskId,
@@ -738,11 +764,13 @@ impl WorkflowProgressEvent {
     /// The background-task id this progress event belongs to.
     pub fn task_id(&self) -> &crate::ids::TaskId {
         match self {
-            Self::Phase { task_id, .. }
+            Self::Registered { task_id, .. }
+            | Self::Phase { task_id, .. }
             | Self::AgentStarted { task_id, .. }
             | Self::AgentCacheHit { task_id, .. }
             | Self::AgentDone { task_id, .. }
             | Self::AgentFailed { task_id, .. }
+            | Self::Finished { task_id, .. }
             | Self::Log { task_id, .. } => task_id,
         }
     }

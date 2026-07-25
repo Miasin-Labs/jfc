@@ -19,10 +19,17 @@ pub mod http;
 pub mod model_policy;
 pub mod retry;
 
+mod anthropic_catalog;
+
+pub use anthropic_catalog::{
+    ANTHROPIC_ALIAS_FABLE, ANTHROPIC_ALIAS_HAIKU, ANTHROPIC_ALIAS_OPUS, ANTHROPIC_ALIAS_SONNET,
+    AnthropicModelKind, AnthropicModelMetadata, AnthropicProviderIds, anthropic_model_catalog,
+    anthropic_model_metadata, context_suffix, normalize_anthropic_model_id,
+};
+
 pub use model_policy::{
-    AnthropicModelKind, DEFAULT_MAX_OUTPUT_TOKENS, KnownModel,
-    LEGACY_ANTHROPIC_THINKING_BUDGET_TOKENS, ModelRequestPolicy, ModelRequestProfile,
-    ModelThinkingMode, OpenAiModelKind, ProviderFamily,
+    DEFAULT_MAX_OUTPUT_TOKENS, KnownModel, LEGACY_ANTHROPIC_THINKING_BUDGET_TOKENS,
+    ModelRequestPolicy, ModelRequestProfile, ModelThinkingMode, OpenAiModelKind, ProviderFamily,
 };
 
 macro_rules! string_id {

@@ -5,24 +5,40 @@ use crate::types::{ChatMessage, MessagePart, Role};
 
 /// Extract the first meaningful user prompt from messages for display in session list
 pub fn extract_first_prompt(messages: &[ChatMessage]) -> Option<String> {
+    let cleaned = first_meaningful_user_prompt(messages)?;
+    // Truncate long prompts for display (floor to char boundary)
+    if cleaned.len() > 100 {
+        let boundary = cleaned.floor_char_boundary(100);
+        Some(format!("{}…", &cleaned[..boundary]))
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Return the complete first meaningful prompt, including for resumed sessions
+/// whose initial transcript entries are local slash commands.
+pub fn first_meaningful_user_prompt(messages: &[ChatMessage]) -> Option<String> {
     messages
         .iter()
-        .find(|m| m.role == Role::User && !m.is_compact_boundary())
-        .and_then(|m| {
+        .filter(|m| m.role == Role::User && !m.is_compact_boundary())
+        .find_map(|m| {
             m.parts.iter().find_map(|p| match p {
-                MessagePart::Text(t) if !t.trim().is_empty() => {
-                    let trimmed = t.trim();
-                    // Truncate long prompts for display (floor to char boundary)
-                    if trimmed.len() > 100 {
-                        let boundary = trimmed.floor_char_boundary(100);
-                        Some(format!("{}…", &trimmed[..boundary]))
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                }
+                MessagePart::Text(t) => meaningful_user_prompt(t),
                 _ => None,
             })
         })
+}
+
+/// Return user text that can identify a session. Local slash commands and
+/// runtime-only reminders describe control flow, not what the session is about.
+pub fn meaningful_user_prompt(text: &str) -> Option<String> {
+    let cleaned = jfc_core::strip_system_reminders(text);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 /// Merge consecutive same-role `ChatMessage`s into one logical turn
@@ -302,7 +318,9 @@ mod coalesce_tests {
     //! assistant message on save so the file is human-readable and the
     //! resume path doesn't get 50+ assistant rows for a single user
     //! turn (the original `ses_20260515_175208.json` symptom).
-    use super::{coalesce_consecutive_same_role, extract_first_prompt};
+    use super::{
+        coalesce_consecutive_same_role, extract_first_prompt, first_meaningful_user_prompt,
+    };
     use crate::ids::ToolId;
     use crate::types::{
         ChatMessage, MessagePart, ModelUsage, Role, ToolCall, ToolDisplayState, ToolInput,
@@ -478,6 +496,41 @@ mod coalesce_tests {
             extract_first_prompt(&messages).as_deref(),
             Some("actual first prompt after compact")
         );
+    }
+
+    #[test]
+    fn extract_first_prompt_skips_slash_commands_regression() {
+        let messages = vec![
+            user_text("/task-clear open"),
+            assistant_text("Cleared 5 open task(s)."),
+            user_text("diagnose why the stream stopped"),
+        ];
+
+        assert_eq!(
+            extract_first_prompt(&messages).as_deref(),
+            Some("diagnose why the stream stopped")
+        );
+    }
+
+    #[test]
+    fn title_input_uses_complete_first_meaningful_historical_prompt_regression() {
+        let full_prompt = format!(
+            "diagnose the refusal lifecycle {}",
+            "carefully ".repeat(20).trim()
+        );
+        let messages = vec![
+            user_text("/task-clear open"),
+            assistant_text("Cleared 5 open task(s)."),
+            user_text(&full_prompt),
+            assistant_text("working"),
+            user_text("newer prompt must not become the title source"),
+        ];
+
+        assert_eq!(
+            first_meaningful_user_prompt(&messages).as_deref(),
+            Some(full_prompt.as_str())
+        );
+        assert!(extract_first_prompt(&messages).unwrap().len() < full_prompt.len());
     }
 
     // Robust: a USER turn mixing text + a stray tool part keeps the text but

@@ -42,6 +42,7 @@ mod task_panel_order;
 mod task_panel_widgets;
 mod teammates_panel;
 mod theme_picker;
+mod usage_overlay;
 pub(crate) mod visual;
 pub(crate) mod voice_cursor;
 

@@ -12,6 +12,23 @@ use jfc_core::*;
 
 use super::theme_picker::{apply_theme, open_theme_picker};
 
+pub(super) async fn cmd_usage(
+    app: &mut App,
+    parts: &[&str],
+    _text: &str,
+    _tx: Option<&mpsc::Sender<EngineEvent>>,
+) {
+    let tab = if parts.first() == Some(&"/stats") {
+        crate::app::UsageTab::Stats
+    } else {
+        crate::app::UsageTab::Usage
+    };
+    app.usage_overlay.open(tab);
+    // The next tick refreshes the cached account snapshots. Rendering remains
+    // lock-free and immediately shows the most recent known values.
+    app.engine.anthropic_snapshot_refreshed_at = None;
+}
+
 /// `/vim` — toggle modal (vim) editing of the prompt. On enable you start in
 /// Normal mode; Esc returns to Normal from Insert/Visual.
 pub(super) async fn cmd_vim(

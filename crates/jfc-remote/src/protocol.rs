@@ -17,6 +17,67 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// Default WebSocket port for the remote-control server.
 pub const DEFAULT_PORT: u16 = 4242;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteAttachment {
+    pub id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteAgentSnapshot {
+    pub id: String,
+    pub description: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool: Option<String>,
+    pub elapsed_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteWorkflowSnapshot {
+    pub task_id: String,
+    pub run_id: String,
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub running_agents: usize,
+    pub finished_agents: usize,
+    pub total_agents: usize,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteModelSnapshot {
+    pub id: String,
+    pub provider: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteSessionSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub model: String,
+    pub permission_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_goal: Option<String>,
+    pub agents: Vec<RemoteAgentSnapshot>,
+    pub workflows: Vec<RemoteWorkflowSnapshot>,
+    pub models: Vec<RemoteModelSnapshot>,
+}
+
 // ─── Envelope ────────────────────────────────────────────────────────────────
 
 /// The payload of a remote-control frame. Tagged JSON via serde's
@@ -95,12 +156,39 @@ pub enum RemoteEnvelope {
     /// Non-blocking toast notification.
     Toast { kind: String, text: String },
 
+    /// Full reconnect-safe state for model selection, goals, agents, and workflows.
+    SessionSnapshot { snapshot: RemoteSessionSnapshot },
+
+    /// Marks the end of a replay requested by `Resume`.
+    ReplayComplete { through_seq: u64 },
+
+    /// A generated/downloadable file or image made available by the host.
+    AttachmentAvailable { attachment: RemoteAttachment },
+
     /// Keep-alive from host.
     Heartbeat,
 
     // ── Inbound (client → host) ──────────────────────────────────────
     /// Submit a user prompt.
     UserPrompt { text: String },
+
+    /// Submit a prompt with image/PDF attachments.
+    UserPromptWithAttachments {
+        text: String,
+        attachments: Vec<RemoteAttachment>,
+    },
+
+    /// Run a slash command through the host's normal command dispatcher.
+    SlashCommand { command: String },
+
+    /// Select a model from the latest `SessionSnapshot` catalog.
+    ModelSelect { model: String },
+
+    /// Adopt or replace the active session goal.
+    ActiveGoalAdopt { condition: String },
+
+    /// Replay retained outbound frames newer than `after_seq`.
+    Resume { after_seq: u64 },
 
     /// Cancel the current turn (equivalent to pressing Escape).
     Interrupt,
@@ -185,6 +273,9 @@ impl RemoteEnvelope {
                 | Self::PermissionRequest { .. }
                 | Self::PlanApprovalRequest { .. }
                 | Self::Toast { .. }
+                | Self::SessionSnapshot { .. }
+                | Self::ReplayComplete { .. }
+                | Self::AttachmentAvailable { .. }
                 | Self::Heartbeat
         );
         linkscope::record_items(
@@ -225,8 +316,16 @@ impl RemoteEnvelope {
             Self::PermissionRequest { .. } => "permission_request",
             Self::PlanApprovalRequest { .. } => "plan_approval_request",
             Self::Toast { .. } => "toast",
+            Self::SessionSnapshot { .. } => "session_snapshot",
+            Self::ReplayComplete { .. } => "replay_complete",
+            Self::AttachmentAvailable { .. } => "attachment_available",
             Self::Heartbeat => "heartbeat",
             Self::UserPrompt { .. } => "user_prompt",
+            Self::UserPromptWithAttachments { .. } => "user_prompt_with_attachments",
+            Self::SlashCommand { .. } => "slash_command",
+            Self::ModelSelect { .. } => "model_select",
+            Self::ActiveGoalAdopt { .. } => "active_goal_adopt",
+            Self::Resume { .. } => "resume",
             Self::Interrupt => "interrupt",
             Self::ApprovalResponse { .. } => "approval_response",
             Self::PlanApprovalResponse { .. } => "plan_approval_response",

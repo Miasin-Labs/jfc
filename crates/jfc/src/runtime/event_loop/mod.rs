@@ -75,6 +75,7 @@ fn engine_event_kind(event: &EngineEvent) -> &'static str {
         EngineEvent::Goal(_) => "engine.goal",
         EngineEvent::Voice(_) => "engine.voice",
         EngineEvent::WorkflowProgress(_) => "engine.workflow_progress",
+        EngineEvent::SessionTitleGenerated { .. } => "engine.session_title_generated",
         EngineEvent::Control(_) => "engine.control",
         EngineEvent::Frontend(_) => "engine.frontend",
     }
@@ -495,6 +496,8 @@ pub(crate) async fn run(
                 );
                 app.engine.messages = messages;
                 app.engine.current_session_id = Some(session_id.clone());
+                app.engine.current_session_title =
+                    session::load_session_title(&session_id).await;
                 // Task store: prefer the project store (`.jfc/tasks.json`)
                 // that `App::new` already opened — it survives across every
                 // session in the repo. ONLY fall back to the per-session store
@@ -594,6 +597,8 @@ pub(crate) async fn run(
                 }
                 app.engine.messages = messages;
                 app.engine.current_session_id = Some(session_id.clone());
+                app.engine.current_session_title =
+                    session::load_session_title(&session_id).await;
                 // Same project-store-first rule as --continue (see above):
                 // keep the project `.jfc/tasks.json` and only fall back to the
                 // per-session store when no git root exists. Prevents the
@@ -886,6 +891,9 @@ pub(crate) async fn run(
                 .map(|s| McpServerInfo {
                     name: s.name.clone(),
                     status: match s.status {
+                        jfc_engine::mcp::McpServerStatus::PendingApproval => {
+                            McpStatus::PendingApproval
+                        }
                         jfc_engine::mcp::McpServerStatus::Connected => McpStatus::Connected,
                         jfc_engine::mcp::McpServerStatus::Failed => McpStatus::Error,
                         jfc_engine::mcp::McpServerStatus::Disabled => McpStatus::Disabled,
@@ -1130,9 +1138,13 @@ pub(crate) async fn run(
             if let AppEvent::Engine(ref engine_ev) = ev
                 && !app.engine.is_stale_stream_event(engine_ev)
                 && let Some(ref rc) = app.remote_host
-                && let Some(envelope) = jfc_engine::remote_host::mirror_event(engine_ev)
             {
-                rc.mirror(envelope);
+                if let Some(envelope) = jfc_engine::remote_host::mirror_event(engine_ev) {
+                    rc.mirror(envelope);
+                }
+                for attachment in jfc_engine::remote_host::mirror_attachments(engine_ev) {
+                    rc.mirror(attachment);
+                }
             }
 
             // Tick alone doesn't dirty the screen; everything else does. The
@@ -1232,6 +1244,8 @@ pub(crate) async fn run(
             } else {
                 rc.clear_pending_approval();
             }
+
+            rc.mirror_snapshot(jfc_engine::remote_host::session_snapshot(&app.engine));
         }
 
         if should_quit {
@@ -1443,6 +1457,16 @@ pub(crate) fn apply_engine_effects(app: &mut App, tx: Option<&EventSender>) {
                 // New session / cleared transcript: drop the timeline + baseline so
                 // the next request doesn't emit a spurious giant first delta.
                 app.reset_timeline();
+            }
+            crate::app::EngineEffect::SessionTitleChanged { session_id, title } => {
+                if let Some(meta) = app
+                    .session_sidebar
+                    .meta
+                    .iter_mut()
+                    .find(|meta| meta.id == session_id)
+                {
+                    meta.title = Some(title);
+                }
             }
             crate::app::EngineEffect::ModelsRefreshed => {
                 app.model_picker.query_cache.clear();

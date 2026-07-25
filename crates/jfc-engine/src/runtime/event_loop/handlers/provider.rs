@@ -49,8 +49,9 @@ pub fn handle_provider_event(state: &mut EngineState, ev: ProviderEvent) {
             state.account_email = email;
             state.push_effect(EngineEffect::ModelsRefreshed);
         }
-        ProviderEvent::AnthropicSnapshotUpdated { snapshot } => {
+        ProviderEvent::AnthropicSnapshotUpdated { snapshot, accounts } => {
             state.anthropic_account_snapshot = snapshot;
+            state.anthropic_account_snapshots = accounts;
         }
         ProviderEvent::ClaudeStatusUpdated(update) => {
             if let Some(snapshot) = update.snapshot {

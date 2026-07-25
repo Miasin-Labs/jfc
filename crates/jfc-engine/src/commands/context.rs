@@ -380,6 +380,7 @@ pub(super) async fn cmd_advisor(
         let targets = match crate::advisor::resolve_local_advisor_provider_targets(
             &state.providers,
             std::sync::Arc::clone(&state.provider),
+            &state.model,
             state.local_advisor_provider.as_ref(),
             &session.model,
         ) {

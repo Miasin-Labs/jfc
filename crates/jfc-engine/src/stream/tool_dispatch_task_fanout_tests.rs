@@ -96,6 +96,7 @@ async fn dispatch_tools_batched_starts_every_task_in_batch_regression() {
         ToolBatchDispatch {
             tx,
             dedup: Arc::new(Mutex::new(ReadDedupCache::default())),
+            cwd: std::env::current_dir().expect("current dir"),
             task_store: Some(jfc_session::TaskStore::in_memory()),
             active_team_name: None,
             current_session_id: None,

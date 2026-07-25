@@ -3016,6 +3016,30 @@ async fn execute_tool_taskstop_non_shell_id_uses_task_path_normal() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn execute_tool_taskstop_cancels_dynamic_workflow_regression() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    crate::workflows::register_active_workflow("bgwf_wf_stoptest", cancel.clone());
+
+    let stop = execute_tool(
+        ToolKind::TaskStop,
+        ToolInput::TaskStop {
+            task_id: "bgwf_wf_stoptest".into(),
+        },
+        dir.path().to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    crate::workflows::unregister_active_workflow("bgwf_wf_stoptest");
+    assert!(!stop.is_error(), "{}", stop.output);
+    assert!(cancel.is_cancelled(), "workflow cancellation token was not fired");
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn execute_tool_bash_output_nonblocking_snapshot_regression() {

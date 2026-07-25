@@ -165,6 +165,28 @@ fn build_bounty_task_prompt(task: &Task) -> String {
     prompt
 }
 
+fn claim_bounty_task(store: &jfc_session::TaskStore, task: &Task) -> Task {
+    match store.update(
+        task.id.as_str(),
+        jfc_session::TaskPatch {
+            status: Some(TaskStatus::InProgress),
+            owner: Some("jfc-factory".to_owned()),
+            ..Default::default()
+        },
+    ) {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            tracing::warn!(
+                target: "jfc::tasks::factory",
+                task_id = %task.id,
+                %error,
+                "failed to claim bounty-routed task before market prompt"
+            );
+            task.clone()
+        }
+    }
+}
+
 fn build_high_risk_prompt(task: &Task) -> String {
     format!(
         "Task `{}` ('{}') is marked high-risk. Please review and approve before I execute it.\n\
@@ -337,6 +359,7 @@ pub async fn maybe_continue_task_factory(state: &mut EngineState, tx: &EventSend
         .into_iter()
         .find(|task| execution_metadata(task).mode == TaskExecutionMode::Bounty)
     {
+        let task = claim_bounty_task(&state.task_store, &task);
         tracing::info!(
             target: "jfc::tasks::factory",
             task_id = %task.id,
@@ -550,8 +573,8 @@ mod tests {
         assert!(prompt.contains("`auto_dispatch`: true"));
         assert!(prompt.contains("`parent_task_id`: \"t1\""));
         let task = state.task_store.get("t1").unwrap();
-        assert_eq!(task.status, jfc_session::TaskStatus::Pending);
-        assert_eq!(task.owner, None);
+        assert_eq!(task.status, jfc_session::TaskStatus::InProgress);
+        assert_eq!(task.owner.as_deref(), Some("jfc-factory"));
     }
 
     #[tokio::test]

@@ -287,7 +287,6 @@ pub(crate) async fn handle_tick(
     // compaction and skips the normal Compact/Blocked threshold.
     if !app.engine.is_streaming
         && app.engine.compacting_started_at.is_none()
-        && !app.engine.speculative_compact_fired
         && !app.engine.force_compact_pending
     {
         let est = app.engine.tool_ctx.approx_tokens;
@@ -297,6 +296,15 @@ pub(crate) async fn handle_tick(
             app.engine.max_output_tokens,
         );
         if matches!(level, jfc_engine::compact::CompactLevel::Precompute) {
+            let source_fingerprint = jfc_engine::precomputed_compact::source_fingerprint(
+                &app.engine.messages,
+                app.engine.model.as_str(),
+                app.engine.max_context_tokens,
+                app.engine.max_output_tokens,
+            );
+            if app.engine.speculative_compact_fingerprint.as_deref()
+                != Some(source_fingerprint.as_str())
+            {
             // Speculatively reclaim context NOW, while idle, so the user's next
             // submit doesn't pay for it. This is the cheap local tool-result
             // trim only (no provider call, no async) — safe to run inline on the
@@ -317,7 +325,20 @@ pub(crate) async fn handle_tick(
             if saved > 0 {
                 needs_draw = true;
             }
+            let persisted_fingerprint =
+                jfc_engine::runtime::ops::start_speculative_compaction(&app.engine);
             app.engine.speculative_compact_fired = true;
+            app.engine.speculative_compact_fingerprint = Some(
+                persisted_fingerprint.unwrap_or_else(|| {
+                    jfc_engine::precomputed_compact::source_fingerprint(
+                        &app.engine.messages,
+                        app.engine.model.as_str(),
+                        app.engine.max_context_tokens,
+                        app.engine.max_output_tokens,
+                    )
+                }),
+            );
+            }
         }
     }
 
@@ -337,9 +358,10 @@ pub(crate) async fn handle_tick(
         tokio::spawn(async move {
             if let Ok(mgr) = oauth.account_manager().await {
                 let snapshot = mgr.snapshot_for_ui().await;
+                let accounts = mgr.snapshots_for_ui().await;
                 let _ = tx
                     .send(EngineEvent::Provider(
-                        ProviderEvent::AnthropicSnapshotUpdated { snapshot },
+                        ProviderEvent::AnthropicSnapshotUpdated { snapshot, accounts },
                     ))
                     .await;
             }
@@ -447,6 +469,9 @@ pub(crate) async fn handle_tick(
                 .map(|s| jfc_core::McpServerInfo {
                     name: s.name.clone(),
                     status: match s.status {
+                        jfc_engine::mcp::McpServerStatus::PendingApproval => {
+                            jfc_core::McpStatus::PendingApproval
+                        }
                         jfc_engine::mcp::McpServerStatus::Connected => {
                             jfc_core::McpStatus::Connected
                         }
@@ -816,6 +841,7 @@ async fn reload_mcp_servers(
         .map(|s| McpServerInfo {
             name: s.name.clone(),
             status: match s.status {
+                McpServerStatus::PendingApproval => McpStatus::PendingApproval,
                 McpServerStatus::Connected => McpStatus::Connected,
                 McpServerStatus::Failed => McpStatus::Error,
                 McpServerStatus::Disabled => McpStatus::Disabled,

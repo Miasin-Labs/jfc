@@ -7,6 +7,8 @@ use jfc_core::ChatMessage;
 ///   status, and the count of tools it exposes.
 /// - `/mcp restart <name>` kills the running server, if any, and re-spawns it
 ///   from cached config.
+/// - `/mcp approve <name>` explicitly starts a repository-provided server.
+/// - `/mcp roots <name> [path ...]` lists or replaces workspace roots.
 /// - `/mcp logs <name>` prints recent stderr lines from the server transport's
 ///   ring buffer.
 pub(super) async fn handle_mcp_command(state: &mut EngineState, args: &str) {
@@ -72,6 +74,60 @@ pub(super) async fn handle_mcp_command(state: &mut EngineState, args: &str) {
             };
             state.messages.push(ChatMessage::assistant(body));
         }
+        "approve" => {
+            if arg.is_empty() {
+                state.messages.push(ChatMessage::user(raw));
+                state.messages.push(ChatMessage::assistant(
+                    "Usage: `/mcp approve <name>`.".to_owned(),
+                ));
+                return;
+            }
+            state.messages.push(ChatMessage::user(raw));
+            let body = match crate::mcp::approve_server(&registry, arg).await {
+                Some(true) => format!("MCP server `{arg}` approved and connected."),
+                Some(false) => format!(
+                    "MCP server `{arg}` was approved but failed to connect. See `/mcp logs {arg}`."
+                ),
+                None => format!("MCP server `{arg}` is not configured."),
+            };
+            state.messages.push(ChatMessage::assistant(body));
+        }
+        "roots" => {
+            if arg.is_empty() {
+                state.messages.push(ChatMessage::user(raw));
+                state.messages.push(ChatMessage::assistant(
+                    "Usage: `/mcp roots <name> [path ...]`.".to_owned(),
+                ));
+                return;
+            }
+            let paths = it.map(std::path::PathBuf::from).collect::<Vec<_>>();
+            let body = if paths.is_empty() {
+                match registry.get(arg).await {
+                    Some(server) if server.spawn_cfg.roots.is_empty() => {
+                        format!("MCP server `{arg}` has no configured roots.")
+                    }
+                    Some(server) => {
+                        let roots = server
+                            .spawn_cfg
+                            .roots
+                            .iter()
+                            .map(|path| format!("- `{}`", path.display()))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!("**`{arg}` roots:**\n\n{roots}")
+                    }
+                    None => format!("MCP server `{arg}` is not configured."),
+                }
+            } else {
+                match crate::mcp::set_server_roots(&registry, arg, paths).await {
+                    Some(Ok(())) => format!("Updated MCP roots for `{arg}`."),
+                    Some(Err(error)) => format!("Failed to update `{arg}` roots: {error}"),
+                    None => format!("MCP server `{arg}` is not configured."),
+                }
+            };
+            state.messages.push(ChatMessage::user(raw));
+            state.messages.push(ChatMessage::assistant(body));
+        }
         "logs" => {
             if arg.is_empty() {
                 state.messages.push(ChatMessage::user(raw));
@@ -114,7 +170,7 @@ pub(super) async fn handle_mcp_command(state: &mut EngineState, args: &str) {
         other => {
             state.messages.push(ChatMessage::user(raw));
             state.messages.push(ChatMessage::assistant(format!(
-                "Unknown subcommand `{other}`. Try `/mcp list`, `/mcp restart <name>`, or `/mcp logs <name>`."
+                "Unknown subcommand `{other}`. Try `/mcp list`, `/mcp approve <name>`, `/mcp restart <name>`, `/mcp roots <name>`, or `/mcp logs <name>`."
             )));
         }
     }

@@ -65,7 +65,11 @@ pub fn generate_recap(messages_since_last_interaction: &[RecapMessage]) -> Optio
     }
 
     // If nothing happened, no recap needed
-    if tool_calls.is_empty() && errors.is_empty() && files_changed.is_empty() {
+    if tool_calls.is_empty()
+        && errors.is_empty()
+        && files_changed.is_empty()
+        && assistant_snippets.is_empty()
+    {
         return None;
     }
 
@@ -160,6 +164,20 @@ mod tests {
             text_preview: String::new(),
         }];
         assert_eq!(generate_recap(&msgs), None);
+    }
+
+    #[test]
+    fn text_only_work_is_still_recap_worthy_regression() {
+        let msgs = vec![RecapMessage {
+            is_assistant: true,
+            tool_calls: vec![],
+            had_error: false,
+            files_changed: vec![],
+            text_preview: "Completed the architecture analysis.".into(),
+        }];
+
+        let recap = generate_recap(&msgs).expect("assistant work should be recapped");
+        assert!(recap.contains("Completed the architecture analysis."));
     }
 
     #[test]

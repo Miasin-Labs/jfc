@@ -24,6 +24,12 @@ pub enum JournalEntry {
         agent_id: String,
         result: serde_json::Value,
     },
+    #[serde(rename = "failed")]
+    Failed {
+        key: String,
+        agent_id: String,
+        error: String,
+    },
 }
 
 /// Loaded journal state for resume.
@@ -158,6 +164,7 @@ pub async fn load_journal(session_id: Option<&str>, run_id: &str) -> JournalCach
             } => {
                 results.insert(key, result);
             }
+            JournalEntry::Failed { .. } => {}
         }
     }
 
@@ -282,10 +289,29 @@ mod tests {
             })
             .await
             .unwrap();
+        writer
+            .append(&JournalEntry::Started {
+                key: "v2:failed".into(),
+                agent_id: "agent_2".into(),
+            })
+            .await
+            .unwrap();
+        writer
+            .append(&JournalEntry::Failed {
+                key: "v2:failed".into(),
+                agent_id: "agent_2".into(),
+                error: "structured output retry cap".into(),
+            })
+            .await
+            .unwrap();
 
         let cache = load_journal(Some("ses_wf_test"), "wf_test123").await;
         assert_eq!(cache.results.len(), 1);
         assert_eq!(cache.results["v2:abc"], serde_json::json!("hello world"));
         assert_eq!(cache.started["v2:abc"].len(), 1);
+        assert!(
+            !cache.results.contains_key("v2:failed"),
+            "failed agents must rerun when the workflow resumes"
+        );
     }
 }

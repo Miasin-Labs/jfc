@@ -322,6 +322,8 @@ pub fn parse_agent(path: &Path, raw: &str) -> Option<AgentDef> {
         permission_mode: parsed.permission_mode,
         forks_parent_context: parsed.forks_parent_context,
         background: parsed.background,
+        observer: parsed.observer,
+        observer_message: parsed.observer_message,
         color: parsed.color,
         effort: parsed.effort,
         max_turns: parsed.max_turns,
@@ -408,6 +410,10 @@ struct AgentFront {
     #[serde(default)]
     pub background: Option<bool>,
     #[serde(default)]
+    pub observer: Option<String>,
+    #[serde(default, rename = "observerMessage")]
+    pub observer_message: Option<String>,
+    #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
     pub effort: Option<Effort>,
@@ -463,6 +469,20 @@ mod tests {
         assert_eq!(s.effort, None);
         assert!(!s.disable_model_invocation);
         assert!(s.is_model_invocable());
+    }
+
+    #[test]
+    fn parse_agent_observer_pairing_regression() {
+        let agent = parse_agent(
+            Path::new("/x/agents/worker.md"),
+            "---\nname: worker\nobserver: reviewer\nobserverMessage: Check invariants.\n---\nDo work.",
+        )
+        .expect("agent");
+        assert_eq!(agent.observer.as_deref(), Some("reviewer"));
+        assert_eq!(
+            agent.observer_message.as_deref(),
+            Some("Check invariants.")
+        );
     }
 
     #[test]

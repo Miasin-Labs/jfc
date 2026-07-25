@@ -768,7 +768,6 @@ pub(super) fn is_invisible_in_transcript(kind: &ToolKind) -> bool {
             | ToolKind::TaskDone
             | ToolKind::TaskStop
             | ToolKind::TaskValidate
-            | ToolKind::Bash
             | ToolKind::BashOutput
             // Scheduling / cron
             | ToolKind::ScheduleWakeup
@@ -1392,8 +1391,8 @@ mod invisible_tool_tests {
     }
 
     #[test]
-    fn bash_is_hidden_so_footer_tracks_shell_activity_regression() {
-        assert!(is_invisible_in_transcript(&ToolKind::Bash));
+    fn bash_is_visible_alongside_footer_shell_activity_regression() {
+        assert!(!is_invisible_in_transcript(&ToolKind::Bash));
     }
 }
 

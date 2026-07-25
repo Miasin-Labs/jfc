@@ -3,6 +3,38 @@ use ratatui::widgets::TableState;
 use crate::query::QueryCache;
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageTab {
+    #[default]
+    Usage,
+    Stats,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageOverlayState {
+    pub visible: bool,
+    pub tab: UsageTab,
+    pub scroll: u16,
+}
+
+impl UsageOverlayState {
+    pub fn open(&mut self, tab: UsageTab) {
+        self.visible = true;
+        self.tab = tab;
+        self.scroll = 0;
+    }
+
+    pub fn close(&mut self) {
+        self.visible = false;
+        self.scroll = 0;
+    }
+
+    pub fn select(&mut self, tab: UsageTab) {
+        self.tab = tab;
+        self.scroll = 0;
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CommandPaletteState {
     pub visible: bool,

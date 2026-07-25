@@ -70,7 +70,13 @@ pub(crate) fn set_terminal_title(app: &App) {
     } else {
         String::new()
     };
-    let title = format!("{}jfc · {} · {}", prefix, app.engine.model, cwd_label);
+    let session_label = app
+        .engine
+        .current_session_title
+        .clone()
+        .or_else(|| jfc_engine::session::extract_first_prompt(&app.engine.messages))
+        .unwrap_or(cwd_label);
+    let title = format!("{}{session_label} · {} · jfc", prefix, app.engine.model);
     let mut guard = match last.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),

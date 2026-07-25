@@ -280,10 +280,10 @@ pub struct Config {
     #[serde(default, alias = "screenReaderMode")]
     pub screen_reader_mode: bool,
 
-    /// Large text paste handling: when true, collapse large pastes in the input
-    /// box to a compact `[Pasted #N · …]` chip. When false (default), insert the
-    /// full pasted text as normal editable input and show a transient toast.
-    #[serde(default, alias = "collapseLargePastes")]
+    /// Large text paste handling: when true (default), stage large pastes behind
+    /// a compact `[Pasted text #N +M lines]` placeholder. When false, insert the
+    /// full pasted text as normal editable input.
+    #[serde(default = "default_true", alias = "collapseLargePastes")]
     pub collapse_large_pastes: bool,
 }
 
@@ -931,7 +931,7 @@ impl Default for Config {
             consult_memory_after_compact: default_true(),
             cross_session_history: default_true(),
             screen_reader_mode: false,
-            collapse_large_pastes: false,
+            collapse_large_pastes: true,
         }
     }
 }

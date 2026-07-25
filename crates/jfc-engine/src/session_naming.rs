@@ -1,18 +1,16 @@
-//! Auto-generate a short, human-readable title for a session after the
-//! first turn finishes.
+//! Auto-generate a short, human-readable title from the first meaningful
+//! submitted prompt.
 //!
-//! v132 fires a small Haiku call after the first user/assistant exchange
-//! to summarize the conversation into a 4–6 word title. The default
+//! The request starts with the first real prompt rather than waiting for an
+//! assistant EndTurn, so a refused or interrupted stream still gets a stable
+//! identity. The default
 //! `display_title` fallback truncates the user's first line, which is
 //! usually fine but loses meaning for long prompts ("can you help me
 //! with the…" → "can you help me with the…"). A Haiku call replaces
 //! that with something like "Refactor auth middleware".
 //!
-//! This module is intentionally lightweight: a single function that
-//! takes the active provider, the first user message, and the first
-//! assistant response, asks the model for a title, and persists it via
-//! `session::set_session_title`. Failures are swallowed — title is
-//! cosmetic and shouldn't disrupt the chat.
+//! Persistence happens in the engine event handler, where `/rename` can win
+//! atomically over an in-flight AI result.
 
 use jfc_provider::{
     ModelId, Provider, ProviderContent, ProviderMessage, ProviderRole, StreamOptions,
@@ -21,19 +19,14 @@ use std::sync::Arc;
 
 const MAX_TITLE_CHARS: usize = 60;
 
-/// Build the prompt asking the model for a 4–6 word title summarizing
-/// the first turn. Returns a single ProviderMessage list ready to send.
-fn build_request(first_user: &str, first_assistant: &str) -> Vec<ProviderMessage> {
+/// Build the prompt asking the model for a 3–7 word title from the first prompt.
+fn build_request(first_user: &str) -> Vec<ProviderMessage> {
     let user_truncated: String = first_user.chars().take(800).collect();
-    let assistant_truncated: String = first_assistant.chars().take(800).collect();
     let body = format!(
-        "Summarize the following first-turn exchange into a 4–6 word title \
-         suitable for a session sidebar. Use Title Case. No quotes, no \
-         trailing punctuation, no emojis. Output the title only — no \
-         preamble, no explanation.\n\n\
-         User: {user_truncated}\n\n\
-         Assistant: {assistant_truncated}\n\n\
-         Title:"
+        "Create a concise 3–7 word session title for this request. Preserve \
+         distinctive project or product names. No punctuation or emoji. Return \
+         exactly one JSON object with a string field named title.\n\n\
+         Request: {user_truncated}"
     );
     vec![ProviderMessage {
         role: ProviderRole::User,
@@ -41,19 +34,16 @@ fn build_request(first_user: &str, first_assistant: &str) -> Vec<ProviderMessage
     }]
 }
 
-/// Generate a title and persist it to the session file. Best-effort —
-/// returns the title that was written, or `None` on any failure.
-pub async fn generate_and_save(
-    session_id: crate::ids::SessionId,
+/// Generate a title. Best-effort; callers own persistence and live-state updates.
+pub async fn generate_title(
     provider: Arc<dyn Provider>,
     model: ModelId,
     first_user: String,
-    first_assistant: String,
 ) -> Option<String> {
-    let messages = build_request(&first_user, &first_assistant);
+    let messages = build_request(&first_user);
     let opts = StreamOptions::new(model.as_str())
         .system("You generate concise, descriptive session titles.")
-        .max_tokens(40);
+        .max_tokens(60);
 
     let resp = match provider.complete(messages, &opts).await {
         Ok(r) => r,
@@ -67,20 +57,26 @@ pub async fn generate_and_save(
         }
     };
 
-    let title = sanitize(&resp.content);
+    let title = title_from_response(&resp.content);
     if title.is_empty() {
         tracing::debug!(target: "jfc::session_naming", "model returned empty title");
         return None;
     }
 
-    crate::session::set_session_title(&session_id, &title).await;
-    tracing::info!(
-        target: "jfc::session_naming",
-        %session_id,
-        title = %title,
-        "auto-generated session title"
-    );
     Some(title)
+}
+
+fn title_from_response(raw: &str) -> String {
+    let candidate = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| raw.to_owned());
+    sanitize(&candidate)
 }
 
 /// Strip quotes, trailing punctuation, and excess whitespace; clamp
@@ -156,8 +152,7 @@ mod tests {
     #[test]
     fn build_request_truncates_long_inputs_robust() {
         let long_user = "u".repeat(2000);
-        let long_assistant = "a".repeat(2000);
-        let req = build_request(&long_user, &long_assistant);
+        let req = build_request(&long_user);
         assert_eq!(req.len(), 1);
         // The combined prompt should not contain the full 2000-char inputs.
         let body_len: usize = req[0]
@@ -168,10 +163,18 @@ mod tests {
                 _ => 0,
             })
             .sum();
-        // System prompt + truncated user (800) + truncated assistant (800) ~< 2500
+        // Instructions plus a truncated 800-character user prompt.
         assert!(
-            body_len < 2500,
+            body_len < 1600,
             "body length {body_len} exceeds expected cap"
+        );
+    }
+
+    #[test]
+    fn structured_title_response_is_unwrapped_normal() {
+        assert_eq!(
+            title_from_response(r#"{"title":"Diagnose Frozen Streams"}"#),
+            "Diagnose Frozen Streams"
         );
     }
 }

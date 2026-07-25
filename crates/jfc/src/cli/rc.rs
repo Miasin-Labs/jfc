@@ -73,11 +73,22 @@ async fn connect_client(url: &str, token: &str) -> anyhow::Result<()> {
 
     let state = ClientState::new();
 
+    // Ask for the retained host stream before accepting new input. A freshly
+    // connected CLI has no durable cursor, so replay from the oldest retained
+    // frame and finish with the host's latest coherent snapshot.
+    tx.send(auth::build_signed_frame(
+        token,
+        1,
+        RemoteEnvelope::Resume { after_seq: 0 },
+    ))
+    .await
+    .map_err(|_| anyhow::anyhow!("remote disconnected during resume"))?;
+
     // Outbound: stdin lines → envelopes.
     let token_out = token.to_string();
     let state_for_input = state.clone();
     tokio::spawn(async move {
-        let mut out_seq: u64 = 1;
+        let mut out_seq: u64 = 2;
         let stdin = tokio::io::BufReader::new(tokio::io::stdin());
         use tokio::io::AsyncBufReadExt;
         let mut lines = stdin.lines();
@@ -106,6 +117,8 @@ async fn connect_client(url: &str, token: &str) -> anyhow::Result<()> {
                     tool_use_id,
                     approved,
                 }
+            } else if line.starts_with('/') {
+                RemoteEnvelope::SlashCommand { command: line }
             } else {
                 RemoteEnvelope::UserPrompt { text: line }
             };
@@ -191,6 +204,43 @@ fn render_envelope(env: &RemoteEnvelope, state: &ClientState) {
         }
         RemoteEnvelope::Toast { kind, text } => {
             println!("\n[{kind}] {text}");
+        }
+        RemoteEnvelope::SessionSnapshot { snapshot } => {
+            println!(
+                "\n[session] model={} mode={} agents={} workflows={}",
+                snapshot.model,
+                snapshot.permission_mode,
+                snapshot.agents.len(),
+                snapshot.workflows.len()
+            );
+            if let Some(goal) = &snapshot.active_goal {
+                println!("  goal: {goal}");
+            }
+            for agent in &snapshot.agents {
+                println!(
+                    "  agent {} [{}] {} ({} tokens)",
+                    agent.id,
+                    agent.status,
+                    agent.description,
+                    agent.input_tokens.saturating_add(agent.output_tokens)
+                );
+            }
+            for workflow in &snapshot.workflows {
+                println!(
+                    "  workflow {} [{}] {}/{} agents",
+                    workflow.name, workflow.status, workflow.finished_agents, workflow.total_agents
+                );
+            }
+        }
+        RemoteEnvelope::ReplayComplete { through_seq } => {
+            tracing::debug!(target: "jfc::remote", through_seq, "replay complete");
+        }
+        RemoteEnvelope::AttachmentAvailable { attachment } => {
+            println!(
+                "\n[file] {} ({})",
+                attachment.name.as_deref().unwrap_or("unnamed"),
+                attachment.mime_type
+            );
         }
         RemoteEnvelope::Heartbeat => {}
         other => {

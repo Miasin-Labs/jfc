@@ -34,7 +34,7 @@ fn display_width(s: &str) -> usize {
 pub fn is_diagram_lang(lang: &str) -> bool {
     matches!(
         lang.trim().to_ascii_lowercase().as_str(),
-        "mermaid" | "mmd" | "dot" | "graphviz" | "gv"
+        "mermaid" | "mmd" | "dot" | "graphviz" | "gv" | "chart" | "dataviz"
     )
 }
 
@@ -77,6 +77,19 @@ pub fn render(lang: &str, src: &str, theme: &Theme, width: usize) -> Vec<Line<'s
     let _linkscope_render = linkscope::phase("markdown.diagram.render");
     linkscope::record_bytes("markdown.diagram.input", usize_to_u64_saturating(src.len()));
     let inner_width = width.saturating_sub(2).max(20);
+    if matches!(
+        lang.trim().to_ascii_lowercase().as_str(),
+        "chart" | "dataviz"
+    ) {
+        return match render_chart(src, theme, inner_width) {
+            Some(lines) => frame(lines, theme, "chart"),
+            None => frame(
+                fallback_outline(src, theme, inner_width),
+                theme,
+                "chart (raw)",
+            ),
+        };
+    }
     let parsed = match lang.trim().to_ascii_lowercase().as_str() {
         "dot" | "graphviz" | "gv" => parse_dot(src),
         _ => parse_mermaid(src),
@@ -106,6 +119,176 @@ pub fn render(lang: &str, src: &str, theme: &Theme, width: usize) -> Vec<Line<'s
             "diagram (raw)",
         ),
     }
+}
+
+#[derive(Debug)]
+struct ChartSeries {
+    name: String,
+    values: Vec<f64>,
+}
+
+fn render_chart(src: &str, theme: &Theme, width: usize) -> Option<Vec<Line<'static>>> {
+    let spec: serde_json::Value = serde_json::from_str(src).ok()?;
+    let series = spec
+        .get("series")?
+        .as_array()?
+        .iter()
+        .filter_map(|series| {
+            let values = series
+                .get("points")?
+                .as_array()?
+                .iter()
+                .filter_map(|point| point.as_array()?.get(1)?.as_f64())
+                .collect::<Vec<_>>();
+            (!values.is_empty()).then(|| ChartSeries {
+                name: series
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("series")
+                    .to_owned(),
+                values,
+            })
+        })
+        .collect::<Vec<_>>();
+    if series.is_empty() {
+        return None;
+    }
+    let ticks = spec
+        .pointer("/x/ticks")
+        .and_then(serde_json::Value::as_array)
+        .map(|ticks| {
+            ticks
+                .iter()
+                .map(|tick| {
+                    tick.as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| tick.to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let kind = spec
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("line");
+    match kind {
+        "bar" => Some(draw_bar_chart(&series, &ticks, theme, width)),
+        "donut" | "doughnut" => Some(draw_donut_chart(&series[0], &ticks, theme, width)),
+        "line" => Some(draw_line_chart(&series, &ticks, &spec, theme, width)),
+        _ => None,
+    }
+}
+
+fn draw_line_chart(
+    series: &[ChartSeries],
+    ticks: &[String],
+    spec: &serde_json::Value,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    const LEVELS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let values = series
+        .iter()
+        .flat_map(|series| series.values.iter().copied())
+        .collect::<Vec<_>>();
+    let minimum = spec
+        .pointer("/y/min")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_else(|| values.iter().copied().fold(f64::INFINITY, f64::min));
+    let maximum = spec
+        .pointer("/y/max")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_else(|| values.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+    let span = (maximum - minimum).max(f64::EPSILON);
+    let mut lines = Vec::new();
+    for item in series {
+        let sparkline = item
+            .values
+            .iter()
+            .map(|value| {
+                let normalized = ((*value - minimum) / span).clamp(0.0, 1.0);
+                let index = (normalized * (LEVELS.len() - 1) as f64).round() as usize;
+                LEVELS[index]
+            })
+            .collect::<String>();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<12}", truncate(&item.name, 12)),
+                theme.style_text_muted,
+            ),
+            Span::styled(truncate(&sparkline, width.saturating_sub(13)), theme.style_accent),
+        ]));
+    }
+    if let (Some(first), Some(last)) = (ticks.first(), ticks.last()) {
+        lines.push(Line::from(Span::styled(
+            format!("{first}  ->  {last}   range {minimum:.3}..{maximum:.3}"),
+            theme.style_text_muted,
+        )));
+    }
+    lines
+}
+
+fn draw_bar_chart(
+    series: &[ChartSeries],
+    ticks: &[String],
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let maximum = series
+        .iter()
+        .flat_map(|series| series.values.iter().copied())
+        .fold(0.0_f64, f64::max)
+        .max(f64::EPSILON);
+    let bar_width = width.saturating_sub(24).max(4);
+    let mut lines = Vec::new();
+    for item in series {
+        if series.len() > 1 {
+            lines.push(Line::from(Span::styled(
+                item.name.clone(),
+                theme.style_text_primary.add_modifier(Modifier::BOLD),
+            )));
+        }
+        for (index, value) in item.values.iter().enumerate() {
+            let label = ticks
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| (index + 1).to_string());
+            let count = ((*value / maximum).clamp(0.0, 1.0) * bar_width as f64).round() as usize;
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>12} ", truncate(&label, 12)), theme.style_text_muted),
+                Span::styled("█".repeat(count), theme.style_accent),
+                Span::styled(format!(" {value:.3}"), theme.style_text_primary),
+            ]));
+        }
+    }
+    lines
+}
+
+fn draw_donut_chart(
+    series: &ChartSeries,
+    ticks: &[String],
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let total = series.values.iter().sum::<f64>().max(f64::EPSILON);
+    let bar_width = width.saturating_sub(28).max(4);
+    series
+        .values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let label = ticks
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| (index + 1).to_string());
+            let share = (*value / total).max(0.0);
+            Line::from(vec![
+                Span::styled(format!("{:>12} ", truncate(&label, 12)), theme.style_text_muted),
+                Span::styled("●".repeat((share * bar_width as f64).round() as usize), theme.style_accent),
+                Span::styled(format!(" {:>5.1}%", share * 100.0), theme.style_text_primary),
+            ])
+        })
+        .collect()
 }
 
 fn usize_to_u64_saturating(value: usize) -> u64 {
@@ -803,12 +986,37 @@ mod tests {
 
     #[test]
     fn is_diagram_lang_matches_known_normal() {
-        for l in ["mermaid", "MERMAID", "mmd", "dot", "graphviz", "gv"] {
+        for l in [
+            "mermaid", "MERMAID", "mmd", "dot", "graphviz", "gv", "chart", "dataviz",
+        ] {
             assert!(is_diagram_lang(l), "{l} should be a diagram lang");
         }
         for l in ["rust", "bash", "json", ""] {
             assert!(!is_diagram_lang(l), "{l} should NOT be a diagram lang");
         }
+    }
+
+    #[test]
+    fn render_chart_spec_as_terminal_bars_regression() {
+        let lines = render(
+            "chart",
+            r#"{
+                "type":"bar",
+                "series":[{"name":"Requests","points":[[0,2],[1,8]]}],
+                "x":{"ticks":["Mon","Tue"]}
+            }"#,
+            &theme(),
+            60,
+        );
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("chart"));
+        assert!(text.contains("Mon"));
+        assert!(text.contains("Tue"));
+        assert!(text.contains('█'));
     }
 
     #[test]

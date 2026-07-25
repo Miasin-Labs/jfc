@@ -239,6 +239,7 @@ pub async fn handle_done(
     state.compacting_last_progress = 0;
     state.compact_suppressed = false;
     state.speculative_compact_fired = false;
+    state.speculative_compact_fingerprint = None;
     // Surface the compaction outcome to the user via a toast
     // — they don't have to scroll to see the boundary marker.
     let saved_k = saved / 1000;
@@ -330,6 +331,7 @@ pub async fn handle_failed(
     state.compacting_attempt_baseline = 0;
     state.compacting_last_progress = 0;
     state.speculative_compact_fired = false;
+    state.speculative_compact_fingerprint = None;
     // Permanent failures (provider unsupported, exhausted retries,
     // breaker tripped) latch suppression so we stop spamming
     // compact attempts on every AllToolsComplete; the user clears

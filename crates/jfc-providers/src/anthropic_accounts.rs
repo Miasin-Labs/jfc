@@ -338,6 +338,10 @@ pub struct AccountSnapshot {
     pub daily_output_tokens: u64,
     pub total_cost_usd: f64,
     pub total_request_count: u64,
+    pub enabled: bool,
+    pub auth_status: String,
+    pub last_used_ms: Option<u64>,
+    pub last_auth_error: Option<String>,
 }
 
 /// One stream's worth of token usage to record. Constructed in the OAuth
@@ -698,7 +702,23 @@ impl AccountManager {
     pub async fn snapshot_for_ui(&self) -> Option<AccountSnapshot> {
         let acct = self.pick_next().await.or(self.active_account().await)?;
         let now = now_ms();
-        Some(AccountSnapshot {
+        Some(Self::account_snapshot(&acct, now))
+    }
+
+    /// Compact UI snapshots for every configured account. This is refreshed
+    /// with the active snapshot so the TUI can render rotation health and
+    /// per-account activity without locking the manager during paint.
+    pub async fn snapshots_for_ui(&self) -> Vec<AccountSnapshot> {
+        let now = now_ms();
+        self.list_accounts()
+            .await
+            .iter()
+            .map(|account| Self::account_snapshot(account, now))
+            .collect()
+    }
+
+    fn account_snapshot(acct: &Account, now: u64) -> AccountSnapshot {
+        AccountSnapshot {
             email: acct.email.clone(),
             name: acct.name.clone(),
             plan: acct.plan.clone(),
@@ -733,7 +753,16 @@ impl AccountManager {
                 .as_ref()
                 .map(|t| t.request_count)
                 .unwrap_or(0),
-        })
+            enabled: acct.is_enabled(),
+            auth_status: match acct.auth_health() {
+                AuthHealth::Healthy => "healthy",
+                AuthHealth::Stale => "refreshing",
+                AuthHealth::NeedsReLogin => "re-login",
+            }
+            .to_owned(),
+            last_used_ms: acct.last_used,
+            last_auth_error: acct.last_auth_error.clone(),
+        }
     }
 
     fn is_account_usable(account: &Account, runtime: &RuntimeState) -> bool {

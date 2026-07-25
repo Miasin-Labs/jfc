@@ -383,6 +383,20 @@ pub async fn handle_stream_error(state: &mut EngineState, tx: &EventSender, e: S
     state.clear_active_stream_scope();
     state.current_stream_request = None;
     state.stream_lifecycle = None;
+    if !auto_retry_signal && !auto_compact_signal {
+        let detail = if interrupted_by_user {
+            "interrupted".to_owned()
+        } else {
+            let first_line = visible_error.lines().next().unwrap_or("stream error");
+            let short: String = first_line.chars().take(48).collect();
+            if short.is_empty() {
+                "stream error".to_owned()
+            } else {
+                short
+            }
+        };
+        state.stream_terminal_status = Some(format!("Stopped · {detail}"));
+    }
     // Clear the turn clock and any pending tool calls so the
     // spinner row stops rendering. Without this, the
     // `show_spinner` condition stays true (it checks
