@@ -1,0 +1,1272 @@
+{
+    "schemaVersion": 1,
+    "kind": "explore",
+    "query": "anthropic_oauth classify_and_recover strip_thinking_blocks body_has_thinking_blocks claude_settings load_merged loading CLAUDE.md hierarchy loading skills loading agents",
+    "totalSymbols": 201,
+    "totalFiles": 70,
+    "filesIncluded": 3,
+    "sourceFiles": [
+        {
+            "path": "crates/jfc-providers/src/anthropic_recovery.rs",
+            "language": "rust",
+            "header": "#### crates/jfc-providers/src/anthropic_recovery.rs — RetryKind::as_str(method), crates/jfc-providers/src/anthropic_recovery.rs::classify_fallback_credit_reject(function), crates/jfc-providers/src/anthropic_recovery.rs::is_400(function), crates/jfc-providers/src/anthropic_recovery.rs::classify_and_recover(function), crates/jfc-providers/src/anthropic_recovery.rs::RecoveryLatches(references), crates/jfc-providers/src/anthropic_recovery.rs::RecoveryAction(references), crates/jfc-providers/src/anthropic_recovery.rs::is_400(calls), crates/jfc-providers/src/anthropic_recovery.rs::classify_fallback_credit_reject(calls), crates/jfc-providers/src/anthropic_recovery.rs::strip_fallback_credit_token(calls), crates/jfc-providers/src/anthropic_recovery.rs::detect_unprocessable_media(calls), +10 more",
+            "body": "73\t}\n74\t\n75\timpl RetryKind {\n76\t    pub fn as_str(self) -> &'static str {\n77\t        match self {\n78\t            Self::MediaStrip => \"retry:media-strip\",\n79\t            Self::CacheDiagnosisBeta => \"retry:cache-diagnosis-beta\",\n80\t            Self::ThinkingType => \"retry:thinking-type\",\n81\t            Self::ThinkingSignatureStrip => \"retry:thinking-signature-strip\",\n82\t            Self::MidConvSystem => \"retry:mid-conv-system\",\n83\t            Self::FallbackCreditStrip => \"retry:fallback-credit-strip\",\n84\t        }\n85\t    }\n86\t}\n87\t\n88\t/// Classify a `fallback_credit_token` rejection from a 400 body, mirroring\n89\t/// 2.1.177's `credit_*` outcome labels (cli.js ~511847).\n90\tpub fn classify_fallback_credit_reject(body: &str) -> Option<&'static str> {\n91\t    if body.contains(\"fallback_credit_token: invalid or malformed\") {\n92\t        Some(\"credit_malformed\")\n93\t    } else if body.contains(\"fallback_credit_token: does not belong to this organization\") {\n94\t        Some(\"credit_wrong_org\")\n95\t    } else if body.contains(\"fallback_credit_token: has expired\") {\n96\t        Some(\"credit_expired\")\n97\t    } else if body.contains(\"fallback_credit_token: is not valid for model\") {\n98\t        Some(\"credit_invalid_model\")\n99\t    } else if body.contains(\"Extra inputs are not permitted\")\n100\t        && body.contains(\"fallback_credit_token\")\n101\t    {\n102\t        Some(\"credit_extra_forbidden\")\n103\t    } else if body.contains(\"fallback_credit_token\") {\n104\t        Some(\"credit_other\")\n105\t    } else {\n106\t        None\n107\t    }\n108\t}\n109\t\n110\t/// True when the error is an HTTP 400 (the status every body-mutating recovery\n111\t/// keys off). `status` is the parsed HTTP status code, `body` the raw response.\n112\tfn is_400(status: u16) -> bool {\n113\t    status == 400\n114\t}\n115\t\n116\t/// Classify a failed Anthropic request and, if a recovery applies, mutate\n117\t/// `body` in place and return [`RecoveryAction::Retry`]. `latches` carries the\n118\t/// per-turn sticky flags so each recovery fires at most once.\n119\t///\n120\t/// `status` is the HTTP status code; `body` the raw error response text;\n121\t/// `request_body` the JSON request that was sent (mutated in place on retry).\n122\tpub fn classify_and_recover(\n123\t    status: u16,\n124\t    body: &str,\n125\t    request_body: &mut Value,\n126\t    latches: &mut RecoveryLatches,\n127\t) -> RecoveryAction {\n128\t    if !is_400(status) {\n129\t        return RecoveryAction::Surface;\n130\t    }\n131\t\n132\t    // 0. Fallback-credit-token reject — strip the poisoned credit token and\n133\t    //    retry without it. Highest priority: a bad token fails every retry.\n134\t    if !latches.fallback_credit_stripped\n135\t        && let Some(reason) = classify_fallback_credit_reject(body)\n136\t        && strip_fallback_credit_token(request_body)\n137\t    {\n138\t        latches.fallback_credit_stripped = true;\n139\t        tracing::warn!(\n140\t            target: \"jfc::provider::anthropic_recovery\",\n141\t            reason,\n142\t            \"tengu_fallback_credit_forfeited: server rejected fallback_credit_token — stripping and retrying\"\n143\t        );\n144\t        return RecoveryAction::Retry(RetryKind::FallbackCreditStrip);\n145\t    }\n146\t\n147\t    // 1. Media-block strip — a 400 pointing at an unprocessable image/document.\n148\t    if !latches.media_strip_done\n149\t        && latches.media_blocks_stripped < MAX_MEDIA_BLOCK_STRIPS\n150\t        && let Some(kind) = detect_unprocessable_media(body)\n151\t        && strip_first_media_block(request_body, kind)\n152\t    {\n153\t        latches.media_blocks_stripped += 1;\n154\t        if latches.media_blocks_stripped >= MAX_MEDIA_BLOCK_STRIPS {\n155\t            latches.media_strip_done = true;\n156\t        }\n157\t        return RecoveryAction::Retry(RetryKind::MediaStrip);\n158\t    }\n159\t\n160\t    // 2. Cache-diagnosis beta reject — drop the diagnostics field + latch.\n161\t    if !latches.cache_diagnosis_dropped\n162\t        && is_cache_diagnosis_beta_reject(body)\n163\t        && drop_cache_diagnosis(request_body)\n164\t    {\n165\t        latches.cache_diagnosis_dropped = true;\n166\t        return RecoveryAction::Retry(RetryKind::CacheDiagnosisBeta);\n167\t    }\n168\t\n169\t    // 3. Thinking-type toggle — flip enabled↔adaptive.\n170\t    if !latches.thinking_type_toggled\n171\t        && is_thinking_type_reject(body)\n172\t        && toggle_thinking_type(request_body)\n173\t    {\n174\t        latches.thinking_type_toggled = true;\n175\t        return RecoveryAction::Retry(RetryKind::ThinkingType);\n176\t    }\n177\t\n178\t    // 4. Thinking-signature strip — drop ALL thinking blocks.\n179\t    if !latches.thinking_signature_stripped\n180\t        && is_thinking_signature_reject(body)\n181\t        && strip_thinking_blocks(request_body)\n182\t    {\n183\t        latches.thinking_signature_stripped = true;\n184\t        return RecoveryAction::Retry(RetryKind::ThinkingSignatureStrip);\n185\t    }\n186\t\n187\t    // 5. Mid-conversation system fallback — server rejected a `role:\"system\"`\n188\t    //    message; fold it into a `<system-reminder>` user block.\n189\t    if !latches.mid_conv_system_fallback_done\n190\t        && is_mid_conv_system_reject(body)\n191\t        && fold_system_role_messages(request_body)\n192\t    {\n193\t        latches.mid_conv_system_fallback_done = true;\n194\t        return RecoveryAction::Retry(RetryKind::MidConvSystem);\n195\t    }\n196\t\n197\t    RecoveryAction::Surface\n198\t}\n199\t\n200\t// ─── Detection ──────────────────────────────────────────────────────────────\n201\t"
+        },
+        {
+            "path": "crates/jfc-config/src/claude_settings.rs",
+            "language": "rust",
+            "header": "#### crates/jfc-config/src/claude_settings.rs — calls(calls), crates/jfc-config/src/claude_settings.rs::ClaudeCompatibilityConfig(references), crates/jfc-config/src/claude_settings.rs::extend_unique(calls), crates/jfc-config/src/claude_settings.rs::settings_sources(function), crates/jfc-config/src/claude_settings.rs::project_hooks_trusted(function), crates/jfc-config/src/claude_settings.rs::load_merged(function), crates/jfc-config/src/claude_settings.rs::project_hooks_trusted(calls), AuditConfig::default(calls), crates/jfc-config/src/claude_settings.rs::settings_sources(calls), crates/jfc-config/src/claude_settings.rs::apply_to_config(function), +4 more",
+            "body": "487\t\n488\t/// Settings files in precedence order, each tagged with whether it is\n489\t/// repository-controlled (`true`) or user-level (`false`).\n490\tfn settings_sources(project_root: &Path) -> Vec<(PathBuf, bool)> {\n491\t    let mut sources = Vec::new();\n492\t    if let Some(home) = dirs::home_dir() {\n493\t        sources.push((home.join(\".claude\").join(\"settings.json\"), false));\n494\t    }\n495\t    sources.push((project_root.join(\".claude\").join(\"settings.json\"), true));\n496\t    sources.push((\n497\t        project_root.join(\".claude\").join(\"settings.local.json\"),\n498\t        true,\n499\t    ));\n500\t    sources\n501\t}\n502\t\n503\t/// CS-JFC-006: whether repo-local `.claude` shell hooks may be activated.\n504\t///\n505\t/// Repository-controlled config must not gain shell execution before the user\n506\t/// has trusted the project. The only trust signal we honor comes from *outside*\n507\t/// the repository (an environment opt-in), so a malicious checkout cannot\n508\t/// self-trust by shipping a marker file.\n509\tpub fn project_hooks_trusted() -> bool {\n510\t    std::env::var(\"JFC_TRUST_PROJECT_HOOKS\")\n511\t        .ok()\n512\t        .is_some_and(|v| !v.is_empty() && v != \"0\" && !v.eq_ignore_ascii_case(\"false\"))\n513\t}\n514\t\n515\tpub fn load_merged(project_root: &Path) -> ClaudeCompatibilityConfig {\n516\t    let trust_project_hooks = project_hooks_trusted();\n517\t    let mut merged = ClaudeCompatibilityConfig::default();\n518\t    for (path, is_project) in settings_sources(project_root) {\n519\t        let Ok(raw) = std::fs::read_to_string(&path) else {\n520\t            continue;\n521\t        };\n522\t        match serde_json::from_str::<ClaudeCompatibilityConfig>(&raw) {\n523\t            Ok(mut settings) => {\n524\t                // Never auto-activate repository-controlled shell hooks. A\n525\t                // project `.claude/settings*.json` that ships hooks would\n526\t                // otherwise reach `sh -c` on setup/prompt events before the\n527\t                // user has trusted the project.\n528\t                if is_project && !trust_project_hooks && settings.hooks.is_some() {\n529\t                    tracing::warn!(\n530\t                        target: \"jfc::config::claude_settings\",\n531\t                        path = %path.display(),\n532\t                        \"ignoring repo-local .claude shell hooks for an untrusted project; \\\n533\t                         set JFC_TRUST_PROJECT_HOOKS=1 to enable them\"\n534\t                    );\n535\t                    settings.hooks = None;\n536\t                }\n537\t                merged.merge_from(settings);\n538\t            }\n539\t            Err(error) => {\n540\t                tracing::warn!(\n541\t                    target: \"jfc::config::claude_settings\",\n542\t                    path = %path.display(),\n543\t                    error = %error,\n544\t                    \"failed to parse Claude settings JSON - ignoring\"\n545\t                );\n546\t            }\n547\t        }\n548\t    }\n549\t    merged\n550\t}\n551\t\n552\tpub fn apply_to_config(cfg: &mut Config, project_root: &Path) {\n553\t    let settings = load_merged(project_root);\n554\t    apply_settings(cfg, settings);\n555\t}\n556\t\n557\tpub fn apply_settings(cfg: &mut Config, settings: ClaudeCompatibilityConfig) {\n558\t    if settings.is_empty() && !chrome_mcp_auto_enable_enabled(&settings) {\n559\t        return;\n560\t    }\n561\t\n562\t    if let Some(model) = settings\n563\t        .model\n564\t        .as_ref()\n565\t        .filter(|model| !model.trim().is_empty())\n566\t    {\n567\t        cfg.default.model = Some(model.trim().to_owned());\n568\t    }\n569\t    if let Some(fallback_model) = settings\n570\t        .fallback_model\n571\t        .as_ref()\n572\t        .filter(|model| !model.trim().is_empty())\n573\t    {\n574\t        let fallback = FallbackModel::Simple(fallback_model.trim().to_owned());\n575\t        if !cfg\n576\t            .default\n577\t            .fallback_models\n578\t            .iter()\n579\t            .any(|existing| existing.model_id() == fallback_model.trim())\n580\t        {\n581\t            cfg.default.fallback_models.push(fallback);\n582\t        }\n583\t        cfg.refusal_fallback_model = Some(fallback_model.trim().to_owned());\n584\t    }\n585\t    if cfg.theme.is_none()\n586\t        && let Some(theme) = settings\n587\t            .theme\n588\t            .as_ref()\n589\t            .filter(|theme| !theme.trim().is_empty())\n590\t    {\n591\t        cfg.theme = Some(theme.trim().to_owned());\n592\t    }\n593\t    if cfg.output_style.is_none()\n594\t        && let Some(output_style) = settings\n595\t            .output_style\n596\t            .as_ref()\n597\t            .filter(|style| !style.trim().is_empty())\n598\t    {\n599\t        cfg.output_style = Some(output_style.trim().to_owned());\n600\t    }\n601\t    if let Some(shell) = settings\n602\t        .default_shell\n603\t        .as_ref()\n604\t        .filter(|shell| !shell.trim().is_empty())\n605\t    {\n606\t        cfg.default_shell = Some(shell.trim().to_owned());\n607\t    }\n608\t    if let Some(always_thinking) = settings.always_thinking_enabled {\n609\t        cfg.default.provider_options.insert(\n610\t            \"alwaysThinkingEnabled\".to_owned(),\n611\t            serde_json::Value::Bool(always_thinking),\n612\t        );\n613\t    }\n614\t    if let Some(thinking_budget) = settings.thinking_budget {\n615\t        cfg.default.thinking_budget = Some(thinking_budget);\n616\t    }\n617\t    if let Some(thinking_display) = settings\n618\t        .thinking_display\n619\t        .as_ref()\n620\t        .filter(|display| !display.trim().is_empty())\n621\t    {\n622\t        cfg.default.provider_options.insert(\n623\t            \"thinkingDisplay\".to_owned(),\n624\t            serde_json::Value::String(thinking_display.trim().to_owned()),\n625\t        );\n626\t    }\n627\t    if let Some(mode) = settings\n628\t        .permissions\n629\t        .default_mode\n630\t        .as_deref()\n631\t        .and_then(normalize_permission_mode)\n632\t    {\n633\t        cfg.default\n634\t            .permission\n635\t            .insert(\"mode\".to_owned(), mode.to_owned());\n636\t    }\n637\t    if !settings.permissions.allow.is_empty() || !settings.permissions.deny.is_empty() {\n638\t        let automation = cfg\n639\t            .permission_automation\n640\t            .get_or_insert_with(PermissionAutomationConfig::default);\n641\t        automation.enabled = true;\n642\t        extend_unique(\n643\t            &mut automation.allowed_tools,\n644\t            settings.permissions.allow.clone(),\n645\t        );\n646\t        extend_unique(\n647\t            &mut automation.denied_tools,\n648\t            settings.permissions.deny.clone(),\n649\t        );\n650\t    }\n651\t    if let Some(hooks) = settings.hooks.clone() {\n652\t        cfg.hooks = merge_hooks(cfg.hooks.take(), Some(hooks));\n653\t    }\n654\t    if settings.disable_all_hooks == Some(true) {\n655\t        cfg.hooks = None;\n656\t    }\n657\t    for (name, server) in &settings.mcp_servers {\n658\t        cfg.mcp.insert(name.clone(), server.clone());\n659\t    }\n660\t    apply_chrome_mcp_auto_enable(cfg, &settings);\n661\t    if let Some(worktree) = settings.worktree.clone() {\n662\t        cfg.worktree = merge_worktree(cfg.worktree.take(), Some(worktree));\n663\t    }\n664\t    if let Some(sandbox) = settings.sandbox.clone() {\n665\t        cfg.sandbox = merge_sandbox(cfg.sandbox.take(), Some(sandbox));\n666\t    }\n667\t    if settings.disable_remote_control == Some(true) {\n668\t        cfg.remote_control\n669\t            .get_or_insert_with(RemoteControlConfig::default)\n670\t            .disabled = true;\n671\t    }\n672\t    if settings.disable_agent_view == Some(true) {\n673\t        cfg.disabled_tools.push(\"AgentView\".to_owned());\n674\t    }\n675\t    if settings.disable_workflows == Some(true) && settings.enable_workflows != Some(true) {\n676\t        cfg.disabled_tools.push(\"Workflow\".to_owned());\n677\t    }\n678\t\n679\t    // Compaction settings — bridge into Config's own fields\n680\t    if let Some(enabled) = settings.auto_compact_enabled {\n681\t        cfg.auto_compact_enabled = enabled;\n682\t    }\n683\t    if let Some(window) = settings.auto_compact_window {\n684\t        cfg.auto_compact_window = Some(window);\n685\t    }\n686\t\n687\t    // Memory recall — autoMemoryEnabled gates memory_recall_enabled.\n688\t    if let Some(enabled) = settings.auto_memory_enabled {\n689\t        cfg.memory_recall_enabled = enabled;\n690\t    }\n691\t\n692\t    // Effort level → reasoning_effort + thinking budget mapping.\n693\t    // CC 2.1.167 maps effortLevel to the model's reasoning effort level.\n694\t    if let Some(ref level) = settings.effort_level {\n695\t        let effort_str = match level.trim() {\n696\t            \"low\" => Some(\"low\"),\n697\t            \"medium\" => Some(\"medium\"),\n698\t            \"high\" => Some(\"high\"),\n699\t            \"max\" | \"xhigh\" => Some(\"max\"),\n700\t            _ => None,\n701\t        };\n702\t        if let Some(e) = effort_str {\n703\t            if cfg.default.reasoning_effort.is_none() {\n704\t                cfg.default.reasoning_effort = Some(e.to_owned());\n705\t            }\n706\t        }\n707\t        // Also set thinking budget as a fallback for providers that use it.\n708\t        let budget = match level.trim() {\n709\t            \"low\" => Some(1_000u32),\n710\t            \"medium\" => Some(5_000u32),\n711\t            \"high\" => Some(10_000u32),\n712\t            \"max\" | \"xhigh\" => Some(32_000u32),\n713\t            _ => None,\n714\t        };\n715\t        if let Some(b) = budget {\n716\t            cfg.default.thinking_budget = cfg.default.thinking_budget.or(Some(b));\n717\t        }\n718\t        // \"max\"/\"xhigh\" → ultracode\n719\t        if matches!(level.trim(), \"max\" | \"xhigh\") && cfg.default.ultracode.is_none() {\n720\t            cfg.default.ultracode = Some(true);\n721\t        }\n722\t    }\n723\t\n724\t    cfg.claude = settings;\n725\t}\n726\t\n727\tfn normalize_permission_mode(mode: &str) -> Option<&'static str> {\n728\t    match mode.trim() {"
+        },
+        {
+            "path": "crates/jfc-providers/src/sse/content_block.rs",
+            "language": "rust",
+            "header": "#### crates/jfc-providers/src/sse/content_block.rs — ContentBlock::deserialize::Block(struct), crates/jfc-providers/src/sse/content_block.rs::ContentBlock(enum), ContentBlock::deserialize(method)",
+            "body": "1\tuse serde::{Deserialize, de::Error as DeError};\n2\tuse serde_json::Value;\n3\t\n4\tuse jfc_provider::ServerToolResultKind;\n5\t\n6\t#[derive(Debug)]\n7\tpub enum ContentBlock {\n8\t    Text {\n9\t        #[allow(dead_code)]\n10\t        text: String,\n11\t    },\n12\t    Thinking {\n13\t        #[allow(dead_code)]\n14\t        thinking: String,\n15\t    },\n16\t    /// Server-redacted thinking block — opaque base64 blob, no deltas.\n17\t    /// Must be round-tripped verbatim in subsequent requests.\n18\t    RedactedThinking {\n19\t        data: String,\n20\t    },\n21\t    ToolUse {\n22\t        id: String,\n23\t        name: String,\n24\t        #[allow(dead_code)]\n25\t        input: Value,\n26\t    },\n27\t    /// Anthropic server-side tool invocation (e.g. web_search, code_execution).\n28\t    /// These are executed server-side; jfc renders them but does not dispatch\n29\t    /// them locally. Shape mirrors `tool_use` but uses `server_tool_use` type.\n30\t    ServerToolUse {\n31\t        id: String,\n32\t        name: String,\n33\t        input: Value,\n34\t    },\n35\t    /// Server-side tool result blocks (`web_search_tool_result`,\n36\t    /// `code_execution_tool_result`, `tool_search_tool_result`, ...).\n37\t    /// `tool_kind` preserves the original wire type so future Anthropic\n38\t    /// result blocks can round-trip without a parser release.\n39\t    ServerToolResult {\n40\t        tool_use_id: String,\n41\t        tool_kind: ServerToolResultKind,\n42\t        content: Value,\n43\t    },\n44\t    Compaction,\n45\t    /// Forward-compatible catch-all for new content block types. Unknown\n46\t    /// blocks are ignored unless they carry `tool_use_id` + `content`, in\n47\t    /// which case they are promoted to `ServerToolResult` above.\n48\t    Unknown {\n49\t        kind: String,\n50\t        raw: Value,\n51\t    },\n52\t}\n53\t\n54\timpl<'de> Deserialize<'de> for ContentBlock {\n55\t    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>\n56\t    where\n57\t        D: serde::Deserializer<'de>,\n58\t    {\n59\t        let value = Value::deserialize(deserializer)?;\n60\t        let kind = value\n61\t            .get(\"type\")\n62\t            .and_then(Value::as_str)\n63\t            .ok_or_else(|| D::Error::missing_field(\"type\"))?\n64\t            .to_owned();\n65\t\n66\t        macro_rules! block {\n67\t            ($ty:ty) => {\n68\t                serde_json::from_value::<$ty>(value.clone()).map_err(D::Error::custom)?\n69\t            };\n70\t        }\n71\t\n72\t        match kind.as_str() {\n73\t            \"text\" => {\n74\t                #[derive(Deserialize)]\n75\t                struct Block {\n76\t                    #[serde(default)]\n77\t                    text: String,\n78\t                }\n79\t                let block = block!(Block);\n80\t                Ok(Self::Text { text: block.text })\n81\t            }\n82\t            \"thinking\" => {\n83\t                #[derive(Deserialize)]\n84\t                struct Block {\n85\t                    #[serde(default)]\n86\t                    thinking: String,\n87\t                }\n88\t                let block = block!(Block);\n89\t                Ok(Self::Thinking {\n90\t                    thinking: block.thinking,\n91\t                })\n92\t            }\n93\t            \"redacted_thinking\" => {\n94\t                #[derive(Deserialize)]\n95\t                struct Block {\n96\t                    data: String,\n97\t                }\n98\t                let block = block!(Block);\n99\t                Ok(Self::RedactedThinking { data: block.data })\n100\t            }\n101\t            \"tool_use\" => {\n102\t                #[derive(Deserialize)]\n103\t                struct Block {\n104\t                    id: String,\n105\t                    name: String,\n106\t                    #[serde(default)]\n107\t                    input: Value,\n108\t                }\n109\t                let block = block!(Block);\n110\t                Ok(Self::ToolUse {\n111\t                    id: block.id,\n112\t                    name: block.name,\n113\t                    input: block.input,\n114\t                })\n115\t            }\n116\t            \"server_tool_use\" => {\n117\t                #[derive(Deserialize)]\n118\t                struct Block {\n119\t                    id: String,\n120\t                    name: String,\n121\t                    #[serde(default)]\n122\t                    input: Value,\n123\t                }\n124\t                let block = block!(Block);\n125\t                Ok(Self::ServerToolUse {\n126\t                    id: block.id,\n127\t                    name: block.name,\n128\t                    input: block.input,\n129\t                })\n130\t            }\n131\t            \"web_search_tool_result\"\n132\t            | \"code_execution_tool_result\"\n133\t            | \"web_fetch_tool_result\"\n134\t            | \"advisor_tool_result\"\n135\t            | \"bash_code_execution_tool_result\"\n136\t            | \"text_editor_code_execution_tool_result\"\n137\t            | \"tool_search_tool_result\" => {\n138\t                #[derive(Deserialize)]\n139\t                struct Block {\n140\t                    tool_use_id: String,\n141\t                    #[serde(default)]\n142\t                    content: Value,\n143\t                }\n144\t                let block = block!(Block);\n145\t                Ok(Self::ServerToolResult {\n146\t                    tool_use_id: block.tool_use_id,\n147\t                    tool_kind: ServerToolResultKind::from_wire_type(&kind),\n148\t                    content: block.content,\n149\t                })\n150\t            }\n151\t            \"compaction\" => Ok(Self::Compaction),\n152\t            _ => {\n153\t                if let Some(tool_use_id) = value.get(\"tool_use_id\").and_then(Value::as_str) {\n154\t                    return Ok(Self::ServerToolResult {\n155\t                        tool_use_id: tool_use_id.to_owned(),\n156\t                        tool_kind: ServerToolResultKind::from_wire_type(&kind),\n157\t                        content: value.get(\"content\").cloned().unwrap_or(Value::Null),\n158\t                    });\n159\t                }\n160\t                Ok(Self::Unknown { kind, raw: value })\n161\t            }\n162\t        }\n163\t    }\n164\t}"
+        }
+    ],
+    "relationships": [
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "strip_thinking_blocks"
+        },
+        {
+            "kind": "calls",
+            "source": "load_merged",
+            "target": "project_hooks_trusted"
+        },
+        {
+            "kind": "calls",
+            "source": "load_merged",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "body_has_thinking_blocks",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ContentBlock::deserialize",
+            "target": "RetryKind::as_str"
+        },
+        {
+            "kind": "references",
+            "source": "classify_and_recover",
+            "target": "RecoveryAction"
+        },
+        {
+            "kind": "calls",
+            "source": "apply_settings",
+            "target": "extend_unique"
+        },
+        {
+            "kind": "calls",
+            "source": "apply_to_config",
+            "target": "load_merged"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::load_merged_local_overrides_project_normal",
+            "target": "load_merged"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::project_local_hooks_are_dropped_when_untrusted_regression",
+            "target": "load_merged"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "is_400"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::project_local_hooks_are_dropped_when_untrusted_regression",
+            "target": "project_hooks_trusted"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::media_strip_removes_block_and_counts_normal",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::non_400_surfaces_robust",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::thinking_type_toggle_adaptive_to_enabled_normal",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::thinking_signature_strip_removes_blocks_normal",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::cache_diagnosis_reject_drops_field_normal",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::mid_conv_system_fallback_folds_message_normal",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::latched_recovery_does_not_repeat_robust",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::media_strip_is_bounded_robust",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::fallback_credit_expired_strips_token_normal",
+            "target": "classify_and_recover"
+        },
+        {
+            "kind": "calls",
+            "source": "load_toml_from_depth",
+            "target": "load_toml_from_depth"
+        },
+        {
+            "kind": "calls",
+            "source": "context_tag_status",
+            "target": "message_is_drop_marker"
+        },
+        {
+            "kind": "calls",
+            "source": "is_readonly_git",
+            "target": "git_has_write_output_flag"
+        },
+        {
+            "kind": "calls",
+            "source": "direct_edit_css",
+            "target": "selector_is_safe_for_css"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "is_thinking_signature_reject"
+        },
+        {
+            "kind": "calls",
+            "source": "load_merged",
+            "target": "settings_sources"
+        },
+        {
+            "kind": "calls",
+            "source": "TaskExecutionMetadata::recommended_for_fields",
+            "target": "contains_any_signal"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "strip_fallback_credit_token"
+        },
+        {
+            "kind": "calls",
+            "source": "RiskSignal::measure",
+            "target": "git_diff_has_review_signal"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "toggle_thinking_type"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "classify_fallback_credit_reject"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "is_thinking_type_reject"
+        },
+        {
+            "kind": "calls",
+            "source": "is_thinking_signature_reject",
+            "target": "is_thinking_type_reject"
+        },
+        {
+            "kind": "calls",
+            "source": "root_public_share_path_allowed",
+            "target": "public_root_asset_location_allowed"
+        },
+        {
+            "kind": "calls",
+            "source": "root_public_share_path_allowed",
+            "target": "public_path_has_private_component"
+        },
+        {
+            "kind": "calls",
+            "source": "RiskSignal::measure",
+            "target": "file_content_has_review_signal"
+        },
+        {
+            "kind": "calls",
+            "source": "push_if_signal",
+            "target": "contains_any"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "fold_system_role_messages"
+        },
+        {
+            "kind": "calls",
+            "source": "apply_to_config",
+            "target": "apply_settings"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::apply_settings_maps_supported_keys_into_config_normal",
+            "target": "apply_settings"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::apply_newer_claude_settings_maps_runtime_config_normal",
+            "target": "apply_settings"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::chrome_auto_enable_respects_denied_mcp_servers_normal",
+            "target": "apply_settings"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::chrome_auto_enable_preserves_explicit_mcp_config_normal",
+            "target": "apply_settings"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "is_mid_conv_system_reject"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "is_cache_diagnosis_beta_reject"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "strip_first_media_block"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "detect_unprocessable_media"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_readonly_segment",
+            "target": "match_remaining_segment"
+        },
+        {
+            "kind": "calls",
+            "source": "HookHandler::execute",
+            "target": "contains_comment_slop"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_and_recover",
+            "target": "drop_cache_diagnosis"
+        },
+        {
+            "kind": "calls",
+            "source": "match_remaining_segment",
+            "target": "is_readonly_git"
+        },
+        {
+            "kind": "calls",
+            "source": "ClaudeMdHierarchy::any",
+            "target": "ContextSignals::is_empty"
+        },
+        {
+            "kind": "calls",
+            "source": "ContextSignals::is_empty",
+            "target": "ContextSignals::is_empty"
+        },
+        {
+            "kind": "calls",
+            "source": "AuditOrchestrator::run",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::full_pipeline_with_mocks_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "parse_claude_hook_value",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::apply_settings_maps_supported_keys_into_config_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::apply_newer_claude_settings_maps_runtime_config_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::chrome_auto_enable_respects_denied_mcp_servers_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::chrome_auto_enable_preserves_explicit_mcp_config_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "screen_reader_mode_defaults_false",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "load_config",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::system_prompt_has_required_sections_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::system_prompt_uses_defaults_when_unset_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::classify_allow_decision_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::classify_block_decision_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::classify_provider_error_fails_closed_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::classify_unparseable_response_fails_closed_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::auto_review_mode_from_config_resolves_opt_out_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::auto_review_mode_from_config_mode_field_takes_precedence_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::slate_disabled_by_default_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::config_defaults_to_no_limits",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_rule_parse_from_config",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_evaluate_first_match_wins",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_ceiling_blocks_even_with_allow",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_ceiling_blocks_even_with_allow_all",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_ceiling_active_in_auto_approve_mode",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_default_ceiling_blocks_destructive",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_no_match_returns_ask",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_deny_overrides_allow_same_path",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_evaluate_with_path",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_check_tool_permission_convenience",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::permissions_tiebreaker_prefers_deny_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_allowed_denied_tools_shorthand",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::test_denied_tools_beats_allowed_tools",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::region_or_default_fallback_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "BedrockWizard::new",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "VertexWizard::new",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::config_shell_hook_runs_through_plugin_host_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::plans_dir_default_fallback_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "rsi_external_worker_sandbox",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::allowlist_cfg",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::from_config_with_no_domains_blocks_outbound_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "effort_resolve_tests::cfg_with",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "Config::default",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "load_toml_from_depth",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "save_theme_to",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "save_advisor_model_to",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "save_server_advisor_model_to",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "save_permission_mode_to",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::theme_field_roundtrips_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::config_default_round_trips_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::resolve_model_returns_none_when_nothing_configured_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::agent_disallowed_unknown_agent_returns_empty_robust",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::bash_shell_defaults_to_none_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::merge_with_local_wins_over_base_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::auto_compact_threshold_pct_defaults_to_85_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::cross_project_recall_defaults_off_regression",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::server_side_compaction_defaults_off_regression",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::always_show_thinking_defaults_false_normal",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::redacted_thinking_defaults_off_regression",
+            "target": "AuditConfig::default"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::full_pipeline_with_mocks_normal",
+            "target": "AuditOrchestrator::run"
+        },
+        {
+            "kind": "calls",
+            "source": "FindingStore::append",
+            "target": "FindingStore::append"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::mid_conv_system_fallback_folds_message_normal",
+            "target": "RetryKind::as_str"
+        },
+        {
+            "kind": "calls",
+            "source": "required_agents_exist",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "verification_agent_is_read_only_and_persistent",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "AuditOrchestrator::run",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "heuristic_judgment",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "PolicyGate::decide",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "finish",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "TaintTracker::trace",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "is_known_html_tag",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "apply_settings",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "string_list_contains",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "extend_unique",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ChatMessage::is_compact_boundary",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "validate_turn_invariants_inner",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "contains_any",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "push_if_signal",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "any_band_collision",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "TaskExecutionMetadata::recommended_for_fields",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "contains_any_signal",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "has_duplicate",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "tool_name_matches",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "Shortcut::placeholders",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ShortcutStore::create",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "root_public_share_path_allowed",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "public_root_asset_location_allowed",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "public_path_has_private_component",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "reject_revoked_public_share",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "apply_edit_to_element",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "selector_part_matches",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "has_element_children",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "direct_edit_css",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "selector_is_safe_for_css",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "index",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "has",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "resolve_source_path",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "push_unique",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "resolve_local_advisor_provider_targets",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "provider_can_run_model",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ask_local_advisor_tool",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "catastrophic_bash_reason",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "classify_readonly_segment",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "match_remaining_segment",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "is_readonly_git",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "git_has_write_output_flag",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "git_args_are_inspection_only",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "is_image_file_path",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "expand_rules",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "RiskSignal::measure",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "file_content_has_review_signal",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "git_diff_has_review_signal",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "cold_tail_range",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ClaudeStatusSnapshot::is_degraded",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ClaudeStatusSnapshot::anthropic_api_or_code_degraded",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "cmd_claude_md",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "pr_status_summary",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "cmd_morning_checkin",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "handle_knowledge_command",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "query_terms",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "vote_says",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "CouncilSession::seat_is_blind_now",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "CouncilSession::record_turn",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "matches_bool",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "build_autofix_prompt",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "edited_is_trigger_file",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "tests::contains_check_matches_parser_normal",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "contains_any",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "is_orphan_tool_result_start",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "cmd_sessions",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "cmd_recap",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "HookHandler::execute",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "contains_comment_slop",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "HookRegistry::has_hooks",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "GlobalDiagnosticsService::snapshot",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ScheduledTaskRegistry::create",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "context_item_kind_for_group",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "is_usable_summary",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "EngineState::queue_background_reminder",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "EngineState::has_interruptible_work",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "EngineState::set_in_progress_tool_use_ids",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "EngineState::clear_active_tool_calls",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "EngineState::sync_selected_context_window",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "EngineState::tool_needs_approval_with_policy",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "transcript_breakdown",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "has_usage_backed_messages",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "MemoryBridgeStore::create_session",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "validate_text",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "load_agents",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "context_tag_status",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "context_tag_kind",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "message_is_drop_marker",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "is_id_named_key",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "ChangeFilter::matches",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "FindingStore::append",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "HookRegistry::has_hooks",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "looks_like_correction",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "rsi_external_worker_sandbox",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "CompartmentFingerprint::new",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "push_beta_once",
+            "target": "ClaudeMdHierarchy::any"
+        },
+        {
+            "kind": "calls",
+            "source": "TaintTracker::trace",
+            "target": "TaintTracker::trace"
+        },
+        {
+            "kind": "calls",
+            "source": "EngineState::set_in_progress_tool_use_ids",
+            "target": "EngineState::clear_active_tool_calls"
+        },
+        {
+            "kind": "calls",
+            "source": "validate_turn_invariants_inner",
+            "target": "ChatMessage::is_compact_boundary"
+        },
+        {
+            "kind": "calls",
+            "source": "context_tag_status",
+            "target": "ChatMessage::is_compact_boundary"
+        },
+        {
+            "kind": "references",
+            "source": "classify_and_recover",
+            "target": "RecoveryLatches"
+        },
+        {
+            "kind": "references",
+            "source": "load_merged",
+            "target": "ClaudeCompatibilityConfig"
+        },
+        {
+            "kind": "references",
+            "source": "apply_settings",
+            "target": "ClaudeCompatibilityConfig"
+        }
+    ],
+    "additionalFiles": [
+        {
+            "path": "crates/context/src/history.rs",
+            "symbols": [
+                "new"
+            ]
+        },
+        {
+            "path": "crates/jfc-agents/src/evals.rs",
+            "symbols": [
+                "required_agents_exist",
+                "verification_agent_is_read_only_and_persistent"
+            ]
+        },
+        {
+            "path": "crates/jfc-agents/src/registry.rs",
+            "symbols": [
+                "load_agents"
+            ]
+        },
+        {
+            "path": "crates/jfc-audit/src/orchestrator.rs",
+            "symbols": [
+                "AuditConfig",
+                "default",
+                "run",
+                "full_pipeline_with_mocks_normal"
+            ]
+        },
+        {
+            "path": "crates/jfc-audit/src/pair.rs",
+            "symbols": [
+                "heuristic_judgment"
+            ]
+        },
+        {
+            "path": "crates/jfc-audit/src/prompt_rewrite/policy.rs",
+            "symbols": [
+                "decide"
+            ]
+        },
+        {
+            "path": "crates/jfc-audit/src/redteam.rs",
+            "symbols": [
+                "finish"
+            ]
+        },
+        {
+            "path": "crates/jfc-audit/src/store.rs",
+            "symbols": [
+                "append"
+            ]
+        },
+        {
+            "path": "crates/jfc-audit/src/taint.rs",
+            "symbols": [
+                "trace"
+            ]
+        },
+        {
+            "path": "crates/jfc-bridge/src/server.rs",
+            "symbols": [
+                "validate_text"
+            ]
+        },
+        {
+            "path": "crates/jfc-bridge/src/store.rs",
+            "symbols": [
+                "create_session"
+            ]
+        },
+        {
+            "path": "crates/jfc-changeset/src/store.rs",
+            "symbols": [
+                "matches"
+            ]
+        },
+        {
+            "path": "crates/jfc-compress/src/transforms/tag_protector.rs",
+            "symbols": [
+                "is_known_html_tag"
+            ]
+        },
+        {
+            "path": "crates/jfc-compress/src/volatile.rs",
+            "symbols": [
+                "is_id_named_key"
+            ]
+        },
+        {
+            "path": "crates/jfc-config/src/lib.rs",
+            "symbols": [
+                "default",
+                "push_beta_once",
+                "load_toml_from_depth",
+                "save_theme_to",
+                "save_advisor_model_to",
+                "save_server_advisor_model_to",
+                "save_permission_mode_to",
+                "theme_field_roundtrips_normal",
+                "config_default_round_trips_robust",
+                "resolve_model_returns_none_when_nothing_configured_robust",
+                "agent_disallowed_unknown_agent_returns_empty_robust",
+                "bash_shell_defaults_to_none_normal",
+                "merge_with_local_wins_over_base_normal",
+                "auto_compact_threshold_pct_defaults_to_85_normal",
+                "cross_project_recall_defaults_off_regression",
+                "server_side_compaction_defaults_off_regression",
+                "always_show_thinking_defaults_false_normal",
+                "redacted_thinking_defaults_off_regression"
+            ]
+        },
+        {
+            "path": "crates/jfc-config/src/paths.rs",
+            "symbols": [
+                "plans_dir_default_fallback_normal"
+            ]
+        },
+        {
+            "path": "crates/jfc-config/tests/screen_reader_mode.rs",
+            "symbols": [
+                "screen_reader_mode_defaults_false"
+            ]
+        },
+        {
+            "path": "crates/jfc-core/src/context.rs",
+            "symbols": [
+                "ClaudeMdHierarchy",
+                "any"
+            ]
+        },
+        {
+            "path": "crates/jfc-core/src/context_management.rs",
+            "symbols": [
+                "is_empty"
+            ]
+        },
+        {
+            "path": "crates/jfc-core/src/message.rs",
+            "symbols": [
+                "is_compact_boundary",
+                "validate_turn_invariants_inner"
+            ]
+        }
+    ],
+    "literalMatches": [],
+    "trimmed": false
+}
